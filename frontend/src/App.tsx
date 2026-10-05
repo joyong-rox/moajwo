@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { fetchHealth, type Health } from './api'
 import Upload from './Upload'
+import Glossary from './Glossary'
 import Validation from './Validation'
 
 type State =
@@ -13,6 +14,8 @@ function App() {
   // 업로드·개인정보 확인 후 검증 섹션의 파일 목록을 다시 불러온다
   const [filesVersion, setFilesVersion] = useState(0)
   const refreshFiles = () => setFilesVersion((v) => v + 1)
+  const [glossaryVersion, setGlossaryVersion] = useState(0)
+  const refreshGlossary = () => setGlossaryVersion((v) => v + 1)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -45,7 +48,8 @@ function App() {
       </section>
 
       <Upload onUploaded={refreshFiles} onPiiChanged={refreshFiles} />
-      <Validation refreshKey={filesVersion} />
+      <Validation refreshKey={filesVersion} onGlossaryChanged={refreshGlossary} />
+      <Glossary refreshKey={glossaryVersion} onChanged={refreshGlossary} />
     </main>
   )
 }

@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import PiiNotice from './PiiNotice'
 import {
+  createAlias,
   listFiles,
   runValidation,
+  type EntityNote,
   type StoredFile,
   type ValidationIssue,
   type ValidationRun,
@@ -25,7 +27,7 @@ const ENTITY_OPTIONS = [
   { value: 'region_code', label: '행정구역코드' },
 ]
 
-function Validation({ refreshKey }: { refreshKey: number }) {
+function Validation({ refreshKey, onGlossaryChanged }: { refreshKey: number; onGlossaryChanged: () => void }) {
   const [files, setFiles] = useState<StoredFile[]>([])
   const [targets, setTargets] = useState<Set<number>>(new Set())
   const [baseline, setBaseline] = useState<Set<number>>(new Set())
@@ -192,7 +194,13 @@ function Validation({ refreshKey }: { refreshKey: number }) {
           {error}
         </p>
       )}
-      {run && <ValidationResult run={run} onPiiChanged={() => setLocalVersion((v) => v + 1)} />}
+      {run && (
+        <ValidationResult
+          run={run}
+          onPiiChanged={() => setLocalVersion((v) => v + 1)}
+          onGlossaryChanged={onGlossaryChanged}
+        />
+      )}
     </section>
   )
 }
@@ -226,7 +234,9 @@ function IssueTable({ issues }: { issues: ValidationIssue[] }) {
   )
 }
 
-function ValidationResult({ run, onPiiChanged }: { run: ValidationRun; onPiiChanged: () => void }) {
+type ResultProps = { run: ValidationRun; onPiiChanged: () => void; onGlossaryChanged: () => void }
+
+function ValidationResult({ run, onPiiChanged, onGlossaryChanged }: ResultProps) {
   return (
     <div className="validation-result">
       <p className={`validation-status status-${run.status}`} role="status">
@@ -263,6 +273,8 @@ function ValidationResult({ run, onPiiChanged }: { run: ValidationRun; onPiiChan
         )}
       </section>
 
+      {run.entities.length > 0 && <EntityNotes entities={run.entities} onRegistered={onGlossaryChanged} />}
+
       {run.notes.length > 0 && (
         <details className="validation-notes">
           <summary>참고 {run.notes.length}건 (상태에 영향 없음)</summary>
@@ -274,6 +286,94 @@ function ValidationResult({ run, onPiiChanged }: { run: ValidationRun; onPiiChan
         </details>
       )}
     </div>
+  )
+}
+
+const ENTITY_STATUS: Record<EntityNote['status'], string> = {
+  unknown: '사전에 없음',
+  ambiguous: '여러 대상',
+  abolished: '폐지·개편',
+}
+
+/** 용어사전 확인 대상 이름. 차단·경고와 별도이며 검증 상태에 영향을 주지 않는다. */
+function EntityNotes({ entities, onRegistered }: { entities: EntityNote[]; onRegistered: () => void }) {
+  const [choice, setChoice] = useState<Record<string, string>>({})
+  const [done, setDone] = useState<Record<string, string>>({})
+  const [error, setError] = useState<string | null>(null)
+
+  async function register(e: EntityNote) {
+    const picked = choice[e.value] ?? (e.candidates[0] ? `${e.candidates[0].kind}:${e.candidates[0].code}` : '')
+    const [kind, code] = picked.split(':')
+    if (!kind || !code) return
+    setError(null)
+    try {
+      const created = await createAlias({ alias: e.value, kind: kind as 'org' | 'region', target_code: code })
+      setDone((prev) => ({ ...prev, [e.value]: created.target_name ?? code }))
+      onRegistered()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }
+
+  return (
+    <section className="validation-group group-entity">
+      <h3>용어사전 확인 대상 {entities.length}건 · 상태에 영향 없음</h3>
+      <div className="upload-table-wrap">
+        <table className="upload-table validation-issues">
+          <thead>
+            <tr>
+              <th scope="col">이름</th>
+              <th scope="col">상태</th>
+              <th scope="col">연결할 대상 (별칭 등록)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entities.map((e) => (
+              <tr key={`${e.field}:${e.value}`}>
+                <th scope="row">
+                  {e.value}
+                  <div className="glossary-meta">
+                    {e.count}행 · {e.files.join(', ')}
+                  </div>
+                </th>
+                <td className="validation-message">
+                  <span className="upload-tag">{ENTITY_STATUS[e.status]}</span> {e.note ?? ''}
+                </td>
+                <td>
+                  {done[e.value] ? (
+                    <span className="mapping-message">→ {done[e.value]} 등록됨 (다시 검증하면 반영)</span>
+                  ) : e.candidates.length ? (
+                    <div className="mapping-pick">
+                      <select
+                        aria-label={`${e.value} 연결 대상`}
+                        value={choice[e.value] ?? `${e.candidates[0].kind}:${e.candidates[0].code}`}
+                        onChange={(ev) => setChoice((prev) => ({ ...prev, [e.value]: ev.target.value }))}
+                      >
+                        {e.candidates.map((c) => (
+                          <option key={`${c.kind}:${c.code}`} value={`${c.kind}:${c.code}`}>
+                            {c.name} ({c.code})
+                          </option>
+                        ))}
+                      </select>
+                      <button type="button" className="mapping-confirm" onClick={() => void register(e)}>
+                        별칭 등록
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="upload-drop-hint">후보 없음 — 용어사전에서 검색해 등록</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {error && (
+        <p className="upload-error" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
   )
 }
 

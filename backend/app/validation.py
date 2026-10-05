@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal
 
+from app.glossary import Glossary, Resolution, period_end, prefer_for_field
 from app.parsing import Cell, SheetResult, is_missing, is_subtotal_label
 
 BlockCode = Literal["sum_mismatch", "required_entity_missing", "period_mismatch"]
@@ -96,12 +97,26 @@ class PiiStatus:
 
 
 @dataclass
+class EntityNote:
+    """용어사전 확인 대상 이름 (사전에 없음·모호·폐지). 차단·경고와 별도이며 상태에 영향 없음."""
+
+    value: str
+    field: str
+    status: str  # unknown(사전에 없음) / ambiguous(여러 항목) / abolished(기준일에 유효하지 않음)
+    note: str | None
+    candidates: list[dict[str, Any]]
+    files: list[str]
+    count: int
+
+
+@dataclass
 class ValidationResult:
     status: Status
     blocks: list[BlockIssue]
     warnings: list[WarningIssue]
     pii: list[PiiStatus]
     notes: list[str]
+    entities: list[EntityNote] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------- 입력 타입
@@ -269,46 +284,128 @@ def _pick_entity_field(files: list[FileInput], requested: str | None) -> str | N
     return None
 
 
-def _entity_values(sheet: SheetInput, key: str) -> set[str]:
-    values: set[str] = set()
-    targets = sheet.by_field(key)
-    sido_cols = sheet.by_field("sido") if key == "sigungu" else []
-    for row in sheet.sheet.body:
-        if row["kind"] not in ("data", "subtotal"):
-            continue
-        cells = row["cells"]
-        for col in targets:
-            value = cells[col.index]
-            if not isinstance(value, str):
+class EntityResolver:
+    """기관·지역 값 → 비교 키. 용어사전이 있으면 항목 코드('org:1741000', 'region:11500'),
+    없거나 해석되지 않으면 정규화한 문자열('text:행안부')을 쓴다."""
+
+    def __init__(self, glossary: Glossary | None, period: str | None) -> None:
+        self.glossary = glossary
+        self.at = period_end(period)
+        self._cache: dict[tuple[str, str], Resolution] = {}
+
+    def resolve(self, name: str, field_key: str | None) -> Resolution | None:
+        if self.glossary is None:
+            return None
+        prefer = prefer_for_field(field_key)
+        cache_key = (name, prefer)
+        if cache_key not in self._cache:
+            self._cache[cache_key] = self.glossary.resolve(name, self.at, prefer)
+        return self._cache[cache_key]
+
+    def key(self, name: str, field_key: str) -> str:
+        if field_key == "region_code" and name.isdigit():
+            return f"region:{name}"
+        resolution = self.resolve(name, field_key)
+        if resolution is not None and resolution.key:
+            return resolution.key
+        return f"text:{_norm(name)}"
+
+
+def _row_entity_names(sheet: SheetInput, cells: list[Cell]) -> list[tuple[str, str]]:
+    """행의 기관·지역 값들. 시군구는 같은 행의 시도와 합쳐 '서울특별시 강서구'처럼 만든다 (동명 시군구 구분)."""
+    sido = next((str(cells[c.index]) for c in sheet.by_field("sido") if isinstance(cells[c.index], str)), None)
+    names = []
+    for key in ENTITY_FIELDS:
+        for c in sheet.by_field(key):
+            value = cells[c.index]
+            if value is None or (isinstance(value, str) and (is_missing(value) or is_subtotal_label(value))):
                 continue
-            values.add(_norm(value))
-            for sc in sido_cols:  # '서울 강서구'처럼 시도와 함께 적은 이름도 맞춰 본다
-                sido = cells[sc.index]
-                if isinstance(sido, str):
-                    values.add(_norm(f"{sido}{value}"))
-    return values
+            text = str(value)
+            if key == "sigungu" and sido:
+                text = f"{sido} {text}"
+            names.append((key, text))
+    return names
 
 
-def check_required(files: list[FileInput], params: ValidationParams, notes: list[str]) -> list[BlockIssue]:
+def check_required(
+    files: list[FileInput], params: ValidationParams, notes: list[str], resolver: EntityResolver
+) -> list[BlockIssue]:
     required = [r.strip() for r in params.required_entities if r.strip()]
     if not required:
         notes.append("필수 기관 목록이 없어 누락 검사를 하지 않았습니다.")
         return []
     key = _pick_entity_field(files, params.entity_field)
-    present: set[str] = set()
-    if key is not None:
-        for f in files:
-            for s in f.sheets:
-                present |= _entity_values(s, key)
+    present_keys: set[str] = set()
+    present_texts: set[str] = set()
+    for f in files:
+        for s in f.sheets:
+            for row in s.sheet.body:
+                if row["kind"] not in ("data", "subtotal"):
+                    continue
+                for field_key, name in _row_entity_names(s, row["cells"]):
+                    present_keys.add(resolver.key(name, field_key))
+                    present_texts.add(_norm(name))
     file_names = [_norm(f.file_name) for f in files]
+
     issues = []
     for name in required:
         n = _norm(name)
-        if n in present or any(n in fn for fn in file_names):  # 기관별 파일이면 파일명으로도 인정
+        res = resolver.resolve(name, key)
+        ref_key = res.key if res is not None else None
+        canonical = _norm(res.ref.name) if res is not None and res.ref is not None else None
+        if (
+            (ref_key is not None and ref_key in present_keys)
+            or n in present_texts
+            or any(n in fn or (canonical is not None and canonical in fn) for fn in file_names)  # 기관별 파일명
+        ):
             continue
         where = "기관·지역 열이 매핑되지 않아 파일명으로만 확인" if key is None else "데이터와 파일명 어디에도 없음"
-        issues.append(BlockIssue("required_entity_missing", f"필수 기관 '{name}' 누락 ({where}).", expected=name))
+        detail = ""
+        if res is not None:
+            if res.status == "resolved" and res.ref is not None:
+                detail = f" — 용어사전: {res.ref.name}({res.ref.code})"
+            elif res.candidates:
+                detail = " — 용어사전 후보: " + ", ".join(c.name for c in res.candidates[:3])
+            if res.note:
+                detail += f", {res.note}"
+        issues.append(
+            BlockIssue("required_entity_missing", f"필수 기관 '{name}' 누락 ({where}){detail}.", expected=name)
+        )
     return issues
+
+
+def collect_entity_notes(files: list[FileInput], resolver: EntityResolver) -> list[EntityNote]:
+    if resolver.glossary is None:
+        return []
+    found: dict[tuple[str, str], EntityNote] = {}
+    for f in files:
+        for s in f.sheets:
+            for row in _data_rows(s.sheet):
+                for field_key, name in _row_entity_names(s, row["cells"]):
+                    if field_key == "region_code":
+                        continue
+                    res = resolver.resolve(name, field_key)
+                    if res is None or (res.status == "resolved" and not res.note):
+                        continue
+                    note = found.get((field_key, name))
+                    if note is None:
+                        status = res.status if res.status != "resolved" else "abolished"
+                        text = res.note
+                        if status == "abolished" and res.ref is not None and resolver.glossary is not None:
+                            # 폐지된 이름은 자기 자신 대신 승계·유사 기관을 후보로 (개편 후 기관 연결용)
+                            refs = resolver.glossary.replacements(res.ref, resolver.at)
+                            text = f"{res.ref.name}({res.ref.code}): {res.note} — 개편 후 항목을 연결하세요"
+                        else:
+                            refs = res.candidates or ([res.ref] if res.ref else [])
+                        candidates = [
+                            {"kind": c.kind, "code": c.code, "name": c.name, "type": c.type_label} for c in refs
+                        ]
+                        note = EntityNote(name, field_key, status, text, candidates, [], 0)
+                        found[(field_key, name)] = note
+                    note.count += 1
+                    if f.file_name not in note.files:
+                        note.files.append(f.file_name)
+    return list(found.values())
 
 
 # ---------------------------------------------------------------- 차단: 기간 불일치
@@ -440,14 +537,9 @@ def check_periods(files: list[FileInput], params: ValidationParams, notes: list[
 # ---------------------------------------------------------------- 경고: 전월 대비 이상치
 
 
-def _entity_key(sheet: SheetInput, cells: list[Cell]) -> tuple[str, ...] | None:
-    parts = []
-    for key in ENTITY_FIELDS:
-        for c in sheet.by_field(key):
-            v = cells[c.index]
-            if v is not None:
-                parts.append(f"{key}={_norm(str(v))}")
-    return tuple(parts) or None
+def _entity_key(sheet: SheetInput, cells: list[Cell], resolver: EntityResolver) -> tuple[str, ...] | None:
+    keys = sorted({resolver.key(name, field_key) for field_key, name in _row_entity_names(sheet, cells)})
+    return tuple(keys) or None
 
 
 def _numeric_fields(sheet: SheetInput) -> dict[str, int]:
@@ -460,7 +552,11 @@ def _numeric_fields(sheet: SheetInput) -> dict[str, int]:
 
 
 def check_mom(
-    files: list[FileInput], baseline: list[FileInput], params: ValidationParams, notes: list[str]
+    files: list[FileInput],
+    baseline: list[FileInput],
+    params: ValidationParams,
+    notes: list[str],
+    resolver: EntityResolver,
 ) -> list[WarningIssue]:
     if not baseline:
         notes.append("전월 자료가 지정되지 않아 전월 대비 이상치 검사를 하지 않았습니다.")
@@ -470,7 +566,7 @@ def check_mom(
         for s in f.sheets:
             fields = _numeric_fields(s)
             for row in _data_rows(s.sheet):
-                key = _entity_key(s, row["cells"])
+                key = _entity_key(s, row["cells"], resolver)
                 if key is None:
                     continue
                 values = {k: row["cells"][i] for k, i in fields.items() if _is_number(row["cells"][i])}
@@ -482,7 +578,7 @@ def check_mom(
         for s in f.sheets:
             fields = _numeric_fields(s)
             for row in _data_rows(s.sheet):
-                key = _entity_key(s, row["cells"])
+                key = _entity_key(s, row["cells"], resolver)
                 if key is None or key not in previous:
                     continue
                 matched += 1
@@ -499,7 +595,7 @@ def check_mom(
                         if abs(change) <= params.change_threshold:
                             continue
                         change_text = f"{change:+.0%}"
-                    entity = ", ".join(p.split("=", 1)[1] for p in key)
+                    entity = ", ".join(dict.fromkeys(name for _, name in _row_entity_names(s, row["cells"])))
                     issues.append(
                         WarningIssue(
                             "mom_outlier",
@@ -673,8 +769,13 @@ def _compare_units(a: _UnitSample, b: _UnitSample) -> str | None:
 
 
 def validate(
-    files: list[FileInput], params: ValidationParams, baseline: list[FileInput] | None = None
+    files: list[FileInput],
+    params: ValidationParams,
+    baseline: list[FileInput] | None = None,
+    glossary: Glossary | None = None,
 ) -> ValidationResult:
+    """glossary가 주어지면 기관·지역 이름을 용어사전 항목 코드로 비교한다 (기준일 = 기준 기간 말일)."""
+    resolver = EntityResolver(glossary, params.expected_period)
     notes: list[str] = []
     blocks: list[BlockIssue] = []
     warnings: list[WarningIssue] = []
@@ -682,10 +783,10 @@ def validate(
     for f in files:
         for s in f.sheets:
             blocks.extend(check_sums(f, s, notes))
-    blocks.extend(check_required(files, params, notes))
+    blocks.extend(check_required(files, params, notes, resolver))
     blocks.extend(check_periods(files, params, notes))
 
-    warnings.extend(check_mom(files, baseline or [], params, notes))
+    warnings.extend(check_mom(files, baseline or [], params, notes, resolver))
     for f in files:
         for s in f.sheets:
             warnings.extend(check_blanks(f, s))
@@ -706,4 +807,5 @@ def validate(
         status = "passed_with_warnings"
     else:
         status = "passed"
-    return ValidationResult(status, blocks, warnings, pii, notes)
+    entities = collect_entity_notes(files, resolver)
+    return ValidationResult(status, blocks, warnings, pii, notes, entities)

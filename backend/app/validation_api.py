@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db import get_session
 from app.decisions import load_decisions, load_learned
 from app.files import load_parsed
+from app.glossary_api import get_glossary
 from app.mapping import get_engine
 from app.models import SourceFile, ValidationRun
 from app.validation import (
@@ -121,6 +122,16 @@ class PiiStatusOut(BaseModel):
     acknowledged: bool
 
 
+class EntityNoteOut(BaseModel):
+    value: str
+    field: str
+    status: str
+    note: str | None
+    candidates: list[dict[str, Any]]
+    files: list[str]
+    count: int
+
+
 class ValidationOut(BaseModel):
     id: int
     status: str
@@ -128,6 +139,7 @@ class ValidationOut(BaseModel):
     warnings: list[IssueOut]  # 경고 — 통합 진행, 표시
     pii: list[PiiStatusOut]  # 개인정보 — 사용자 확인 필요
     notes: list[str]  # 참고 — 상태에 영향 없음
+    entities: list[EntityNoteOut] = []  # 용어사전 확인 대상 이름 — 상태에 영향 없음
     created_at: datetime
 
 
@@ -183,12 +195,13 @@ def run_validation(body: ValidationIn, session: Annotated[Session, Depends(get_s
         entity_field=body.entity_field,
         change_threshold=body.change_threshold,
     )
-    result = validate(files, params, baseline)
+    result = validate(files, params, baseline, glossary=get_glossary(session))
     payload = {
         "blocks": [_issue_out(i, BLOCK_LABEL).model_dump(mode="json") for i in result.blocks],
         "warnings": [_issue_out(i, WARNING_LABEL).model_dump(mode="json") for i in result.warnings],
         "pii": [asdict(p) for p in result.pii],
         "notes": result.notes,
+        "entities": [asdict(e) for e in result.entities],
     }
     run = ValidationRun(
         status=result.status, params=body.model_dump_json(), result=json.dumps(payload, ensure_ascii=False)

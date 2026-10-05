@@ -170,7 +170,19 @@ export type ValidationRun = {
   warnings: ValidationIssue[]
   pii: { file_id: number; file_name: string; counts: Record<PiiType, number>; items: PiiItem[]; acknowledged: boolean }[]
   notes: string[]
+  entities: EntityNote[]
   created_at: string
+}
+
+export type EntityCandidate = { kind: 'org' | 'region'; code: string; name: string; type: string }
+export type EntityNote = {
+  value: string
+  field: string
+  status: 'unknown' | 'ambiguous' | 'abolished'
+  note: string | null
+  candidates: EntityCandidate[]
+  files: string[]
+  count: number
 }
 export type ValidationRequest = {
   file_ids: number[]
@@ -189,4 +201,99 @@ export async function runValidation(body: ValidationRequest): Promise<Validation
       body: JSON.stringify(body),
     }),
   )
+}
+
+export type GlossaryEntry = {
+  id: number
+  kind: 'org' | 'region'
+  code: string
+  name: string
+  type: string | null
+  parent_code: string | null
+  valid_from: string | null
+  valid_to: string | null
+  previous_codes: string | null
+  note: string | null
+  source: 'example' | 'upload' | 'user'
+  active: boolean
+  aliases: string[]
+}
+export type GlossaryAlias = {
+  id: number
+  alias: string
+  kind: 'org' | 'region'
+  target_code: string
+  target_name: string | null
+  valid_from: string | null
+  valid_to: string | null
+  note: string | null
+  source: string
+}
+export type GlossaryInfo = {
+  entries: number
+  org_entries: number
+  region_entries: number
+  example_entries: number
+  aliases: number
+  region_code_table_date: string
+}
+export type ImportReport = {
+  rows: number
+  inserted: number
+  updated: number
+  aliases_added: number
+  applied: boolean
+  errors: { row: number | null; message: string }[]
+  warnings: { row: number | null; message: string }[]
+}
+export type AliasInput = {
+  alias: string
+  kind: 'org' | 'region'
+  target_code: string
+  valid_from?: string | null
+  valid_to?: string | null
+  note?: string | null
+}
+
+export const GLOSSARY_TEMPLATE_URL = `${API_BASE}/glossary/template.csv`
+export const GLOSSARY_EXPORT_URL = `${API_BASE}/glossary/export.csv`
+
+export async function glossaryInfo(): Promise<GlossaryInfo> {
+  return json(await fetch(`${API_BASE}/glossary/info`))
+}
+
+export async function listEntries(q: string, kind: 'all' | 'org' | 'region' = 'all'): Promise<GlossaryEntry[]> {
+  const params = new URLSearchParams({ kind, limit: '100' })
+  if (q.trim()) params.set('q', q.trim())
+  return json(await fetch(`${API_BASE}/glossary/entries?${params}`))
+}
+
+export async function deleteEntry(id: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/glossary/entries/${id}`, { method: 'DELETE' })
+  if (!res.ok) await json(res)
+}
+
+export async function importGlossary(file: File): Promise<ImportReport> {
+  const body = new FormData()
+  body.append('file', file, file.name)
+  return json(await fetch(`${API_BASE}/glossary/import`, { method: 'POST', body }))
+}
+
+export async function listAliases(): Promise<GlossaryAlias[]> {
+  return json(await fetch(`${API_BASE}/glossary/aliases`))
+}
+
+export async function createAlias(body: AliasInput): Promise<GlossaryAlias> {
+  return json(
+    await fetch(`${API_BASE}/glossary/aliases`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  )
+}
+
+export async function deleteAlias(id: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/glossary/aliases/${id}`, { method: 'DELETE' })
+  if (!res.ok) await json(res)
 }

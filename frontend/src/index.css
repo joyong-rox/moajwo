@@ -614,3 +614,126 @@ body {
   color: var(--muted);
   font-size: 0.85rem;
 }
+
+/* ---- 용어사전 (단계 4 보완) : glossary-* 클래스만 사용 ---- */
+.glossary {
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.glossary h2 {
+  margin: 0 0 4px;
+  font-size: 1.1rem;
+}
+
+.glossary-search {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+
+.glossary-search input {
+  flex: 1 1 200px;
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.glossary-search select {
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  font: inherit;
+}
+
+.glossary-meta {
+  display: block;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+.glossary-aliases {
+  margin-top: 16px;
+}
+
+.validation-group.group-entity {
+  border-left-color: var(--accent);
+}
+
+.validation-group.group-entity h3 {
+  color: var(--accent);
+}
+
+.group-entity .mapping-confirm {
+  flex: none;
+  white-space: nowrap;
+}
+
+.group-entity .mapping-pick select {
+  max-width: 180px;
+}
+
+.glossary-upload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 12px;
+}
+
+.glossary-upload a {
+  color: var(--accent);
+}
+
+.glossary-report {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--pass-text);
+  border-radius: 6px;
+  background: var(--pass-bg);
+  color: var(--pass-text);
+  font-size: 0.875rem;
+}
+
+.glossary-report.is-failed {
+  border-color: var(--block-border);
+  background: var(--block-bg);
+  color: var(--block-text);
+}
+
+.glossary-entries {
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.glossary-entries tr.is-selected th,
+.glossary-entries tr.is-selected td {
+  background: var(--accent-bg);
+}
+
+.glossary-alias-cell {
+  max-width: 200px;
+  white-space: normal;
+}
+
+.glossary-subtitle {
+  margin: 16px 0 0;
+  font-size: 0.95rem;
+}
+
+.group-entity .validation-issues td.validation-message {
+  min-width: 160px;
+  width: auto;
+}
+
+.group-entity .validation-issues tbody th {
+  min-width: 120px;
+  white-space: normal;
+}

@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -60,4 +60,52 @@ class ValidationRun(Base):
     status: Mapped[str] = mapped_column(String(32))
     params: Mapped[str] = mapped_column(Text)  # JSON
     result: Mapped[str] = mapped_column(Text)  # JSON (차단/경고/개인정보/참고 분리)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GlossaryEntry(Base):
+    """용어사전 항목 (기관 또는 지역). 사용자가 업로드·등록한다. 처음에는 예시 몇 개만 들어 있다.
+
+    kind: 'org'(기관, 코드는 행정기관코드 등 사용자 지정)
+          'region'(지역, 코드는 행정동코드 시도 2자리 / 시군구 5자리)
+    valid_from/valid_to: 존속 기간 (valid_to는 그날까지 포함). previous_codes: 개편 전 항목 코드(쉼표 구분)
+    """
+
+    __tablename__ = "glossary_entries"
+    __table_args__ = (UniqueConstraint("kind", "code"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    code: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(255))
+    normalized: Mapped[str] = mapped_column(String(255), index=True)
+    type_label: Mapped[str | None] = mapped_column(String(64))
+    parent_code: Mapped[str | None] = mapped_column(String(32))
+    valid_from: Mapped[date | None] = mapped_column(Date)
+    valid_to: Mapped[date | None] = mapped_column(Date)
+    previous_codes: Mapped[str | None] = mapped_column(String(500))
+    note: Mapped[str | None] = mapped_column(String(500))
+    source: Mapped[str] = mapped_column(String(16), default="user")  # example / upload / user
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GlossaryAlias(Base):
+    """용어사전 별칭. 용어사전 항목(kind + target_code)에 연결한다.
+
+    kind: 'org' 또는 'region' (대상 항목의 종류)
+    valid_from/valid_to: 이 별칭이 그 대상을 뜻하는 기간 (비우면 제한 없음, valid_to는 그날까지 포함)
+    """
+
+    __tablename__ = "glossary_aliases"
+    __table_args__ = (UniqueConstraint("normalized", "kind", "target_code", "valid_from"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alias: Mapped[str] = mapped_column(String(255))
+    normalized: Mapped[str] = mapped_column(String(255), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    target_code: Mapped[str] = mapped_column(String(16))
+    valid_from: Mapped[date | None] = mapped_column(Date)
+    valid_to: Mapped[date | None] = mapped_column(Date)
+    note: Mapped[str | None] = mapped_column(String(500))
+    source: Mapped[str] = mapped_column(String(16), default="user")  # example / upload / user
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
