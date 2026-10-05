@@ -17,3 +17,57 @@
 | Infra | Docker Compose |
 
 사용하지 않는 기술: Celery, Redis, Kubernetes, VectorDB, 스케줄러.
+
+## 구조
+
+```
+backend/    FastAPI 앱 (app/), Alembic 마이그레이션 (alembic/), 테스트 (tests/)
+frontend/   React + Vite + TypeScript, 운영 시 nginx로 서빙 (/api → backend 프록시)
+docker-compose.yml
+```
+
+## 실행 (Docker Compose)
+
+```sh
+docker compose up -d --build
+curl http://localhost:8000/health   # {"status":"ok","database":"ok"}
+# 웹 화면: http://localhost:8080
+```
+
+- 백엔드 컨테이너는 기동 시 `alembic upgrade head`를 실행한 뒤 서버를 띄웁니다.
+- SQLite DB와 업로드 파일은 `moajwo-data` 볼륨(`/app/data`)에 저장됩니다.
+- 포트는 `127.0.0.1`에만 바인딩됩니다.
+
+## 로컬 개발
+
+```sh
+# backend
+cd backend
+python -m venv .venv && .venv/Scripts/activate   # macOS/Linux: source .venv/bin/activate
+pip install -r requirements-dev.txt
+alembic upgrade head
+uvicorn app.main:app --reload --port 8000
+ruff check . && ruff format --check . && pytest
+
+# frontend (개발 서버가 /api 를 localhost:8000 으로 프록시)
+cd frontend
+npm ci
+npm run dev
+npm run lint && npm run build
+```
+
+## 의존성 관리
+
+- `backend/requirements.in`: 직접 의존성 (버전 고정)
+- `backend/requirements.txt`: Python 3.11 / linux 기준 전이 의존성까지 고정한 설치 목록
+- 오프라인 설치: 인터넷이 되는 곳에서 `pip download -r requirements.txt -d wheels` 후
+  폐쇄망에서 `pip install --no-index --find-links wheels -r requirements.txt`
+- 프론트엔드는 `package.json` 정확한 버전 + `package-lock.json`으로 고정합니다.
+
+## DB 마이그레이션
+
+```sh
+cd backend
+alembic revision --autogenerate -m "설명"   # app/models.py 변경 후
+alembic upgrade head
+```
