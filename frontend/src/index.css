@@ -5,6 +5,13 @@
   --border: #d1d9e0;
   --ok: #1a7f37;
   --fail: #cf222e;
+  --accent: #0969da;
+  --accent-bg: #f0f6ff;
+  --tag-bg: #f6f8fa;
+  --empty-bg: #f6f8fa;
+  --subtotal-bg: #fff1c2;
+  --subtotal-text: #7d4e00;
+  --subtotal-row-bg: #fffbea;
 
   color-scheme: light;
   font-family: system-ui, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
@@ -66,4 +73,175 @@ body {
 
 .fail {
   color: var(--fail);
+}
+
+/* ---- 업로드 (단계 2) : upload-* 클래스만 사용 ---- */
+.upload {
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.upload h2 {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+}
+
+.upload-drop {
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  padding: 28px 16px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.upload-drop:hover,
+.upload-drop:focus-visible,
+.upload-drop.is-dragging {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  outline: none;
+}
+
+.upload-drop.is-busy {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.upload-drop-title {
+  margin: 0;
+  font-weight: 600;
+}
+
+.upload-drop-hint {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.upload-error {
+  margin: 12px 0 0;
+  color: var(--fail);
+}
+
+.upload-results {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.upload-file {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  min-width: 0;
+}
+
+.upload-file-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+}
+
+.upload-file-name {
+  overflow-wrap: anywhere;
+}
+
+.upload-file-head .upload-error {
+  margin: 0;
+}
+
+.upload-file-meta {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.upload-sheet {
+  margin-top: 8px;
+}
+
+.upload-sheet summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+  cursor: pointer;
+  padding: 6px 0;
+  font-size: 0.9rem;
+}
+
+.upload-sheet-name {
+  font-weight: 600;
+}
+
+.upload-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: var(--tag-bg);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.upload-sheet summary .upload-tag {
+  margin-left: 0;
+}
+
+.upload-tag.kind-subtotal,
+.upload-table tr.kind-subtotal .upload-tag {
+  background: var(--subtotal-bg);
+  color: var(--subtotal-text);
+}
+
+.upload-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.upload-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+.upload-table th,
+.upload-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.upload-table thead th {
+  background: var(--tag-bg);
+  font-weight: 600;
+}
+
+.upload-table tbody th {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.upload-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.upload-table tr.kind-empty td,
+.upload-table tr.kind-empty th {
+  background: var(--empty-bg);
+}
+
+.upload-table tr.kind-subtotal td {
+  background: var(--subtotal-row-bg);
+  font-weight: 600;
 }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchHealth, type Health } from './api'
+import Upload from './Upload'
 
 type State =
   | { kind: 'loading' }
@@ -38,6 +39,8 @@ function App() {
         )}
         {state.kind === 'error' && <p className="fail">연결 실패: {state.message}</p>}
       </section>
+
+      <Upload />
     </main>
   )
 }

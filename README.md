@@ -64,6 +64,17 @@ npm run lint && npm run build
   폐쇄망에서 `pip install --no-index --find-links wheels -r requirements.txt`
 - 프론트엔드는 `package.json` 정확한 버전 + `package-lock.json`으로 고정합니다.
 
+## 업로드와 파싱 (`POST /files`)
+
+- 필드 `files`로 xlsx / xls / csv 여러 개 업로드 (요청당 20개, 파일당 50MB).
+- 원본은 `data/uploads/<uuid>.<ext>`에 새 파일로 저장 후 읽기 전용으로 바꾸고, 메타데이터는 `source_files`에 기록합니다.
+- 파싱 규칙 ([backend/app/parsing.py](backend/app/parsing.py))
+  - 헤더: 1~3행 중 서로 다른 텍스트 셀이 가장 많은 행 (병합 제목 행은 제외됨)
+  - 병합 셀: 범위 전체를 왼쪽 위 값으로 채움 (ffill)
+  - 숫자: `1,234`, `2 100 000`, ` 750 ` 등은 숫자로 변환. 천 단위 구분이 틀린 값(전화번호 등)과 앞자리 0 코드값은 문자열 유지
+  - CSV 인코딩: chardet 신뢰도 0.5 이상이면 채택, 아니면 EUC-KR → CP949 → UTF-8 순서
+  - 행 구분: 빈 행 / 소계·합계 행(소계, 합계, 총계, 누계, 계, total 등) / 데이터 행. 행 수는 데이터 행만 셉니다.
+
 ## DB 마이그레이션
 
 ```sh
