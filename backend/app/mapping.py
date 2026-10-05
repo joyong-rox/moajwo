@@ -37,8 +37,8 @@ TOP_CANDIDATES = 3
 SAMPLE_SIZE = 5
 MAX_LLM_COLUMNS = 15  # 요청 하나에서 LLM으로 넘기는 열 수 상한
 
-Status = Literal["auto", "review", "unresolved"]
-Method = Literal["exact", "exact_part", "similarity", "llm", "none"]
+Status = Literal["auto", "review", "unresolved", "confirmed"]
+Method = Literal["exact", "learned", "exact_part", "similarity", "pattern", "llm", "user", "none"]
 EngineStatus = Literal["ok", "unavailable", "skipped"]
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
@@ -169,7 +169,7 @@ _LLM_SYSTEM = (
     "단위가 다른 측정값(예: mm, ℃, ㎢, kg)은 금액·건수·인구 같은 항목이 아니다. "
     "열 이름이 '열3'처럼 의미가 없을 때만 샘플 값의 형식(코드, 날짜, 이름 등)으로 판단한다. "
     '가장 가까운 것을 억지로 고르지 말고, 확실하지 않거나 맞는 항목이 없으면 key를 "none"으로 한다. '
-    "reason은 한국어 한 문장으로 쓴다. 반드시 JSON으로만 답한다."
+    "reason은 반드시 한국어로만 한 문장으로 쓰고 중국어·영어 문장을 섞지 않는다. 반드시 JSON으로만 답한다."
 )
 
 
@@ -205,8 +205,43 @@ def _llm_prompt(fields: list[StandardField], name: ColumnName, samples: list[Cel
     )
 
 
+# ---------------------------------------------------------------- 샘플 패턴 (LLM 전 규칙 판별)
+
+# 행정표준코드 시도 앞 2자리. 42(강원도)·45(전라북도)는 특별자치도 전환 전 코드로, 과거 통계에 남아 있다.
+SIDO_CODE_PREFIXES = frozenset(
+    {"11", "26", "27", "28", "29", "30", "31", "36", "41", "42", "43", "44", "45", "46", "47", "48", "50", "51", "52"}
+)
+# 시도 2자리, 시군구 5자리, 행정동 8자리, 법정동·행정동 10자리. 7자리는 행정기관코드와 겹쳐 제외한다.
+REGION_CODE_LENGTHS = frozenset({2, 5, 8, 10})
+_GENERATED_NAME = re.compile(r"^열\d+$")
+
+
+def looks_like_region_code(column: str, samples: list[Cell]) -> bool:
+    """샘플이 모두 시도 코드로 시작하는 같은 길이의 숫자면 행정구역코드로 본다.
+
+    숫자형 셀은 금액 등과 헷갈리기 쉬우므로, 열 이름이 비어 있거나('열3') '코드'가 들어간 경우에만 인정한다.
+    """
+    values = [s for s in samples if s is not None]
+    if len(values) < 2:
+        return False
+    all_text = all(isinstance(v, str) for v in values)
+    if not all_text:
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in values):
+            return False
+        if not (_GENERATED_NAME.match(column) or "코드" in column):
+            return False
+    texts = [str(v) for v in values]
+    lengths = {len(t) for t in texts}
+    if len(lengths) != 1 or not all(_DIGITS.match(t) for t in texts):
+        return False
+    length = lengths.pop()
+    if length not in REGION_CODE_LENGTHS or (length == 2 and not all_text):
+        return False
+    return all(t[:2] in SIDO_CODE_PREFIXES for t in texts)
+
+
 # Qwen이 답변 중간에 중국어 등으로 넘어가는 경우가 있어, 한자·가나가 나오면 그 앞까지만 쓴다.
-_FOREIGN_SCRIPT = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿]")
+_FOREIGN_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 def clean_reason(text: str) -> str:
@@ -241,6 +276,10 @@ class MappingEngine:
         self._field_vectors: dict[str, list[list[float]]] | None = None
         self._lock = threading.Lock()
 
+    def exact_key(self, normalized: str) -> str | None:
+        """표준 사전(학습 별칭 제외)에서 정규화된 이름의 key."""
+        return self._exact.get(normalized)
+
     # -- 임베딩 (사전 쪽은 한 번 계산해 메모리에 보관, 실패하면 다음 요청에서 재시도)
     def _dictionary_vectors(self) -> dict[str, list[list[float]]]:
         with self._lock:
@@ -268,11 +307,15 @@ class MappingEngine:
         ]
         return sims, "ok"
 
-    # -- 1단계
-    def _exact_match(self, name: ColumnName, result: ColumnMapping) -> bool:
+    # -- 1단계 (표준 사전 + 사용자 확정에서 학습한 별칭)
+    def _exact_match(self, name: ColumnName, result: ColumnMapping, learned: dict[str, str]) -> bool:
         key = self._exact.get(name.primary)
         if key is not None:
             self._apply(result, key, "auto", "exact", 1.0, "표준 사전과 정확히 일치")
+            return True
+        key = learned.get(name.primary)
+        if key in self._by_key:
+            self._apply(result, key, "auto", "learned", 1.0, "사용자가 확정한 열 이름(학습된 별칭)과 일치")
             return True
         for part in reversed(name.parts):  # 2단 헤더는 아래(뒤) 부분이 더 구체적
             key = self._exact.get(part)
@@ -323,7 +366,17 @@ class MappingEngine:
         r.field_key, r.field_label = key, self._by_key[key].label
         r.status, r.method, r.score, r.reason = status, method, score, reason
 
-    def map_columns(self, columns: list[str], samples: list[list[Cell]], use_llm: bool = True) -> MappingResult:
+    def map_columns(
+        self,
+        columns: list[str],
+        samples: list[list[Cell]],
+        use_llm: bool = True,
+        learned: dict[str, str] | None = None,
+        decisions: dict[str, str | None] | None = None,
+    ) -> MappingResult:
+        """learned: 정규화된 열 이름 → field key (학습 별칭). decisions: 열 이름 → 확정된 field key(None=해당 없음)."""
+        learned = learned or {}
+        decisions = decisions or {}
         names = [split_column_name(c) for c in columns]
         results = [
             ColumnMapping(c, s[:SAMPLE_SIZE], qualifier=n.qualifier)
@@ -331,11 +384,23 @@ class MappingEngine:
         ]
 
         for name, result in zip(names, results, strict=True):
-            self._exact_match(name, result)
+            if result.column in decisions:  # 사용자가 확정한 열은 다시 판단하지 않는다
+                key = decisions[result.column]
+                if key in self._by_key:
+                    self._apply(result, key, "confirmed", "user", 1.0, "사용자가 확정")
+                else:
+                    result.status, result.method, result.reason = "confirmed", "user", "사용자가 '해당 없음'으로 확정"
+                continue
+            self._exact_match(name, result, learned)
 
         sims, embedding_status = self._embed_columns(names)
         for i, (name, result) in enumerate(zip(names, results, strict=True)):
             self._similarity(name, sims[i] if sims is not None else None, result)
+
+        for result in results:
+            if result.status == "unresolved" and looks_like_region_code(result.column, result.samples):
+                reason = "샘플이 시도 코드로 시작하는 같은 길이의 숫자 (행정구역코드 형식)"
+                self._apply(result, "region_code", "review", "pattern", 0.9, reason)
 
         llm_status: EngineStatus = "skipped"
         pending = [(n, r) for n, r in zip(names, results, strict=True) if r.status == "unresolved"]

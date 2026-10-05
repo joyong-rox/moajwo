@@ -195,3 +195,50 @@ def test_llm_prompt_contains_only_one_column_and_format_hint() -> None:
     assert len(llm.calls) == 2
     assert "샘플 형식: 소수가 있는 숫자" in llm.calls[0]
     assert "풍속" not in llm.calls[0]
+
+
+@pytest.mark.parametrize(
+    ("column", "samples", "expected"),
+    [
+        ("열5", ["11500", "11680", "26440"], True),  # 시군구 5자리
+        ("열5", [11500, 11680, 26440], True),  # 숫자형이어도 열 이름이 없으면 인정
+        ("행정코드", ["1150010100", "2644010100"], True),  # 법정동 10자리
+        ("열2", ["11", "26", "41"], True),  # 시도 2자리 문자열
+        ("열2", [11, 26, 41], False),  # 2자리 숫자는 나이·수량과 구분 불가
+        ("금액", [11500, 26440, 41000], False),  # 의미 있는 이름의 숫자형은 금액일 수 있음
+        ("열5", ["1741000", "1311000"], False),  # 7자리 = 행정기관코드와 겹침
+        ("열5", ["99500", "11680"], False),  # 없는 시도 코드
+        ("열5", ["11500", "116800"], False),  # 길이 불일치
+        ("열5", ["11500"], False),  # 샘플 1개는 판단하지 않음
+    ],
+)
+def test_looks_like_region_code(column: str, samples: list, expected: bool) -> None:
+    from app.mapping import looks_like_region_code
+
+    assert looks_like_region_code(column, samples) is expected
+
+
+def test_region_code_pattern_before_llm() -> None:
+    fields = [*FIELDS, StandardField("region_code", "행정구역코드", "지역 코드", ("지역코드",))]
+    llm = FakeLlm({})
+    engine = MappingEngine(fields, None, llm)
+    m = _by_column(engine.map_columns(["열5"], [["11500", "11680", "26440"]]))
+    assert (m["열5"].status, m["열5"].method, m["열5"].field_key) == ("review", "pattern", "region_code")
+    assert llm.calls == []  # 규칙으로 결정되면 LLM을 부르지 않는다
+
+
+def test_learned_alias_and_decisions() -> None:
+    llm = FakeLlm({})
+    engine = MappingEngine(FIELDS, None, llm)
+    result = engine.map_columns(
+        ["자치구명", "강수량", "부처"],
+        [["강서구"], [1.5], ["행안부"]],
+        learned={"자치구명": "sido"},
+        decisions={"강수량": None, "부처": "budget"},
+    )
+    m = _by_column(result)
+    assert (m["자치구명"].status, m["자치구명"].method, m["자치구명"].field_key) == ("auto", "learned", "sido")
+    assert (m["강수량"].status, m["강수량"].method, m["강수량"].field_key) == ("confirmed", "user", None)
+    # 확정은 사전 일치보다 우선한다
+    assert (m["부처"].status, m["부처"].field_key) == ("confirmed", "budget")
+    assert llm.calls == []  # 확정된 열은 LLM으로 가지 않는다

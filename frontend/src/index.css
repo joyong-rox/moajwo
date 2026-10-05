@@ -20,6 +20,8 @@
   --review-text: #7d4e00;
   --unresolved-bg: #ffebe9;
   --unresolved-text: #a40e26;
+  --confirmed-bg: #ddf4ff;
+  --confirmed-text: #0550ae;
 
   color-scheme: light;
   font-family: system-ui, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
@@ -376,4 +378,63 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--muted);
+}
+
+.upload-tag.mapping-confirmed {
+  background: var(--confirmed-bg);
+  color: var(--confirmed-text);
+}
+
+.mapping-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 0 0 8px;
+}
+
+.mapping-confirm {
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.mapping-confirm:hover:not(:disabled),
+.mapping-confirm:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: none;
+}
+
+.mapping-confirm:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.mapping-message {
+  color: var(--confirmed-text);
+  font-size: 0.85rem;
+}
+
+.mapping-pick {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.mapping-pick select {
+  min-height: 32px;
+  max-width: 140px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
 }

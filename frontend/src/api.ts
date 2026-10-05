@@ -43,8 +43,8 @@ export type UploadResult = {
   error: string | null
 }
 
-export type MappingStatus = 'auto' | 'review' | 'unresolved'
-export type MappingMethod = 'exact' | 'exact_part' | 'similarity' | 'llm' | 'none'
+export type MappingStatus = 'auto' | 'review' | 'unresolved' | 'confirmed'
+export type MappingMethod = 'exact' | 'learned' | 'exact_part' | 'similarity' | 'pattern' | 'llm' | 'user' | 'none'
 export type EngineStatus = 'ok' | 'unavailable' | 'skipped'
 
 export type MappingCandidate = {
@@ -83,6 +83,30 @@ export async function mapFile(fileId: number): Promise<FileMapping> {
     throw new Error(typeof detail === 'string' ? detail : `HTTP ${res.status}`)
   }
   return (await res.json()) as FileMapping
+}
+
+export type StandardFieldInfo = { key: string; label: string; description: string }
+
+export async function fetchFields(): Promise<StandardFieldInfo[]> {
+  const res = await fetch(`${API_BASE}/mapping/fields`)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return (await res.json()) as StandardFieldInfo[]
+}
+
+export type DecisionInput = { sheet: string; column: string; field_key: string | null }
+export type DecisionsResult = { saved: number; learned: string[]; not_learned: { column: string; reason: string }[] }
+
+export async function saveDecisions(fileId: number, decisions: DecisionInput[]): Promise<DecisionsResult> {
+  const res = await fetch(`${API_BASE}/files/${fileId}/mapping/decisions`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decisions }),
+  })
+  if (!res.ok) {
+    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
+    throw new Error(typeof detail === 'string' ? detail : `HTTP ${res.status}`)
+  }
+  return (await res.json()) as DecisionsResult
 }
 
 export const ACCEPTED_EXTENSIONS = ['.xlsx', '.xls', '.csv']
