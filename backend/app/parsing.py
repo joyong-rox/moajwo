@@ -17,6 +17,8 @@ import chardet
 import openpyxl
 import xlrd
 
+from app.pii import PiiReport, mask_cell, scan_grid
+
 SUPPORTED_EXTENSIONS = (".xlsx", ".xls", ".csv")
 
 # 헤더는 1~3행 안에서만 찾는다.
@@ -48,12 +50,23 @@ class SheetResult:
     header_row_end: int | None = None  # 2단 헤더면 아래 헤더 행 (1-based), 아니면 header_row와 같음
     preview: list[dict[str, Any]] = field(default_factory=list)
     samples: list[list[Cell]] = field(default_factory=list)  # 열별 데이터 행 샘플 (중복·결측 제외)
+    title_texts: list[str] = field(default_factory=list)  # 헤더 위 제목·단위 행 텍스트 (기간·단위 추정용)
+    note_texts: list[str] = field(default_factory=list)  # 주석 행 텍스트 (단위 추정용)
+    body: list[dict[str, Any]] = field(default_factory=list)  # 헤더 아래 모든 행 (검증용, API 응답에는 넣지 않음)
+    pii: PiiReport = field(default_factory=PiiReport)
 
 
 @dataclass
 class FileResult:
     sheets: list[SheetResult]
     encoding: str | None = None  # csv만
+
+    @property
+    def pii(self) -> PiiReport:
+        report = PiiReport()
+        for s in self.sheets:
+            report.merge(s.pii)
+        return report
 
     @property
     def data_rows(self) -> int:
@@ -209,16 +222,18 @@ def is_missing(cell: Cell) -> bool:
     return isinstance(cell, str) and cell in MISSING_MARKERS
 
 
+def is_subtotal_label(cell: Cell) -> bool:
+    """'소계', '서울특별시 계'가 아닌 '계', '영업1팀 소계', '전국' 같은 합계 라벨 셀인지."""
+    if not isinstance(cell, str):
+        return False
+    compact = re.sub(r"\s+", "", cell)
+    if len(compact) > _SUBTOTAL_MAX_LEN:
+        return False
+    return bool(_SUBTOTAL_EXACT.match(compact) or _SUBTOTAL_ANYWHERE.search(compact))
+
+
 def _is_subtotal(row: list[Cell]) -> bool:
-    for cell in row:
-        if not isinstance(cell, str):
-            continue
-        compact = re.sub(r"\s+", "", cell)
-        if len(compact) > _SUBTOTAL_MAX_LEN:
-            continue
-        if _SUBTOTAL_EXACT.match(compact) or _SUBTOTAL_ANYWHERE.search(compact):
-            return True
-    return False
+    return any(is_subtotal_label(cell) for cell in row)
 
 
 def _is_note(row: list[Cell]) -> bool:
@@ -349,24 +364,36 @@ def analyze_sheet(name: str, raw: list[list[Any]]) -> SheetResult:
     counts = {"data": 0, "empty": 0, "subtotal": 0, "note": 0}
     missing_total = 0
     preview: list[dict[str, Any]] = []
+    body: list[dict[str, Any]] = []
+    note_texts: list[str] = []
     samples: list[list[Cell]] = [[] for _ in range(width)]
+    title_texts = [c for row in grid[: block[0] if block else 0] for c in dict.fromkeys(row) if isinstance(c, str)]
     for offset, row in enumerate(grid[body_start:]):
         kind = classify_row(row)
         counts[kind] += 1
         if kind == "data":
             for j, cell in enumerate(row):
                 bucket = samples[j]
+                # 샘플은 화면·LLM으로 나가므로 개인정보는 마스킹한 값으로 담는다.
+                shown = mask_cell(cell)
                 if (
                     len(bucket) < SAMPLES_PER_COLUMN
                     and cell is not None
                     and not is_missing(cell)
-                    and cell not in bucket
+                    and shown not in bucket
                 ):
-                    bucket.append(cell)
+                    bucket.append(shown)
         missing = [j for j, c in enumerate(row) if is_missing(c)] if kind == "data" else []
         missing_total += len(missing)
+        entry = {"row": body_start + offset + 1, "kind": kind, "cells": row, "missing": missing}
+        body.append(entry)  # 검증용 원래 값 (응답으로 내보내지 않음)
         if len(preview) < PREVIEW_ROWS:
-            preview.append({"row": body_start + offset + 1, "kind": kind, "cells": row, "missing": missing})
+            preview.append({**entry, "cells": [mask_cell(c) for c in row]})
+        if kind == "note":
+            note_texts.extend(c for c in dict.fromkeys(row) if isinstance(c, str))
+
+    pii = PiiReport()
+    scan_grid(name, grid, pii)
 
     return SheetResult(
         name=name,
@@ -380,6 +407,10 @@ def analyze_sheet(name: str, raw: list[list[Any]]) -> SheetResult:
         missing_cells=missing_total,
         preview=preview,
         samples=samples,
+        title_texts=title_texts,
+        note_texts=note_texts,
+        body=body,
+        pii=pii,
     )
 
 

@@ -167,3 +167,76 @@ def test_corrupt_file_reports_error(client: TestClient) -> None:
     res = client.post("/files", files=[("files", ("broken.xlsx", b"not a zip", "application/octet-stream"))])
     body = res.json()[0]
     assert body["error"] and body["id"] is not None
+
+
+def test_validation_flow_blocks_and_pii(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sqlite3
+
+    from app import files, validation_api
+    from app.config import DATA_DIR
+    from app.mapping import MappingEngine, load_dictionary
+
+    engine = MappingEngine(load_dictionary(), None, None)
+    monkeypatch.setattr(files, "get_engine", lambda: engine)
+    monkeypatch.setattr(validation_api, "get_engine", lambda: engine)
+    xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    header = ["기관명", "예산액(백만원)", "담당자", "연락처"]
+    bad = _xlsx_bytes(
+        header,
+        [
+            ["행정안전부", 100, "홍길동", "010-1234-5678"],
+            ["기상청", 200, "김철수", "kim@example.go.kr"],
+            ["합계", 999, None, None],  # 합계 불일치
+        ],
+    )
+    up = client.post("/files", files=[("files", ("2026년 9월_예산.xlsx", bad, xlsx))]).json()[0]
+    assert up["pii"]["counts"] == {"rrn": 0, "mobile": 1, "email": 1}
+    assert {i["masked"] for i in up["pii"]["items"]} == {"010-****-5678", "k***@example.go.kr"}
+    assert up["pii"]["acknowledged"] is False
+
+    res = client.post(
+        "/validation",
+        json={"file_ids": [up["id"]], "expected_period": "2026-09", "required_entities": ["행정안전부", "기상청"]},
+    )
+    assert res.status_code == 200
+    run = res.json()
+    assert run["status"] == "blocked"
+    assert [b["code"] for b in run["blocks"]] == ["sum_mismatch"]
+    assert run["blocks"][0]["label"] == "합계 불일치" and run["blocks"][0]["row"] == 4
+    assert all(w["code"] in {"mom_outlier", "blank_value", "unit_estimate"} for w in run["warnings"])
+    assert run["pii"][0]["acknowledged"] is False
+    assert client.get(f"/validation/{run['id']}").json()["status"] == "blocked"
+
+    fixed = _xlsx_bytes(
+        header,
+        [
+            ["행정안전부", 100, "홍길동", "010-1234-5678"],
+            ["기상청", 200, "김철수", "kim@example.go.kr"],
+            ["합계", 300, None, None],
+        ],
+    )
+    up2 = client.post("/files", files=[("files", ("2026년 9월_예산_수정.xlsx", fixed, xlsx))]).json()[0]
+    run2 = client.post("/validation", json={"file_ids": [up2["id"]], "expected_period": "2026-09"}).json()
+    assert run2["blocks"] == [] and run2["status"] == "pii_confirmation_required"
+
+    ack = client.post(f"/files/{up2['id']}/pii/acknowledge").json()
+    assert ack["acknowledged"] is True
+    run3 = client.post("/validation", json={"file_ids": [up2["id"]], "expected_period": "2026-09"}).json()
+    assert run3["status"] in ("passed", "passed_with_warnings")
+
+    listed = {f["id"]: f for f in client.get("/files").json()}
+    assert listed[up2["id"]]["pii"]["acknowledged"] is True
+
+    # 원문 개인정보는 DB 어디에도 저장되지 않는다
+    con = sqlite3.connect(DATA_DIR / "moajwo.db")
+    dump = "\n".join(con.iterdump())
+    con.close()
+    assert "010-1234-5678" not in dump and "kim@example.go.kr" not in dump
+
+    # 입력 검증
+    assert client.post("/validation", json={"file_ids": []}).status_code == 422
+    assert client.post("/validation", json={"file_ids": [up["id"]], "expected_period": "2026-13"}).status_code == 422
+    assert client.post("/validation", json={"file_ids": [up["id"]], "baseline_file_ids": [up["id"]]}).status_code == 422
+    clean = client.post("/files", files=[("files", ("c.xlsx", _xlsx_bytes(["기관명"], [["기상청"]]), xlsx))]).json()[0]
+    assert client.post(f"/files/{clean['id']}/pii/acknowledge").status_code == 409

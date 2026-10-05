@@ -1,3 +1,4 @@
+import json
 import logging
 from dataclasses import asdict
 from pathlib import PurePath
@@ -44,6 +45,7 @@ class UploadResultOut(BaseModel):
     sheet_count: int = 0
     data_rows: int = 0
     sheets: list[SheetOut] = []
+    pii: dict[str, Any] | None = None  # 개인정보 탐지 요약 (마스킹 값과 위치만)
     error: str | None = None
 
 
@@ -84,10 +86,20 @@ def _handle_one(upload: UploadFile, session: Session) -> UploadResultOut:
         result.error = str(exc)
         return result
 
+    report = parsed.pii
+    summary = {"counts": report.counts, "items": [asdict(i) for i in report.items]}
+    record.pii_summary = json.dumps(summary, ensure_ascii=False)
+    session.commit()
+    if report.found:
+        # 원문은 기록하지 않는다 (건수만)
+        logger.info("pii patterns found: id=%s counts=%s", record.id, report.counts)
+        result.pii = {**summary, "acknowledged": False}
+
     result.encoding = parsed.encoding
     result.sheet_count = len(parsed.sheets)
     result.data_rows = parsed.data_rows
-    result.sheets = [SheetOut(**asdict(s)) for s in parsed.sheets]
+    # body(전체 행)는 크므로 응답 모델에 필요한 필드만 읽는다.
+    result.sheets = [SheetOut.model_validate(s, from_attributes=True) for s in parsed.sheets]
     return result
 
 
@@ -133,7 +145,7 @@ def map_file_columns(
 
     사용자가 확정한 열은 확정값을 그대로 쓰고, 학습된 별칭은 1단계 정확 일치에 포함한다.
     """
-    record, parsed = _load_parsed(session, file_id)
+    record, parsed = load_parsed(session, file_id)
     engine = get_engine()
     learned = load_learned(session)
     decisions = load_decisions(session, file_id)
@@ -164,7 +176,7 @@ def _merge_status(current: str, new: str) -> str:
     return "skipped"
 
 
-def _load_parsed(session: Session, file_id: int) -> tuple[SourceFile, FileResult]:
+def load_parsed(session: Session, file_id: int) -> tuple[SourceFile, FileResult]:
     record = session.get(SourceFile, file_id)
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "파일을 찾을 수 없습니다.")
@@ -198,7 +210,7 @@ def save_mapping_decisions(
     file_id: int, body: DecisionsIn, session: Annotated[Session, Depends(get_session)]
 ) -> DecisionsOut:
     """사용자가 확인·수정한 매핑을 확정 저장하고, 열 이름을 별칭으로 학습한다."""
-    _, parsed = _load_parsed(session, file_id)
+    _, parsed = load_parsed(session, file_id)
     engine = get_engine()
     columns = {s.name: set(s.columns) for s in parsed.sheets}
     valid_keys = {f.key for f in engine.fields}

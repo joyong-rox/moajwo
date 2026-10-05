@@ -1,5 +1,6 @@
 import { useRef, useState, type DragEvent } from 'react'
 import Mapping from './Mapping'
+import PiiNotice from './PiiNotice'
 import { ACCEPTED_EXTENSIONS, uploadFiles, type Cell, type RowKind, type SheetSummary, type UploadResult } from './api'
 
 const KIND_LABEL: Record<RowKind, string> = { data: '데이터', empty: '빈 행', subtotal: '소계/합계', note: '주석' }
@@ -15,7 +16,7 @@ function formatCell(value: Cell) {
   return String(value)
 }
 
-function Upload() {
+function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiChanged?: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -34,6 +35,7 @@ function Upload() {
     try {
       const uploaded = await uploadFiles(accepted)
       setResults((prev) => [...uploaded, ...prev])
+      onUploaded?.()
     } catch (err) {
       setError(`업로드 실패: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
@@ -92,7 +94,7 @@ function Upload() {
         <ul className="upload-results">
           {results.map((r, i) => (
             <li key={`${r.id ?? 'x'}-${i}`} className="upload-file">
-              <FileSummary result={r} />
+              <FileSummary result={r} onPiiChanged={onPiiChanged} />
             </li>
           ))}
         </ul>
@@ -101,7 +103,7 @@ function Upload() {
   )
 }
 
-function FileSummary({ result }: { result: UploadResult }) {
+function FileSummary({ result, onPiiChanged }: { result: UploadResult; onPiiChanged?: () => void }) {
   return (
     <>
       <div className="upload-file-head">
@@ -115,6 +117,9 @@ function FileSummary({ result }: { result: UploadResult }) {
           </span>
         )}
       </div>
+      {result.id !== null && result.pii && (
+        <PiiNotice fileId={result.id} pii={result.pii} onAcknowledged={onPiiChanged} />
+      )}
       {result.sheets.map((sheet) => (
         <SheetPreview key={sheet.name} sheet={sheet} />
       ))}

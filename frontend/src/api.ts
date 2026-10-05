@@ -40,8 +40,14 @@ export type UploadResult = {
   sheet_count: number
   data_rows: number
   sheets: SheetSummary[]
+  pii: PiiSummary | null
   error: string | null
 }
+
+export type PiiType = 'rrn' | 'mobile' | 'email'
+export const PII_LABEL: Record<PiiType, string> = { rrn: '주민등록번호', mobile: '휴대전화번호', email: '이메일' }
+export type PiiItem = { type: PiiType; sheet: string; row: number; column: string; masked: string }
+export type PiiSummary = { counts: Record<PiiType, number>; items: PiiItem[]; acknowledged: boolean }
 
 export type MappingStatus = 'auto' | 'review' | 'unresolved' | 'confirmed'
 export type MappingMethod = 'exact' | 'learned' | 'exact_part' | 'similarity' | 'pattern' | 'llm' | 'user' | 'none'
@@ -120,4 +126,67 @@ export async function uploadFiles(files: File[]): Promise<UploadResult[]> {
     throw new Error(typeof detail === 'string' ? detail : `HTTP ${res.status}`)
   }
   return (await res.json()) as UploadResult[]
+}
+
+async function json<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
+    const message =
+      typeof detail === 'string'
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((d: { msg?: string }) => d.msg ?? '').join(', ')
+          : `HTTP ${res.status}`
+    throw new Error(message)
+  }
+  return (await res.json()) as T
+}
+
+export type StoredFile = { id: number; original_name: string; uploaded_at: string; pii: PiiSummary | null }
+
+export async function listFiles(): Promise<StoredFile[]> {
+  return json(await fetch(`${API_BASE}/files`))
+}
+
+export async function acknowledgePii(fileId: number): Promise<PiiSummary> {
+  return json(await fetch(`${API_BASE}/files/${fileId}/pii/acknowledge`, { method: 'POST' }))
+}
+
+export type ValidationStatus = 'blocked' | 'pii_confirmation_required' | 'passed_with_warnings' | 'passed'
+export type ValidationIssue = {
+  code: string
+  label: string
+  message: string
+  file_id: number | null
+  file_name: string | null
+  sheet: string | null
+  row: number | null
+  column: string | null
+}
+export type ValidationRun = {
+  id: number
+  status: ValidationStatus
+  blocks: ValidationIssue[]
+  warnings: ValidationIssue[]
+  pii: { file_id: number; file_name: string; counts: Record<PiiType, number>; items: PiiItem[]; acknowledged: boolean }[]
+  notes: string[]
+  created_at: string
+}
+export type ValidationRequest = {
+  file_ids: number[]
+  baseline_file_ids: number[]
+  expected_period: string | null
+  required_entities: string[]
+  entity_field: string | null
+  change_threshold: number
+}
+
+export async function runValidation(body: ValidationRequest): Promise<ValidationRun> {
+  return json(
+    await fetch(`${API_BASE}/validation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  )
 }

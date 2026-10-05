@@ -22,6 +22,17 @@
   --unresolved-text: #a40e26;
   --confirmed-bg: #ddf4ff;
   --confirmed-text: #0550ae;
+  --block-bg: #ffebe9;
+  --block-border: #ff8182;
+  --block-text: #a40e26;
+  --warning-bg: #fff8c5;
+  --warning-border: #d4a72c;
+  --warning-text: #7d4e00;
+  --pii-bg: #fbefff;
+  --pii-border: #c297ff;
+  --pii-text: #6639ba;
+  --pass-bg: #dafbe1;
+  --pass-text: #116329;
 
   color-scheme: light;
   font-family: system-ui, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
@@ -436,5 +447,170 @@ body {
   background: var(--bg);
   color: var(--text);
   font: inherit;
+  font-size: 0.85rem;
+}
+
+/* ---- 개인정보 경고 (단계 4) ---- */
+.pii-notice {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--pii-border);
+  border-radius: 6px;
+  background: var(--pii-bg);
+  color: var(--pii-text);
+  font-size: 0.875rem;
+}
+
+.pii-notice.is-acknowledged {
+  border-color: var(--border);
+  background: var(--tag-bg);
+  color: var(--muted);
+}
+
+.pii-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.pii-items {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.pii-notice .mapping-confirm {
+  margin-top: 4px;
+}
+
+/* ---- 통합 전 검증 (단계 4) : validation-* 클래스만 사용 ---- */
+.validation {
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.validation h2 {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+}
+
+.validation-files input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+}
+
+.validation-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.validation-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.validation-form input,
+.validation-form select,
+.validation-form textarea {
+  min-height: 36px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.validation-wide {
+  grid-column: 1 / -1;
+}
+
+.validation-status {
+  margin: 16px 0 8px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-weight: 600;
+}
+
+.validation-status.status-blocked {
+  background: var(--block-bg);
+  color: var(--block-text);
+}
+
+.validation-status.status-pii_confirmation_required {
+  background: var(--pii-bg);
+  color: var(--pii-text);
+}
+
+.validation-status.status-passed_with_warnings {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.validation-status.status-passed {
+  background: var(--pass-bg);
+  color: var(--pass-text);
+}
+
+.validation-group {
+  margin-top: 12px;
+  padding: 8px 12px 12px;
+  border-left: 4px solid var(--border);
+  border-radius: 4px;
+}
+
+.validation-group h3 {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+}
+
+.validation-group.group-block {
+  border-left-color: var(--block-border);
+}
+
+.validation-group.group-block h3 {
+  color: var(--block-text);
+}
+
+.validation-group.group-warning {
+  border-left-color: var(--warning-border);
+}
+
+.validation-group.group-warning h3 {
+  color: var(--warning-text);
+}
+
+.validation-group.group-pii {
+  border-left-color: var(--pii-border);
+}
+
+.validation-group.group-pii h3 {
+  color: var(--pii-text);
+}
+
+.validation-issues td {
+  min-width: 140px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.validation-issues td.validation-message {
+  min-width: 220px;
+  width: 60%;
+}
+
+.validation-pii-file {
+  margin: 8px 0 0;
+  font-weight: 600;
+}
+
+.validation-notes {
+  margin-top: 12px;
+  color: var(--muted);
   font-size: 0.85rem;
 }

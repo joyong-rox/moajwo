@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { fetchHealth, type Health } from './api'
 import Upload from './Upload'
+import Validation from './Validation'
 
 type State =
   | { kind: 'loading' }
@@ -9,6 +10,9 @@ type State =
 
 function App() {
   const [state, setState] = useState<State>({ kind: 'loading' })
+  // 업로드·개인정보 확인 후 검증 섹션의 파일 목록을 다시 불러온다
+  const [filesVersion, setFilesVersion] = useState(0)
+  const refreshFiles = () => setFilesVersion((v) => v + 1)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -40,7 +44,8 @@ function App() {
         {state.kind === 'error' && <p className="fail">연결 실패: {state.message}</p>}
       </section>
 
-      <Upload />
+      <Upload onUploaded={refreshFiles} onPiiChanged={refreshFiles} />
+      <Validation refreshKey={filesVersion} />
     </main>
   )
 }
