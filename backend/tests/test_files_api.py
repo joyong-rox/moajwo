@@ -52,6 +52,38 @@ def test_original_saved_read_only_with_new_name(client: TestClient) -> None:
         assert path.name != "evil.xls"
 
 
+def test_mapping_endpoint(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import files
+    from app.mapping import MappingEngine, load_dictionary
+
+    calls: list[str] = []
+
+    def fake_llm(system: str, user: str, schema: dict) -> dict:
+        calls.append(user)
+        return {"key": "none", "confidence": 0, "reason": "해당 없음"}
+
+    monkeypatch.setattr(files, "get_engine", lambda: MappingEngine(load_dictionary(), None, fake_llm))
+    up = client.post(
+        "/files",
+        files=[("files", ("members.xls", (FIXTURES / "members.xls").read_bytes(), "application/vnd.ms-excel"))],
+    )
+    file_id = up.json()[0]["id"]
+
+    res = client.post(f"/files/{file_id}/mapping")
+    assert res.status_code == 200
+    body = res.json()
+    cols = {c["column"]: c for c in body["sheets"][0]["columns"]}
+    assert set(cols) == {"지역", "이름", "가입일", "회비"}
+    assert cols["지역"]["field_key"] == "region" and cols["지역"]["status"] == "auto"
+    assert cols["지역"]["samples"] == ["서울", "부산"]
+    assert body["embedding"] == "skipped" and body["llm"] == "ok"
+    assert all(len(c["candidates"]) == 3 for c in cols.values())
+    # LLM에는 미해결 열만 간다
+    assert len(calls) == sum(1 for c in cols.values() if c["method"] == "llm")
+
+    assert client.post("/files/999999/mapping").status_code == 404
+
+
 def test_corrupt_file_reports_error(client: TestClient) -> None:
     res = client.post("/files", files=[("files", ("broken.xlsx", b"not a zip", "application/octet-stream"))])
     body = res.json()[0]

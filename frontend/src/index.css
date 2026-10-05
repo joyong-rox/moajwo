@@ -14,6 +14,12 @@
   --subtotal-row-bg: #fffbea;
   --note-bg: #eef1ff;
   --note-text: #4a55a2;
+  --auto-bg: #dafbe1;
+  --auto-text: #116329;
+  --review-bg: #fff1c2;
+  --review-text: #7d4e00;
+  --unresolved-bg: #ffebe9;
+  --unresolved-text: #a40e26;
 
   color-scheme: light;
   font-family: system-ui, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
@@ -266,5 +272,108 @@ body {
 }
 
 .upload-table td.missing {
+  color: var(--muted);
+}
+
+/* ---- 열 매핑 (단계 3) : mapping-* 클래스만 사용 ---- */
+.mapping {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.mapping-run {
+  min-height: 36px;
+  padding: 6px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mapping-run:hover:not(:disabled),
+.mapping-run:focus-visible {
+  background: var(--accent);
+  color: #fff;
+  outline: none;
+}
+
+.mapping-run:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+.mapping-warn {
+  margin: 12px 0 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--review-bg);
+  color: var(--review-text);
+  font-size: 0.875rem;
+}
+
+.mapping-sheet h3 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 16px 0 8px;
+  font-size: 0.95rem;
+}
+
+.mapping-sheet h3 .upload-tag {
+  margin-left: 0;
+}
+
+.upload-tag.mapping-auto {
+  background: var(--auto-bg);
+  color: var(--auto-text);
+}
+
+.upload-tag.mapping-review {
+  background: var(--review-bg);
+  color: var(--review-text);
+}
+
+.upload-tag.mapping-unresolved {
+  background: var(--unresolved-bg);
+  color: var(--unresolved-text);
+}
+
+.mapping-table td,
+.mapping-table th {
+  vertical-align: top;
+}
+
+.mapping-table tbody th {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.mapping-reason {
+  min-width: 180px;
+  max-width: 260px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  white-space: normal;
+}
+
+.mapping-candidate {
+  display: inline-block;
+  margin: 0 4px 2px 0;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.mapping-samples {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--muted);
 }

@@ -22,6 +22,7 @@ SUPPORTED_EXTENSIONS = (".xlsx", ".xls", ".csv")
 # 헤더는 1~3행 안에서만 찾는다.
 HEADER_SEARCH_ROWS = 3
 PREVIEW_ROWS = 20
+SAMPLES_PER_COLUMN = 5  # 매핑(특히 LLM)에 넘기는 열별 샘플 값 수
 CHARDET_MIN_CONFIDENCE = 0.5
 # chardet 판별 실패/저신뢰 시 시도 순서 (EUC-KR 우선, CP949는 EUC-KR 확장)
 CSV_FALLBACK_ENCODINGS = ("euc-kr", "cp949", "utf-8")
@@ -46,6 +47,7 @@ class SheetResult:
     missing_cells: int = 0  # '-', 'x', '…' 등 결측 표기 셀 (데이터 행 기준)
     header_row_end: int | None = None  # 2단 헤더면 아래 헤더 행 (1-based), 아니면 header_row와 같음
     preview: list[dict[str, Any]] = field(default_factory=list)
+    samples: list[list[Cell]] = field(default_factory=list)  # 열별 데이터 행 샘플 (중복·결측 제외)
 
 
 @dataclass
@@ -347,9 +349,20 @@ def analyze_sheet(name: str, raw: list[list[Any]]) -> SheetResult:
     counts = {"data": 0, "empty": 0, "subtotal": 0, "note": 0}
     missing_total = 0
     preview: list[dict[str, Any]] = []
+    samples: list[list[Cell]] = [[] for _ in range(width)]
     for offset, row in enumerate(grid[body_start:]):
         kind = classify_row(row)
         counts[kind] += 1
+        if kind == "data":
+            for j, cell in enumerate(row):
+                bucket = samples[j]
+                if (
+                    len(bucket) < SAMPLES_PER_COLUMN
+                    and cell is not None
+                    and not is_missing(cell)
+                    and cell not in bucket
+                ):
+                    bucket.append(cell)
         missing = [j for j, c in enumerate(row) if is_missing(c)] if kind == "data" else []
         missing_total += len(missing)
         if len(preview) < PREVIEW_ROWS:
@@ -366,6 +379,7 @@ def analyze_sheet(name: str, raw: list[list[Any]]) -> SheetResult:
         note_rows=counts["note"],
         missing_cells=missing_total,
         preview=preview,
+        samples=samples,
     )
 
 

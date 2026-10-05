@@ -1,4 +1,5 @@
 import { useRef, useState, type DragEvent } from 'react'
+import Mapping from './Mapping'
 import { ACCEPTED_EXTENSIONS, uploadFiles, type Cell, type RowKind, type SheetSummary, type UploadResult } from './api'
 
 const KIND_LABEL: Record<RowKind, string> = { data: '데이터', empty: '빈 행', subtotal: '소계/합계', note: '주석' }
@@ -117,6 +118,7 @@ function FileSummary({ result }: { result: UploadResult }) {
       {result.sheets.map((sheet) => (
         <SheetPreview key={sheet.name} sheet={sheet} />
       ))}
+      {result.id !== null && !result.error && <Mapping fileId={result.id} />}
     </>
   )
 }

@@ -60,7 +60,7 @@ npm run lint && npm run build
 
 - `backend/requirements.in`: 직접 의존성 (버전 고정)
 - `backend/requirements.txt`: Python 3.11 / linux 기준 전이 의존성까지 고정한 설치 목록
-- 오프라인 설치: 인터넷이 되는 곳에서 `pip download -r requirements.txt -d wheels` 후
+- 오프라인 설치: 인터넷이 되는 곳에서 `pip download -r requirements.txt -d wheels --platform manylinux_2_28_x86_64 --python-version 3.11 --only-binary=:all:` 후
   폐쇄망에서 `pip install --no-index --find-links wheels -r requirements.txt`
 - 프론트엔드는 `package.json` 정확한 버전 + `package-lock.json`으로 고정합니다.
 
@@ -80,6 +80,20 @@ npm run lint && npm run build
     - 소계·합계 행: 소계, 합계, 총계, 누계, 계, 전국, total 등
     - 주석 행: 값이 하나뿐이고 `자료:`, `출처:`, `주:`, `주1)`, `※`, `*`, `(단위:` 로 시작
     - 데이터 행
+
+## 열 매핑 (`POST /files/{id}/mapping`)
+
+저장된 원본을 다시 파싱해 시트별 열 이름을 표준 사전([backend/app/standard_dictionary.json](backend/app/standard_dictionary.json))에 매핑합니다.
+
+1. **사전 정확 일치**: 공백·가운뎃점·단위 괄호·연도를 무시하고 비교 → 자동 적용. `인구_2025`는 `인구수` + 연도 `2025`로 분리. 2단 헤더 일부만 일치하면 확인 대상.
+2. **유사도**: rapidfuzz 문자열 유사도 0.4 + bge-m3 임베딩 코사인 0.6 가중 평균
+   - 0.90 이상이고 1·2위 차이 0.05 이상 → 자동 적용
+   - 0.75 이상 → 사용자 확인 대상
+3. **LLM**: 1·2단계 미해결 열만, 한 번에 한 열씩 열 이름 + 샘플 값 5개 + 샘플 형식 힌트를 로컬 Ollama(Qwen 7B)에 보냄. 결과는 항상 사용자 확인 대상(자동 적용하지 않음). 요청당 최대 15열.
+
+- Ollama 설정: `OLLAMA_BASE_URL`(기본 `http://localhost:11434`, Compose에서는 `http://host.docker.internal:11434`), `OLLAMA_EMBED_MODEL`(기본 `bge-m3`), `OLLAMA_LLM_MODEL`(기본 `qwen2.5:7b`). 로컬/사설 주소가 아니면 호출을 거부합니다.
+- 모델 준비(최초 1회): `ollama pull bge-m3 && ollama pull qwen2.5:7b`
+- Ollama가 꺼져 있으면 임베딩 없이 문자열 유사도만 쓰고, LLM 대상 열은 미해결로 남깁니다.
 
 ## DB 마이그레이션
 

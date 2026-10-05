@@ -43,6 +43,48 @@ export type UploadResult = {
   error: string | null
 }
 
+export type MappingStatus = 'auto' | 'review' | 'unresolved'
+export type MappingMethod = 'exact' | 'exact_part' | 'similarity' | 'llm' | 'none'
+export type EngineStatus = 'ok' | 'unavailable' | 'skipped'
+
+export type MappingCandidate = {
+  key: string
+  label: string
+  score: number
+  fuzzy: number
+  embedding: number | null
+}
+
+export type ColumnMapping = {
+  column: string
+  samples: Cell[]
+  status: MappingStatus
+  method: MappingMethod
+  field_key: string | null
+  field_label: string | null
+  score: number | null
+  qualifier: string | null
+  reason: string | null
+  candidates: MappingCandidate[]
+}
+
+export type FileMapping = {
+  file_id: number
+  original_name: string
+  embedding: EngineStatus
+  llm: EngineStatus
+  sheets: { name: string; columns: ColumnMapping[] }[]
+}
+
+export async function mapFile(fileId: number): Promise<FileMapping> {
+  const res = await fetch(`${API_BASE}/files/${fileId}/mapping`, { method: 'POST' })
+  if (!res.ok) {
+    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
+    throw new Error(typeof detail === 'string' ? detail : `HTTP ${res.status}`)
+  }
+  return (await res.json()) as FileMapping
+}
+
 export const ACCEPTED_EXTENSIONS = ['.xlsx', '.xls', '.csv']
 
 export async function uploadFiles(files: File[]): Promise<UploadResult[]> {
