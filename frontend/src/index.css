@@ -12,6 +12,8 @@
   --subtotal-bg: #fff1c2;
   --subtotal-text: #7d4e00;
   --subtotal-row-bg: #fffbea;
+  --note-bg: #eef1ff;
+  --note-text: #4a55a2;
 
   color-scheme: light;
   font-family: system-ui, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
@@ -244,4 +246,25 @@ body {
 .upload-table tr.kind-subtotal td {
   background: var(--subtotal-row-bg);
   font-weight: 600;
+}
+
+.upload-tag.kind-note,
+.upload-table tr.kind-note .upload-tag {
+  background: var(--note-bg);
+  color: var(--note-text);
+}
+
+.upload-tag.kind-missing {
+  background: var(--tag-bg);
+  color: var(--muted);
+}
+
+.upload-table tr.kind-note td {
+  color: var(--note-text);
+  font-style: italic;
+  white-space: normal;
+}
+
+.upload-table td.missing {
+  color: var(--muted);
 }

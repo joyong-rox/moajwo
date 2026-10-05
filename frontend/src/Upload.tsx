@@ -1,7 +1,7 @@
 import { useRef, useState, type DragEvent } from 'react'
 import { ACCEPTED_EXTENSIONS, uploadFiles, type Cell, type RowKind, type SheetSummary, type UploadResult } from './api'
 
-const KIND_LABEL: Record<RowKind, string> = { data: '데이터', empty: '빈 행', subtotal: '소계/합계' }
+const KIND_LABEL: Record<RowKind, string> = { data: '데이터', empty: '빈 행', subtotal: '소계/합계', note: '주석' }
 
 function isAccepted(file: File) {
   const name = file.name.toLowerCase()
@@ -121,15 +121,26 @@ function FileSummary({ result }: { result: UploadResult }) {
   )
 }
 
+function headerLabel(sheet: SheetSummary) {
+  if (!sheet.header_row) return '헤더 없음'
+  if (sheet.header_row_end && sheet.header_row_end !== sheet.header_row) {
+    return `헤더 ${sheet.header_row}~${sheet.header_row_end}행`
+  }
+  return `헤더 ${sheet.header_row}행`
+}
+
 function SheetPreview({ sheet }: { sheet: SheetSummary }) {
+  const shown = sheet.data_rows + sheet.empty_rows + sheet.subtotal_rows + sheet.note_rows
   return (
     <details className="upload-sheet">
       <summary>
         <span className="upload-sheet-name">{sheet.name}</span>
-        <span>헤더 {sheet.header_row ? `${sheet.header_row}행` : '없음'}</span>
+        <span>{headerLabel(sheet)}</span>
         <span>데이터 {sheet.data_rows.toLocaleString('ko-KR')}행</span>
         {sheet.subtotal_rows > 0 && <span className="upload-tag kind-subtotal">소계/합계 {sheet.subtotal_rows}</span>}
         {sheet.empty_rows > 0 && <span className="upload-tag kind-empty">빈 행 {sheet.empty_rows}</span>}
+        {sheet.note_rows > 0 && <span className="upload-tag kind-note">주석 {sheet.note_rows}</span>}
+        {sheet.missing_cells > 0 && <span className="upload-tag kind-missing">결측 표기 {sheet.missing_cells}칸</span>}
       </summary>
       <div className="upload-table-wrap">
         <table className="upload-table">
@@ -150,17 +161,28 @@ function SheetPreview({ sheet }: { sheet: SheetSummary }) {
                   {row.row}
                   {row.kind !== 'data' && <span className="upload-tag">{KIND_LABEL[row.kind]}</span>}
                 </th>
-                {row.cells.map((cell, j) => (
-                  <td key={j} className={typeof cell === 'number' ? 'num' : undefined}>
-                    {formatCell(cell)}
+                {row.kind === 'note' ? (
+                  // 가로 병합된 주석은 ffill로 모든 칸에 반복되므로 한 번만 표시한다.
+                  <td colSpan={row.cells.length}>
+                    {formatCell(row.cells.find((c) => c !== null) ?? null)}
                   </td>
-                ))}
+                ) : (
+                  row.cells.map((cell, j) => {
+                    const missing = row.missing.includes(j)
+                    const cls = missing ? 'num missing' : typeof cell === 'number' ? 'num' : undefined
+                    return (
+                      <td key={j} className={cls} title={missing ? '결측/비공개 표기 (원본 그대로)' : undefined}>
+                        {formatCell(cell)}
+                      </td>
+                    )
+                  })
+                )}
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      {sheet.data_rows + sheet.empty_rows + sheet.subtotal_rows > sheet.preview.length && (
+      {shown > sheet.preview.length && (
         <p className="upload-drop-hint">처음 {sheet.preview.length}행만 미리보기로 표시합니다.</p>
       )}
     </details>

@@ -26,6 +26,9 @@ class SheetOut(BaseModel):
     data_rows: int
     empty_rows: int
     subtotal_rows: int
+    note_rows: int
+    missing_cells: int
+    header_row_end: int | None
     preview: list[dict[str, Any]]
 
 

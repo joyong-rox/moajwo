@@ -16,7 +16,7 @@ export async function fetchHealth(signal?: AbortSignal): Promise<Health> {
   return (await res.json()) as Health
 }
 
-export type RowKind = 'data' | 'empty' | 'subtotal'
+export type RowKind = 'data' | 'empty' | 'subtotal' | 'note'
 export type Cell = string | number | boolean | null
 
 export type SheetSummary = {
@@ -26,7 +26,10 @@ export type SheetSummary = {
   data_rows: number
   empty_rows: number
   subtotal_rows: number
-  preview: { row: number; kind: RowKind; cells: Cell[] }[]
+  note_rows: number
+  missing_cells: number
+  header_row_end: number | null
+  preview: { row: number; kind: RowKind; cells: Cell[]; missing: number[] }[]
 }
 
 export type UploadResult = {

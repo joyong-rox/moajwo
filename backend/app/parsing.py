@@ -26,7 +26,7 @@ CHARDET_MIN_CONFIDENCE = 0.5
 # chardet 판별 실패/저신뢰 시 시도 순서 (EUC-KR 우선, CP949는 EUC-KR 확장)
 CSV_FALLBACK_ENCODINGS = ("euc-kr", "cp949", "utf-8")
 
-RowKind = Literal["data", "empty", "subtotal"]
+RowKind = Literal["data", "empty", "subtotal", "note"]
 Cell = str | int | float | bool | None
 
 
@@ -42,6 +42,9 @@ class SheetResult:
     data_rows: int
     empty_rows: int
     subtotal_rows: int
+    note_rows: int = 0  # 자료/주/※ 등 주석 행
+    missing_cells: int = 0  # '-', 'x', '…' 등 결측 표기 셀 (데이터 행 기준)
+    header_row_end: int | None = None  # 2단 헤더면 아래 헤더 행 (1-based), 아니면 header_row와 같음
     preview: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -183,8 +186,25 @@ def _read_csv(path: Path, sheet_name: str) -> tuple[dict[str, list[list[Any]]], 
 # ---------------------------------------------------------------- 분석
 
 _SUBTOTAL_ANYWHERE = re.compile(r"(소계|합계|총계|누계|subtotal|grandtotal)", re.IGNORECASE)
-_SUBTOTAL_EXACT = re.compile(r"^(계|합|총|total|sum)$", re.IGNORECASE)
+# '전국'은 시도·시군구 통계에서 전체 합계 행이다.
+_SUBTOTAL_EXACT = re.compile(r"^(계|합|총|전국|total|sum)$", re.IGNORECASE)
 _SUBTOTAL_MAX_LEN = 20  # 긴 문장 속 '합계' 단어는 소계 행으로 보지 않는다
+
+# 정부 통계 하단 주석: "자료: …", "출처 : …", "주: 1) …", "주1) …", "※ …", "* …", "(단위: 명)"
+_NOTE_PREFIX = re.compile(
+    r"^(?:(?:자료|출처|주|비고|참고|note|notes|source)\s*\d*\s*[:：)]|[※*＊†‡]|\(?\s*단위\s*[:：])",
+    re.IGNORECASE,
+)
+
+# 통계표 결측/비공개 표기. 원본 표기는 그대로 두고 표시만 한다 (0과 구분).
+MISSING_MARKERS = frozenset({"-", "－", "–", "—", "x", "X", "…", "...", "·", "ㆍ", "..", "na", "n/a", "NA", "N/A"})
+
+# 2단 헤더 아래 줄에 올 수 있는 숫자는 연도뿐이다 (그 외 숫자가 있으면 데이터 행으로 본다).
+_YEAR_MIN, _YEAR_MAX = 1900, 2100
+
+
+def is_missing(cell: Cell) -> bool:
+    return isinstance(cell, str) and cell in MISSING_MARKERS
 
 
 def _is_subtotal(row: list[Cell]) -> bool:
@@ -199,26 +219,94 @@ def _is_subtotal(row: list[Cell]) -> bool:
     return False
 
 
+def _is_note(row: list[Cell]) -> bool:
+    """값이 한 종류뿐(병합 ffill 포함)이고 주석 접두어로 시작하는 행."""
+    values = {c for c in row if c is not None}
+    if len(values) != 1:
+        return False
+    (value,) = values
+    return isinstance(value, str) and bool(_NOTE_PREFIX.match(value.strip()))
+
+
 def classify_row(row: list[Cell]) -> RowKind:
     if all(c is None for c in row):
         return "empty"
+    if _is_note(row):
+        return "note"
     if _is_subtotal(row):
         return "subtotal"
     return "data"
 
 
+def _header_texts(row: list[Cell]) -> set[str]:
+    return {c for c in row if isinstance(c, str) and not is_missing(c) and not _is_note([c])}
+
+
 def detect_header_row(rows: list[list[Cell]]) -> int | None:
     """1~3행 중 '서로 다른 텍스트 셀'이 가장 많은 행을 헤더로 본다 (0-based).
 
-    병합된 제목 행은 ffill 후 같은 값이 반복되므로 고유 값이 1개뿐이라 자연스럽게 밀린다.
+    병합된 제목·단위 행은 ffill 후 같은 값이 반복되므로 고유 값이 1개뿐이라 자연스럽게 밀린다.
     동점이면 위쪽 행을 고른다. 텍스트 셀이 하나도 없으면 None.
     """
     best, best_score = None, 0
     for i, row in enumerate(rows[:HEADER_SEARCH_ROWS]):
-        texts = {c for c in row if isinstance(c, str)}
-        if len(texts) > best_score:
-            best, best_score = i, len(texts)
+        score = len(_header_texts(row))
+        if score > best_score:
+            best, best_score = i, score
     return best
+
+
+def _runs(row: list[Cell]) -> list[tuple[int, int]]:
+    """같은 값이 가로로 2칸 이상 이어진 구간 [start, end). 가로 병합 셀의 ffill 흔적이다."""
+    runs, i = [], 0
+    while i < len(row):
+        j = i + 1
+        while j < len(row) and row[i] is not None and row[j] == row[i]:
+            j += 1
+        if j - i >= 2:
+            runs.append((i, j))
+        i = j
+    return runs
+
+
+def _is_header_like(cell: Cell) -> bool:
+    if cell is None:
+        return True
+    if isinstance(cell, str):
+        return not is_missing(cell)
+    return isinstance(cell, int) and not isinstance(cell, bool) and _YEAR_MIN <= cell <= _YEAR_MAX
+
+
+def _is_two_level(top: list[Cell], sub: list[Cell]) -> bool:
+    """top이 가로 병합된 그룹 헤더이고 sub가 그 아래를 나눠 쓰는 하위 헤더인지.
+
+    - top에 가로 반복 구간이 있고, 전체 폭을 덮는 한 덩어리(제목 행)는 아니어야 한다.
+    - 각 구간 아래 sub 셀은 모두 채워져 있고 서로 달라야 한다.
+    - sub의 모든 셀은 텍스트 또는 연도여야 한다 (금액 등 숫자가 있으면 데이터 행).
+    """
+    runs = _runs(top)
+    if not runs or len({c for c in top if c is not None}) < 2:
+        return False
+    # 하위 헤더에는 '계'·'합계' 열이 흔하므로 소계 여부는 보지 않는다 (실제 소계 행은 숫자가 있어 걸러진다).
+    if not all(_is_header_like(c) for c in sub) or _is_note(sub):
+        return False
+    for start, end in runs:
+        cells = sub[start:end]
+        if any(c is None for c in cells) or len(set(cells)) != len(cells):
+            return False
+    return True
+
+
+def detect_header_block(rows: list[list[Cell]]) -> tuple[int, int] | None:
+    """헤더 구간 (top, bottom) 0-based. 1단이면 top == bottom."""
+    h = detect_header_row(rows)
+    if h is None:
+        return None
+    if h > 0 and _is_two_level(rows[h - 1], rows[h]):
+        return h - 1, h
+    if h + 1 < len(rows) and _is_two_level(rows[h], rows[h + 1]):
+        return h, h + 1
+    return h, h
 
 
 def _trim(grid: list[list[Cell]]) -> list[list[Cell]]:
@@ -229,12 +317,17 @@ def _trim(grid: list[list[Cell]]) -> list[list[Cell]]:
     return [(r + [None] * width)[:width] for r in grid]
 
 
-def _column_names(header: list[Cell] | None, width: int) -> list[str]:
+def _column_names(header_rows: list[list[Cell]], width: int) -> list[str]:
+    """헤더 행(1~2줄)을 위→아래로 합쳐 열 이름을 만든다. 예: '인구' + '2025' → '인구_2025'."""
     names: list[str] = []
     seen: dict[str, int] = {}
     for i in range(width):
-        value = header[i] if header is not None else None
-        name = str(value) if value is not None else f"열{i + 1}"
+        parts: list[str] = []
+        for row in header_rows:
+            value = row[i]
+            if value is not None and (not parts or str(value) != parts[-1]):
+                parts.append(str(value))
+        name = "_".join(parts) or f"열{i + 1}"
         if name in seen:
             seen[name] += 1
             name = f"{name}_{seen[name]}"
@@ -247,25 +340,31 @@ def _column_names(header: list[Cell] | None, width: int) -> list[str]:
 def analyze_sheet(name: str, raw: list[list[Any]]) -> SheetResult:
     grid = _trim([[normalize_cell(v) for v in row] for row in raw])
     width = len(grid[0]) if grid else 0
-    header_idx = detect_header_row(grid)
-    header = grid[header_idx] if header_idx is not None else None
-    body_start = header_idx + 1 if header_idx is not None else 0
+    block = detect_header_block(grid)
+    header_rows = grid[block[0] : block[1] + 1] if block else []
+    body_start = block[1] + 1 if block else 0
 
-    counts = {"data": 0, "empty": 0, "subtotal": 0}
+    counts = {"data": 0, "empty": 0, "subtotal": 0, "note": 0}
+    missing_total = 0
     preview: list[dict[str, Any]] = []
     for offset, row in enumerate(grid[body_start:]):
         kind = classify_row(row)
         counts[kind] += 1
+        missing = [j for j, c in enumerate(row) if is_missing(c)] if kind == "data" else []
+        missing_total += len(missing)
         if len(preview) < PREVIEW_ROWS:
-            preview.append({"row": body_start + offset + 1, "kind": kind, "cells": row})
+            preview.append({"row": body_start + offset + 1, "kind": kind, "cells": row, "missing": missing})
 
     return SheetResult(
         name=name,
-        header_row=header_idx + 1 if header_idx is not None else None,
-        columns=_column_names(header, width),
+        header_row=block[0] + 1 if block else None,
+        header_row_end=block[1] + 1 if block else None,
+        columns=_column_names(header_rows, width),
         data_rows=counts["data"],
         empty_rows=counts["empty"],
         subtotal_rows=counts["subtotal"],
+        note_rows=counts["note"],
+        missing_cells=missing_total,
         preview=preview,
     )
 
