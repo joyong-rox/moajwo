@@ -89,7 +89,7 @@ npm run lint && npm run build
 2. **유사도**: rapidfuzz 문자열 유사도 0.4 + bge-m3 임베딩 코사인 0.6 가중 평균
    - 0.90 이상이고 1·2위 차이 0.05 이상 → 자동 적용
    - 0.75 이상 → 사용자 확인 대상
-   - 값 형식 규칙: 샘플이 모두 시도 코드(11, 26, … 52)로 시작하는 같은 길이(2·5·8·10자리)의 숫자면 `행정구역코드` 확인 대상 (LLM 전에 결정, 숫자형 셀은 열 이름이 없거나 '코드'가 들어간 경우만)
+   - 값 형식 규칙: 샘플이 모두 **행정안전부 행정동 코드표**(말소 포함)에 실제로 있는 2·5·8·10자리 코드면 `행정구역코드` (LLM 전에 결정). 5자리 이상이고 3개 이상 일치하면 자동 적용, 그 외 확인 대상. 숫자형 셀은 열 이름이 없거나 '코드'가 들어간 경우만
 3. **LLM**: 1·2단계 미해결 열만, 한 번에 한 열씩 열 이름 + 샘플 값 5개 + 샘플 형식 힌트를 로컬 Ollama(Qwen 7B)에 보냄. 결과는 항상 사용자 확인 대상(자동 적용하지 않음). 요청당 최대 15열.
 
 - **확정과 학습** (`PUT /files/{id}/mapping/decisions`, `GET /mapping/fields`)
@@ -99,6 +99,13 @@ npm run lint && npm run build
 - Ollama 설정: `OLLAMA_BASE_URL`(기본 `http://localhost:11434`, Compose에서는 `http://host.docker.internal:11434`), `OLLAMA_EMBED_MODEL`(기본 `bge-m3`), `OLLAMA_LLM_MODEL`(기본 `qwen2.5:7b`). 로컬/사설 주소가 아니면 호출을 거부합니다.
 - 모델 준비(최초 1회): `ollama pull bge-m3 && ollama pull qwen2.5:7b`
 - Ollama가 꺼져 있으면 임베딩 없이 문자열 유사도만 쓰고, LLM 대상 열은 미해결로 남깁니다.
+
+## 참조 데이터: 행정동 코드표
+
+- 파일: [backend/app/reference/KIKcd_H.20260930.all.xlsx](backend/app/reference/KIKcd_H.20260930.all.xlsx) — 행정안전부 「행정기관(행정동) 및 관할구역(법정동) 변경내역(2026.9.30. 시행)」 첨부 `jscode20260930(말소코드포함).zip`의 `KIKcd_H`(행정동 코드) 원본을 내용 변경 없이 보관
+- 출처·기준일·sha256: [admin_codes.source.json](backend/app/reference/admin_codes.source.json) (테스트가 해시 일치를 확인)
+- 말소 코드 포함: 2026-07-01 광주광역시(29)·전라남도(46) → 전남광주통합특별시(12), 강원도(42) → 강원특별자치도(51), 전라북도(45) → 전북특별자치도(52) 등 과거 통계의 코드도 인식
+- 갱신: 같은 게시판의 최신 「말소코드포함」 zip에서 `KIKcd_H…xlsx`를 교체하고 `admin_codes.source.json`의 파일명·기준일·해시를 수정
 
 ## 데이터 초기화
 

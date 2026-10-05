@@ -200,10 +200,14 @@ def test_llm_prompt_contains_only_one_column_and_format_hint() -> None:
 @pytest.mark.parametrize(
     ("column", "samples", "expected"),
     [
-        ("열5", ["11500", "11680", "26440"], True),  # 시군구 5자리
+        ("열5", ["11500", "11680", "26440"], True),  # 시군구 5자리 (서울 강서·강남, 부산 강서)
         ("열5", [11500, 11680, 26440], True),  # 숫자형이어도 열 이름이 없으면 인정
-        ("행정코드", ["1150010100", "2644010100"], True),  # 법정동 10자리
-        ("열2", ["11", "26", "41"], True),  # 시도 2자리 문자열
+        ("행정코드", ["1150052000", "2644051000"], True),  # 행정동 10자리
+        ("열8", ["11500520", "26440510"], True),  # 읍면동 8자리
+        ("열2", ["11", "26", "12"], True),  # 시도 2자리 문자열 (12 = 전남광주통합특별시)
+        ("열5", ["29110", "46110"], True),  # 2026-07-01 말소된 광주·전남 코드 (과거 자료)
+        ("열5", ["11500", "11510"], False),  # 11510은 코드표에 없는 시군구
+        ("행정코드", ["1150010100", "2644010100"], False),  # 법정동 코드는 행정동 코드표에 없음
         ("열2", [11, 26, 41], False),  # 2자리 숫자는 나이·수량과 구분 불가
         ("금액", [11500, 26440, 41000], False),  # 의미 있는 이름의 숫자형은 금액일 수 있음
         ("열5", ["1741000", "1311000"], False),  # 7자리 = 행정기관코드와 겹침
@@ -218,13 +222,25 @@ def test_looks_like_region_code(column: str, samples: list, expected: bool) -> N
     assert looks_like_region_code(column, samples) is expected
 
 
+def _region_fields() -> list[StandardField]:
+    return [*FIELDS, StandardField("region_code", "행정구역코드", "지역 코드", ("지역코드",))]
+
+
 def test_region_code_pattern_before_llm() -> None:
-    fields = [*FIELDS, StandardField("region_code", "행정구역코드", "지역 코드", ("지역코드",))]
     llm = FakeLlm({})
-    engine = MappingEngine(fields, None, llm)
-    m = _by_column(engine.map_columns(["열5"], [["11500", "11680", "26440"]]))
-    assert (m["열5"].status, m["열5"].method, m["열5"].field_key) == ("review", "pattern", "region_code")
+    engine = MappingEngine(_region_fields(), None, llm)
+    m = _by_column(engine.map_columns(["열5", "열6"], [["11500", "11680", "26440"], ["11500", "26440"]]))
+    # 공식 코드표와 3개 이상 일치 → 자동, 2개뿐 → 확인 대상
+    assert (m["열5"].status, m["열5"].method, m["열5"].field_key) == ("auto", "pattern", "region_code")
+    assert "11500 서울특별시 강서구" in (m["열5"].reason or "")
+    assert (m["열6"].status, m["열6"].field_key) == ("review", "region_code")
     assert llm.calls == []  # 규칙으로 결정되면 LLM을 부르지 않는다
+
+
+def test_region_code_reason_mentions_abolished() -> None:
+    engine = MappingEngine(_region_fields(), None, None)
+    m = _by_column(engine.map_columns(["열5"], [["29110", "46110", "11500"]]))
+    assert "말소 코드 2개" in (m["열5"].reason or "")
 
 
 def test_learned_alias_and_decisions() -> None:

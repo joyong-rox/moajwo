@@ -1,0 +1,14 @@
+{
+  "name": "행정동 코드 (주민등록 행정기관코드, 말소코드 포함)",
+  "file": "KIKcd_H.20260930.all.xlsx",
+  "original_file": "jscode20260930(말소코드포함).zip / KIKcd_H.20260930(말소코드포함).xlsx",
+  "publisher": "행정안전부",
+  "source_page": "https://www.mois.go.kr/frt/bbs/type001/commonSelectBoardArticle.do?bbsId=BBSMSTR_000000000052&nttId=129824",
+  "source_title": "행정기관(행정동) 및 관할구역(법정동) 변경내역(2026.9.30. 시행)",
+  "effective_date": "2026-09-30",
+  "downloaded_at": "2026-10-05",
+  "zip_sha256": "3ea6d3d8edd74fe5e802ef12030faf03c65a7a5cf278419b08368af4f40e1096",
+  "file_sha256": "4f72a228b11e453214d73978f2c7b0966cc14589c3557e5b655a1d0635fdfafb",
+  "columns": ["행정동코드", "시도명", "시군구명", "읍면동명", "생성일자", "말소일자"],
+  "note": "원본 xlsx를 내용 변경 없이 파일명만 바꿔 보관한다. 갱신 시 같은 게시판의 최신 '말소코드포함' 자료로 교체하고 이 파일의 값을 고친다."
+}

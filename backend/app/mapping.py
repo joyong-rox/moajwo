@@ -20,7 +20,7 @@ from typing import Any, Literal
 
 from rapidfuzz import fuzz
 
-from app import ollama
+from app import admin_codes, ollama
 from app.parsing import Cell
 
 logger = logging.getLogger(__name__)
@@ -207,37 +207,57 @@ def _llm_prompt(fields: list[StandardField], name: ColumnName, samples: list[Cel
 
 # ---------------------------------------------------------------- 샘플 패턴 (LLM 전 규칙 판별)
 
-# 행정표준코드 시도 앞 2자리. 42(강원도)·45(전라북도)는 특별자치도 전환 전 코드로, 과거 통계에 남아 있다.
-SIDO_CODE_PREFIXES = frozenset(
-    {"11", "26", "27", "28", "29", "30", "31", "36", "41", "42", "43", "44", "45", "46", "47", "48", "50", "51", "52"}
-)
-# 시도 2자리, 시군구 5자리, 행정동 8자리, 법정동·행정동 10자리. 7자리는 행정기관코드와 겹쳐 제외한다.
+# 시도 2자리, 시군구 5자리, 읍면동 8자리, 행정동 10자리. 7자리는 행정기관(부처)코드와 겹쳐 제외한다.
 REGION_CODE_LENGTHS = frozenset({2, 5, 8, 10})
+REGION_CODE_AUTO_MIN_SAMPLES = 3  # 공식 코드표와 모두 일치하는 샘플이 이만큼 있으면 자동 적용
 _GENERATED_NAME = re.compile(r"^열\d+$")
 
 
-def looks_like_region_code(column: str, samples: list[Cell]) -> bool:
-    """샘플이 모두 시도 코드로 시작하는 같은 길이의 숫자면 행정구역코드로 본다.
+@dataclass(frozen=True)
+class RegionCodeMatch:
+    examples: list[str]  # 예: '11500 서울특별시 강서구'
+    abolished: int  # 말소된 코드 수 (과거 통계)
+    count: int
+    length: int  # 코드 자릿수
+
+    @property
+    def strong(self) -> bool:
+        # 2자리 시도 코드는 우연히 맞기 쉬워 자동 적용하지 않는다.
+        return self.count >= REGION_CODE_AUTO_MIN_SAMPLES and self.length >= 5
+
+
+def match_region_codes(column: str, samples: list[Cell]) -> RegionCodeMatch | None:
+    """샘플이 모두 행정안전부 행정동 코드표(말소 포함)에 실제로 있는 코드면 일치 정보를 돌려준다.
 
     숫자형 셀은 금액 등과 헷갈리기 쉬우므로, 열 이름이 비어 있거나('열3') '코드'가 들어간 경우에만 인정한다.
     """
     values = [s for s in samples if s is not None]
     if len(values) < 2:
-        return False
+        return None
     all_text = all(isinstance(v, str) for v in values)
     if not all_text:
         if not all(isinstance(v, int) and not isinstance(v, bool) for v in values):
-            return False
+            return None
         if not (_GENERATED_NAME.match(column) or "코드" in column):
-            return False
+            return None
     texts = [str(v) for v in values]
     lengths = {len(t) for t in texts}
     if len(lengths) != 1 or not all(_DIGITS.match(t) for t in texts):
-        return False
+        return None
     length = lengths.pop()
     if length not in REGION_CODE_LENGTHS or (length == 2 and not all_text):
-        return False
-    return all(t[:2] in SIDO_CODE_PREFIXES for t in texts)
+        return None
+    table = admin_codes.load_table()
+    areas = [table.lookup(t) for t in texts]
+    if any(a is None for a in areas):
+        return None
+    found = [a for a in areas if a is not None]
+    examples = [f"{t} {a.full_name}" for t, a in zip(texts[:2], found[:2], strict=True)]
+    return RegionCodeMatch(examples, sum(1 for a in found if a.abolished), len(found), length)
+
+
+def looks_like_region_code(column: str, samples: list[Cell]) -> bool:
+    return match_region_codes(column, samples) is not None
 
 
 # Qwen이 답변 중간에 중국어 등으로 넘어가는 경우가 있어, 한자·가나가 나오면 그 앞까지만 쓴다.
@@ -398,8 +418,18 @@ class MappingEngine:
             self._similarity(name, sims[i] if sims is not None else None, result)
 
         for result in results:
-            if result.status == "unresolved" and looks_like_region_code(result.column, result.samples):
-                reason = "샘플이 시도 코드로 시작하는 같은 길이의 숫자 (행정구역코드 형식)"
+            if result.status != "unresolved":
+                continue
+            match = match_region_codes(result.column, result.samples)
+            if match is None:
+                continue
+            table_date = admin_codes.load_table().effective_date
+            reason = f"샘플이 모두 행정동 코드표({table_date} 기준)에 있는 코드: " + ", ".join(match.examples)
+            if match.abolished:
+                reason += f" (말소 코드 {match.abolished}개 포함 — 과거 기준 자료)"
+            if match.strong:
+                self._apply(result, "region_code", "auto", "pattern", 1.0, reason)
+            else:
                 self._apply(result, "region_code", "review", "pattern", 0.9, reason)
 
         llm_status: EngineStatus = "skipped"
