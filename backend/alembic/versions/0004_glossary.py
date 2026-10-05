@@ -23,15 +23,14 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("alias", sa.String(length=255), nullable=False),
         sa.Column("normalized", sa.String(length=255), nullable=False),
-        sa.Column("kind", sa.String(length=16), nullable=False),
-        sa.Column("target_code", sa.String(length=16), nullable=False),
+        sa.Column("target_code", sa.String(length=7), nullable=False),
         sa.Column("valid_from", sa.Date(), nullable=True),
         sa.Column("valid_to", sa.Date(), nullable=True),
         sa.Column("note", sa.String(length=500), nullable=True),
         sa.Column("source", sa.String(length=16), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("normalized", "kind", "target_code", "valid_from"),
+        sa.UniqueConstraint("normalized", "target_code", "valid_from"),
     )
     op.create_index("ix_glossary_aliases_normalized", "glossary_aliases", ["normalized"])
 

@@ -285,7 +285,7 @@ def _pick_entity_field(files: list[FileInput], requested: str | None) -> str | N
 
 
 class EntityResolver:
-    """기관·지역 값 → 비교 키. 용어사전이 있으면 항목 코드('org:1741000', 'region:11500'),
+    """기관·지역 값 → 비교 키. 용어사전이 있으면 7자리 항목 코드('entity:1741000'),
     없거나 해석되지 않으면 정규화한 문자열('text:행안부')을 쓴다."""
 
     def __init__(self, glossary: Glossary | None, period: str | None) -> None:
@@ -304,7 +304,9 @@ class EntityResolver:
 
     def key(self, name: str, field_key: str) -> str:
         if field_key == "region_code" and name.isdigit():
-            return f"region:{name}"
+            # 지역코드 열(시도 2자리, 시도+시군구 5자리)은 용어사전 항목의 시도·시군구 코드로 연결한다
+            entry = self.glossary.by_region_code(name, self.at) if self.glossary else None
+            return f"entity:{entry.code}" if entry else f"region:{name}"
         resolution = self.resolve(name, field_key)
         if resolution is not None and resolution.key:
             return resolution.key
@@ -397,9 +399,7 @@ def collect_entity_notes(files: list[FileInput], resolver: EntityResolver) -> li
                             text = f"{res.ref.name}({res.ref.code}): {res.note} — 개편 후 항목을 연결하세요"
                         else:
                             refs = res.candidates or ([res.ref] if res.ref else [])
-                        candidates = [
-                            {"kind": c.kind, "code": c.code, "name": c.name, "type": c.type_label} for c in refs
-                        ]
+                        candidates = [{"code": c.code, "name": c.name, "type": c.type_label} for c in refs]
                         note = EntityNote(name, field_key, status, text, candidates, [], 0)
                         found[(field_key, name)] = note
                     note.count += 1

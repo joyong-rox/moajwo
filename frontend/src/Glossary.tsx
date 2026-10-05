@@ -15,7 +15,6 @@ import {
   type ImportReport,
 } from './api'
 
-const KIND_LABEL = { org: '기관', region: '지역' } as const
 const SOURCE_LABEL = { example: '예시', upload: '업로드', user: '직접 등록' } as const
 
 function errorText(err: unknown) {
@@ -34,7 +33,7 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
   const [entries, setEntries] = useState<GlossaryEntry[]>([])
   const [aliases, setAliases] = useState<GlossaryAlias[]>([])
   const [query, setQuery] = useState('')
-  const [kind, setKind] = useState<'all' | 'org' | 'region'>('all')
+  const [scope, setScope] = useState<'all' | 'org' | 'region'>('all')
   const [report, setReport] = useState<ImportReport | null>(null)
   const [target, setTarget] = useState<GlossaryEntry | null>(null)
   const [alias, setAlias] = useState('')
@@ -47,7 +46,7 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([glossaryInfo(), listAliases(), listEntries(query, kind)])
+    Promise.all([glossaryInfo(), listAliases(), listEntries(query, scope)])
       .then(([i, a, e]) => {
         if (cancelled) return
         setInfo(i)
@@ -98,9 +97,9 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
       <h2>용어사전 (기관·지역 이름)</h2>
       {info && (
         <p className="upload-drop-hint">
-          등록 항목 {info.entries}개 (기관 {info.org_entries} · 지역 {info.region_entries}
-          {info.example_entries > 0 && ` · 예시 ${info.example_entries}`}) · 별칭 {info.aliases}개 · 지역 코드는
-          행정동코드(시도 2자리·시군구 5자리), 확인 기준 {info.region_code_table_date}
+          등록 항목 {info.entries}개 (자치단체 {info.region_entries}
+          {info.example_entries > 0 && ` · 예시 ${info.example_entries}`}) · 별칭 {info.aliases}개 · 항목은 7자리
+          코드로 식별, 시도 2자리·시군구 3자리 코드 확인 기준 {info.region_code_table_date}
         </p>
       )}
 
@@ -129,8 +128,8 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
         </a>
       </div>
       <p className="upload-drop-hint">
-        열: 구분(기관/지역) · 코드 · 정식명칭 · 유형 · 상위코드 · 시작일 · 종료일 · 이전코드 · 별칭(; 구분) · 메모. 같은
-        코드는 갱신되며, 오류가 한 행이라도 있으면 아무것도 반영하지 않습니다.
+        열: 코드(7자리) · 정식명칭 · 유형 · 시도코드(2자리) · 시군구코드(3자리) · 시작일 · 종료일 · 이전코드 · 별칭(;
+        구분) · 메모. 같은 코드는 갱신되며, 오류가 한 행이라도 있으면 아무것도 반영하지 않습니다.
       </p>
 
       {report && (
@@ -160,10 +159,10 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
       )}
 
       <div className="glossary-search">
-        <select aria-label="항목 종류" value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
-          <option value="all">기관+지역</option>
-          <option value="org">기관</option>
-          <option value="region">지역</option>
+        <select aria-label="항목 범위" value={scope} onChange={(e) => setScope(e.target.value as typeof scope)}>
+          <option value="all">전체</option>
+          <option value="org">기관 (시도코드 없음)</option>
+          <option value="region">자치단체 (시도코드 있음)</option>
         </select>
         <input
           type="search"
@@ -183,6 +182,7 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
             <tr>
               <th scope="col">이름</th>
               <th scope="col">코드</th>
+              <th scope="col">시도·시군구</th>
               <th scope="col">유효기간</th>
               <th scope="col">별칭</th>
               <th scope="col">관리</th>
@@ -191,7 +191,7 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
           <tbody>
             {entries.length === 0 && (
               <tr>
-                <td colSpan={5} className="upload-drop-hint">
+                <td colSpan={6} className="upload-drop-hint">
                   항목이 없습니다. 양식을 내려받아 업로드하세요.
                 </td>
               </tr>
@@ -199,13 +199,14 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
             {entries.map((e) => (
               <tr key={e.id} className={target?.id === e.id ? 'is-selected' : undefined}>
                 <th scope="row">
-                  <span className="upload-tag">{KIND_LABEL[e.kind]}</span> {e.name}
+                  {e.name}
                   <span className="glossary-meta">
                     {e.type ?? ''} · {SOURCE_LABEL[e.source]}
                     {!e.active && ' · 종료'}
                   </span>
                 </th>
                 <td>{e.code}</td>
+                <td>{e.sido_code ? `${e.sido_code}${e.sigungu_code ? ` · ${e.sigungu_code}` : ''}` : ''}</td>
                 <td>{period(e)}</td>
                 <td className="glossary-alias-cell">{e.aliases.join(', ')}</td>
                 <td>
@@ -263,7 +264,6 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
             if (!target) return ''
             const created = await createAlias({
               alias: alias.trim(),
-              kind: target.kind,
               target_code: target.code,
               valid_from: validFrom || null,
               valid_to: validTo || null,
@@ -307,7 +307,7 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
                   <tr key={a.id}>
                     <th scope="row">{a.alias}</th>
                     <td>
-                      <span className="upload-tag">{KIND_LABEL[a.kind]}</span> {a.target_name ?? '?'} ({a.target_code})
+                      {a.target_name ?? '?'} ({a.target_code})
                     </td>
                     <td>
                       {a.valid_from || a.valid_to ? `${a.valid_from ?? '처음'} ~ ${a.valid_to ?? '현재'}` : '제한 없음'}

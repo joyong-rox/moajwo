@@ -174,7 +174,7 @@ export type ValidationRun = {
   created_at: string
 }
 
-export type EntityCandidate = { kind: 'org' | 'region'; code: string; name: string; type: string }
+export type EntityCandidate = { code: string; name: string; type: string }
 export type EntityNote = {
   value: string
   field: string
@@ -205,11 +205,11 @@ export async function runValidation(body: ValidationRequest): Promise<Validation
 
 export type GlossaryEntry = {
   id: number
-  kind: 'org' | 'region'
   code: string
   name: string
   type: string | null
-  parent_code: string | null
+  sido_code: string | null
+  sigungu_code: string | null
   valid_from: string | null
   valid_to: string | null
   previous_codes: string | null
@@ -221,7 +221,6 @@ export type GlossaryEntry = {
 export type GlossaryAlias = {
   id: number
   alias: string
-  kind: 'org' | 'region'
   target_code: string
   target_name: string | null
   valid_from: string | null
@@ -231,7 +230,6 @@ export type GlossaryAlias = {
 }
 export type GlossaryInfo = {
   entries: number
-  org_entries: number
   region_entries: number
   example_entries: number
   aliases: number
@@ -248,7 +246,6 @@ export type ImportReport = {
 }
 export type AliasInput = {
   alias: string
-  kind: 'org' | 'region'
   target_code: string
   valid_from?: string | null
   valid_to?: string | null
@@ -262,8 +259,8 @@ export async function glossaryInfo(): Promise<GlossaryInfo> {
   return json(await fetch(`${API_BASE}/glossary/info`))
 }
 
-export async function listEntries(q: string, kind: 'all' | 'org' | 'region' = 'all'): Promise<GlossaryEntry[]> {
-  const params = new URLSearchParams({ kind, limit: '100' })
+export async function listEntries(q: string, scope: 'all' | 'org' | 'region' = 'all'): Promise<GlossaryEntry[]> {
+  const params = new URLSearchParams({ scope, limit: '100' })
   if (q.trim()) params.set('q', q.trim())
   return json(await fetch(`${API_BASE}/glossary/entries?${params}`))
 }

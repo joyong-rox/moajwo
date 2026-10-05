@@ -64,23 +64,22 @@ class ValidationRun(Base):
 
 
 class GlossaryEntry(Base):
-    """용어사전 항목 (기관 또는 지역). 사용자가 업로드·등록한다. 처음에는 예시 몇 개만 들어 있다.
+    """용어사전 항목 (기관·자치단체). 사용자가 업로드·등록한다. 처음에는 예시 몇 개만 들어 있다.
 
-    kind: 'org'(기관, 코드는 행정기관코드 등 사용자 지정)
-          'region'(지역, 코드는 행정동코드 시도 2자리 / 시군구 5자리)
+    code: 7자리 기관코드 (현행 기관끼리 겹치지 않으므로 이것 하나로 식별)
+    sido_code / sigungu_code: 자치단체의 시도 2자리 / 시군구 3자리 코드 (선택, 지역 약칭·지역코드 열 연결에 사용)
     valid_from/valid_to: 존속 기간 (valid_to는 그날까지 포함). previous_codes: 개편 전 항목 코드(쉼표 구분)
     """
 
     __tablename__ = "glossary_entries"
-    __table_args__ = (UniqueConstraint("kind", "code"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    kind: Mapped[str] = mapped_column(String(16))
-    code: Mapped[str] = mapped_column(String(32))
+    code: Mapped[str] = mapped_column(String(7), unique=True)
     name: Mapped[str] = mapped_column(String(255))
     normalized: Mapped[str] = mapped_column(String(255), index=True)
     type_label: Mapped[str | None] = mapped_column(String(64))
-    parent_code: Mapped[str | None] = mapped_column(String(32))
+    sido_code: Mapped[str | None] = mapped_column(String(2))
+    sigungu_code: Mapped[str | None] = mapped_column(String(3))
     valid_from: Mapped[date | None] = mapped_column(Date)
     valid_to: Mapped[date | None] = mapped_column(Date)
     previous_codes: Mapped[str | None] = mapped_column(String(500))
@@ -90,20 +89,18 @@ class GlossaryEntry(Base):
 
 
 class GlossaryAlias(Base):
-    """용어사전 별칭. 용어사전 항목(kind + target_code)에 연결한다.
+    """용어사전 별칭. 7자리 코드(target_code)의 항목에 연결한다.
 
-    kind: 'org' 또는 'region' (대상 항목의 종류)
     valid_from/valid_to: 이 별칭이 그 대상을 뜻하는 기간 (비우면 제한 없음, valid_to는 그날까지 포함)
     """
 
     __tablename__ = "glossary_aliases"
-    __table_args__ = (UniqueConstraint("normalized", "kind", "target_code", "valid_from"),)
+    __table_args__ = (UniqueConstraint("normalized", "target_code", "valid_from"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     alias: Mapped[str] = mapped_column(String(255))
     normalized: Mapped[str] = mapped_column(String(255), index=True)
-    kind: Mapped[str] = mapped_column(String(16))
-    target_code: Mapped[str] = mapped_column(String(16))
+    target_code: Mapped[str] = mapped_column(String(7))
     valid_from: Mapped[date | None] = mapped_column(Date)
     valid_to: Mapped[date | None] = mapped_column(Date)
     note: Mapped[str | None] = mapped_column(String(500))

@@ -302,12 +302,11 @@ function EntityNotes({ entities, onRegistered }: { entities: EntityNote[]; onReg
   const [error, setError] = useState<string | null>(null)
 
   async function register(e: EntityNote) {
-    const picked = choice[e.value] ?? (e.candidates[0] ? `${e.candidates[0].kind}:${e.candidates[0].code}` : '')
-    const [kind, code] = picked.split(':')
-    if (!kind || !code) return
+    const code = choice[e.value] ?? e.candidates[0]?.code
+    if (!code) return
     setError(null)
     try {
-      const created = await createAlias({ alias: e.value, kind: kind as 'org' | 'region', target_code: code })
+      const created = await createAlias({ alias: e.value, target_code: code })
       setDone((prev) => ({ ...prev, [e.value]: created.target_name ?? code }))
       onRegistered()
     } catch (err) {
@@ -346,11 +345,11 @@ function EntityNotes({ entities, onRegistered }: { entities: EntityNote[]; onReg
                     <div className="mapping-pick">
                       <select
                         aria-label={`${e.value} 연결 대상`}
-                        value={choice[e.value] ?? `${e.candidates[0].kind}:${e.candidates[0].code}`}
+                        value={choice[e.value] ?? e.candidates[0].code}
                         onChange={(ev) => setChoice((prev) => ({ ...prev, [e.value]: ev.target.value }))}
                       >
                         {e.candidates.map((c) => (
-                          <option key={`${c.kind}:${c.code}`} value={`${c.kind}:${c.code}`}>
+                          <option key={c.code} value={c.code}>
                             {c.name} ({c.code})
                           </option>
                         ))}
