@@ -20,7 +20,7 @@ from app.files import load_parsed
 from app.glossary import normalize_name
 from app.glossary_api import get_glossary
 from app.mapping import ColumnMapping, MappingEngine, get_engine
-from app.models import GlossaryAlias, ReviewItem, ReviewSession, SourceFile
+from app.models import GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile
 from app.parsing import FileResult, SheetResult
 from app.pii import PII_LABEL
 from app.validation import (
@@ -465,7 +465,9 @@ def summarize(session: ReviewSession, items: list[ReviewItem]) -> Summary:
     if blocks:
         score = min(score, BLOCKED_SCORE_CAP)
     score = max(0, score)
-    if session.status == "ready":
+    if session.status == "superseded":
+        text = "다시 검사로 대체된 이전 검토입니다. 최신 검토에서 계속하세요."
+    elif session.status == "ready":
         text = f"검토 완료 — 통합 준비가 끝났습니다 (자동 보정 {auto}건 적용 예정)."
     elif blocks:
         text = f"통합 불가 — 차단 {blocks}건을 원본에서 고친 뒤 다시 검사하세요."
@@ -556,12 +558,14 @@ def complete(db: Session, session: ReviewSession) -> dict[str, int]:
     if session.remember_format:
         engine = get_engine()
         for item in items:
-            if item.category != "pending" or item.decision != "approved" or not item.choice:
+            if item.decision != "approved":
                 continue
             if item.kind == "mapping" and item.file_id is not None and item.column is not None:
-                if learn_column(db, engine, item.file_id, item.column, item.choice) is None:
+                # 이번에 승인한 매핑 + 이전 검사에서 사용자가 확정해 이어받은 매핑(자동 적용으로 표시됨)
+                key = item.choice or json.loads(item.payload).get("field_key")
+                if key and learn_column(db, engine, item.file_id, item.column, key) is None:
                     learned["columns"] += 1
-            elif item.kind == "entity" and item.before:
+            elif item.kind == "entity" and item.category == "pending" and item.choice and item.before:
                 normalized = normalize_name(item.before)
                 exists = db.scalar(
                     select(GlossaryAlias.id).where(
@@ -580,3 +584,149 @@ def complete(db: Session, session: ReviewSession) -> dict[str, int]:
     session.completed_at = datetime.now(UTC)
     db.commit()
     return learned
+
+
+# ---------------------------------------------------------------- 다시 검사
+
+
+ItemKey = tuple[str, int | None, str | None, str | None, str | None]
+
+
+def item_key(item: ReviewItem, file_map: dict[int, int] | None = None) -> ItemKey:
+    """같은 항목을 알아보는 키 (종류, 파일, 시트, 열, 이전 값). file_map: 교체 전 파일 → 교체 후 파일."""
+    fid = item.file_id
+    if file_map and fid in file_map:
+        fid = file_map[fid]
+    return (item.kind, fid, item.sheet, item.column, item.before)
+
+
+def recheck(db: Session, old: ReviewSession, replace: dict[int, int] | None = None) -> ReviewSession:
+    """이전 검토를 이어받아 다시 검사한다.
+
+    - 같은 조건으로 검증·매핑·보정을 다시 계산한다 (replace로 원본을 고친 파일로 바꿀 수 있음).
+    - 이전 세션의 승인/거부를 같은 항목에 다시 적용한다. 열 매핑은 이미 확정 테이블에 있어 자동 적용으로 넘어온다.
+    - 제외 파일과 '이 형식 기억하기' 선택을 이어받는다. 이전 세션은 superseded(대체됨)가 된다.
+    """
+    if old.status == "superseded":
+        raise ReviewError("이미 다시 검사된 이전 검토입니다. 최신 검토에서 다시 검사하세요.")
+    replace = {int(k): int(v) for k, v in (replace or {}).items() if int(k) != int(v)}
+    params = json.loads(old.params)
+    file_ids: list[int] = json.loads(old.file_ids)
+    unknown = [k for k in replace if k not in file_ids]
+    if unknown:
+        raise ReviewError(f"이 검토에 없는 파일은 바꿀 수 없습니다: {unknown}")
+    new_ids = [replace.get(fid, fid) for fid in file_ids]
+    if len(set(new_ids)) != len(new_ids) or set(new_ids) & set(params.get("baseline_file_ids", [])):
+        raise ReviewError("같은 파일을 두 번 넣거나 전월 자료와 겹치게 바꿀 수 없습니다.")
+    for new_id in replace.values():
+        if db.get(SourceFile, new_id) is None:
+            raise ReviewError(f"파일을 찾을 수 없습니다: {new_id}")
+        _copy_mapping_decisions(db, [k for k, v in replace.items() if v == new_id][0], new_id)
+
+    params["file_ids"] = new_ids
+    params["replaced_files"] = {str(k): v for k, v in replace.items()}
+    session = create_session(db, params)
+    session.parent_id = old.id
+    session.remember_format = old.remember_format
+    # 교체한 파일은 새 내용이므로 제외·개인정보 확인을 새로 받는다
+    session.excluded_file_ids = json.dumps(sorted(f for f in json.loads(old.excluded_file_ids) if f not in replace))
+    old.status = "superseded"
+    db.commit()
+
+    previous = {
+        item_key(i, replace): i
+        for i in session_items(db, old)
+        if i.category == "pending" and i.decision is not None and not (i.kind == "pii" and i.file_id in replace)
+    }
+    for item in session_items(db, session):
+        before = previous.get(item_key(item))
+        if item.category != "pending" or item.decision is not None or before is None:
+            continue
+        try:
+            decide(db, session, item, before.decision or "rejected", before.choice)
+        except ReviewError:
+            db.rollback()  # 후보가 바뀌어 같은 선택을 적용할 수 없으면 대기로 둔다
+    return session
+
+
+def _copy_mapping_decisions(db: Session, old_file: int, new_file: int) -> None:
+    """원본을 고친 파일은 형식이 같으므로 이전 파일의 열 매핑 확정을 이어받는다 (새 파일에 없는 것만)."""
+    existing = {
+        (d.sheet_name, d.column_name)
+        for d in db.scalars(select(MappingDecision).where(MappingDecision.source_file_id == new_file))
+    }
+    for d in db.scalars(select(MappingDecision).where(MappingDecision.source_file_id == old_file)):
+        if (d.sheet_name, d.column_name) not in existing:
+            db.add(
+                MappingDecision(
+                    source_file_id=new_file, sheet_name=d.sheet_name, column_name=d.column_name, field_key=d.field_key
+                )
+            )
+    db.flush()
+
+
+def history(db: Session, session: ReviewSession, limit: int = 50) -> list[dict[str, Any]]:
+    """처음 검사부터 이 세션까지 (오래된 것 → 최신)."""
+    chain: list[ReviewSession] = []
+    current: ReviewSession | None = session
+    while current is not None and len(chain) < limit:
+        chain.append(current)
+        current = db.get(ReviewSession, current.parent_id) if current.parent_id else None
+    out = []
+    for s_ in reversed(chain):
+        summary = summarize(s_, session_items(db, s_))
+        out.append(
+            {
+                "id": s_.id,
+                "status": s_.status,
+                "score": summary.score,
+                "blocks": summary.blocks,
+                "pending_open": summary.pending_open,
+                "created_at": s_.created_at,
+            }
+        )
+    return out
+
+
+def _open_items(session: ReviewSession, items: list[ReviewItem]) -> list[ReviewItem]:
+    excluded = set(json.loads(session.excluded_file_ids))
+    return [
+        i
+        for i in items
+        if (i.category == "block" or (i.category == "pending" and i.decision is None))
+        and (i.file_id is None or i.file_id not in excluded or i.kind == "pii")
+    ]
+
+
+def changes(db: Session, session: ReviewSession) -> dict[str, Any] | None:
+    """이전 검사 대비 변화: 점수·차단·남은 확인 필요, 해결된 항목, 새로 생긴 항목."""
+    if session.parent_id is None:
+        return None
+    parent = db.get(ReviewSession, session.parent_id)
+    if parent is None:
+        return None
+    replace = {int(k): v for k, v in json.loads(session.params).get("replaced_files", {}).items()}
+    old_items, new_items = session_items(db, parent), session_items(db, session)
+    old_sum, new_sum = summarize(parent, old_items), summarize(session, new_items)
+    old_open = {item_key(i, replace): i for i in _open_items(parent, old_items)}
+    new_open = {item_key(i): i for i in _open_items(session, new_items)}
+
+    def brief(i: ReviewItem) -> dict[str, Any]:
+        return {
+            "category": i.category,
+            "kind": i.kind,
+            "before": i.before,
+            "after": i.after,
+            "file_name": i.file_name,
+            "column": i.column,
+        }
+
+    return {
+        "parent_id": parent.id,
+        "score": [old_sum.score, new_sum.score],
+        "blocks": [old_sum.blocks, new_sum.blocks],
+        "pending_open": [old_sum.pending_open, new_sum.pending_open],
+        "replaced_files": {str(k): v for k, v in replace.items()},
+        "resolved": [brief(i) for k, i in old_open.items() if k not in new_open],
+        "added": [brief(i) for k, i in new_open.items() if k not in old_open],
+    }

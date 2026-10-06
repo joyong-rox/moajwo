@@ -193,3 +193,82 @@ def test_remember_format_learns_on_complete(client: TestClient) -> None:
     # 끝난 세션은 바꿀 수 없다
     assert client.patch(f"/reviews/{rid}", json={"remember_format": False}).status_code == 409
     assert client.post(f"/reviews/{rid}/complete").status_code == 409
+
+
+# 다시 검사 테스트용: 앞선 테스트가 '기억하기'로 학습한 이름과 겹치지 않게 한다
+ROWS2 = [[("집행 실적 금액" if c == "집행 실적액" else c) for c in ROWS[0]]] + [
+    [("기상청 본부" if c == "기상청본청" else c) for c in row] for row in ROWS[1:]
+]
+
+
+def _decide(client: TestClient, rid: int, item: dict, decision: str, choice: str | None = None) -> dict:
+    res = client.post(f"/reviews/{rid}/items/{item['id']}/decision", json={"decision": decision, "choice": choice})
+    assert res.status_code == 200, res.text
+    return res.json()
+
+
+def test_recheck_carries_decisions(client: TestClient) -> None:
+    fid = _upload(client, "d.xlsx", _xlsx(ROWS2))
+    first = _create(client, [fid])
+    rid = first["id"]
+    entity = _items(first, kind="entity", before="기상청 본부")[0]
+    code = entity["payload"]["candidates"][0]["code"]
+    _decide(client, rid, entity, "approved", code)
+    _decide(client, rid, _items(first, kind="pii")[0], "rejected")
+    _decide(client, rid, _items(first, kind="mapping", before="집행 실적 금액")[0], "approved", "expenditure")
+    client.patch(f"/reviews/{rid}", json={"remember_format": True})
+
+    res = client.post(f"/reviews/{rid}/recheck", json={})
+    assert res.status_code == 201, res.text
+    second = res.json()
+    assert second["parent_id"] == rid and second["status"] == "in_review"
+    assert second["remember_format"] is True
+    assert second["files"][0]["excluded"] is True  # 개인정보 거부로 제외한 상태를 이어받음
+    entity2 = _items(second, kind="entity", before="기상청 본부")[0]
+    assert (entity2["decision"], entity2["choice"]) == ("approved", code)
+    assert _items(second, kind="pii")[0]["decision"] == "rejected"
+    mapping2 = _items(second, kind="mapping", before="집행 실적 금액")[0]
+    assert mapping2["category"] == "auto" and mapping2["after"] == "집행액"  # 확정이 이미 반영됨
+    assert [h["id"] for h in second["history"]] == [rid, second["id"]]
+    assert second["changes"]["parent_id"] == rid
+
+    old = client.get(f"/reviews/{rid}").json()
+    assert old["status"] == "superseded" and old["child_id"] == second["id"] and not old["can_complete"]
+    assert old["summary"].startswith("다시 검사로 대체된")
+    item = _items(old, category="pending")[0]
+    assert client.post(f"/reviews/{rid}/items/{item['id']}/decision", json={"decision": "approved"}).status_code == 409
+    assert client.post(f"/reviews/{rid}/recheck", json={}).status_code == 409  # 대체된 세션은 다시 검사 불가
+
+
+def test_recheck_with_fixed_file(client: TestClient) -> None:
+    bad_id = _upload(client, "e_bad.xlsx", _xlsx(ROWS2))
+    first = _create(client, [bad_id])
+    assert first["counts"]["block"] == 1
+    _decide(client, first["id"], _items(first, kind="pii")[0], "approved")
+    _decide(client, first["id"], _items(first, kind="mapping", before="집행 실적 금액")[0], "approved", "expenditure")
+
+    fixed_rows = [r[:] for r in ROWS2]
+    fixed_rows[-1][4] = 600  # 합계를 고친 파일
+    fixed_id = _upload(client, "e_fixed.xlsx", _xlsx(fixed_rows))
+    assert client.post(f"/reviews/{first['id']}/recheck", json={"replace": {"999999": fixed_id}}).status_code == 409
+
+    second = client.post(f"/reviews/{first['id']}/recheck", json={"replace": {str(bad_id): fixed_id}}).json()
+    assert [f["id"] for f in second["files"]] == [fixed_id]
+    assert second["counts"]["block"] == 0
+    changes = second["changes"]
+    assert changes["blocks"] == [1, 0] and changes["score"][1] > changes["score"][0]
+    assert [r["kind"] for r in changes["resolved"] if r["category"] == "block"] == ["sum_mismatch"]
+    assert changes["replaced_files"] == {str(bad_id): fixed_id}
+    # 고친 파일은 형식이 같아 열 매핑 확정을 이어받고, 개인정보 확인은 새로 받는다
+    mapping = _items(second, kind="mapping", before="집행 실적 금액")[0]
+    assert mapping["category"] == "auto" and mapping["after"] == "집행액"
+    assert _items(second, kind="pii")[0]["decision"] is None
+    # '기억하기'로 완료하면 이전 검사에서 확정해 이어받은 매핑도 학습한다
+    client.patch(f"/reviews/{second['id']}", json={"remember_format": True})
+    _decide(client, second["id"], _items(second, kind="pii")[0], "approved")
+    for left in _items(client.get(f"/reviews/{second['id']}").json(), category="pending", decision=None):
+        _decide(client, second["id"], left, "rejected")
+    done = client.post(f"/reviews/{second['id']}/complete").json()
+    assert done["status"] == "ready" and done["learned"]["columns"] >= 1
+    with _db() as con:
+        assert con.execute("select count(*) from learned_aliases where alias = '집행 실적 금액'").fetchone()[0] == 1

@@ -111,12 +111,14 @@ class GlossaryAlias(Base):
 class ReviewSession(Base):
     """통합 전 검토 세션. 검증·매핑·자동 보정 결과를 항목으로 펼쳐 두고 사용자의 승인/거부를 기록한다.
 
-    status: in_review / ready(검토 완료, 통합 가능)
+    status: in_review / ready(검토 완료, 통합 가능) / superseded(다시 검사로 대체됨)
+    parent_id: 다시 검사로 만든 세션이면 이전 세션
     """
 
     __tablename__ = "review_sessions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("review_sessions.id", ondelete="SET NULL"))
     status: Mapped[str] = mapped_column(String(16), default="in_review")
     params: Mapped[str] = mapped_column(Text)  # JSON (검증 조건)
     file_ids: Mapped[str] = mapped_column(Text)  # JSON

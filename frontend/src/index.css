@@ -1087,3 +1087,70 @@ body {
   gap: 8px;
   margin-top: 8px;
 }
+
+/* ---- 다시 검사 이력 (단계 5 보완) ---- */
+.review-history {
+  margin: 0 0 12px;
+}
+
+.review-history-chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  font-size: 0.875rem;
+}
+
+.review-chip.is-current {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.review-changes summary {
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.review-change-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 0.85rem;
+}
+
+.review-change-list.is-resolved {
+  color: var(--pass-text);
+}
+
+.review-change-list.is-added {
+  color: var(--block-text);
+}
+
+.review-replace {
+  margin-top: 12px;
+}
+
+.review-replace summary {
+  cursor: pointer;
+  font-size: 0.875rem;
+}
+
+.review-replace-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-top: 6px;
+  font-size: 0.875rem;
+}
+
+.review-replace-row select {
+  min-height: 32px;
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  font: inherit;
+}

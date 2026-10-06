@@ -321,7 +321,7 @@ export type ReviewItem = {
 }
 export type Review = {
   id: number
-  status: 'in_review' | 'ready'
+  status: 'in_review' | 'ready' | 'superseded'
   score: number
   summary: string
   counts: { block: number; pending: number; pending_open: number; auto: number; warning: number }
@@ -331,6 +331,27 @@ export type Review = {
   items: ReviewItem[]
   validation_run_id: number | null
   learned: { columns: number; names: number } | null
+  parent_id: number | null
+  child_id: number | null
+  history: { id: number; status: string; score: number; blocks: number; pending_open: number }[]
+  changes: ReviewChanges | null
+}
+export type ReviewChangeItem = {
+  category: ReviewCategory
+  kind: string
+  before: string | null
+  after: string | null
+  file_name: string | null
+  column: string | null
+}
+export type ReviewChanges = {
+  parent_id: number
+  score: [number, number]
+  blocks: [number, number]
+  pending_open: [number, number]
+  replaced_files: Record<string, number>
+  resolved: ReviewChangeItem[]
+  added: ReviewChangeItem[]
 }
 
 export async function createReview(body: ValidationRequest): Promise<Review> {
@@ -370,4 +391,14 @@ export async function setRememberFormat(reviewId: number, remember: boolean): Pr
 
 export async function completeReview(reviewId: number): Promise<Review> {
   return json(await fetch(`${API_BASE}/reviews/${reviewId}/complete`, { method: 'POST' }))
+}
+
+export async function recheckReview(reviewId: number, replace: Record<number, number>): Promise<Review> {
+  return json(
+    await fetch(`${API_BASE}/reviews/${reviewId}/recheck`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ replace }),
+    }),
+  )
 }

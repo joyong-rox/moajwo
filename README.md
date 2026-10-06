@@ -140,7 +140,12 @@ npm run lint && npm run build
   - 개인정보: 승인 → 포함 확인 기록, 거부 → 이 파일을 이번 통합에서 제외
 - 하단 「다음부터 이 형식 기억하기」: 선택하고 「검토 완료」하면 승인한 열 이름(학습 별칭)과 기관·지역 이름(용어사전 별칭)을 학습합니다. 선택하지 않으면 이번 검토에만 적용합니다.
 - 「검토 완료」는 차단과 남은 확인 필요 항목이 없을 때만 가능하며 세션을 `ready`(통합 준비)로 바꿉니다.
-- API: `POST /reviews`, `GET /reviews/{id}`, `POST /reviews/{id}/items/{item_id}/decision`, `PATCH /reviews/{id}`(remember_format), `POST /reviews/{id}/complete`
+- 다시 검사 세션 (`POST /reviews/{id}/recheck`): 같은 조건으로 다시 계산하되 이전 검토를 이어받습니다.
+  - 같은 항목(종류·파일·시트·열·이전 값)의 승인/거부, 제외 파일, 「기억하기」 선택을 이어받고, 열 매핑 확정은 자동 적용으로 넘어옵니다.
+  - `replace: {이전 파일 id: 고친 파일 id}`로 원본을 고쳐 다시 올린 파일로 바꿀 수 있습니다. 같은 형식이므로 열 매핑 확정을 복사하고, 개인정보 확인은 새 파일 기준으로 다시 받습니다.
+  - 이전 세션은 `superseded`(대체됨)가 되어 더 바꿀 수 없습니다. 화면에 검사 이력(1차 → 2차 …)과 이전 검사 대비 변화(점수·차단·남은 확인 필요, 해결된 항목, 새로 생긴 항목)를 보여줍니다.
+  - 「기억하기」로 완료하면 이번에 승인한 항목과 함께 이전 검사에서 확정해 이어받은 열 매핑도 학습합니다.
+- API: `POST /reviews`, `GET /reviews/{id}`, `POST /reviews/{id}/items/{item_id}/decision`, `PATCH /reviews/{id}`(remember_format), `POST /reviews/{id}/complete`, `POST /reviews/{id}/recheck`
 
 ## 용어사전 (기관·자치단체 이름, `/glossary/*`)
 

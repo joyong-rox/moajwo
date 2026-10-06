@@ -6,11 +6,22 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_session
 from app.models import ReviewItem, ReviewSession, SourceFile
-from app.review import ReviewError, complete, create_session, decide, session_items, summarize
+from app.review import (
+    ReviewError,
+    changes,
+    complete,
+    create_session,
+    decide,
+    history,
+    recheck,
+    session_items,
+    summarize,
+)
 from app.validation_api import ValidationIn
 
 router = APIRouter(prefix="/reviews", tags=["review"])
@@ -56,6 +67,10 @@ class ReviewOut(BaseModel):
     created_at: datetime
     completed_at: datetime | None
     learned: dict[str, int] | None = None
+    parent_id: int | None = None
+    child_id: int | None = None  # 이 세션을 이어받아 다시 검사한 세션 (대체된 경우)
+    history: list[dict[str, Any]] = []  # 처음 검사부터 이 세션까지
+    changes: dict[str, Any] | None = None  # 이전 검사 대비 변화
 
 
 def review_out(db: Session, session: ReviewSession, learned: dict[str, int] | None = None) -> ReviewOut:
@@ -107,6 +122,10 @@ def review_out(db: Session, session: ReviewSession, learned: dict[str, int] | No
         created_at=session.created_at,
         completed_at=session.completed_at,
         learned=learned,
+        parent_id=session.parent_id,
+        child_id=db.scalar(select(ReviewSession.id).where(ReviewSession.parent_id == session.id)),
+        history=history(db, session),
+        changes=changes(db, session),
     )
 
 
@@ -176,3 +195,20 @@ def complete_review(review_id: int, db: Annotated[Session, Depends(get_session)]
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     return review_out(db, session, learned)
+
+
+class RecheckIn(BaseModel):
+    # 원본을 고쳐 다시 올린 파일로 바꿀 때: {이전 파일 id: 새 파일 id}
+    replace: dict[int, int] = {}
+
+
+@router.post("/{review_id}/recheck", response_model=ReviewOut, status_code=status.HTTP_201_CREATED)
+def recheck_review(review_id: int, body: RecheckIn, db: Annotated[Session, Depends(get_session)]) -> ReviewOut:
+    """이전 검토를 이어받아 다시 검사한다 (결정·제외·기억하기 선택을 이어받고, 이전 검토는 대체됨)."""
+    old = _get(db, review_id)
+    try:
+        session = recheck(db, old, body.replace)
+    except ReviewError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    return review_out(db, session)

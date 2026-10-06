@@ -3,8 +3,12 @@ import {
   completeReview,
   createReview,
   decideReviewItem,
+  listFiles,
+  recheckReview,
   setRememberFormat,
   type Review,
+  type ReviewChangeItem,
+  type StoredFile,
   type ReviewCategory,
   type ReviewItem,
   type ValidationRequest,
@@ -47,25 +51,36 @@ function ReviewPanel({ request, onClose }: { request: ValidationRequest; onClose
   const [busyItem, setBusyItem] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
-  const [version, setVersion] = useState(0)
+  const [uploaded, setUploaded] = useState<StoredFile[]>([])
+  // 다시 검사할 때 바꿀 파일: {검토 중인 파일 id: 고친 파일 id}
+  const [replace, setReplace] = useState<Record<number, number>>({})
 
   useEffect(() => {
-    // 로딩 표시는 처음 값(true)과 '다시 검사' 처리기에서 켠다. 여기서는 결과만 반영한다.
+    // 패널이 열릴 때 한 번 검토를 만든다 (새로 열면 App이 패널을 새로 만든다)
     let cancelled = false
     createReview(request)
       .then((r) => !cancelled && setReview(r))
       .catch((err: unknown) => !cancelled && setError(`검토를 만들지 못했습니다: ${errorText(err)}`))
       .finally(() => !cancelled && setLoading(false))
+    listFiles()
+      .then((list) => !cancelled && setUploaded(list))
+      .catch(() => undefined)
     return () => {
       cancelled = true
     }
-  }, [request, version])
+  }, [request])
 
-  function recheck() {
+  async function recheck(current: Review) {
+    // 이전 검토의 승인/거부·제외·기억하기 선택을 이어받아 새 검사 세션을 만든다
     setLoading(true)
-    setError(null)
     setMessage(null)
-    setVersion((v) => v + 1)
+    const changed = Object.fromEntries(Object.entries(replace).filter(([from, to]) => Number(from) !== to))
+    const ok = await run(null, () => recheckReview(current.id, changed))
+    if (ok) setReplace({})
+    setLoading(false)
+    listFiles()
+      .then(setUploaded)
+      .catch(() => undefined)
   }
 
   async function run(itemId: number | null, fn: () => Promise<Review>): Promise<boolean> {
@@ -91,7 +106,11 @@ function ReviewPanel({ request, onClose }: { request: ValidationRequest; onClose
         </button>
       </div>
 
-      {loading && <p className="upload-drop-hint">검토 항목을 만드는 중… (LLM 판정이 필요한 열이 있으면 수십 초)</p>}
+      {loading && (
+        <p className="upload-drop-hint" role="status">
+          검토 항목을 만드는 중… (LLM 판정이 필요한 열이 있으면 수십 초)
+        </p>
+      )}
       {error && (
         <p className="upload-error" role="alert">
           {error}
@@ -101,6 +120,7 @@ function ReviewPanel({ request, onClose }: { request: ValidationRequest; onClose
       {review && !loading && (
         <>
           <ScoreHeader review={review} />
+          <RecheckHistory review={review} />
 
           {GROUPS.map((g) => (
             <ItemGroup
@@ -151,8 +171,13 @@ function ReviewPanel({ request, onClose }: { request: ValidationRequest; onClose
               않으면 이번 검토에만 적용합니다.
             </p>
             <div className="review-actions">
-              <button type="button" className="mapping-confirm" disabled={busyItem !== null} onClick={recheck}>
-                다시 검사
+              <button
+                type="button"
+                className="mapping-confirm"
+                disabled={busyItem !== null || review.status === 'superseded'}
+                onClick={() => void recheck(review)}
+              >
+                다시 검사 (결정 이어받기)
               </button>
               <button
                 type="button"
@@ -179,6 +204,32 @@ function ReviewPanel({ request, onClose }: { request: ValidationRequest; onClose
                 {message}
               </p>
             )}
+            <details className="review-replace">
+              <summary>원본을 고친 파일로 바꿔 다시 검사</summary>
+              <p className="upload-drop-hint">
+                고친 파일을 먼저 업로드한 뒤 아래에서 고르세요. 같은 형식이므로 열 매핑 확정은 이어받고, 개인정보 확인은
+                새로 받습니다.
+              </p>
+              {review.files.map((f) => (
+                <label key={f.id} className="review-replace-row">
+                  <span>{f.name}</span>
+                  <select
+                    aria-label={`${f.name} 대신 검사할 파일`}
+                    value={replace[f.id] ?? f.id}
+                    onChange={(e) => setReplace((prev) => ({ ...prev, [f.id]: Number(e.target.value) }))}
+                  >
+                    <option value={f.id}>그대로 (#{f.id})</option>
+                    {uploaded
+                      .filter((u) => u.id !== f.id && !review.files.some((rf) => rf.id === u.id))
+                      .map((u) => (
+                        <option key={u.id} value={u.id}>
+                          #{u.id} {u.original_name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              ))}
+            </details>
           </div>
         </>
       )}
@@ -213,6 +264,50 @@ function ScoreHeader({ review }: { review: Review }) {
               .join(', ')}`}
         </p>
       </div>
+    </div>
+  )
+}
+
+function changeLabel(c: ReviewChangeItem) {
+  return `${KIND_LABEL[c.kind] ?? c.kind}: ${c.before ?? '-'} → ${c.after ?? '-'}`
+}
+
+/** 검사 이력(#1 → #2 …)과 이전 검사 대비 변화 */
+function RecheckHistory({ review }: { review: Review }) {
+  if (review.history.length < 2 || !review.changes) return null
+  const c = review.changes
+  const delta = (pair: [number, number], unit = '') => `${pair[0]}${unit} → ${pair[1]}${unit}`
+  return (
+    <div className="review-history">
+      <p className="review-history-chain">
+        검사 이력:{' '}
+        {review.history.map((h, i) => (
+          <span key={h.id} className={`review-chip${h.id === review.id ? ' is-current' : ''}`}>
+            {i + 1}차 #{h.id} · {h.score}점
+          </span>
+        ))}
+      </p>
+      <details className="review-changes" open>
+        <summary>
+          이전 검사 대비: 점수 {delta(c.score, '점')} · 차단 {delta(c.blocks)} · 남은 확인 필요 {delta(c.pending_open)} · 해결{' '}
+          {c.resolved.length}건 · 새로 생김 {c.added.length}건
+          {Object.keys(c.replaced_files).length > 0 && ` · 교체한 파일 ${Object.keys(c.replaced_files).length}개`}
+        </summary>
+        {c.resolved.length > 0 && (
+          <ul className="review-change-list is-resolved">
+            {c.resolved.map((r, i) => (
+              <li key={`r${i}`}>해결 — {changeLabel(r)}</li>
+            ))}
+          </ul>
+        )}
+        {c.added.length > 0 && (
+          <ul className="review-change-list is-added">
+            {c.added.map((r, i) => (
+              <li key={`a${i}`}>새로 생김 — {changeLabel(r)}</li>
+            ))}
+          </ul>
+        )}
+      </details>
     </div>
   )
 }
