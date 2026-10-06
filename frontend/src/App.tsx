@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { fetchHealth, type Health } from './api'
+import { fetchHealth, type Health, type ValidationRequest } from './api'
 import Upload from './Upload'
 import Glossary from './Glossary'
+import ReviewPanel from './ReviewPanel'
 import Validation from './Validation'
 
 type State =
@@ -16,6 +17,9 @@ function App() {
   const refreshFiles = () => setFilesVersion((v) => v + 1)
   const [glossaryVersion, setGlossaryVersion] = useState(0)
   const refreshGlossary = () => setGlossaryVersion((v) => v + 1)
+  const [reviewRequest, setReviewRequest] = useState<ValidationRequest | null>(null)
+  // 검토를 새로 열 때마다 패널을 새로 만든다 (이전 검토 상태를 섞지 않음)
+  const [reviewKey, setReviewKey] = useState(0)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -48,7 +52,21 @@ function App() {
       </section>
 
       <Upload onUploaded={refreshFiles} onPiiChanged={refreshFiles} />
-      <Validation refreshKey={filesVersion} onGlossaryChanged={refreshGlossary} />
+      <Validation refreshKey={filesVersion} onGlossaryChanged={refreshGlossary} onOpenReview={(request) => {
+          setReviewRequest(request)
+          setReviewKey((k) => k + 1)
+        }}
+      />
+      {reviewRequest && (
+        <ReviewPanel
+          key={reviewKey}
+          request={reviewRequest}
+          onClose={() => {
+            setReviewRequest(null)
+            refreshFiles()
+          }}
+        />
+      )}
       <Glossary refreshKey={glossaryVersion} onChanged={refreshGlossary} />
     </main>
   )

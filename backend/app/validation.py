@@ -313,7 +313,7 @@ class EntityResolver:
         return f"text:{_norm(name)}"
 
 
-def _row_entity_names(sheet: SheetInput, cells: list[Cell]) -> list[tuple[str, str]]:
+def row_entity_names(sheet: SheetInput, cells: list[Cell]) -> list[tuple[str, str]]:
     """행의 기관·지역 값들. 시군구는 같은 행의 시도와 합쳐 '서울특별시 강서구'처럼 만든다 (동명 시군구 구분)."""
     sido = next((str(cells[c.index]) for c in sheet.by_field("sido") if isinstance(cells[c.index], str)), None)
     names = []
@@ -344,7 +344,7 @@ def check_required(
             for row in s.sheet.body:
                 if row["kind"] not in ("data", "subtotal"):
                     continue
-                for field_key, name in _row_entity_names(s, row["cells"]):
+                for field_key, name in row_entity_names(s, row["cells"]):
                     present_keys.add(resolver.key(name, field_key))
                     present_texts.add(_norm(name))
     file_names = [_norm(f.file_name) for f in files]
@@ -383,7 +383,7 @@ def collect_entity_notes(files: list[FileInput], resolver: EntityResolver) -> li
     for f in files:
         for s in f.sheets:
             for row in _data_rows(s.sheet):
-                for field_key, name in _row_entity_names(s, row["cells"]):
+                for field_key, name in row_entity_names(s, row["cells"]):
                     if field_key == "region_code":
                         continue
                     res = resolver.resolve(name, field_key)
@@ -538,7 +538,7 @@ def check_periods(files: list[FileInput], params: ValidationParams, notes: list[
 
 
 def _entity_key(sheet: SheetInput, cells: list[Cell], resolver: EntityResolver) -> tuple[str, ...] | None:
-    keys = sorted({resolver.key(name, field_key) for field_key, name in _row_entity_names(sheet, cells)})
+    keys = sorted({resolver.key(name, field_key) for field_key, name in row_entity_names(sheet, cells)})
     return tuple(keys) or None
 
 
@@ -595,7 +595,7 @@ def check_mom(
                         if abs(change) <= params.change_threshold:
                             continue
                         change_text = f"{change:+.0%}"
-                    entity = ", ".join(dict.fromkeys(name for _, name in _row_entity_names(s, row["cells"])))
+                    entity = ", ".join(dict.fromkeys(name for _, name in row_entity_names(s, row["cells"])))
                     issues.append(
                         WarningIssue(
                             "mom_outlier",

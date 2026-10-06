@@ -106,3 +106,50 @@ class GlossaryAlias(Base):
     note: Mapped[str | None] = mapped_column(String(500))
     source: Mapped[str] = mapped_column(String(16), default="user")  # example / upload / user
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReviewSession(Base):
+    """통합 전 검토 세션. 검증·매핑·자동 보정 결과를 항목으로 펼쳐 두고 사용자의 승인/거부를 기록한다.
+
+    status: in_review / ready(검토 완료, 통합 가능)
+    """
+
+    __tablename__ = "review_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), default="in_review")
+    params: Mapped[str] = mapped_column(Text)  # JSON (검증 조건)
+    file_ids: Mapped[str] = mapped_column(Text)  # JSON
+    excluded_file_ids: Mapped[str] = mapped_column(Text, default="[]")  # JSON (개인정보 거부 등으로 제외)
+    validation_run_id: Mapped[int | None] = mapped_column(ForeignKey("validation_runs.id", ondelete="SET NULL"))
+    remember_format: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReviewItem(Base):
+    """검토 항목. category: block(차단) / pending(확인 필요) / auto(자동 적용) / warning(검증 경고, 참고)
+
+    reason_source: rule(규칙 템플릿 문장) / llm(LLM이 생성한 문장)
+    decision: pending 항목만 사용 — None(대기) / approved / rejected
+    """
+
+    __tablename__ = "review_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("review_sessions.id", ondelete="CASCADE"), index=True)
+    category: Mapped[str] = mapped_column(String(16))
+    kind: Mapped[str] = mapped_column(String(32))
+    file_id: Mapped[int | None] = mapped_column(ForeignKey("source_files.id", ondelete="SET NULL"))
+    file_name: Mapped[str | None] = mapped_column(String(255))
+    sheet: Mapped[str | None] = mapped_column(String(255))
+    row: Mapped[int | None]
+    column: Mapped[str | None] = mapped_column(String(255))
+    before: Mapped[str | None] = mapped_column(Text)
+    after: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    reason_source: Mapped[str] = mapped_column(String(8), default="rule")
+    payload: Mapped[str] = mapped_column(Text, default="{}")  # JSON (후보, 대상 키 등)
+    decision: Mapped[str | None] = mapped_column(String(16))
+    choice: Mapped[str | None] = mapped_column(String(64))  # 승인 시 고른 값 (표준 항목 key / 7자리 코드)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

@@ -54,6 +54,8 @@ class SheetResult:
     note_texts: list[str] = field(default_factory=list)  # 주석 행 텍스트 (단위 추정용)
     body: list[dict[str, Any]] = field(default_factory=list)  # 헤더 아래 모든 행 (검증용, API 응답에는 넣지 않음)
     pii: PiiReport = field(default_factory=PiiReport)
+    header_cells: list[list[Cell]] = field(default_factory=list)  # 헤더 행 원래 셀 (2단 헤더 결합 표시용)
+    corrections: list[dict[str, Any]] = field(default_factory=list)  # 파서가 바꾼 값 (열 단위 묶음, 검토 패널용)
 
 
 @dataclass
@@ -116,33 +118,41 @@ def normalize_cell(value: Any) -> Cell:
 # ---------------------------------------------------------------- 파일 읽기
 
 
-def _read_xlsx(path: Path) -> dict[str, list[list[Any]]]:
+Filled = dict[str, set[tuple[int, int]]]  # 시트 → 병합 채움으로 값이 들어간 칸 (0-based 행, 열)
+
+
+def _read_xlsx(path: Path) -> tuple[dict[str, list[list[Any]]], Filled]:
     # read_only 모드에서는 병합 셀 정보를 얻을 수 없어 일반 모드로 연다 (파일은 읽기만 함).
     wb = openpyxl.load_workbook(path, data_only=True)
     try:
         sheets: dict[str, list[list[Any]]] = {}
+        filled: Filled = {}
         for ws in wb.worksheets:
             grid = [list(row) for row in ws.iter_rows(values_only=True)]
+            cells = filled.setdefault(ws.title, set())
             for rng in ws.merged_cells.ranges:
                 top_left = grid[rng.min_row - 1][rng.min_col - 1] if rng.min_row - 1 < len(grid) else None
-                _fill_range(grid, rng.min_row - 1, rng.max_row, rng.min_col - 1, rng.max_col, top_left)
+                _fill_range(grid, rng.min_row - 1, rng.max_row, rng.min_col - 1, rng.max_col, top_left, cells)
             sheets[ws.title] = grid
-        return sheets
+        return sheets, filled
     finally:
         wb.close()
 
 
-def _read_xls(path: Path) -> dict[str, list[list[Any]]]:
+def _read_xls(path: Path) -> tuple[dict[str, list[list[Any]]], Filled]:
     book = xlrd.open_workbook(path, formatting_info=True, on_demand=True)
     try:
         sheets: dict[str, list[list[Any]]] = {}
+        filled: Filled = {}
         for sh in book.sheets():
             grid = [[_xls_value(book, sh.cell(r, c)) for c in range(sh.ncols)] for r in range(sh.nrows)]
+            cells = filled.setdefault(sh.name, set())
             for rlo, rhi, clo, chi in sh.merged_cells:
                 if rlo < len(grid):
-                    _fill_range(grid, rlo, rhi, clo, chi, grid[rlo][clo] if clo < len(grid[rlo]) else None)
+                    value = grid[rlo][clo] if clo < len(grid[rlo]) else None
+                    _fill_range(grid, rlo, rhi, clo, chi, value, cells)
             sheets[sh.name] = grid
-        return sheets
+        return sheets, filled
     finally:
         book.release_resources()
 
@@ -160,14 +170,24 @@ def _xls_value(book: xlrd.book.Book, cell: xlrd.sheet.Cell) -> Any:
     return cell.value
 
 
-def _fill_range(grid: list[list[Any]], r0: int, r1: int, c0: int, c1: int, value: Any) -> None:
-    """병합 범위 [r0, r1) x [c0, c1)를 상단 왼쪽 값으로 채운다 (ffill)."""
+def _fill_range(
+    grid: list[list[Any]],
+    r0: int,
+    r1: int,
+    c0: int,
+    c1: int,
+    value: Any,
+    filled: set[tuple[int, int]] | None = None,
+) -> None:
+    """병합 범위 [r0, r1) x [c0, c1)를 상단 왼쪽 값으로 채운다 (ffill). 채운 칸은 filled에 기록한다."""
     for r in range(r0, min(r1, len(grid))):
         row = grid[r]
         if len(row) < c1:
             row.extend([None] * (c1 - len(row)))
         for c in range(c0, c1):
             row[c] = value
+            if filled is not None and (r, c) != (r0, c0) and value is not None:
+                filled.add((r, c))
 
 
 def decode_csv(raw: bytes) -> tuple[str, str]:
@@ -354,7 +374,34 @@ def _column_names(header_rows: list[list[Cell]], width: int) -> list[str]:
     return names
 
 
-def analyze_sheet(name: str, raw: list[list[Any]]) -> SheetResult:
+def _corrections(
+    raw: list[list[Any]], grid: list[list[Cell]], body: list[dict[str, Any]], filled: set[tuple[int, int]]
+) -> list[dict[str, Any]]:
+    """본문 행에서 파서가 바꾼 값을 열 단위로 묶는다: 숫자 문자열 → 숫자, 병합 셀 채움. (원본은 그대로)"""
+    found: dict[tuple[str, int], dict[str, Any]] = {}
+    for entry in body:
+        if entry["kind"] not in ("data", "subtotal"):
+            continue
+        r = entry["row"] - 1
+        for j, value in enumerate(grid[r]):
+            original = raw[r][j] if j < len(raw[r]) else None
+            if (r, j) in filled:
+                kind, before = "ffill", None
+            elif isinstance(original, str) and isinstance(value, int | float) and not isinstance(value, bool):
+                kind, before = "number", mask_cell(original.strip())
+            else:
+                continue
+            item = found.setdefault(
+                (kind, j),
+                {"kind": kind, "column": j, "count": 0, "rows": [], "before": before, "after": mask_cell(value)},
+            )
+            item["count"] += 1
+            if len(item["rows"]) < 5:
+                item["rows"].append(entry["row"])
+    return sorted(found.values(), key=lambda c: (c["column"], c["kind"]))
+
+
+def analyze_sheet(name: str, raw: list[list[Any]], filled: set[tuple[int, int]] | None = None) -> SheetResult:
     grid = _trim([[normalize_cell(v) for v in row] for row in raw])
     width = len(grid[0]) if grid else 0
     block = detect_header_block(grid)
@@ -394,6 +441,7 @@ def analyze_sheet(name: str, raw: list[list[Any]]) -> SheetResult:
 
     pii = PiiReport()
     scan_grid(name, grid, pii)
+    corrections = _corrections(raw, grid, body, filled or set())
 
     return SheetResult(
         name=name,
@@ -411,6 +459,8 @@ def analyze_sheet(name: str, raw: list[list[Any]]) -> SheetResult:
         note_texts=note_texts,
         body=body,
         pii=pii,
+        header_cells=[[mask_cell(c) for c in row] for row in header_rows],
+        corrections=corrections,
     )
 
 
@@ -418,11 +468,12 @@ def parse_file(path: Path, original_name: str | None = None) -> FileResult:
     """original_name: 사용자가 올린 파일명. CSV는 시트가 없어 이 이름(확장자 제외)을 시트명으로 쓴다."""
     ext = path.suffix.lower()
     encoding = None
+    filled: Filled = {}
     try:
         if ext == ".xlsx":
-            sheets = _read_xlsx(path)
+            sheets, filled = _read_xlsx(path)
         elif ext == ".xls":
-            sheets = _read_xls(path)
+            sheets, filled = _read_xls(path)
         elif ext == ".csv":
             sheets, encoding = _read_csv(path, Path(original_name or path.name).stem)
         else:
@@ -431,4 +482,5 @@ def parse_file(path: Path, original_name: str | None = None) -> FileResult:
         raise
     except Exception as exc:  # 손상/암호화 파일 등 라이브러리별 예외를 사용자 메시지로 통일
         raise ParseError(f"파일을 읽을 수 없습니다 ({type(exc).__name__}).") from exc
-    return FileResult(sheets=[analyze_sheet(n, g) for n, g in sheets.items()], encoding=encoding)
+    sheet_results = [analyze_sheet(n, g, filled.get(n)) for n, g in sheets.items()]
+    return FileResult(sheets=sheet_results, encoding=encoding)

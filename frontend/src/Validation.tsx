@@ -7,6 +7,7 @@ import {
   type EntityNote,
   type StoredFile,
   type ValidationIssue,
+  type ValidationRequest,
   type ValidationRun,
   type ValidationStatus,
 } from './api'
@@ -27,7 +28,13 @@ const ENTITY_OPTIONS = [
   { value: 'region_code', label: '행정구역코드' },
 ]
 
-function Validation({ refreshKey, onGlossaryChanged }: { refreshKey: number; onGlossaryChanged: () => void }) {
+type ValidationProps = {
+  refreshKey: number
+  onGlossaryChanged: () => void
+  onOpenReview: (request: ValidationRequest) => void
+}
+
+function Validation({ refreshKey, onGlossaryChanged, onOpenReview }: ValidationProps) {
   const [files, setFiles] = useState<StoredFile[]>([])
   const [targets, setTargets] = useState<Set<number>>(new Set())
   const [baseline, setBaseline] = useState<Set<number>>(new Set())
@@ -61,23 +68,25 @@ function Validation({ refreshKey, onGlossaryChanged }: { refreshKey: number; onG
     return next
   }
 
+  function buildRequest(): ValidationRequest {
+    return {
+      file_ids: [...targets],
+      baseline_file_ids: [...baseline],
+      expected_period: period.trim() || null,
+      required_entities: entities
+        .split(/[\n,]/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+      entity_field: entityField || null,
+      change_threshold: threshold / 100,
+    }
+  }
+
   async function submit() {
     setBusy(true)
     setError(null)
     try {
-      setRun(
-        await runValidation({
-          file_ids: [...targets],
-          baseline_file_ids: [...baseline],
-          expected_period: period.trim() || null,
-          required_entities: entities
-            .split(/[\n,]/)
-            .map((s) => s.trim())
-            .filter(Boolean),
-          entity_field: entityField || null,
-          change_threshold: threshold / 100,
-        }),
-      )
+      setRun(await runValidation(buildRequest()))
     } catch (err) {
       setError(`검증 실패: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
@@ -186,9 +195,19 @@ function Validation({ refreshKey, onGlossaryChanged }: { refreshKey: number; onG
           />
         </label>
       </div>
-      <button type="button" className="mapping-run" disabled={busy || targets.size === 0} onClick={() => void submit()}>
-        {busy ? '검증 중…' : `검증 실행 (${targets.size}개 파일)`}
-      </button>
+      <div className="review-open">
+        <button type="button" className="mapping-run" disabled={busy || targets.size === 0} onClick={() => void submit()}>
+          {busy ? '검증 중…' : `검증 실행 (${targets.size}개 파일)`}
+        </button>
+        <button
+          type="button"
+          className="mapping-run"
+          disabled={busy || targets.size === 0}
+          onClick={() => onOpenReview(buildRequest())}
+        >
+          사전 검토 열기 (통합 전)
+        </button>
+      </div>
       {error && (
         <p className="upload-error" role="alert">
           {error}

@@ -42,7 +42,13 @@ def load_decisions(session: Session, file_id: int) -> dict[str, dict[str, str | 
     return out
 
 
-def save_decisions(session: Session, engine: MappingEngine, file_id: int, items: list[DecisionInput]) -> SaveResult:
+def save_decisions(
+    session: Session, engine: MappingEngine, file_id: int, items: list[DecisionInput], learn: bool = True
+) -> SaveResult:
+    """확정 저장. learn=False면 이 파일의 확정만 저장하고 열 이름은 학습하지 않는다.
+
+    (검토 패널에서 '다음부터 이 형식 기억하기'를 선택하지 않은 경우)
+    """
     result = SaveResult()
     for item in items:
         decision = session.scalar(
@@ -59,8 +65,8 @@ def save_decisions(session: Session, engine: MappingEngine, file_id: int, items:
         session.flush()  # 같은 요청에 같은 열이 다시 오면 위 조회가 이 행을 찾도록 (autoflush 꺼짐)
         result.saved += 1
 
-        if item.field_key is not None:
-            reason = _learn(session, engine, file_id, item.column, item.field_key)
+        if learn and item.field_key is not None:
+            reason = learn_column(session, engine, file_id, item.column, item.field_key)
             if reason is None:
                 result.learned.append(item.column)
             else:
@@ -69,7 +75,7 @@ def save_decisions(session: Session, engine: MappingEngine, file_id: int, items:
     return result
 
 
-def _learn(session: Session, engine: MappingEngine, file_id: int, column: str, key: str) -> str | None:
+def learn_column(session: Session, engine: MappingEngine, file_id: int, column: str, key: str) -> str | None:
     """열 이름을 별칭으로 학습한다. 학습하지 않으면 그 이유를 돌려준다."""
     name = split_column_name(column)
     normalized = name.primary

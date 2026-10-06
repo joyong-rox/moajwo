@@ -23,6 +23,7 @@ from app.validation import (
     MappedColumn,
     SheetInput,
     ValidationParams,
+    ValidationResult,
     validate,
 )
 
@@ -196,6 +197,12 @@ def run_validation(body: ValidationIn, session: Annotated[Session, Depends(get_s
         change_threshold=body.change_threshold,
     )
     result = validate(files, params, baseline, glossary=get_glossary(session))
+    run = save_run(session, body.model_dump_json(), result)
+    return _validation_out(run)
+
+
+def save_run(session: Session, params_json: str, result: ValidationResult) -> ValidationRun:
+    """검증 결과를 등급별로 분리한 그대로 기록한다 (검증 API와 검토 패널이 함께 사용)."""
     payload = {
         "blocks": [_issue_out(i, BLOCK_LABEL).model_dump(mode="json") for i in result.blocks],
         "warnings": [_issue_out(i, WARNING_LABEL).model_dump(mode="json") for i in result.warnings],
@@ -203,9 +210,7 @@ def run_validation(body: ValidationIn, session: Annotated[Session, Depends(get_s
         "notes": result.notes,
         "entities": [asdict(e) for e in result.entities],
     }
-    run = ValidationRun(
-        status=result.status, params=body.model_dump_json(), result=json.dumps(payload, ensure_ascii=False)
-    )
+    run = ValidationRun(status=result.status, params=params_json, result=json.dumps(payload, ensure_ascii=False))
     session.add(run)
     session.commit()
     logger.info(
@@ -215,7 +220,7 @@ def run_validation(body: ValidationIn, session: Annotated[Session, Depends(get_s
         len(result.blocks),
         len(result.warnings),
     )
-    return _validation_out(run)
+    return run
 
 
 @router.get("/validation/{run_id}", response_model=ValidationOut)

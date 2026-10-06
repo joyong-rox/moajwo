@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app import files, glossary_api, validation_api
+from app import files, glossary_api, review_api, validation_api
 from app.db import get_session
 
 logger = logging.getLogger(__name__)
@@ -16,6 +16,7 @@ app.include_router(files.router)
 app.include_router(files.mapping_router)
 app.include_router(validation_api.router)
 app.include_router(glossary_api.router)
+app.include_router(review_api.router)
 
 
 @app.get("/health")

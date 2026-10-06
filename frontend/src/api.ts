@@ -294,3 +294,80 @@ export async function deleteAlias(id: number): Promise<void> {
   const res = await fetch(`${API_BASE}/glossary/aliases/${id}`, { method: 'DELETE' })
   if (!res.ok) await json(res)
 }
+
+export type ReviewCategory = 'block' | 'pending' | 'auto' | 'warning'
+export type ReviewItem = {
+  id: number
+  category: ReviewCategory
+  kind: string
+  file_id: number | null
+  file_name: string | null
+  sheet: string | null
+  row: number | null
+  column: string | null
+  before: string | null
+  after: string | null
+  reason: string
+  reason_source: 'rule' | 'llm'
+  payload: {
+    candidates?: { key?: string; code?: string; label?: string; name?: string; score?: number }[]
+    field_key?: string | null
+    count?: number
+    [key: string]: unknown
+  }
+  decision: 'approved' | 'rejected' | null
+  choice: string | null
+  excluded: boolean
+}
+export type Review = {
+  id: number
+  status: 'in_review' | 'ready'
+  score: number
+  summary: string
+  counts: { block: number; pending: number; pending_open: number; auto: number; warning: number }
+  can_complete: boolean
+  remember_format: boolean
+  files: { id: number; name: string; excluded: boolean }[]
+  items: ReviewItem[]
+  validation_run_id: number | null
+  learned: { columns: number; names: number } | null
+}
+
+export async function createReview(body: ValidationRequest): Promise<Review> {
+  return json(
+    await fetch(`${API_BASE}/reviews`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  )
+}
+
+export async function decideReviewItem(
+  reviewId: number,
+  itemId: number,
+  decision: 'approved' | 'rejected',
+  choice: string | null,
+): Promise<Review> {
+  return json(
+    await fetch(`${API_BASE}/reviews/${reviewId}/items/${itemId}/decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, choice }),
+    }),
+  )
+}
+
+export async function setRememberFormat(reviewId: number, remember: boolean): Promise<Review> {
+  return json(
+    await fetch(`${API_BASE}/reviews/${reviewId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ remember_format: remember }),
+    }),
+  )
+}
+
+export async function completeReview(reviewId: number): Promise<Review> {
+  return json(await fetch(`${API_BASE}/reviews/${reviewId}/complete`, { method: 'POST' }))
+}
