@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { listAllRuns, runDownloadUrl, type IntegrationRun } from './api'
+import { isManager, useAuth } from './authContext'
 import ReviewPanel from './ReviewPanel'
 import { formatDuration, formatTime, STATUS_CLASS } from './runFormat'
 
 /** 실행 기록: runs 테이블 기반 (입력 파일 수, 결과 파일 경로, 상태, 소요 시간). */
 function Runs() {
+  const { me } = useAuth()
+  const showUser = isManager(me.role) // 관리자·소유자는 전체 사용자의 실행을 본다
   const [runs, setRuns] = useState<IntegrationRun[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [openReview, setOpenReview] = useState<number | null>(null)
@@ -31,7 +34,8 @@ function Runs() {
         </button>
       </div>
       <p className="upload-drop-hint">
-        통합 결과를 만든 실행과 자동화 실행을 최신 순으로 보여줍니다. 상태: 완료 · 검토(확인할 항목이 남아 대기) · 실패.
+        {showUser ? '전체 사용자의' : '내'} 통합 실행과 자동화 실행을 최신 순으로 보여줍니다. 상태: 완료 · 검토(확인할 항목이
+        남아 대기) · 실패.
       </p>
       {error && (
         <p className="upload-error" role="alert">
@@ -46,6 +50,7 @@ function Runs() {
               <tr>
                 <th scope="col">번호</th>
                 <th scope="col">시작</th>
+                {showUser && <th scope="col">실행한 사람</th>}
                 <th scope="col">방식</th>
                 <th scope="col">입력 파일</th>
                 <th scope="col">상태</th>
@@ -58,6 +63,7 @@ function Runs() {
                 <tr key={r.id}>
                   <td data-label="번호">#{r.id}</td>
                   <td data-label="시작">{formatTime(r.started_at)}</td>
+                  {showUser && <td data-label="실행한 사람">{r.user_name ?? '(계정 도입 전)'}</td>}
                   <td data-label="방식">
                     {r.trigger === 'automation'
                       ? `자동화 ${r.automation_name ? `'${r.automation_name}'` : '(삭제됨)'}`
@@ -79,7 +85,7 @@ function Runs() {
                         className="mapping-confirm"
                         onClick={() => setOpenReview(r.review_session_id)}
                       >
-                        검토 이어서 하기
+                        {r.user_id === me.id ? '검토 이어서 하기' : '검토 보기'}
                       </button>
                     ) : r.status === 'failed' ? (
                       <span className="upload-error">{r.error ?? '실패'}</span>

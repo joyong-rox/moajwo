@@ -30,11 +30,12 @@ const ENTITY_OPTIONS = [
 
 type ValidationProps = {
   refreshKey: number
+  canManageGlossary?: boolean // 용어사전 별칭 등록은 관리자·소유자만
   onGlossaryChanged: () => void
   onOpenReview: (request: ValidationRequest) => void
 }
 
-function Validation({ refreshKey, onGlossaryChanged, onOpenReview }: ValidationProps) {
+function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, onOpenReview }: ValidationProps) {
   const [files, setFiles] = useState<StoredFile[]>([])
   const [targets, setTargets] = useState<Set<number>>(new Set())
   const [baseline, setBaseline] = useState<Set<number>>(new Set())
@@ -218,6 +219,7 @@ function Validation({ refreshKey, onGlossaryChanged, onOpenReview }: ValidationP
           run={run}
           onPiiChanged={() => setLocalVersion((v) => v + 1)}
           onGlossaryChanged={onGlossaryChanged}
+          canManageGlossary={canManageGlossary}
         />
       )}
     </section>
@@ -253,9 +255,14 @@ function IssueTable({ issues }: { issues: ValidationIssue[] }) {
   )
 }
 
-type ResultProps = { run: ValidationRun; onPiiChanged: () => void; onGlossaryChanged: () => void }
+type ResultProps = {
+  run: ValidationRun
+  onPiiChanged: () => void
+  onGlossaryChanged: () => void
+  canManageGlossary: boolean
+}
 
-function ValidationResult({ run, onPiiChanged, onGlossaryChanged }: ResultProps) {
+function ValidationResult({ run, onPiiChanged, onGlossaryChanged, canManageGlossary }: ResultProps) {
   return (
     <div className="validation-result">
       <p className={`validation-status status-${run.status}`} role="status">
@@ -292,7 +299,9 @@ function ValidationResult({ run, onPiiChanged, onGlossaryChanged }: ResultProps)
         )}
       </section>
 
-      {run.entities.length > 0 && <EntityNotes entities={run.entities} onRegistered={onGlossaryChanged} />}
+      {run.entities.length > 0 && (
+        <EntityNotes entities={run.entities} onRegistered={onGlossaryChanged} canRegister={canManageGlossary} />
+      )}
 
       {run.notes.length > 0 && (
         <details className="validation-notes">
@@ -315,7 +324,15 @@ const ENTITY_STATUS: Record<EntityNote['status'], string> = {
 }
 
 /** 용어사전 확인 대상 이름. 차단·경고와 별도이며 검증 상태에 영향을 주지 않는다. */
-function EntityNotes({ entities, onRegistered }: { entities: EntityNote[]; onRegistered: () => void }) {
+function EntityNotes({
+  entities,
+  onRegistered,
+  canRegister,
+}: {
+  entities: EntityNote[]
+  onRegistered: () => void
+  canRegister: boolean
+}) {
   const [choice, setChoice] = useState<Record<string, string>>({})
   const [done, setDone] = useState<Record<string, string>>({})
   const [error, setError] = useState<string | null>(null)
@@ -342,7 +359,7 @@ function EntityNotes({ entities, onRegistered }: { entities: EntityNote[]; onReg
             <tr>
               <th scope="col">이름</th>
               <th scope="col">상태</th>
-              <th scope="col">연결할 대상 (별칭 등록)</th>
+              <th scope="col">{canRegister ? '연결할 대상 (별칭 등록)' : '후보'}</th>
             </tr>
           </thead>
           <tbody>
@@ -358,7 +375,13 @@ function EntityNotes({ entities, onRegistered }: { entities: EntityNote[]; onReg
                   <span className="upload-tag">{ENTITY_STATUS[e.status]}</span> {e.note ?? ''}
                 </td>
                 <td>
-                  {done[e.value] ? (
+                  {!canRegister ? (
+                    <span className="upload-drop-hint">
+                      {e.candidates.length
+                        ? `${e.candidates.map((c) => `${c.name}(${c.code})`).join(', ')} — 사전 등록은 관리자에게 요청 (검토에서 이번 통합에만 연결할 수 있음)`
+                        : '후보 없음 — 사전 등록은 관리자에게 요청'}
+                    </span>
+                  ) : done[e.value] ? (
                     <span className="mapping-message">→ {done[e.value]} 등록됨 (다시 검증하면 반영)</span>
                   ) : e.candidates.length ? (
                     <div className="mapping-pick">

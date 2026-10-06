@@ -12,6 +12,7 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app import admin_codes
+from app.auth import ManagerDep
 from app.db import get_session
 from app.glossary import AliasEntry, EntityRef, Entry, Glossary, normalize_name, period_end
 from app.glossary_import import CODE_PATTERN, export_csv, import_file, template_csv
@@ -133,7 +134,7 @@ def list_entries(
 
 
 @router.delete("/entries/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_entry(entry_id: int, session: Annotated[Session, Depends(get_session)]) -> None:
+def delete_entry(entry_id: int, session: Annotated[Session, Depends(get_session)], _: ManagerDep) -> None:
     entry = session.get(GlossaryEntry, entry_id)
     if entry is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "항목을 찾을 수 없습니다.")
@@ -154,7 +155,7 @@ class ImportOut(BaseModel):
 
 @router.post("/import", response_model=ImportOut)
 def import_glossary(
-    file: Annotated[UploadFile, File()], session: Annotated[Session, Depends(get_session)]
+    file: Annotated[UploadFile, File()], session: Annotated[Session, Depends(get_session)], _: ManagerDep
 ) -> ImportOut:
     """CSV·xlsx·xls 양식으로 항목과 별칭을 일괄 등록·갱신한다. 오류가 있으면 아무것도 반영하지 않는다."""
     name = PurePath((file.filename or "").replace("\\", "/")).name or "glossary.csv"
@@ -294,7 +295,7 @@ def _overlaps(a_from: date | None, a_to: date | None, b_from: date | None, b_to:
 
 
 @router.post("/aliases", response_model=AliasOut, status_code=status.HTTP_201_CREATED)
-def create_alias(body: AliasIn, session: Annotated[Session, Depends(get_session)]) -> AliasOut:
+def create_alias(body: AliasIn, session: Annotated[Session, Depends(get_session)], _: ManagerDep) -> AliasOut:
     if _target(session, body.target_code) is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"용어사전에 없는 코드입니다: {body.target_code}")
     normalized = normalize_name(body.alias)
@@ -321,7 +322,7 @@ def create_alias(body: AliasIn, session: Annotated[Session, Depends(get_session)
 
 
 @router.delete("/aliases/{alias_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_alias(alias_id: int, session: Annotated[Session, Depends(get_session)]) -> None:
+def delete_alias(alias_id: int, session: Annotated[Session, Depends(get_session)], _: ManagerDep) -> None:
     alias = session.get(GlossaryAlias, alias_id)
     if alias is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "별칭을 찾을 수 없습니다.")

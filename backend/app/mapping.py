@@ -38,7 +38,7 @@ SAMPLE_SIZE = 5
 MAX_LLM_COLUMNS = 15  # 요청 하나에서 LLM으로 넘기는 열 수 상한
 
 Status = Literal["auto", "review", "unresolved", "confirmed"]
-Method = Literal["exact", "learned", "exact_part", "similarity", "pattern", "llm", "user", "none"]
+Method = Literal["exact", "standard", "learned", "exact_part", "similarity", "pattern", "llm", "user", "none"]
 EngineStatus = Literal["ok", "unavailable", "skipped"]
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
@@ -327,11 +327,17 @@ class MappingEngine:
         ]
         return sims, "ok"
 
-    # -- 1단계 (표준 사전 + 사용자 확정에서 학습한 별칭)
-    def _exact_match(self, name: ColumnName, result: ColumnMapping, learned: dict[str, str]) -> bool:
+    # -- 1단계 (표준 사전 + 전사 표준 사전(승격된 이름) + 사용자 확정에서 학습한 별칭)
+    def _exact_match(
+        self, name: ColumnName, result: ColumnMapping, learned: dict[str, str], standard: dict[str, str]
+    ) -> bool:
         key = self._exact.get(name.primary)
         if key is not None:
             self._apply(result, key, "auto", "exact", 1.0, "표준 사전과 정확히 일치")
+            return True
+        key = standard.get(name.primary)
+        if key in self._by_key:
+            self._apply(result, key, "auto", "standard", 1.0, "전사 표준 사전(관리자 승인으로 승격된 이름)과 일치")
             return True
         key = learned.get(name.primary)
         if key in self._by_key:
@@ -393,9 +399,12 @@ class MappingEngine:
         use_llm: bool = True,
         learned: dict[str, str] | None = None,
         decisions: dict[str, str | None] | None = None,
+        standard: dict[str, str] | None = None,
     ) -> MappingResult:
-        """learned: 정규화된 열 이름 → field key (학습 별칭). decisions: 열 이름 → 확정된 field key(None=해당 없음)."""
+        """learned: 정규화된 열 이름 → field key (이 사용자의 학습 별칭). decisions: 열 이름 → 확정된 field key
+        (None=해당 없음). standard: 전사 표준 사전 (승격된 열 이름 → field key)."""
         learned = learned or {}
+        standard = standard or {}
         decisions = decisions or {}
         names = [split_column_name(c) for c in columns]
         results = [
@@ -411,7 +420,7 @@ class MappingEngine:
                 else:
                     result.status, result.method, result.reason = "confirmed", "user", "사용자가 '해당 없음'으로 확정"
                 continue
-            self._exact_match(name, result, learned)
+            self._exact_match(name, result, learned, standard)
 
         sims, embedding_status = self._embed_columns(names)
         for i, (name, result) in enumerate(zip(names, results, strict=True)):

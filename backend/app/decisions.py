@@ -29,8 +29,17 @@ class SaveResult:
     not_learned: list[dict[str, str]] = field(default_factory=list)
 
 
-def load_learned(session: Session) -> dict[str, str]:
-    return dict(session.execute(select(LearnedAlias.normalized, LearnedAlias.field_key)).all())
+def load_learned(session: Session, user_id: int | None = None) -> dict[str, str]:
+    """이 사용자의 학습 별칭 (+ 계정 도입 전에 학습한 공용 별칭). 개인 별칭이 공용보다 우선한다."""
+    rows = session.execute(
+        select(LearnedAlias.normalized, LearnedAlias.field_key, LearnedAlias.user_id).where(
+            (LearnedAlias.user_id.is_(None)) | (LearnedAlias.user_id == user_id)
+        )
+    ).all()
+    out: dict[str, str] = {}
+    for normalized, key, _owner in sorted(rows, key=lambda r: r[2] is not None):
+        out[normalized] = key
+    return out
 
 
 def load_decisions(session: Session, file_id: int) -> dict[str, dict[str, str | None]]:
@@ -43,7 +52,12 @@ def load_decisions(session: Session, file_id: int) -> dict[str, dict[str, str | 
 
 
 def save_decisions(
-    session: Session, engine: MappingEngine, file_id: int, items: list[DecisionInput], learn: bool = True
+    session: Session,
+    engine: MappingEngine,
+    file_id: int,
+    items: list[DecisionInput],
+    learn: bool = True,
+    user_id: int | None = None,
 ) -> SaveResult:
     """확정 저장. learn=False면 이 파일의 확정만 저장하고 열 이름은 학습하지 않는다.
 
@@ -66,7 +80,7 @@ def save_decisions(
         result.saved += 1
 
         if learn and item.field_key is not None:
-            reason = learn_column(session, engine, file_id, item.column, item.field_key)
+            reason = learn_column(session, engine, file_id, item.column, item.field_key, user_id)
             if reason is None:
                 result.learned.append(item.column)
             else:
@@ -75,8 +89,10 @@ def save_decisions(
     return result
 
 
-def learn_column(session: Session, engine: MappingEngine, file_id: int, column: str, key: str) -> str | None:
-    """열 이름을 별칭으로 학습한다. 학습하지 않으면 그 이유를 돌려준다."""
+def learn_column(
+    session: Session, engine: MappingEngine, file_id: int, column: str, key: str, user_id: int | None = None
+) -> str | None:
+    """열 이름을 이 사용자의 별칭으로 학습한다. 학습하지 않으면 그 이유를 돌려준다."""
     name = split_column_name(column)
     normalized = name.primary
     if not normalized or (column.startswith(_GENERATED_PREFIX) and column[len(_GENERATED_PREFIX) :].isdigit()):
@@ -87,9 +103,12 @@ def learn_column(session: Session, engine: MappingEngine, file_id: int, column: 
     if builtin is not None:
         # 표준 사전과 충돌하면 사전을 우선한다 (이 파일의 확정은 저장됨).
         return f"표준 사전에서 다른 항목({builtin})의 이름이라 학습하지 않음"
-    alias = session.scalar(select(LearnedAlias).where(LearnedAlias.normalized == normalized))
+    owner = LearnedAlias.user_id.is_(None) if user_id is None else LearnedAlias.user_id == user_id
+    alias = session.scalar(select(LearnedAlias).where(LearnedAlias.normalized == normalized, owner))
     if alias is None:
-        session.add(LearnedAlias(normalized=normalized, alias=column, field_key=key, source_file_id=file_id))
+        session.add(
+            LearnedAlias(normalized=normalized, alias=column, field_key=key, source_file_id=file_id, user_id=user_id)
+        )
         session.flush()
     else:  # 같은 이름을 다른 항목으로 다시 확정하면 최신 확정을 따른다
         alias.field_key, alias.alias, alias.source_file_id = key, column, file_id

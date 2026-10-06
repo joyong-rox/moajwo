@@ -9,8 +9,10 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
 from app.db import get_session
-from app.models import Automation, ReviewItem, ReviewSession, SourceFile
+from app.files import get_file_for
+from app.models import Automation, ReviewItem, ReviewSession, SourceFile, User
 from app.review import (
     ReviewError,
     changes,
@@ -73,12 +75,18 @@ class ReviewOut(BaseModel):
     changes: dict[str, Any] | None = None  # 이전 검사 대비 변화
     automation_id: int | None = None  # 저장된 자동화로 실행한 검토
     automation_name: str | None = None
+    created_by: int | None = None
+    created_by_name: str | None = None
+    can_edit: bool = True  # 이 검토를 만든 사람만 승인·완료·다시 검사할 수 있다 (다른 사람은 조회만)
 
 
-def review_out(db: Session, session: ReviewSession, learned: dict[str, int] | None = None) -> ReviewOut:
+def review_out(
+    db: Session, session: ReviewSession, learned: dict[str, int] | None = None, user: CurrentUser | None = None
+) -> ReviewOut:
     items = session_items(db, session)
     s = summarize(session, items)
     automation = db.get(Automation, session.automation_id) if session.automation_id is not None else None
+    creator = db.get(User, session.created_by) if session.created_by is not None else None
     excluded = set(json.loads(session.excluded_file_ids))
     files = []
     for fid in json.loads(session.file_ids):
@@ -131,29 +139,36 @@ def review_out(db: Session, session: ReviewSession, learned: dict[str, int] | No
         changes=changes(db, session),
         automation_id=session.automation_id,
         automation_name=automation.name if automation is not None else None,
+        created_by=session.created_by,
+        created_by_name=creator.display_name if creator is not None else None,
+        can_edit=user is None or session.created_by == user.id or (session.created_by is None and user.is_manager),
     )
 
 
-def _get(db: Session, review_id: int) -> ReviewSession:
+def _get(db: Session, review_id: int, user: CurrentUser, own: bool = False) -> ReviewSession:
+    """볼 수 있는(own=True면 바꿀 수 있는) 검토. 남의 검토는 일반 사용자에게 없는 것처럼 404."""
     session = db.get(ReviewSession, review_id)
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "검토 세션을 찾을 수 없습니다.")
+    (ensure_own if own else ensure_view)(user, session.created_by, "검토 세션")
     return session
 
 
 @router.post("", response_model=ReviewOut, status_code=status.HTTP_201_CREATED)
-def create_review(body: ValidationIn, db: Annotated[Session, Depends(get_session)]) -> ReviewOut:
+def create_review(body: ValidationIn, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> ReviewOut:
     if set(body.file_ids) & set(body.baseline_file_ids):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "같은 파일을 검증 대상과 전월 자료로 함께 쓸 수 없습니다."
         )
-    session = create_session(db, body.model_dump())
-    return review_out(db, session)
+    for fid in [*body.file_ids, *body.baseline_file_ids]:
+        get_file_for(db, user, fid)
+    session = create_session(db, body.model_dump(), user_id=user.id)
+    return review_out(db, session, user=user)
 
 
 @router.get("/{review_id}", response_model=ReviewOut)
-def get_review(review_id: int, db: Annotated[Session, Depends(get_session)]) -> ReviewOut:
-    return review_out(db, _get(db, review_id))
+def get_review(review_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> ReviewOut:
+    return review_out(db, _get(db, review_id, user), user=user)
 
 
 class DecisionIn(BaseModel):
@@ -163,9 +178,9 @@ class DecisionIn(BaseModel):
 
 @router.post("/{review_id}/items/{item_id}/decision", response_model=ReviewOut)
 def decide_item(
-    review_id: int, item_id: int, body: DecisionIn, db: Annotated[Session, Depends(get_session)]
+    review_id: int, item_id: int, body: DecisionIn, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep
 ) -> ReviewOut:
-    session = _get(db, review_id)
+    session = _get(db, review_id, user, own=True)
     item = db.get(ReviewItem, item_id)
     if item is None or item.session_id != session.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "검토 항목을 찾을 수 없습니다.")
@@ -174,7 +189,7 @@ def decide_item(
     except ReviewError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    return review_out(db, session)
+    return review_out(db, session, user=user)
 
 
 class ReviewPatch(BaseModel):
@@ -182,24 +197,27 @@ class ReviewPatch(BaseModel):
 
 
 @router.patch("/{review_id}", response_model=ReviewOut)
-def update_review(review_id: int, body: ReviewPatch, db: Annotated[Session, Depends(get_session)]) -> ReviewOut:
-    session = _get(db, review_id)
+def update_review(
+    review_id: int, body: ReviewPatch, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep
+) -> ReviewOut:
+    session = _get(db, review_id, user, own=True)
     if session.status != "in_review":
         raise HTTPException(status.HTTP_409_CONFLICT, "검토가 끝난 세션은 바꿀 수 없습니다.")
     session.remember_format = body.remember_format
     db.commit()
-    return review_out(db, session)
+    return review_out(db, session, user=user)
 
 
 @router.post("/{review_id}/complete", response_model=ReviewOut)
-def complete_review(review_id: int, db: Annotated[Session, Depends(get_session)]) -> ReviewOut:
-    session = _get(db, review_id)
+def complete_review(review_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> ReviewOut:
+    session = _get(db, review_id, user, own=True)
     try:
-        learned = complete(db, session)
+        # 기관·지역 이름은 모두가 쓰는 용어사전에 들어가므로 사전 관리 권한(관리자·소유자)일 때만 학습
+        learned = complete(db, session, learn_names=user.is_manager)
     except ReviewError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    return review_out(db, session, learned)
+    return review_out(db, session, learned, user=user)
 
 
 class RecheckIn(BaseModel):
@@ -208,12 +226,16 @@ class RecheckIn(BaseModel):
 
 
 @router.post("/{review_id}/recheck", response_model=ReviewOut, status_code=status.HTTP_201_CREATED)
-def recheck_review(review_id: int, body: RecheckIn, db: Annotated[Session, Depends(get_session)]) -> ReviewOut:
+def recheck_review(
+    review_id: int, body: RecheckIn, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep
+) -> ReviewOut:
     """이전 검토를 이어받아 다시 검사한다 (결정·제외·기억하기 선택을 이어받고, 이전 검토는 대체됨)."""
-    old = _get(db, review_id)
+    old = _get(db, review_id, user, own=True)
+    for new_id in body.replace.values():
+        get_file_for(db, user, new_id)
     try:
         session = recheck(db, old, body.replace)
     except ReviewError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    return review_out(db, session)
+    return review_out(db, session, user=user)

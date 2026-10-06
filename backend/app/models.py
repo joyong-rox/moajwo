@@ -20,6 +20,8 @@ class SourceFile(Base):
     # 개인정보 탐지 요약(JSON: 건수 + 위치 + 마스킹 값). 원문은 저장하지 않는다.
     pii_summary: Mapped[str | None] = mapped_column(Text)
     pii_acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    data_rows: Mapped[int | None]  # 데이터 행 수 (대시보드 '검증한 행 수' 집계용)
 
 
 class MappingDecision(Base):
@@ -39,12 +41,18 @@ class MappingDecision(Base):
 
 
 class LearnedAlias(Base):
-    """사용자 확정에서 학습한 별칭. 표준 사전 파일은 건드리지 않고 DB에만 쌓는다."""
+    """사용자 확정에서 학습한 별칭 (개인별). 표준 사전 파일은 건드리지 않고 DB에만 쌓는다.
+
+    user_id: 학습한 사용자. 계정 도입 전에 학습한 별칭은 None(모든 사용자에게 적용).
+    여러 사용자가 같은 매핑을 승인하면 관리자 심사를 거쳐 전사 표준 사전(standard_terms)으로 승격된다.
+    """
 
     __tablename__ = "learned_aliases"
+    __table_args__ = (UniqueConstraint("normalized", "user_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    normalized: Mapped[str] = mapped_column(String(255), unique=True)  # mapping.normalize 결과
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    normalized: Mapped[str] = mapped_column(String(255))  # mapping.normalize 결과
     alias: Mapped[str] = mapped_column(String(255))  # 사용자가 본 원래 열 이름
     field_key: Mapped[str] = mapped_column(String(64), index=True)
     source_file_id: Mapped[int | None] = mapped_column(ForeignKey("source_files.id", ondelete="SET NULL"))
@@ -60,6 +68,7 @@ class ValidationRun(Base):
     status: Mapped[str] = mapped_column(String(32))
     params: Mapped[str] = mapped_column(Text)  # JSON
     result: Mapped[str] = mapped_column(Text)  # JSON (차단/경고/개인정보/참고 분리)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -126,6 +135,7 @@ class ReviewSession(Base):
     validation_run_id: Mapped[int | None] = mapped_column(ForeignKey("validation_runs.id", ondelete="SET NULL"))
     remember_format: Mapped[bool] = mapped_column(default=False)
     automation_id: Mapped[int | None] = mapped_column(ForeignKey("automations.id", ondelete="SET NULL"))
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -170,6 +180,7 @@ class IntegrationRun(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     review_session_id: Mapped[int | None] = mapped_column(ForeignKey("review_sessions.id", ondelete="SET NULL"))
     automation_id: Mapped[int | None] = mapped_column(ForeignKey("automations.id", ondelete="SET NULL"))
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     trigger: Mapped[str] = mapped_column(String(16), default="manual")
     status: Mapped[str] = mapped_column(String(16))
     input_file_count: Mapped[int] = mapped_column(default=0)
@@ -224,10 +235,111 @@ class Automation(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    # 이 자동화를 사람이 직접 할 때 걸리는 시간(분). 비우면 설정의 기본값을 쓴다 (절약 시간 계산)
+    manual_baseline_minutes: Mapped[float | None] = mapped_column(Float)
     source_run_id: Mapped[int | None]  # 저장한 실행 번호 (기록용, 외래키 순환을 피하려고 제약 없음)
     column_rules: Mapped[str] = mapped_column(Text)
     entity_rules: Mapped[str] = mapped_column(Text)
     validation: Mapped[str] = mapped_column(Text)
     output_format: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class User(Base):
+    """사용자 계정. role: user(일반) / admin(관리자) / owner(소유자)
+
+    - user: 자기 파일·검토·실행 기록·자동화만 다룬다.
+    - admin: 전체 기록 조회(읽기 전용), 사전 관리, 승격 심사, 일반 사용자 계정 관리.
+    - owner: admin 권한 + 설정(수동 기준 소요 시간), 관리자·소유자 계정 관리.
+    어떤 역할도 통합 결과 데이터(결과 파일·변경 기록)를 직접 수정할 수 없다.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(32), unique=True)
+    display_name: Mapped[str] = mapped_column(String(64))
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(16), default="user")
+    is_active: Mapped[bool] = mapped_column(default=True)
+    failed_logins: Mapped[int] = mapped_column(default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuthSession(Base):
+    """로그인 세션. 브라우저 쿠키에는 임의 토큰을, DB에는 그 해시만 저장한다."""
+
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class MappingApproval(Base):
+    """사용자가 승인한 열 매핑 (열 이름 → 표준 항목).
+
+    같은 매핑을 서로 다른 사용자 3명 이상이 승인하면 승격 후보가 된다.
+    """
+
+    __tablename__ = "mapping_approvals"
+    __table_args__ = (UniqueConstraint("normalized", "field_key", "user_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    normalized: Mapped[str] = mapped_column(String(255), index=True)
+    column_name: Mapped[str] = mapped_column(String(255))  # 승인할 때 본 열 이름 (예시)
+    field_key: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PromotionCandidate(Base):
+    """전사 표준 사전 승격 심사 대기열. status: pending(심사 대기) / approved(반영됨) / rejected(반려)"""
+
+    __tablename__ = "promotion_candidates"
+    __table_args__ = (UniqueConstraint("normalized", "field_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    normalized: Mapped[str] = mapped_column(String(255))
+    column_name: Mapped[str] = mapped_column(String(255))
+    field_key: Mapped[str] = mapped_column(String(64))
+    approver_count: Mapped[int] = mapped_column(default=0)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    reviewed_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_note: Mapped[str | None] = mapped_column(String(500))
+
+
+class StandardTerm(Base):
+    """전사 표준 사전: 관리자 승인으로 승격된 열 이름 → 표준 항목. 모든 사용자의 1단계(정확 일치)에 적용된다.
+
+    기본 표준 사전 파일(standard_dictionary.json)은 바꾸지 않고, 겹치면 기본 사전이 우선한다.
+    """
+
+    __tablename__ = "standard_terms"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    normalized: Mapped[str] = mapped_column(String(255), unique=True)
+    term: Mapped[str] = mapped_column(String(255))
+    field_key: Mapped[str] = mapped_column(String(64))
+    candidate_id: Mapped[int | None] = mapped_column(ForeignKey("promotion_candidates.id", ondelete="SET NULL"))
+    approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AppSetting(Base):
+    """소유자가 정하는 설정 (key → JSON 값). 예: manual_baseline_minutes(실행 1건을 사람이 할 때 걸리는 시간, 분)"""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

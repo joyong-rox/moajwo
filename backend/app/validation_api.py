@@ -9,12 +9,14 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser, CurrentUserDep, ensure_view
 from app.db import get_session
 from app.decisions import load_decisions, load_learned
-from app.files import load_parsed
+from app.files import get_file_for, load_parsed
 from app.glossary_api import get_glossary
 from app.mapping import get_engine
 from app.models import SourceFile, ValidationRun
+from app.promotion import load_standard
 from app.validation import (
     BLOCK_LABEL,
     ENTITY_FIELDS,
@@ -60,19 +62,24 @@ def pii_out(record: SourceFile) -> PiiOut | None:
 
 
 @router.get("/files", response_model=list[FileListItem])
-def list_files(session: Annotated[Session, Depends(get_session)], limit: int = 100) -> list[FileListItem]:
-    records = session.scalars(select(SourceFile).order_by(SourceFile.id.desc()).limit(min(max(limit, 1), 500)))
+def list_files(
+    session: Annotated[Session, Depends(get_session)], user: CurrentUserDep, limit: int = 100
+) -> list[FileListItem]:
+    """내가 올린 파일 (관리자·소유자는 계정 도입 전에 올라온 파일도 함께)."""
+    mine = SourceFile.uploaded_by == user.id
+    where = (mine | SourceFile.uploaded_by.is_(None)) if user.is_manager else mine
+    records = session.scalars(
+        select(SourceFile).where(where).order_by(SourceFile.id.desc()).limit(min(max(limit, 1), 500))
+    )
     return [
         FileListItem(id=r.id, original_name=r.original_name, uploaded_at=r.uploaded_at, pii=pii_out(r)) for r in records
     ]
 
 
 @router.post("/files/{file_id}/pii/acknowledge", response_model=PiiOut)
-def acknowledge_pii(file_id: int, session: Annotated[Session, Depends(get_session)]) -> PiiOut:
+def acknowledge_pii(file_id: int, session: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> PiiOut:
     """사용자가 개인정보 포함 사실을 확인했다고 기록한다 (원본·탐지 결과는 바꾸지 않는다)."""
-    record = session.get(SourceFile, file_id)
-    if record is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "파일을 찾을 수 없습니다.")
+    record = get_file_for(session, user, file_id, own=True)
     if pii_out(record) is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "이 파일에서는 개인정보 패턴이 발견되지 않았습니다.")
     if record.pii_acknowledged_at is None:
@@ -144,14 +151,22 @@ class ValidationOut(BaseModel):
     created_at: datetime
 
 
-def _file_input(session: Session, file_id: int, learned: dict[str, str]) -> FileInput:
+def _file_input(
+    session: Session, file_id: int, learned: dict[str, str], standard: dict[str, str], user: CurrentUser
+) -> FileInput:
+    get_file_for(session, user, file_id)
     record, parsed = load_parsed(session, file_id)
     engine = get_engine()
     decisions = load_decisions(session, file_id)
     sheets = []
     for sheet in parsed.sheets:
         result = engine.map_columns(
-            sheet.columns, sheet.samples, use_llm=False, learned=learned, decisions=decisions.get(sheet.name)
+            sheet.columns,
+            sheet.samples,
+            use_llm=False,
+            learned=learned,
+            decisions=decisions.get(sheet.name),
+            standard=standard,
         )
         columns = [
             MappedColumn(i, c.column, c.field_key, c.qualifier)
@@ -181,15 +196,17 @@ def _validation_out(run: ValidationRun) -> ValidationOut:
 
 
 @router.post("/validation", response_model=ValidationOut)
-def run_validation(body: ValidationIn, session: Annotated[Session, Depends(get_session)]) -> ValidationOut:
+def run_validation(
+    body: ValidationIn, session: Annotated[Session, Depends(get_session)], user: CurrentUserDep
+) -> ValidationOut:
     overlap = set(body.file_ids) & set(body.baseline_file_ids)
     if overlap:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "같은 파일을 검증 대상과 전월 자료로 함께 쓸 수 없습니다."
         )
-    learned = load_learned(session)
-    files = [_file_input(session, fid, learned) for fid in dict.fromkeys(body.file_ids)]
-    baseline = [_file_input(session, fid, learned) for fid in dict.fromkeys(body.baseline_file_ids)]
+    learned, standard = load_learned(session, user.id), load_standard(session)
+    files = [_file_input(session, fid, learned, standard, user) for fid in dict.fromkeys(body.file_ids)]
+    baseline = [_file_input(session, fid, learned, standard, user) for fid in dict.fromkeys(body.baseline_file_ids)]
     params = ValidationParams(
         expected_period=body.expected_period,
         required_entities=body.required_entities,
@@ -197,11 +214,11 @@ def run_validation(body: ValidationIn, session: Annotated[Session, Depends(get_s
         change_threshold=body.change_threshold,
     )
     result = validate(files, params, baseline, glossary=get_glossary(session))
-    run = save_run(session, body.model_dump_json(), result)
+    run = save_run(session, body.model_dump_json(), result, user.id)
     return _validation_out(run)
 
 
-def save_run(session: Session, params_json: str, result: ValidationResult) -> ValidationRun:
+def save_run(session: Session, params_json: str, result: ValidationResult, user_id: int | None = None) -> ValidationRun:
     """검증 결과를 등급별로 분리한 그대로 기록한다 (검증 API와 검토 패널이 함께 사용)."""
     payload = {
         "blocks": [_issue_out(i, BLOCK_LABEL).model_dump(mode="json") for i in result.blocks],
@@ -210,7 +227,9 @@ def save_run(session: Session, params_json: str, result: ValidationResult) -> Va
         "notes": result.notes,
         "entities": [asdict(e) for e in result.entities],
     }
-    run = ValidationRun(status=result.status, params=params_json, result=json.dumps(payload, ensure_ascii=False))
+    run = ValidationRun(
+        status=result.status, params=params_json, result=json.dumps(payload, ensure_ascii=False), created_by=user_id
+    )
     session.add(run)
     session.commit()
     logger.info(
@@ -224,8 +243,11 @@ def save_run(session: Session, params_json: str, result: ValidationResult) -> Va
 
 
 @router.get("/validation/{run_id}", response_model=ValidationOut)
-def get_validation(run_id: int, session: Annotated[Session, Depends(get_session)]) -> ValidationOut:
+def get_validation(
+    run_id: int, session: Annotated[Session, Depends(get_session)], user: CurrentUserDep
+) -> ValidationOut:
     run = session.get(ValidationRun, run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "검증 기록을 찾을 수 없습니다.")
+    ensure_view(user, run.created_by, "검증 기록")
     return _validation_out(run)

@@ -1511,3 +1511,454 @@ body {
     display: block;
   }
 }
+
+/* ---- 로그인 · 사이드바 · 대시보드 · 관리 화면 (단계 8) : login-, shell-, side-, page-, dash-, admin- 클래스만 사용 ---- */
+.login {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.login-card {
+  display: grid;
+  gap: 10px;
+  width: min(380px, 100%);
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-sizing: border-box;
+}
+
+.login-card h1 {
+  margin: 0;
+  font-size: 1.75rem;
+}
+
+.login-card h2 {
+  margin: 8px 0 0;
+  font-size: 1.125rem;
+}
+
+.login-card .subtitle {
+  margin: 0;
+}
+
+.login-card label,
+.admin-form label {
+  display: grid;
+  gap: 4px;
+  font-size: 0.875rem;
+}
+
+.login-card input,
+.admin-form input,
+.admin-form select,
+.admin-actions input {
+  min-height: 36px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  box-sizing: border-box;
+  max-width: 100%;
+}
+
+.login-loading {
+  padding: 32px 16px;
+  color: var(--muted);
+}
+
+.shell {
+  --shell-side: 232px;
+  display: grid;
+  grid-template-columns: var(--shell-side) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.shell-main {
+  min-width: 0;
+}
+
+.shell-side {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: 100vh;
+  padding: 20px 12px;
+  border-right: 1px solid var(--border);
+  background: var(--tag-bg);
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+
+.side-brand {
+  display: grid;
+  padding: 0 8px;
+}
+
+.side-brand strong {
+  font-size: 1.25rem;
+}
+
+.side-brand span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.side-nav {
+  display: grid;
+  gap: 2px;
+}
+
+.side-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 40px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.side-link:hover:not(:disabled),
+.side-link:focus-visible {
+  background: var(--accent-bg);
+  outline: none;
+}
+
+.side-link.is-active {
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.side-link.is-disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.side-badge {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.side-user {
+  display: grid;
+  gap: 2px;
+  margin-top: auto;
+  padding: 10px 8px 0;
+  border-top: 1px solid var(--border);
+  font-size: 0.875rem;
+}
+
+.side-user-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.side-user-role {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.side-user-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.side-user-actions .side-link {
+  min-height: 32px;
+  padding: 2px 8px;
+}
+
+.side-logout {
+  min-height: 32px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.app .page-title {
+  margin: 0 0 16px;
+  font-size: 1.5rem;
+}
+
+.page-error {
+  padding: 24px 0;
+}
+
+.page-error .side-link {
+  display: inline-flex;
+  border: 1px solid var(--border);
+}
+
+/* 사이드바가 있으면 넓은 패널(검토·실행 기록)은 본문 영역 폭에 맞춘다 */
+.shell-main .review-panel,
+.shell-main .runs {
+  width: min(1120px, calc(100vw - var(--shell-side) - 32px));
+}
+
+.dash {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 24px;
+}
+
+.dash-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+
+.dash-head h2 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+
+.dash-scope {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.dash-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.dash-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--tag-bg);
+}
+
+.dash-card dt {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.dash-card dd {
+  margin: 0;
+}
+
+.dash-value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.dash-sub {
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+.admin {
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.app .page-title + .admin {
+  margin-top: 0;
+}
+
+.admin h2 {
+  margin: 0 0 4px;
+  font-size: 1.125rem;
+}
+
+.admin h3 {
+  margin: 12px 0 4px;
+  font-size: 1rem;
+}
+
+.admin-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.admin-form label {
+  flex: 1 1 140px;
+}
+
+.admin-form .upload-drop-hint {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.admin-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 12px 0;
+}
+
+.admin-filter {
+  min-height: 32px;
+  padding: 2px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.admin-filter.is-active {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.admin-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.admin-item {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
+.admin-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.admin-item .upload-drop-hint {
+  margin: 4px 0 0;
+}
+
+.admin-badge {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.admin-badge.is-pending {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.admin-badge.is-approved {
+  border-color: var(--pass-text);
+  background: var(--pass-bg);
+  color: var(--pass-text);
+}
+
+.admin-badge.is-rejected {
+  color: var(--muted);
+}
+
+.admin-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.admin-actions input {
+  flex: 1 1 160px;
+}
+
+.admin-row-actions {
+  white-space: nowrap;
+}
+
+.admin-row-actions button + button {
+  margin-left: 4px;
+}
+
+/* 좁은 화면: 사이드바를 위쪽 메뉴 줄로 */
+@media (max-width: 860px) {
+  .shell {
+    --shell-side: 0px;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shell-side {
+    position: static;
+    height: auto;
+    gap: 8px;
+    padding: 12px 16px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .side-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .side-link {
+    min-height: 36px;
+  }
+
+  .side-user {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 0;
+    padding: 8px 0 0;
+  }
+
+  .side-user-actions {
+    margin: 0 0 0 auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .dash-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

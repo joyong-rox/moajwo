@@ -20,6 +20,7 @@ const STATUS_LABEL: Record<MappingStatus, string> = {
 }
 const METHOD_LABEL: Record<MappingMethod, string> = {
   exact: '사전 일치',
+  standard: '전사 표준 사전',
   learned: '학습된 이름',
   exact_part: '사전 부분 일치',
   similarity: '유사도',

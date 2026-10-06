@@ -167,7 +167,7 @@ function ReviewPanel({
               <input
                 type="checkbox"
                 checked={review.remember_format}
-                disabled={review.status !== 'in_review' || busyItem !== null}
+                disabled={review.status !== 'in_review' || busyItem !== null || !review.can_edit}
                 onChange={(e) => {
                   const previous = review
                   // 바로 체크 표시를 바꾸고 저장한다. 저장에 실패하면 원래대로 되돌린다.
@@ -187,7 +187,7 @@ function ReviewPanel({
               <button
                 type="button"
                 className="mapping-confirm"
-                disabled={busyItem !== null || review.status === 'superseded'}
+                disabled={busyItem !== null || review.status === 'superseded' || !review.can_edit}
                 onClick={() => void recheck(review)}
               >
                 다시 검사 (결정 이어받기)
@@ -195,15 +195,18 @@ function ReviewPanel({
               <button
                 type="button"
                 className="mapping-run"
-                disabled={!review.can_complete || busyItem !== null}
+                disabled={!review.can_complete || busyItem !== null || !review.can_edit}
                 onClick={() =>
                   void run(null, async () => {
                     const done = await completeReview(review.id)
                     const learned = done.learned
+                    const skipped = learned?.names_skipped
+                      ? ` 기관·지역 이름 ${learned.names_skipped}개는 공용 용어사전이라 관리자만 등록할 수 있어 기억하지 않았습니다.`
+                      : ''
                     setMessage(
-                      learned && (learned.columns || learned.names)
+                      (learned && (learned.columns || learned.names)
                         ? `검토 완료 — 열 이름 ${learned.columns}개, 기관·지역 이름 ${learned.names}개를 기억했습니다.`
-                        : '검토 완료 — 통합 준비가 끝났습니다.',
+                        : '검토 완료 — 통합 준비가 끝났습니다.') + skipped,
                     )
                     return done
                   })
@@ -217,7 +220,7 @@ function ReviewPanel({
                 {message}
               </p>
             )}
-            {review.status === 'ready' && <IntegrationResult reviewId={review.id} />}
+            {review.status === 'ready' && review.can_edit && <IntegrationResult reviewId={review.id} />}
             <details className="review-replace">
               <summary>원본을 고친 파일로 바꿔 다시 검사</summary>
               <p className="upload-drop-hint">
@@ -260,6 +263,11 @@ function ScoreHeader({ review }: { review: Review }) {
         <span>/ 100</span>
       </div>
       <div className="review-score-text">
+        {!review.can_edit && (
+          <p className="review-automation">
+            {review.created_by_name ?? '다른 사용자'}님의 검토입니다 — 조회만 할 수 있습니다 (승인·완료·통합은 만든 사람만).
+          </p>
+        )}
         {review.automation_name && (
           <p className="review-automation">
             자동화 '{review.automation_name}'의 규칙을 적용한 검토입니다 — 저장된 규칙에 없는 새 열 등만 확인하면 됩니다.
@@ -355,7 +363,7 @@ function ItemGroup({ review, category, title, hint, busyItem, onDecide }: GroupP
             <ItemRow
               key={i.id}
               item={i}
-              disabled={review.status !== 'in_review' || busyItem !== null}
+              disabled={review.status !== 'in_review' || busyItem !== null || !review.can_edit}
               busy={busyItem === i.id}
               onDecide={onDecide}
             />

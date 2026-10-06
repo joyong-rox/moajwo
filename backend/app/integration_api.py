@@ -11,10 +11,11 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
 from app.config import DATA_DIR
 from app.db import get_session
 from app.integration import KST, IntegrationError, integrate
-from app.models import Automation, IntegrationRun, ReviewSession, RunChange
+from app.models import Automation, IntegrationRun, ReviewSession, RunChange, User
 
 router = APIRouter(tags=["integration"])
 
@@ -32,6 +33,8 @@ class RunOut(BaseModel):
     trigger: str  # manual / automation
     automation_id: int | None
     automation_name: str | None
+    user_id: int | None  # 실행한 사용자
+    user_name: str | None
     input_file_count: int
     file_name: str | None
     output_path: str | None  # 결과 파일 경로 (data/outputs/…)
@@ -51,7 +54,7 @@ def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=KST)
 
 
-def run_out(run: IntegrationRun, automation_name: str | None = None) -> RunOut:
+def run_out(run: IntegrationRun, automation_name: str | None = None, user_name: str | None = None) -> RunOut:
     duration = None
     if run.started_at is not None and run.finished_at is not None:
         duration = max(0, round((_aware(run.finished_at) - _aware(run.started_at)).total_seconds() * 1000))
@@ -63,6 +66,8 @@ def run_out(run: IntegrationRun, automation_name: str | None = None) -> RunOut:
         trigger=run.trigger,
         automation_id=run.automation_id,
         automation_name=automation_name,
+        user_id=run.user_id,
+        user_name=user_name,
         input_file_count=run.input_file_count,
         file_name=Path(run.output_path).name if run.output_path else None,
         output_path=f"data/{run.output_path}" if run.output_path else None,
@@ -83,7 +88,18 @@ def runs_out(db: Session, runs: list[IntegrationRun]) -> list[RunOut]:
     names: dict[int, str] = {}
     if ids:
         names = {i: n for i, n in db.execute(select(Automation.id, Automation.name).where(Automation.id.in_(ids)))}
-    out = [run_out(r, names.get(r.automation_id) if r.automation_id else None) for r in runs]
+    user_ids = {r.user_id for r in runs if r.user_id is not None}
+    users: dict[int, str] = {}
+    if user_ids:
+        users = {i: n for i, n in db.execute(select(User.id, User.display_name).where(User.id.in_(user_ids)))}
+    out = [
+        run_out(
+            r,
+            names.get(r.automation_id) if r.automation_id else None,
+            users.get(r.user_id) if r.user_id else None,
+        )
+        for r in runs
+    ]
     for o in out:
         if o.status == "review" and o.review_session_id is not None:
             o.review_session_id = _latest_session(db, o.review_session_id)
@@ -101,11 +117,13 @@ def _latest_session(db: Session, session_id: int) -> int:
 
 
 @router.post("/reviews/{review_id}/integrate", response_model=RunOut, status_code=status.HTTP_201_CREATED)
-def integrate_review(review_id: int, db: Annotated[Session, Depends(get_session)]) -> RunOut:
-    """검토가 끝난 세션으로 새 결과 엑셀을 만든다. 실행할 때마다 새 파일을 만든다 (원본은 덮어쓰지 않음)."""
+def integrate_review(review_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> RunOut:
+    """검토가 끝난 세션으로 새 결과 엑셀을 만든다. 실행할 때마다 새 파일을 만든다 (원본은 덮어쓰지 않음).
+    검토를 만든 사람만 실행한다."""
     session = db.get(ReviewSession, review_id)
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "검토 세션을 찾을 수 없습니다.")
+    ensure_own(user, session.created_by, "검토 세션")
     try:
         run = integrate(db, session)
     except IntegrationError as exc:
@@ -116,12 +134,18 @@ def integrate_review(review_id: int, db: Annotated[Session, Depends(get_session)
 @router.get("/runs", response_model=list[RunOut])
 def list_runs(
     db: Annotated[Session, Depends(get_session)],
+    user: CurrentUserDep,
     review_id: int | None = None,
     automation_id: int | None = None,
+    user_id: int | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[RunOut]:
-    """실행 기록 (최신 순)."""
+    """실행 기록 (최신 순). 일반 사용자는 자기 실행만, 관리자·소유자는 전체(user_id로 거를 수 있음)."""
     stmt = select(IntegrationRun).order_by(IntegrationRun.id.desc()).limit(limit)
+    if not user.is_manager:
+        stmt = stmt.where(IntegrationRun.user_id == user.id)
+    elif user_id is not None:
+        stmt = stmt.where(IntegrationRun.user_id == user_id)
     if review_id is not None:
         stmt = stmt.where(IntegrationRun.review_session_id == review_id)
     if automation_id is not None:
@@ -129,16 +153,17 @@ def list_runs(
     return runs_out(db, list(db.scalars(stmt)))
 
 
-def _get(db: Session, run_id: int) -> IntegrationRun:
+def _get(db: Session, run_id: int, user: CurrentUser) -> IntegrationRun:
     run = db.get(IntegrationRun, run_id)
     if run is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "통합 실행을 찾을 수 없습니다.")
+    ensure_view(user, run.user_id, "통합 실행")
     return run
 
 
 @router.get("/runs/{run_id}", response_model=RunOut)
-def get_run(run_id: int, db: Annotated[Session, Depends(get_session)]) -> RunOut:
-    return runs_out(db, [_get(db, run_id)])[0]
+def get_run(run_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> RunOut:
+    return runs_out(db, [_get(db, run_id, user)])[0]
 
 
 class ChangeOut(BaseModel):
@@ -166,11 +191,12 @@ class ChangePage(BaseModel):
 def list_changes(
     run_id: int,
     db: Annotated[Session, Depends(get_session)],
+    user: CurrentUserDep,
     kind: str | None = None,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> ChangePage:
-    _get(db, run_id)
+    _get(db, run_id, user)
     where = [RunChange.run_id == run_id] + ([RunChange.kind == kind] if kind else [])
     total = db.scalar(select(func.count(RunChange.id)).where(*where)) or 0
     rows = db.scalars(select(RunChange).where(*where).order_by(RunChange.id).offset(offset).limit(limit))
@@ -181,8 +207,8 @@ def list_changes(
 
 
 @router.get("/runs/{run_id}/download")
-def download_run(run_id: int, db: Annotated[Session, Depends(get_session)]) -> FileResponse:
-    run = _get(db, run_id)
+def download_run(run_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> FileResponse:
+    run = _get(db, run_id, user)
     if run.status != "done" or not run.output_path:
         raise HTTPException(status.HTTP_409_CONFLICT, "결과 파일이 없습니다.")
     path = (DATA_DIR / run.output_path).resolve()

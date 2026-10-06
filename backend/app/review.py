@@ -23,6 +23,7 @@ from app.mapping import ColumnMapping, MappingEngine, get_engine, normalize, spl
 from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile
 from app.parsing import FileResult, SheetResult
 from app.pii import PII_LABEL
+from app.promotion import load_standard, record_approval
 from app.validation import (
     EntityResolver,
     FileInput,
@@ -78,6 +79,8 @@ def mapping_reason(m: ColumnMapping) -> tuple[str, str]:
         return f"사용자가 '{m.column}' 열을 '해당 없음'으로 확정했습니다.", "rule"
     if m.method == "exact":
         return f"열 이름 '{m.column}'이(가) 표준 사전의 '{label}'과(와) 일치합니다 (공백·단위 괄호·연도 제외).", "rule"
+    if m.method == "standard":
+        return f"열 이름 '{m.column}'이(가) 전사 표준 사전(관리자 승인으로 승격)의 '{label}'과(와) 일치합니다.", "rule"
     if m.method == "learned":
         return f"이전에 사용자가 확정해 학습된 열 이름 '{m.column}' → '{label}'입니다.", "rule"
     if m.method == "exact_part":
@@ -168,12 +171,24 @@ class _Loaded:
     mappings: dict[str, list[ColumnMapping]]  # 시트 → 열 매핑
 
 
-def _load(db: Session, file_id: int, engine: MappingEngine, learned: dict[str, str], use_llm: bool) -> _Loaded:
+def _load(
+    db: Session,
+    file_id: int,
+    engine: MappingEngine,
+    learned: dict[str, str],
+    use_llm: bool,
+    standard: dict[str, str] | None = None,
+) -> _Loaded:
     record, parsed = load_parsed(db, file_id)
     decisions = load_decisions(db, file_id)
     mappings = {
         sheet.name: engine.map_columns(
-            sheet.columns, sheet.samples, use_llm=use_llm, learned=learned, decisions=decisions.get(sheet.name)
+            sheet.columns,
+            sheet.samples,
+            use_llm=use_llm,
+            learned=learned,
+            decisions=decisions.get(sheet.name),
+            standard=standard,
         ).columns
         for sheet in parsed.sheets
     }
@@ -205,22 +220,29 @@ def _file_input(loaded: _Loaded) -> FileInput:
 
 
 def create_session(
-    db: Session, params: dict[str, Any], use_llm: bool = True, automation: Automation | None = None
+    db: Session,
+    params: dict[str, Any],
+    use_llm: bool = True,
+    automation: Automation | None = None,
+    user_id: int | None = None,
 ) -> ReviewSession:
     """검토 세션을 만든다. params: file_ids, baseline_file_ids, expected_period, required_entities, entity_field,
     change_threshold (검증 API와 같은 조건).
 
     automation: 저장된 자동화로 실행하면 그 매핑·이름 연결 규칙을 먼저 적용해 자동 적용 항목으로 보여주고,
     자동화에 없는 새 열만 확인 필요로 남긴다.
+    user_id: 검토를 만든 사용자 (그 사용자의 학습 별칭을 쓰고, 승인·완료는 이 사용자만 한다)
     """
     engine = get_engine()
     rules = AutomationRules.of(automation) if automation is not None else None
     if rules is not None:
         for fid in dict.fromkeys(params["file_ids"]):
             _apply_column_rules(db, engine, fid, rules)
-    learned = load_learned(db)
-    targets = [_load(db, fid, engine, learned, use_llm) for fid in dict.fromkeys(params["file_ids"])]
-    baseline = [_load(db, fid, engine, learned, False) for fid in dict.fromkeys(params.get("baseline_file_ids", []))]
+    learned, standard = load_learned(db, user_id), load_standard(db)
+    targets = [_load(db, fid, engine, learned, use_llm, standard) for fid in dict.fromkeys(params["file_ids"])]
+    baseline = [
+        _load(db, fid, engine, learned, False, standard) for fid in dict.fromkeys(params.get("baseline_file_ids", []))
+    ]
     vparams = ValidationParams(
         expected_period=params.get("expected_period"),
         required_entities=params.get("required_entities", []),
@@ -230,7 +252,7 @@ def create_session(
     glossary = get_glossary(db)
     files = [_file_input(t) for t in targets]
     result = validate(files, vparams, [_file_input(b) for b in baseline], glossary=glossary)
-    run = save_run(db, json.dumps(params, ensure_ascii=False), result)
+    run = save_run(db, json.dumps(params, ensure_ascii=False), result, user_id)
 
     session = ReviewSession(
         status="in_review",
@@ -240,6 +262,7 @@ def create_session(
         validation_run_id=run.id,
         remember_format=False,
         automation_id=automation.id if automation is not None else None,
+        created_by=user_id,
     )
     db.add(session)
     db.flush()
@@ -590,7 +613,7 @@ def decide(db: Session, session: ReviewSession, item: ReviewItem, decision: str,
     payload = json.loads(item.payload)
     now = datetime.now(UTC)
     if item.kind == "mapping":
-        _decide_mapping(db, item, payload, decision, choice)
+        _decide_mapping(db, item, payload, decision, choice, session.created_by)
     elif item.kind == "entity":
         codes = [c["code"] for c in payload.get("candidates", [])]
         if decision == "approved":
@@ -611,7 +634,9 @@ def decide(db: Session, session: ReviewSession, item: ReviewItem, decision: str,
     db.commit()
 
 
-def _decide_mapping(db: Session, item: ReviewItem, payload: dict[str, Any], decision: str, choice: str | None) -> None:
+def _decide_mapping(
+    db: Session, item: ReviewItem, payload: dict[str, Any], decision: str, choice: str | None, user_id: int | None
+) -> None:
     engine = get_engine()
     labels = {f.key: f.label for f in engine.fields}
     if decision == "approved":
@@ -622,6 +647,8 @@ def _decide_mapping(db: Session, item: ReviewItem, payload: dict[str, Any], deci
         key = None  # 거부 = 이 열은 매핑하지 않음('해당 없음')으로 확정
     assert item.file_id is not None and item.sheet is not None and item.column is not None
     save_decisions(db, engine, item.file_id, [DecisionInput(item.sheet, item.column, key)], learn=False)
+    if key is not None:
+        record_approval(db, engine, user_id, item.column, key)  # 전사 표준 사전 승격 집계
     item.choice = key
     item.after = labels[key] if key else "(해당 없음)"
 
@@ -642,15 +669,16 @@ def _decide_pii(db: Session, session: ReviewSession, item: ReviewItem, decision:
     session.excluded_file_ids = json.dumps(sorted(excluded))
 
 
-def complete(db: Session, session: ReviewSession) -> dict[str, int]:
-    """검토 완료. 차단·대기 항목이 없어야 한다. '이 형식 기억하기'면 승인한 열 이름·기관명을 학습한다."""
+def complete(db: Session, session: ReviewSession, learn_names: bool = True) -> dict[str, int]:
+    """검토 완료. 차단·대기 항목이 없어야 한다. '이 형식 기억하기'면 승인한 열 이름(이 사용자의 별칭)과
+    기관명을 학습한다. 기관명은 모두가 쓰는 용어사전에 들어가므로 learn_names(사전 관리 권한)일 때만 학습한다."""
     if session.status != "in_review":
         raise ReviewError("이미 검토가 끝난 세션입니다.")
     items = session_items(db, session)
     summary = summarize(session, items)
     if not summary.can_complete:
         raise ReviewError(summary.summary)
-    learned = {"columns": 0, "names": 0}
+    learned = {"columns": 0, "names": 0, "names_skipped": 0}
     if session.remember_format:
         engine = get_engine()
         for item in items:
@@ -659,9 +687,12 @@ def complete(db: Session, session: ReviewSession) -> dict[str, int]:
             if item.kind == "mapping" and item.file_id is not None and item.column is not None:
                 # 이번에 승인한 매핑 + 이전 검사에서 사용자가 확정해 이어받은 매핑(자동 적용으로 표시됨)
                 key = item.choice or json.loads(item.payload).get("field_key")
-                if key and learn_column(db, engine, item.file_id, item.column, key) is None:
+                if key and learn_column(db, engine, item.file_id, item.column, key, session.created_by) is None:
                     learned["columns"] += 1
             elif item.kind == "entity" and item.category == "pending" and item.choice and item.before:
+                if not learn_names:
+                    learned["names_skipped"] += 1
+                    continue
                 normalized = normalize_name(item.before)
                 exists = db.scalar(
                     select(GlossaryAlias.id).where(
@@ -722,7 +753,7 @@ def recheck(db: Session, old: ReviewSession, replace: dict[int, int] | None = No
     params["file_ids"] = new_ids
     params["replaced_files"] = {str(k): v for k, v in replace.items()}
     automation = db.get(Automation, old.automation_id) if old.automation_id is not None else None
-    session = create_session(db, params, automation=automation)
+    session = create_session(db, params, automation=automation, user_id=old.created_by)
     session.parent_id = old.id
     session.remember_format = old.remember_format
     # 교체한 파일은 새 내용이므로 제외·개인정보 확인을 새로 받는다

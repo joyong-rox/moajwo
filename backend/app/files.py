@@ -8,12 +8,14 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
 from app.config import DATA_DIR
 from app.db import get_session
 from app.decisions import DecisionInput, load_decisions, load_learned, save_decisions
 from app.mapping import get_engine
 from app.models import SourceFile
 from app.parsing import SUPPORTED_EXTENSIONS, FileResult, ParseError, parse_file
+from app.promotion import load_standard, record_approval
 from app.storage import MAX_UPLOAD_BYTES, UploadTooLarge, safe_original_name, store_original
 
 logger = logging.getLogger(__name__)
@@ -53,14 +55,15 @@ class UploadResultOut(BaseModel):
 def upload_files(
     files: Annotated[list[UploadFile], File()],
     session: Annotated[Session, Depends(get_session)],
+    user: CurrentUserDep,
 ) -> list[UploadResultOut]:
     if len(files) > MAX_FILES_PER_REQUEST:
         detail = f"한 번에 최대 {MAX_FILES_PER_REQUEST}개까지 올릴 수 있습니다."
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail)
-    return [_handle_one(upload, session) for upload in files]
+    return [_handle_one(upload, session, user.id) for upload in files]
 
 
-def _handle_one(upload: UploadFile, session: Session) -> UploadResultOut:
+def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadResultOut:
     name = safe_original_name(upload.filename)
     ext = PurePath(name).suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
@@ -73,7 +76,11 @@ def _handle_one(upload: UploadFile, session: Session) -> UploadResultOut:
         return UploadResultOut(original_name=name, error=f"파일이 너무 큽니다 (최대 {limit_mb}MB).")
 
     record = SourceFile(
-        original_name=name, stored_path=stored.relative_path, sha256=stored.sha256, size_bytes=stored.size_bytes
+        original_name=name,
+        stored_path=stored.relative_path,
+        sha256=stored.sha256,
+        size_bytes=stored.size_bytes,
+        uploaded_by=user_id,
     )
     session.add(record)
     session.commit()
@@ -89,6 +96,7 @@ def _handle_one(upload: UploadFile, session: Session) -> UploadResultOut:
     report = parsed.pii
     summary = {"counts": report.counts, "items": [asdict(i) for i in report.items]}
     record.pii_summary = json.dumps(summary, ensure_ascii=False)
+    record.data_rows = parsed.data_rows
     session.commit()
     if report.found:
         # 원문은 기록하지 않는다 (건수만)
@@ -139,21 +147,28 @@ class FileMappingOut(BaseModel):
 
 @router.post("/{file_id}/mapping", response_model=FileMappingOut)
 def map_file_columns(
-    file_id: int, session: Annotated[Session, Depends(get_session)], use_llm: bool = True
+    file_id: int, session: Annotated[Session, Depends(get_session)], user: CurrentUserDep, use_llm: bool = True
 ) -> FileMappingOut:
     """저장된 원본(읽기 전용)을 다시 파싱해 시트별 열 매핑 후보를 만든다.
 
     사용자가 확정한 열은 확정값을 그대로 쓰고, 학습된 별칭은 1단계 정확 일치에 포함한다.
     """
+    get_file_for(session, user, file_id)
     record, parsed = load_parsed(session, file_id)
     engine = get_engine()
-    learned = load_learned(session)
+    learned = load_learned(session, user.id)
+    standard = load_standard(session)
     decisions = load_decisions(session, file_id)
     embedding_status, llm_status = "skipped", "skipped"
     sheets: list[SheetMappingOut] = []
     for sheet in parsed.sheets:
         result = engine.map_columns(
-            sheet.columns, sheet.samples, use_llm=use_llm, learned=learned, decisions=decisions.get(sheet.name)
+            sheet.columns,
+            sheet.samples,
+            use_llm=use_llm,
+            learned=learned,
+            decisions=decisions.get(sheet.name),
+            standard=standard,
         )
         # 여러 시트 중 하나라도 실패하면 실패로, 하나라도 성공하면 성공으로 보고한다.
         embedding_status = _merge_status(embedding_status, result.embedding)
@@ -174,6 +189,15 @@ def _merge_status(current: str, new: str) -> str:
     if "ok" in (current, new):
         return "ok"
     return "skipped"
+
+
+def get_file_for(session: Session, user: CurrentUser, file_id: int, own: bool = False) -> SourceFile:
+    """요청한 사용자가 볼 수 있는(own=True면 바꿀 수 있는) 파일. 남의 파일은 없는 것처럼 404."""
+    record = session.get(SourceFile, file_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "파일을 찾을 수 없습니다.")
+    (ensure_own if own else ensure_view)(user, record.uploaded_by, "파일")
+    return record
 
 
 def load_parsed(session: Session, file_id: int) -> tuple[SourceFile, FileResult]:
@@ -207,9 +231,11 @@ class DecisionsOut(BaseModel):
 
 @router.put("/{file_id}/mapping/decisions", response_model=DecisionsOut)
 def save_mapping_decisions(
-    file_id: int, body: DecisionsIn, session: Annotated[Session, Depends(get_session)]
+    file_id: int, body: DecisionsIn, session: Annotated[Session, Depends(get_session)], user: CurrentUserDep
 ) -> DecisionsOut:
-    """사용자가 확인·수정한 매핑을 확정 저장하고, 열 이름을 별칭으로 학습한다."""
+    """사용자가 확인·수정한 매핑을 확정 저장하고, 열 이름을 이 사용자의 별칭으로 학습한다.
+    승인한 매핑은 전사 표준 사전 승격 집계에도 기록한다."""
+    get_file_for(session, user, file_id, own=True)
     _, parsed = load_parsed(session, file_id)
     engine = get_engine()
     columns = {s.name: set(s.columns) for s in parsed.sheets}
@@ -220,8 +246,16 @@ def save_mapping_decisions(
         if d.field_key is not None and d.field_key not in valid_keys:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 표준 항목입니다: {d.field_key}")
     result = save_decisions(
-        session, engine, file_id, [DecisionInput(d.sheet, d.column, d.field_key) for d in body.decisions]
+        session,
+        engine,
+        file_id,
+        [DecisionInput(d.sheet, d.column, d.field_key) for d in body.decisions],
+        user_id=user.id,
     )
+    for d in body.decisions:
+        if d.field_key is not None:
+            record_approval(session, engine, user.id, d.column, d.field_key)
+    session.commit()
     return DecisionsOut(saved=result.saved, learned=result.learned, not_learned=result.not_learned)
 
 

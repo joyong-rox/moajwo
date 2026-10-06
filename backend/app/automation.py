@@ -60,7 +60,7 @@ def rules_from_session(db: Session, session: ReviewSession) -> dict[str, Any]:
     return {"columns": list(columns.values()), "entities": entities}
 
 
-def save_from_run(db: Session, run: IntegrationRun, name: str) -> Automation:
+def save_from_run(db: Session, run: IntegrationRun, name: str, owner_id: int | None = None) -> Automation:
     name = name.strip()
     if not name:
         raise AutomationError("자동화 이름을 입력하세요.")
@@ -71,13 +71,15 @@ def save_from_run(db: Session, run: IntegrationRun, name: str) -> Automation:
     session = db.get(ReviewSession, run.review_session_id) if run.review_session_id is not None else None
     if session is None:
         raise AutomationError("이 실행의 검토 기록이 없어 규칙을 저장할 수 없습니다.")
-    if db.scalar(select(Automation.id).where(Automation.name == name)) is not None:
+    mine = Automation.owner_id.is_(None) if owner_id is None else Automation.owner_id == owner_id
+    if db.scalar(select(Automation.id).where(Automation.name == name, mine)) is not None:
         raise AutomationError(f"같은 이름의 자동화가 이미 있습니다: {name}")
     rules = rules_from_session(db, session)
     params = json.loads(session.params)
     summary = json.loads(run.summary or "{}")
     automation = Automation(
         name=name,
+        owner_id=owner_id,
         source_run_id=run.id,
         column_rules=json.dumps(rules["columns"], ensure_ascii=False),
         entity_rules=json.dumps(rules["entities"], ensure_ascii=False),
@@ -104,6 +106,7 @@ def run_automation(
     expected_period: str | None,
     baseline_file_ids: list[int] | None = None,
     use_llm: bool = True,
+    user_id: int | None = None,
 ) -> tuple[IntegrationRun, ReviewSession]:
     """새 파일에 자동화 규칙을 적용한다. 확인할 항목이 없으면 바로 통합 결과까지 만들고(완료),
     새 열 등 확인할 항목이 남으면 실행 기록을 '검토'로 남긴다 (검토 패널에서 이어서 처리)."""
@@ -126,10 +129,11 @@ def run_automation(
         "entity_field": validation.get("entity_field"),
         "change_threshold": validation.get("change_threshold") or 0.5,
     }
-    session = create_session(db, params, use_llm=use_llm, automation=automation)
+    session = create_session(db, params, use_llm=use_llm, automation=automation, user_id=user_id)
     run = IntegrationRun(
         review_session_id=session.id,
         automation_id=automation.id,
+        user_id=user_id,
         trigger="automation",
         status="review",
         input_file_count=len(file_ids),

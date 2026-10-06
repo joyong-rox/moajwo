@@ -65,6 +65,7 @@ function Automations() {
                 <strong>{a.name}</strong>
                 <span>
                   열 규칙 {a.column_rules.length} · 이름 연결 {Object.keys(a.entity_rules).length} · 실행 {a.run_count}회
+                  {a.owner_name && ` · ${a.owner_name}`}
                 </span>
               </button>
             </li>

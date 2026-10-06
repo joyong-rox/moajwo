@@ -34,6 +34,7 @@ from app.glossary_api import get_glossary
 from app.mapping import ColumnMapping, get_engine
 from app.models import Automation, IntegrationRun, ReviewSession, RunChange
 from app.parsing import Cell, is_missing
+from app.promotion import load_standard
 from app.review import mapping_reason, session_items, summarize
 from app.validation import EntityResolver
 
@@ -214,7 +215,7 @@ def build(db: Session, session: ReviewSession) -> _Built:
         raise IntegrationError("통합할 파일이 없습니다 (모두 제외됨).")
 
     engine = get_engine()
-    learned = load_learned(db)
+    learned, standard = load_learned(db, session.created_by), load_standard(db)
     glossary = get_glossary(db)
     items = session_items(db, session)
     choices = {
@@ -241,7 +242,12 @@ def build(db: Session, session: ReviewSession) -> _Built:
         info: dict[str, Any] = {"id": fid, "name": record.original_name, "excluded": False, "sheets": []}
         for sheet in parsed.sheets:
             mappings = engine.map_columns(
-                sheet.columns, sheet.samples, use_llm=False, learned=learned, decisions=decisions.get(sheet.name)
+                sheet.columns,
+                sheet.samples,
+                use_llm=False,
+                learned=learned,
+                decisions=decisions.get(sheet.name),
+                standard=standard,
             ).columns
             columns, dropped = _columns(sheet.columns, mappings)
             for d in dropped:
@@ -528,6 +534,7 @@ def integrate(db: Session, session: ReviewSession) -> IntegrationRun:
         run = IntegrationRun(
             trigger="automation" if session.automation_id else "manual",
             automation_id=session.automation_id,
+            user_id=session.created_by,
             started_at=started,
         )
         db.add(run)
