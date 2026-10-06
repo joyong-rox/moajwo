@@ -341,6 +341,9 @@ def _correction_items(loaded: _Loaded) -> list[ReviewItem]:
                     "천 단위 쉼표·공백을 지웁니다."
                 )
                 before, after = f'"{c["before"]}"', _fmt(c["after"])
+            elif c["kind"] == "trim":
+                reason = f"'{column}' 열의 값 {c['count']}칸({where})에서 앞뒤 공백을 지웁니다."
+                before, after = f'"{c["before"]}"', str(c["after"])
             else:
                 reason = f"'{column}' 열의 병합 셀 {c['count']}칸({where})을 위쪽 값 '{c['after']}'(으)로 채웁니다."
                 before, after = "(빈 칸)", str(c["after"])
@@ -409,6 +412,9 @@ def _entity_items(
                         continue
                     if normalize_name(name) == normalize_name(res.ref.name):
                         continue
+                    if field_key == "sigungu" and " " in res.ref.name and " " in name:
+                        if normalize_name(name.split(" ", 1)[1]) == normalize_name(res.ref.name.split(" ", 1)[1]):
+                            continue
                     key = (field_key, name)
                     if key in seen:
                         payload = json.loads(seen[key].payload)

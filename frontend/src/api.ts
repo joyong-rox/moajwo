@@ -402,3 +402,31 @@ export async function recheckReview(reviewId: number, replace: Record<number, nu
     }),
   )
 }
+
+export type IntegrationRun = {
+  id: number
+  review_session_id: number | null
+  status: 'done' | 'failed' | 'running'
+  file_name: string | null
+  row_count: number
+  change_count: number
+  warning_count: number
+  summary: {
+    processed_at?: string
+    cell_change_count?: number
+    column_change_count?: number
+    change_counts?: Record<string, number>
+  }
+  error: string | null
+  created_at: string
+}
+
+export const runDownloadUrl = (runId: number) => `${API_BASE}/runs/${runId}/download`
+
+export async function integrateReview(reviewId: number): Promise<IntegrationRun> {
+  return json(await fetch(`${API_BASE}/reviews/${reviewId}/integrate`, { method: 'POST' }))
+}
+
+export async function listRuns(reviewId: number): Promise<IntegrationRun[]> {
+  return json(await fetch(`${API_BASE}/runs?review_id=${reviewId}`))
+}

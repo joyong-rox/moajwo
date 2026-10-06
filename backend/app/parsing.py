@@ -389,6 +389,8 @@ def _corrections(
                 kind, before = "ffill", None
             elif isinstance(original, str) and isinstance(value, int | float) and not isinstance(value, bool):
                 kind, before = "number", mask_cell(original.strip())
+            elif isinstance(original, str) and isinstance(value, str) and original != value:
+                kind, before = "trim", mask_cell(original)
             else:
                 continue
             item = found.setdefault(
@@ -432,10 +434,17 @@ def analyze_sheet(name: str, raw: list[list[Any]], filled: set[tuple[int, int]] 
                     bucket.append(shown)
         missing = [j for j, c in enumerate(row) if is_missing(c)] if kind == "data" else []
         missing_total += len(missing)
-        entry = {"row": body_start + offset + 1, "kind": kind, "cells": row, "missing": missing}
-        body.append(entry)  # 검증용 원래 값 (응답으로 내보내지 않음)
+        r = body_start + offset
+        source = raw[r] if r < len(raw) else []
+        # 파일에 적힌 그대로의 값 (병합 채움 전 = 빈 칸). 통합 결과에서 바뀐 셀을 빠짐없이 찾는 데 쓴다.
+        original = [
+            None if (r, j) in (filled or ()) else (source[j] if j < len(source) else None) for j in range(width)
+        ]
+        entry = {"row": r + 1, "kind": kind, "cells": row, "missing": missing, "original": original}
+        body.append(entry)  # 검증·통합용 값 (응답으로 내보내지 않음)
         if len(preview) < PREVIEW_ROWS:
-            preview.append({**entry, "cells": [mask_cell(c) for c in row]})
+            masked = [mask_cell(c) for c in row]
+            preview.append({"row": entry["row"], "kind": kind, "cells": masked, "missing": missing})
         if kind == "note":
             note_texts.extend(c for c in dict.fromkeys(row) if isinstance(c, str))
 

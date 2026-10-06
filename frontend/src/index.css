@@ -1154,3 +1154,35 @@ body {
   background: var(--bg);
   font: inherit;
 }
+
+/* ---- 통합 결과 (단계 6) : integration-* 클래스만 사용 ---- */
+.integration {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--pass-text);
+  border-radius: 8px;
+  background: var(--pass-bg);
+}
+
+.integration-latest {
+  margin-top: 8px;
+}
+
+.integration-title {
+  margin: 0 0 6px;
+  font-weight: 600;
+}
+
+.integration a {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.integration-history {
+  margin-top: 8px;
+  font-size: 0.875rem;
+}
+
+.integration-history summary {
+  cursor: pointer;
+}

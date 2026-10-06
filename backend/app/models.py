@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Date, DateTime, Float, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -155,3 +155,47 @@ class ReviewItem(Base):
     decision: Mapped[str | None] = mapped_column(String(16))
     choice: Mapped[str | None] = mapped_column(String(64))  # 승인 시 고른 값 (표준 항목 key / 7자리 코드)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class IntegrationRun(Base):
+    """통합 실행. 검토가 끝난 세션으로 새 결과 파일을 만든다 (원본은 덮어쓰지 않음)."""
+
+    __tablename__ = "integration_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    review_session_id: Mapped[int | None] = mapped_column(ForeignKey("review_sessions.id", ondelete="SET NULL"))
+    status: Mapped[str] = mapped_column(String(16))  # done / failed
+    output_path: Mapped[str | None] = mapped_column(String(1024))  # DATA_DIR 기준 상대 경로
+    output_sha256: Mapped[str | None] = mapped_column(String(64))
+    file_ids: Mapped[str] = mapped_column(Text)  # JSON (통합에 포함한 파일)
+    row_count: Mapped[int] = mapped_column(default=0)
+    change_count: Mapped[int] = mapped_column(default=0)
+    warning_count: Mapped[int] = mapped_column(default=0)
+    summary: Mapped[str] = mapped_column(Text, default="{}")  # JSON (처리 요약)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RunChange(Base):
+    """통합 실행에서 바뀐 값 하나. 통합 결과에서 원본과 달라진 셀(그리고 열 이름 매핑)은 모두 여기에 기록한다.
+
+    output_row: 결과 파일 '통합 데이터' 시트의 행 번호 (열 이름 변경은 헤더 행 1)
+    kind: ffill(병합 셀 채움) / number(숫자 변환) / trim(공백 정리) / entity(이름 정규화) / column(열 이름 매핑) / other
+    """
+
+    __tablename__ = "run_changes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("integration_runs.id", ondelete="CASCADE"), index=True)
+    source_file_id: Mapped[int | None] = mapped_column(ForeignKey("source_files.id", ondelete="SET NULL"))
+    file_name: Mapped[str] = mapped_column(String(255))
+    sheet: Mapped[str] = mapped_column(String(255))
+    source_row: Mapped[int | None]
+    output_row: Mapped[int]
+    column: Mapped[str] = mapped_column(String(255))  # 결과 파일의 열 이름
+    source_column: Mapped[str] = mapped_column(String(255))  # 원본 파일의 열 이름
+    kind: Mapped[str] = mapped_column(String(16))
+    before: Mapped[str | None] = mapped_column(Text)
+    after: Mapped[str | None] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(Float)

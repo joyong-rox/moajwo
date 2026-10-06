@@ -13,6 +13,7 @@ import {
   type ReviewItem,
   type ValidationRequest,
 } from './api'
+import IntegrationResult from './IntegrationResult'
 
 const KIND_LABEL: Record<string, string> = {
   mapping: '열 매핑',
@@ -20,6 +21,7 @@ const KIND_LABEL: Record<string, string> = {
   pii: '개인정보',
   number: '숫자 변환',
   ffill: '병합 셀 채움',
+  trim: '공백 정리',
   header: '헤더 결합',
   sum_mismatch: '합계 불일치',
   required_entity_missing: '필수 기관 누락',
@@ -204,6 +206,7 @@ function ReviewPanel({ request, onClose }: { request: ValidationRequest; onClose
                 {message}
               </p>
             )}
+            {review.status === 'ready' && <IntegrationResult reviewId={review.id} />}
             <details className="review-replace">
               <summary>원본을 고친 파일로 바꿔 다시 검사</summary>
               <p className="upload-drop-hint">
