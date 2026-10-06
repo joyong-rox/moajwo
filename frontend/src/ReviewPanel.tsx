@@ -3,6 +3,7 @@ import {
   completeReview,
   createReview,
   decideReviewItem,
+  getReview,
   listFiles,
   recheckReview,
   setRememberFormat,
@@ -47,7 +48,15 @@ function location(item: ReviewItem) {
 }
 
 /** 통합 전 사전 검토 패널: 품질 점수 → 보정 예정 항목(이전 → 이후, 근거 펼치기) → 기억하기·검토 완료 */
-function ReviewPanel({ request, onClose }: { request: ValidationRequest; onClose: () => void }) {
+function ReviewPanel({
+  request,
+  reviewId,
+  onClose,
+}: {
+  request?: ValidationRequest
+  reviewId?: number // 이미 만든 검토(자동화 실행에서 확인할 항목이 남은 경우)를 이어서 연다
+  onClose: () => void
+}) {
   const [review, setReview] = useState<Review | null>(null)
   const [loading, setLoading] = useState(true)
   const [busyItem, setBusyItem] = useState<number | null>(null)
@@ -60,7 +69,9 @@ function ReviewPanel({ request, onClose }: { request: ValidationRequest; onClose
   useEffect(() => {
     // 패널이 열릴 때 한 번 검토를 만든다 (새로 열면 App이 패널을 새로 만든다)
     let cancelled = false
-    createReview(request)
+    const load = reviewId !== undefined ? getReview(reviewId) : request ? createReview(request) : null
+    if (load === null) return
+    load
       .then((r) => !cancelled && setReview(r))
       .catch((err: unknown) => !cancelled && setError(`검토를 만들지 못했습니다: ${errorText(err)}`))
       .finally(() => !cancelled && setLoading(false))
@@ -70,7 +81,7 @@ function ReviewPanel({ request, onClose }: { request: ValidationRequest; onClose
     return () => {
       cancelled = true
     }
-  }, [request])
+  }, [request, reviewId])
 
   async function recheck(current: Review) {
     // 이전 검토의 승인/거부·제외·기억하기 선택을 이어받아 새 검사 세션을 만든다
@@ -249,6 +260,11 @@ function ScoreHeader({ review }: { review: Review }) {
         <span>/ 100</span>
       </div>
       <div className="review-score-text">
+        {review.automation_name && (
+          <p className="review-automation">
+            자동화 '{review.automation_name}'의 규칙을 적용한 검토입니다 — 저장된 규칙에 없는 새 열 등만 확인하면 됩니다.
+          </p>
+        )}
         <p className="review-summary">{review.summary}</p>
         <p className="review-counts">
           <span className="review-chip is-block">차단 {review.counts.block}</span>

@@ -19,8 +19,8 @@ from app.decisions import DecisionInput, learn_column, load_decisions, load_lear
 from app.files import load_parsed
 from app.glossary import normalize_name
 from app.glossary_api import get_glossary
-from app.mapping import ColumnMapping, MappingEngine, get_engine
-from app.models import GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile
+from app.mapping import ColumnMapping, MappingEngine, get_engine, normalize, split_column_name
+from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile
 from app.parsing import FileResult, SheetResult
 from app.pii import PII_LABEL
 from app.validation import (
@@ -121,6 +121,43 @@ def entity_reason(status: str, value: str, note: str | None, candidates: list[di
     return f"{note or f'{value}은(는) 기준일에 유효하지 않은 항목입니다.'}{tail}"
 
 
+# ---------------------------------------------------------------- 자동화 규칙
+
+
+def column_rule_key(column: str) -> str:
+    """자동화 열 규칙의 키: 연도·단위 괄호·공백을 뺀 열 이름 (매월 바뀌는 '2026년' 등은 같은 열로 본다)."""
+    return split_column_name(column).primary or normalize(column)
+
+
+@dataclass
+class AutomationRules:
+    name: str
+    columns: dict[str, str | None]  # 열 규칙 키 → 표준 항목 key (None = 해당 없음)
+    entities: dict[str, str | None]  # 정규화한 이름 → 7자리 코드 (None = 바꾸지 않음)
+
+    @classmethod
+    def of(cls, automation: Automation) -> AutomationRules:
+        return cls(
+            automation.name,
+            {r["key"]: r["field_key"] for r in json.loads(automation.column_rules)},
+            {normalize_name(k): v for k, v in json.loads(automation.entity_rules).items()},
+        )
+
+
+def _apply_column_rules(db: Session, engine: MappingEngine, file_id: int, rules: AutomationRules) -> None:
+    """자동화의 열 규칙을 이 파일의 매핑 확정으로 기록한다 (이 파일에서 사용자가 이미 확정한 열은 그대로 둔다)."""
+    _, parsed = load_parsed(db, file_id)
+    existing = load_decisions(db, file_id)
+    inputs = [
+        DecisionInput(sheet.name, column, rules.columns[column_rule_key(column)])
+        for sheet in parsed.sheets
+        for column in sheet.columns
+        if column_rule_key(column) in rules.columns and column not in existing.get(sheet.name, {})
+    ]
+    if inputs:
+        save_decisions(db, engine, file_id, inputs, learn=False)
+
+
 # ---------------------------------------------------------------- 세션 만들기
 
 
@@ -167,10 +204,20 @@ def _file_input(loaded: _Loaded) -> FileInput:
     )
 
 
-def create_session(db: Session, params: dict[str, Any], use_llm: bool = True) -> ReviewSession:
+def create_session(
+    db: Session, params: dict[str, Any], use_llm: bool = True, automation: Automation | None = None
+) -> ReviewSession:
     """검토 세션을 만든다. params: file_ids, baseline_file_ids, expected_period, required_entities, entity_field,
-    change_threshold (검증 API와 같은 조건)."""
+    change_threshold (검증 API와 같은 조건).
+
+    automation: 저장된 자동화로 실행하면 그 매핑·이름 연결 규칙을 먼저 적용해 자동 적용 항목으로 보여주고,
+    자동화에 없는 새 열만 확인 필요로 남긴다.
+    """
     engine = get_engine()
+    rules = AutomationRules.of(automation) if automation is not None else None
+    if rules is not None:
+        for fid in dict.fromkeys(params["file_ids"]):
+            _apply_column_rules(db, engine, fid, rules)
     learned = load_learned(db)
     targets = [_load(db, fid, engine, learned, use_llm) for fid in dict.fromkeys(params["file_ids"])]
     baseline = [_load(db, fid, engine, learned, False) for fid in dict.fromkeys(params.get("baseline_file_ids", []))]
@@ -192,15 +239,16 @@ def create_session(db: Session, params: dict[str, Any], use_llm: bool = True) ->
         excluded_file_ids="[]",
         validation_run_id=run.id,
         remember_format=False,
+        automation_id=automation.id if automation is not None else None,
     )
     db.add(session)
     db.flush()
     items = _validation_items(result) + _pii_items(targets)
     for loaded in targets:
-        items += _mapping_items(loaded)
+        items += _mapping_items(loaded, rules)
         items += _correction_items(loaded)
     labels = {f.key: f.label for f in engine.fields}
-    items += _entity_items(result, files, EntityResolver(glossary, vparams.expected_period), labels)
+    items += _entity_items(result, files, EntityResolver(glossary, vparams.expected_period), labels, rules)
     for item in items:
         item.session_id = session.id
         db.add(item)
@@ -290,11 +338,15 @@ def _pii_items(targets: list[_Loaded]) -> list[ReviewItem]:
     return items
 
 
-def _mapping_items(loaded: _Loaded) -> list[ReviewItem]:
+def _mapping_items(loaded: _Loaded, rules: AutomationRules | None = None) -> list[ReviewItem]:
     items = []
     for sheet in loaded.parsed.sheets:
         for m in loaded.mappings[sheet.name]:
             reason, source = mapping_reason(m)
+            in_rules = rules is not None and column_rule_key(m.column) in rules.columns
+            if rules is not None and in_rules and m.status == "confirmed":
+                target = f"'{m.field_label}'" if m.field_key else "'해당 없음'"
+                reason, source = f"자동화 '{rules.name}'의 매핑 규칙을 적용했습니다 ('{m.column}' → {target}).", "rule"
             label = (m.field_label or "") + (f" ({m.qualifier})" if m.qualifier else "")
             payload = {
                 "field_key": m.field_key,
@@ -310,12 +362,18 @@ def _mapping_items(loaded: _Loaded) -> list[ReviewItem]:
                 "before": m.column,
                 "payload": payload,
             }
-            if m.status in ("auto", "confirmed"):
+            if rules is not None and not in_rules and m.status == "auto":
+                # 자동화에 없는 새 열은 사전 자동 매핑이 되더라도 한 번 확인받는다
+                reason = f"자동화 '{rules.name}'에 없는 새 열입니다. {reason}"
+                items.append(_item("pending", "mapping", reason, source=source, after=label, **common))
+            elif m.status in ("auto", "confirmed"):
                 after = label if m.field_key else "(해당 없음)"
                 decision = "approved" if m.status == "confirmed" else None
                 items.append(_item("auto", "mapping", reason, source=source, after=after, decision=decision, **common))
             else:
                 after = label if m.field_key else "(매핑 없음)"
+                if rules is not None and not in_rules:
+                    reason = f"자동화 '{rules.name}'에 없는 새 열입니다. {reason}"
                 items.append(_item("pending", "mapping", reason, source=source, after=after, **common))
     return items
 
@@ -379,12 +437,27 @@ def _header_items(loaded: _Loaded, sheet: SheetResult) -> list[ReviewItem]:
 
 
 def _entity_items(
-    result: ValidationResult, files: list[FileInput], resolver: EntityResolver, labels: dict[str, str]
+    result: ValidationResult,
+    files: list[FileInput],
+    resolver: EntityResolver,
+    labels: dict[str, str],
+    rules: AutomationRules | None = None,
 ) -> list[ReviewItem]:
     """labels: 표준 항목 key → 한국어 이름 (위치 표시에 내부 key를 노출하지 않음)"""
     items = []
     for e in result.entities:
         first = e.candidates[0] if e.candidates else None
+        ruled = _entity_rule_item(e.value, e.candidates, rules)
+        if ruled is not None:
+            ruled.file_name = ", ".join(e.files)
+            ruled.column = labels.get(e.field, e.field)
+            ruled.payload = json.dumps(
+                {"status": e.status, "candidates": e.candidates, "field": e.field, "count": e.count},
+                ensure_ascii=False,
+                default=str,
+            )
+            items.append(ruled)
+            continue
         items.append(
             _item(
                 "pending",
@@ -440,6 +513,23 @@ def _entity_items(
                         payload={"code": res.ref.code, "count": 1, "via": res.via},
                     )
     return items + list(seen.values())
+
+
+def _entity_rule_item(value: str, candidates: list[dict[str, Any]], rules: AutomationRules | None) -> ReviewItem | None:
+    """자동화에 저장된 이름 연결을 적용한 자동 항목. 규칙이 없거나 저장한 코드가 지금 후보에 없으면 None(확인 필요)."""
+    if rules is None or normalize_name(value) not in rules.entities:
+        return None
+    code = rules.entities[normalize_name(value)]
+    if code is None:
+        reason = f"자동화 '{rules.name}'의 규칙에 따라 '{value}'은(는) 바꾸지 않고 그대로 둡니다."
+        return _item("auto", "entity", reason, before=value, after=f"{value} (그대로)", decision="rejected")
+    picked = next((c for c in candidates if c["code"] == code), None)
+    if picked is None:
+        return None
+    reason = f"자동화 '{rules.name}'의 규칙에 따라 '{value}'을(를) '{picked['name']}'({code})(으)로 연결합니다."
+    return _item(
+        "auto", "entity", reason, before=value, after=f"{picked['name']} ({code})", decision="approved", choice=code
+    )
 
 
 # ---------------------------------------------------------------- 상태·점수
@@ -631,7 +721,8 @@ def recheck(db: Session, old: ReviewSession, replace: dict[int, int] | None = No
 
     params["file_ids"] = new_ids
     params["replaced_files"] = {str(k): v for k, v in replace.items()}
-    session = create_session(db, params)
+    automation = db.get(Automation, old.automation_id) if old.automation_id is not None else None
+    session = create_session(db, params, automation=automation)
     session.parent_id = old.id
     session.remember_format = old.remember_format
     # 교체한 파일은 새 내용이므로 제외·개인정보 확인을 새로 받는다

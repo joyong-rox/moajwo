@@ -13,40 +13,91 @@ from sqlalchemy.orm import Session
 
 from app.config import DATA_DIR
 from app.db import get_session
-from app.integration import IntegrationError, integrate
-from app.models import IntegrationRun, ReviewSession, RunChange
+from app.integration import KST, IntegrationError, integrate
+from app.models import Automation, IntegrationRun, ReviewSession, RunChange
 
 router = APIRouter(tags=["integration"])
 
 XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+STATUS_LABEL = {"done": "완료", "review": "검토", "failed": "실패", "running": "실행 중"}
+
+
 class RunOut(BaseModel):
     id: int
     review_session_id: int | None
     status: str
+    status_label: str  # 완료 / 검토 / 실패
+    trigger: str  # manual / automation
+    automation_id: int | None
+    automation_name: str | None
+    input_file_count: int
     file_name: str | None
+    output_path: str | None  # 결과 파일 경로 (data/outputs/…)
     row_count: int
     change_count: int
     warning_count: int
     summary: dict[str, Any]
     error: str | None
     created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    duration_ms: int | None  # 시작부터 종료까지 (검토 대기 중이면 없음)
 
 
-def run_out(run: IntegrationRun) -> RunOut:
+def _aware(value: datetime) -> datetime:
+    """SQLite는 시간대 없이 돌려주므로 저장할 때 쓴 KST로 본다."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=KST)
+
+
+def run_out(run: IntegrationRun, automation_name: str | None = None) -> RunOut:
+    duration = None
+    if run.started_at is not None and run.finished_at is not None:
+        duration = max(0, round((_aware(run.finished_at) - _aware(run.started_at)).total_seconds() * 1000))
     return RunOut(
         id=run.id,
         review_session_id=run.review_session_id,
         status=run.status,
+        status_label=STATUS_LABEL.get(run.status, run.status),
+        trigger=run.trigger,
+        automation_id=run.automation_id,
+        automation_name=automation_name,
+        input_file_count=run.input_file_count,
         file_name=Path(run.output_path).name if run.output_path else None,
+        output_path=f"data/{run.output_path}" if run.output_path else None,
         row_count=run.row_count,
         change_count=run.change_count,
         warning_count=run.warning_count,
         summary=json.loads(run.summary or "{}"),
         error=run.error,
         created_at=run.created_at,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        duration_ms=duration,
     )
+
+
+def runs_out(db: Session, runs: list[IntegrationRun]) -> list[RunOut]:
+    ids = {r.automation_id for r in runs if r.automation_id is not None}
+    names: dict[int, str] = {}
+    if ids:
+        names = {i: n for i, n in db.execute(select(Automation.id, Automation.name).where(Automation.id.in_(ids)))}
+    out = [run_out(r, names.get(r.automation_id) if r.automation_id else None) for r in runs]
+    for o in out:
+        if o.status == "review" and o.review_session_id is not None:
+            o.review_session_id = _latest_session(db, o.review_session_id)
+    return out
+
+
+def _latest_session(db: Session, session_id: int) -> int:
+    """검토 대기 실행은 다시 검사한 최신 검토를 가리킨다 (이전 검토는 대체됨)."""
+    for _ in range(100):
+        child = db.scalar(select(ReviewSession.id).where(ReviewSession.parent_id == session_id))
+        if child is None:
+            break
+        session_id = child
+    return session_id
 
 
 @router.post("/reviews/{review_id}/integrate", response_model=RunOut, status_code=status.HTTP_201_CREATED)
@@ -59,19 +110,23 @@ def integrate_review(review_id: int, db: Annotated[Session, Depends(get_session)
         run = integrate(db, session)
     except IntegrationError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    return run_out(run)
+    return runs_out(db, [run])[0]
 
 
 @router.get("/runs", response_model=list[RunOut])
 def list_runs(
     db: Annotated[Session, Depends(get_session)],
     review_id: int | None = None,
+    automation_id: int | None = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[RunOut]:
+    """실행 기록 (최신 순)."""
     stmt = select(IntegrationRun).order_by(IntegrationRun.id.desc()).limit(limit)
     if review_id is not None:
         stmt = stmt.where(IntegrationRun.review_session_id == review_id)
-    return [run_out(r) for r in db.scalars(stmt)]
+    if automation_id is not None:
+        stmt = stmt.where(IntegrationRun.automation_id == automation_id)
+    return runs_out(db, list(db.scalars(stmt)))
 
 
 def _get(db: Session, run_id: int) -> IntegrationRun:
@@ -83,7 +138,7 @@ def _get(db: Session, run_id: int) -> IntegrationRun:
 
 @router.get("/runs/{run_id}", response_model=RunOut)
 def get_run(run_id: int, db: Annotated[Session, Depends(get_session)]) -> RunOut:
-    return run_out(_get(db, run_id))
+    return runs_out(db, [_get(db, run_id)])[0]
 
 
 class ChangeOut(BaseModel):

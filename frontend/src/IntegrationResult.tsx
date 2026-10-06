@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { integrateReview, listRuns, runDownloadUrl, type IntegrationRun } from './api'
+import { integrateReview, listRuns, runDownloadUrl, saveAutomation, type Automation, type IntegrationRun } from './api'
 
 const CHANGE_LABEL: Record<string, string> = {
   ffill: '병합 셀 채움',
@@ -43,6 +43,7 @@ function IntegrationResult({ reviewId }: { reviewId: number }) {
   }
 
   const latest = runs.find((r) => r.status === 'done')
+  const finished = runs.filter((r) => r.status !== 'review')
   return (
     <div className="integration">
       <div className="review-actions">
@@ -78,11 +79,12 @@ function IntegrationResult({ reviewId }: { reviewId: number }) {
           </p>
         </div>
       )}
-      {runs.length > 1 && (
+      {latest && <SaveAutomation run={latest} />}
+      {finished.length > 1 && (
         <details className="integration-history">
-          <summary>이 검토로 만든 결과 {runs.length}개</summary>
+          <summary>이 검토로 만든 결과 {finished.length}개</summary>
           <ul>
-            {runs.map((r) => (
+            {finished.map((r) => (
               <li key={r.id}>
                 #{r.id} ·{' '}
                 {r.status === 'done' ? (
@@ -97,6 +99,66 @@ function IntegrationResult({ reviewId }: { reviewId: number }) {
         </details>
       )}
     </div>
+  )
+}
+
+/** 완료된 실행의 승인된 매핑 규칙·검증 조건·출력 형식을 자동화로 저장한다 (입력 파일은 저장하지 않음). */
+function SaveAutomation({ run }: { run: IntegrationRun }) {
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [saved, setSaved] = useState<Automation | null>(null)
+
+  async function save() {
+    setBusy(true)
+    setError(null)
+    try {
+      setSaved(await saveAutomation(run.id, name.trim()))
+    } catch (err) {
+      setError(`저장 실패: ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (saved) {
+    return (
+      <p className="integration-automation-saved" role="status">
+        자동화 '{saved.name}'(으)로 저장했습니다 — 열 규칙 {saved.column_rules.length}개, 이름 연결{' '}
+        {Object.keys(saved.entity_rules).length}개. 상단 '자동화' 메뉴에서 새 파일로 실행하세요.
+      </p>
+    )
+  }
+  return (
+    <form
+      className="integration-automation"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (name.trim()) void save()
+      }}
+    >
+      <label>
+        자동화 이름
+        <input
+          type="text"
+          value={name}
+          maxLength={100}
+          placeholder="예: 월간 예산 집행 취합"
+          onChange={(e) => setName(e.target.value)}
+        />
+      </label>
+      <button type="submit" className="mapping-confirm" disabled={busy || !name.trim()}>
+        {busy ? '저장 중…' : '자동화로 저장'}
+      </button>
+      <p className="upload-drop-hint">
+        승인한 열 매핑 규칙, 기관·지역 이름 연결, 검증 조건, 결과 열 순서를 저장합니다. 입력 파일은 저장하지 않습니다.
+      </p>
+      {error && (
+        <p className="upload-error" role="alert">
+          {error}
+        </p>
+      )}
+    </form>
   )
 }
 

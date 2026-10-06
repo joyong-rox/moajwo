@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_session
-from app.models import ReviewItem, ReviewSession, SourceFile
+from app.models import Automation, ReviewItem, ReviewSession, SourceFile
 from app.review import (
     ReviewError,
     changes,
@@ -71,11 +71,14 @@ class ReviewOut(BaseModel):
     child_id: int | None = None  # 이 세션을 이어받아 다시 검사한 세션 (대체된 경우)
     history: list[dict[str, Any]] = []  # 처음 검사부터 이 세션까지
     changes: dict[str, Any] | None = None  # 이전 검사 대비 변화
+    automation_id: int | None = None  # 저장된 자동화로 실행한 검토
+    automation_name: str | None = None
 
 
 def review_out(db: Session, session: ReviewSession, learned: dict[str, int] | None = None) -> ReviewOut:
     items = session_items(db, session)
     s = summarize(session, items)
+    automation = db.get(Automation, session.automation_id) if session.automation_id is not None else None
     excluded = set(json.loads(session.excluded_file_ids))
     files = []
     for fid in json.loads(session.file_ids):
@@ -126,6 +129,8 @@ def review_out(db: Session, session: ReviewSession, learned: dict[str, int] | No
         child_id=db.scalar(select(ReviewSession.id).where(ReviewSession.parent_id == session.id)),
         history=history(db, session),
         changes=changes(db, session),
+        automation_id=session.automation_id,
+        automation_name=automation.name if automation is not None else None,
     )
 
 

@@ -335,6 +335,8 @@ export type Review = {
   child_id: number | null
   history: { id: number; status: string; score: number; blocks: number; pending_open: number }[]
   changes: ReviewChanges | null
+  automation_id: number | null
+  automation_name: string | null
 }
 export type ReviewChangeItem = {
   category: ReviewCategory
@@ -406,7 +408,16 @@ export async function recheckReview(reviewId: number, replace: Record<number, nu
 export type IntegrationRun = {
   id: number
   review_session_id: number | null
-  status: 'done' | 'failed' | 'running'
+  status: 'done' | 'failed' | 'running' | 'review'
+  status_label: string
+  trigger: 'manual' | 'automation'
+  automation_id: number | null
+  automation_name: string | null
+  input_file_count: number
+  output_path: string | null
+  started_at: string | null
+  finished_at: string | null
+  duration_ms: number | null
   file_name: string | null
   row_count: number
   change_count: number
@@ -416,6 +427,7 @@ export type IntegrationRun = {
     cell_change_count?: number
     column_change_count?: number
     change_counts?: Record<string, number>
+    columns?: string[]
   }
   error: string | null
   created_at: string
@@ -429,4 +441,70 @@ export async function integrateReview(reviewId: number): Promise<IntegrationRun>
 
 export async function listRuns(reviewId: number): Promise<IntegrationRun[]> {
   return json(await fetch(`${API_BASE}/runs?review_id=${reviewId}`))
+}
+
+export async function getReview(reviewId: number): Promise<Review> {
+  return json(await fetch(`${API_BASE}/reviews/${reviewId}`))
+}
+
+export async function listAllRuns(limit = 100): Promise<IntegrationRun[]> {
+  return json(await fetch(`${API_BASE}/runs?limit=${limit}`))
+}
+
+export type ColumnRule = { key: string; column: string; field_key: string | null; field_label: string | null }
+export type Automation = {
+  id: number
+  name: string
+  source_run_id: number | null
+  column_rules: ColumnRule[]
+  entity_rules: Record<string, string | null>
+  validation: {
+    required_entities?: string[] | null
+    entity_field?: string | null
+    change_threshold?: number | null
+    expected_period?: string | null
+  }
+  output_format: { columns?: string[] }
+  created_at: string
+  updated_at: string | null
+  run_count: number
+  last_run: IntegrationRun | null
+}
+export type AutomationRunResult = {
+  run: IntegrationRun
+  review_id: number
+  counts: { block: number; pending: number; pending_open: number; auto: number; warning: number }
+  summary: string
+}
+
+export async function saveAutomation(runId: number, name: string): Promise<Automation> {
+  return json(
+    await fetch(`${API_BASE}/runs/${runId}/automation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    }),
+  )
+}
+
+export async function listAutomations(): Promise<Automation[]> {
+  return json(await fetch(`${API_BASE}/automations`))
+}
+
+export async function deleteAutomation(id: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/automations/${id}`, { method: 'DELETE' })
+  if (!res.ok) await json(res)
+}
+
+export async function runAutomation(
+  id: number,
+  body: { file_ids: number[]; baseline_file_ids: number[]; expected_period: string | null },
+): Promise<AutomationRunResult> {
+  return json(
+    await fetch(`${API_BASE}/automations/${id}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  )
 }

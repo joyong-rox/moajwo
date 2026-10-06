@@ -23,6 +23,7 @@ from openpyxl import Workbook
 from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import DATA_DIR
@@ -31,7 +32,7 @@ from app.files import load_parsed
 from app.glossary import EntityRef, Resolution, entity_ref, normalize_name
 from app.glossary_api import get_glossary
 from app.mapping import ColumnMapping, get_engine
-from app.models import IntegrationRun, ReviewSession, RunChange
+from app.models import Automation, IntegrationRun, ReviewSession, RunChange
 from app.parsing import Cell, is_missing
 from app.review import mapping_reason, session_items, summarize
 from app.validation import EntityResolver
@@ -217,9 +218,7 @@ def build(db: Session, session: ReviewSession) -> _Built:
     glossary = get_glossary(db)
     items = session_items(db, session)
     choices = {
-        i.before: i.choice
-        for i in items
-        if i.kind == "entity" and i.category == "pending" and i.decision == "approved" and i.choice and i.before
+        i.before: i.choice for i in items if i.kind == "entity" and i.decision == "approved" and i.choice and i.before
     }
     normalizer = _EntityNormalizer(EntityResolver(glossary, params.get("expected_period")), choices, session.id)
 
@@ -330,7 +329,26 @@ def build(db: Session, session: ReviewSession) -> _Built:
     # 열이 나중에 늘어난 경우 앞 행들의 길이를 맞춘다
     for row in built.rows:
         row.extend([None] * (len(built.labels) - len(row)))
+    if session.automation_id is not None:
+        automation = db.get(Automation, session.automation_id)
+        if automation is not None:
+            _apply_output_format(built, json.loads(automation.output_format).get("columns", []))
     return built
+
+
+def _apply_output_format(built: _Built, order: list[str]) -> None:
+    """저장된 자동화의 열 순서대로 결과 열을 정렬한다 (출처 열은 맨 앞, 새 열은 뒤에 붙임)."""
+    head = list(range(len(PROVENANCE)))
+    rest = [i for i in range(len(PROVENANCE), len(built.labels))]
+    rank = {label: n for n, label in enumerate(order)}
+    rest.sort(key=lambda i: (rank.get(built.labels[i], len(rank)), i))
+    new_order = head + rest
+    position = {old: new for new, old in enumerate(new_order)}
+    built.labels = [built.labels[i] for i in new_order]
+    built.rows = [[row[i] for i in new_order] for row in built.rows]
+    for ch in built.changes:
+        if ch.output_col is not None:
+            ch.output_col = position[ch.output_col - 1] + 1
 
 
 def _classify(original: Any, value: Any, c: _Column) -> tuple[str, str]:
@@ -483,20 +501,43 @@ def _output_path(run_id: int, now: datetime) -> Path:
     return OUTPUT_DIR / f"통합결과_{run_id:04d}_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
 
 
+def pending_run(db: Session, session: ReviewSession) -> IntegrationRun | None:
+    """자동화 실행으로 만든 '검토 대기' 실행 기록 (다시 검사한 세션이면 이전 세션의 기록)."""
+    current: ReviewSession | None = session
+    while current is not None:
+        run = db.scalar(
+            select(IntegrationRun).where(
+                IntegrationRun.review_session_id == current.id, IntegrationRun.status == "review"
+            )
+        )
+        if run is not None:
+            return run
+        current = db.get(ReviewSession, current.parent_id) if current.parent_id else None
+    return None
+
+
 def integrate(db: Session, session: ReviewSession) -> IntegrationRun:
+    started = datetime.now(KST)
+    run = pending_run(db, session)
     built = build(db, session)
     now = datetime.now(KST)
     items = session_items(db, session)
     warning_count = summarize(session, items).warnings
-    run = IntegrationRun(
-        review_session_id=session.id,
-        status="running",
-        file_ids=json.dumps([f["id"] for f in built.files if not f["excluded"]]),
-        row_count=len(built.rows),
-        warning_count=warning_count,
-        summary="{}",
-    )
-    db.add(run)
+    file_ids = [f["id"] for f in built.files if not f["excluded"]]
+    if run is None:
+        run = IntegrationRun(
+            trigger="automation" if session.automation_id else "manual",
+            automation_id=session.automation_id,
+            started_at=started,
+        )
+        db.add(run)
+    run.review_session_id = session.id
+    run.status = "running"
+    run.file_ids = json.dumps(file_ids)
+    run.input_file_count = len(json.loads(session.file_ids))
+    run.row_count = len(built.rows)
+    run.warning_count = warning_count
+    run.summary = "{}"
     db.commit()
 
     cell_changes = [c for c in built.changes if c.output_col is not None]
@@ -541,6 +582,7 @@ def integrate(db: Session, session: ReviewSession) -> IntegrationRun:
         run.output_sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
         run.change_count = len(built.changes)
         run.summary = json.dumps(summary, ensure_ascii=False, default=str)
+        run.finished_at = datetime.now(KST)
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -553,6 +595,7 @@ def integrate(db: Session, session: ReviewSession) -> IntegrationRun:
         if failed is not None:
             failed.status = "failed"
             failed.error = str(exc)[:1000]
+            failed.finished_at = datetime.now(KST)
             db.commit()
         logger.exception("integration run %s failed", run.id)
         raise IntegrationError(f"통합 결과를 만들지 못했습니다: {exc}") from exc

@@ -125,6 +125,7 @@ class ReviewSession(Base):
     excluded_file_ids: Mapped[str] = mapped_column(Text, default="[]")  # JSON (개인정보 거부 등으로 제외)
     validation_run_id: Mapped[int | None] = mapped_column(ForeignKey("validation_runs.id", ondelete="SET NULL"))
     remember_format: Mapped[bool] = mapped_column(default=False)
+    automation_id: Mapped[int | None] = mapped_column(ForeignKey("automations.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -158,13 +159,22 @@ class ReviewItem(Base):
 
 
 class IntegrationRun(Base):
-    """통합 실행. 검토가 끝난 세션으로 새 결과 파일을 만든다 (원본은 덮어쓰지 않음)."""
+    """실행 기록 (runs). 검토가 끝난 세션으로 새 결과 파일을 만든다 (원본은 덮어쓰지 않음).
 
-    __tablename__ = "integration_runs"
+    status: review(검토 대기 — 자동화 실행에서 확인할 항목이 남음) / running / done(완료) / failed(실패)
+    trigger: manual(검토 패널에서 직접) / automation(저장된 자동화로 실행)
+    """
+
+    __tablename__ = "runs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     review_session_id: Mapped[int | None] = mapped_column(ForeignKey("review_sessions.id", ondelete="SET NULL"))
-    status: Mapped[str] = mapped_column(String(16))  # done / failed
+    automation_id: Mapped[int | None] = mapped_column(ForeignKey("automations.id", ondelete="SET NULL"))
+    trigger: Mapped[str] = mapped_column(String(16), default="manual")
+    status: Mapped[str] = mapped_column(String(16))
+    input_file_count: Mapped[int] = mapped_column(default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     output_path: Mapped[str | None] = mapped_column(String(1024))  # DATA_DIR 기준 상대 경로
     output_sha256: Mapped[str | None] = mapped_column(String(64))
     file_ids: Mapped[str] = mapped_column(Text)  # JSON (통합에 포함한 파일)
@@ -186,7 +196,7 @@ class RunChange(Base):
     __tablename__ = "run_changes"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    run_id: Mapped[int] = mapped_column(ForeignKey("integration_runs.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), index=True)
     source_file_id: Mapped[int | None] = mapped_column(ForeignKey("source_files.id", ondelete="SET NULL"))
     file_name: Mapped[str] = mapped_column(String(255))
     sheet: Mapped[str] = mapped_column(String(255))
@@ -199,3 +209,25 @@ class RunChange(Base):
     after: Mapped[str | None] = mapped_column(Text)
     reason: Mapped[str] = mapped_column(Text)
     confidence: Mapped[float] = mapped_column(Float)
+
+
+class Automation(Base):
+    """저장된 자동화: 승인된 매핑 규칙·검증 조건·출력 형식 (입력 파일은 저장하지 않음).
+
+    column_rules: [{column, normalized, field_key(None=해당 없음), field_label}] — 열 이름 기준
+    entity_rules: {이름: 7자리 코드} — 검토에서 승인한 기관·지역 이름 연결
+    validation: {required_entities, entity_field, change_threshold, expected_period(지난 실행 값, 기본값으로만 사용)}
+    output_format: {columns: [결과 열 순서]}
+    """
+
+    __tablename__ = "automations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    source_run_id: Mapped[int | None]  # 저장한 실행 번호 (기록용, 외래키 순환을 피하려고 제약 없음)
+    column_rules: Mapped[str] = mapped_column(Text)
+    entity_rules: Mapped[str] = mapped_column(Text)
+    validation: Mapped[str] = mapped_column(Text)
+    output_format: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

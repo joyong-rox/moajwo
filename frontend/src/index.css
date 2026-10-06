@@ -1186,3 +1186,328 @@ body {
 .integration-history summary {
   cursor: pointer;
 }
+
+/* ---- 메뉴 · 자동화 · 실행 기록 (단계 7) : app-tab*, automation-*, runs-* 클래스만 사용 ---- */
+.app-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-tab {
+  min-height: 40px;
+  padding: 6px 14px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.app-tab.is-active {
+  margin-bottom: -1px;
+  border-color: var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.app-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.automation,
+.runs {
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+/* 실행 기록 표는 열이 많아 검토 패널처럼 화면 폭에 맞춰 넓게 펼친다 (.app 폭·여백은 그대로) */
+.runs {
+  box-sizing: border-box;
+  width: min(1120px, calc(100vw - 32px));
+  margin-left: 50%;
+  transform: translateX(-50%);
+}
+
+.automation h2,
+.runs h2 {
+  margin: 0 0 4px;
+  font-size: 1.125rem;
+}
+
+.automation-list {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.automation-pick {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.automation-pick span {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.automation-pick.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.automation-detail {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.automation-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.automation-detail-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  overflow-wrap: anywhere;
+}
+
+.automation-rules {
+  margin: 8px 0;
+  font-size: 0.875rem;
+}
+
+.automation-rules summary,
+.automation-files summary {
+  cursor: pointer;
+}
+
+.automation-rules ul {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+
+.automation-run {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.automation-upload,
+.automation-period {
+  display: grid;
+  gap: 4px;
+  font-size: 0.875rem;
+}
+
+.automation-upload input,
+.automation-period input {
+  max-width: 100%;
+  font: inherit;
+}
+
+.automation-period input {
+  width: 160px;
+  min-height: 32px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.automation-files {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.875rem;
+}
+
+.automation-files label {
+  overflow-wrap: anywhere;
+}
+
+.automation-run .mapping-run {
+  justify-self: start;
+}
+
+.automation-result {
+  margin-top: 12px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--tag-bg);
+  overflow-wrap: anywhere;
+}
+
+.integration-automation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--pass-text);
+}
+
+.integration-automation label {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 220px;
+  font-size: 0.875rem;
+}
+
+.integration-automation input {
+  min-height: 32px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.integration-automation p {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.integration-automation-saved {
+  margin: 12px 0 0;
+  font-weight: 600;
+}
+
+.review-automation {
+  margin: 0 0 4px;
+  color: var(--accent);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.runs-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 표가 넓으면 표만 가로로 스크롤한다 (페이지는 가로 스크롤 없음) */
+.runs-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.runs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.runs-table th,
+.runs-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.runs-table .runs-path {
+  min-width: 220px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.runs-status {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.runs-status.is-done {
+  border-color: var(--pass-text);
+  background: var(--pass-bg);
+  color: var(--pass-text);
+}
+
+.runs-status.is-review {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.runs-status.is-failed {
+  border-color: var(--block-border);
+  background: var(--block-bg);
+  color: var(--block-text);
+}
+
+.runs-path code {
+  font-size: 0.8rem;
+}
+
+/* 좁은 화면: 표를 행마다 카드로 보여준다 */
+@media (max-width: 640px) {
+  .runs-table thead {
+    display: none;
+  }
+
+  .runs-table tr {
+    display: block;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .runs-table td {
+    display: flex;
+    gap: 8px;
+    padding: 2px 0;
+    border-bottom: none;
+    white-space: normal;
+  }
+
+  .runs-table td::before {
+    content: attr(data-label);
+    flex: 0 0 72px;
+    color: var(--muted);
+  }
+
+  .runs-table .runs-path {
+    display: block;
+    min-width: 0;
+  }
+
+  .runs-table .runs-path::before {
+    display: block;
+  }
+}
