@@ -261,3 +261,26 @@ def test_blank_csv_cells_are_not_changes(client: TestClient) -> None:
     changes = client.get(f"/runs/{run['id']}/changes", params={"limit": 1000}).json()["items"]
     blanks = [c for c in changes if c["column"] in ("설치장소상세위치", "운영메모")]
     assert blanks == [] and "other" not in run["summary"]["change_counts"]
+
+
+def test_sigungu_full_name_kept_without_sido_column(client: TestClient) -> None:
+    """시도 열이 없으면 '서울특별시 강서구'를 '강서구'로 줄이지 않는다.
+
+    실제 자료(발급제증명 시군구명)에서 6만여 칸이 바뀌던 문제.
+    """
+    lines = ["시군구명,건수", "서울특별시 강서구,10", "부산광역시 강서구,20"]
+    fid = client.post(
+        "/files", files=[("files", ("시군구만.csv", "\r\n".join(lines).encode("cp949"), "text/csv"))]
+    ).json()[0]["id"]
+    review = client.post("/reviews", json={"file_ids": [fid]}).json()
+    for item in [i for i in review["items"] if i["category"] == "pending"]:
+        client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json={"decision": "rejected"})
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = client.post(f"/reviews/{review['id']}/integrate").json()
+    wb = openpyxl.load_workbook(io.BytesIO(client.get(f"/runs/{run['id']}/download").content))
+    data = wb[DATA_SHEET]
+    header = [c.value for c in data[1]]
+    j = header.index("시군구") + 1
+    assert [data.cell(row=r, column=j).value for r in (2, 3)] == ["서울특별시 강서구", "부산광역시 강서구"]
+    assert [data.cell(row=r, column=header.index("시군구 코드") + 1).value for r in (2, 3)] == ["3150000", "3360000"]
+    assert "entity" not in run["summary"]["change_counts"]

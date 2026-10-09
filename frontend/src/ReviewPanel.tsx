@@ -3,6 +3,7 @@ import {
   completeReview,
   createReview,
   decideReviewItem,
+  fetchFields,
   getReview,
   listFiles,
   recheckReview,
@@ -12,6 +13,7 @@ import {
   type StoredFile,
   type ReviewCategory,
   type ReviewItem,
+  type StandardFieldInfo,
   type ValidationRequest,
 } from './api'
 import IntegrationResult from './IntegrationResult'
@@ -69,6 +71,13 @@ function ReviewPanel({
   const [replace, setReplace] = useState<Record<number, number>>({})
   // 긴 근거 문장을 크게 보여주는 창
   const [reasonItem, setReasonItem] = useState<ReviewItem | null>(null)
+  // 열 매핑을 후보(유사도 상위) 밖의 표준 항목으로도 고를 수 있게 전체 표준 항목을 불러 둔다
+  const [fields, setFields] = useState<StandardFieldInfo[]>([])
+  useEffect(() => {
+    fetchFields()
+      .then(setFields)
+      .catch(() => undefined)
+  }, [])
 
   useEffect(() => {
     // 패널이 열릴 때 한 번 검토를 만든다 (새로 열면 App이 패널을 새로 만든다)
@@ -147,6 +156,7 @@ function ReviewPanel({
                 void run(item.id, () => decideReviewItem(review.id, item.id, decision, choice))
               }
               onOpenReason={setReasonItem}
+              fields={fields}
             />
           ))}
 
@@ -351,9 +361,10 @@ type GroupProps = {
   busyItem: number | null
   onDecide: (item: ReviewItem, decision: 'approved' | 'rejected', choice: string | null) => void
   onOpenReason: (item: ReviewItem) => void
+  fields: StandardFieldInfo[]
 }
 
-function ItemGroup({ review, category, title, hint, busyItem, onDecide, onOpenReason }: GroupProps) {
+function ItemGroup({ review, category, title, hint, busyItem, onDecide, onOpenReason, fields }: GroupProps) {
   const items = review.items.filter((i) => i.category === category)
   return (
     <section className={`review-group is-${category}`}>
@@ -379,6 +390,7 @@ function ItemGroup({ review, category, title, hint, busyItem, onDecide, onOpenRe
                 busy={busyItem === i.id}
                 onDecide={onDecide}
                 onOpenReason={onOpenReason}
+                fields={fields}
               />
             ))}
           </ul>
@@ -410,10 +422,14 @@ type RowProps = {
   busy?: boolean
   onDecide?: GroupProps['onDecide']
   onOpenReason?: (item: ReviewItem) => void
+  fields?: StandardFieldInfo[]
 }
 
-function ItemRow({ item, disabled, busy, onDecide, onOpenReason }: RowProps) {
+function ItemRow({ item, disabled, busy, onDecide, onOpenReason, fields = [] }: RowProps) {
   const choices = choicesOf(item)
+  // 후보에 없는 표준 항목 (열 매핑만)
+  const others =
+    item.kind === 'mapping' ? fields.filter((f) => !choices.some((c) => c.value === f.key)).map((f) => ({ value: f.key, label: f.label })) : []
   const initial = item.choice ?? (item.kind === 'mapping' ? item.payload.field_key ?? choices[0]?.value : choices[0]?.value) ?? ''
   const [choice, setChoice] = useState(initial)
   const stop = (e: MouseEvent) => {
@@ -442,26 +458,48 @@ function ItemRow({ item, disabled, busy, onDecide, onOpenReason }: RowProps) {
           </span>
           {item.category === 'pending' && onDecide ? (
             <span className="review-controls" onClick={stop}>
-              {choices.length > 0 && (
+              {(choices.length > 0 || others.length > 0) && (
                 <select
                   aria-label={`${item.before} 적용할 대상`}
                   value={choice}
                   disabled={disabled}
                   onChange={(e) => setChoice(e.target.value)}
                 >
-                  {choices.map((c) => (
-                    <option key={c.value} value={c.value}>
-                      {c.label}
-                    </option>
-                  ))}
+                  {choice === '' && <option value="">표준 항목 선택</option>}
+                  {others.length > 0 ? (
+                    <>
+                      {choices.length > 0 && (
+                      <optgroup label="추천 후보">
+                        {choices.map((c) => (
+                          <option key={c.value} value={c.value}>
+                            {c.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                      )}
+                      <optgroup label="다른 표준 항목">
+                        {others.map((c) => (
+                          <option key={c.value} value={c.value}>
+                            {c.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                    </>
+                  ) : (
+                    choices.map((c) => (
+                      <option key={c.value} value={c.value}>
+                        {c.label}
+                      </option>
+                    ))
+                  )}
                 </select>
               )}
               <button
                 type="button"
                 className="review-approve"
-                disabled={disabled || (choices.length === 0 && item.kind !== 'pii')}
+                disabled={disabled || (item.kind !== 'pii' && (choices.length === 0 && others.length === 0 || choice === ''))}
                 aria-pressed={item.decision === 'approved'}
-                onClick={() => onDecide(item, 'approved', choices.length ? choice : null)}
+                onClick={() => onDecide(item, 'approved', choices.length || others.length ? choice : null)}
               >
                 승인
               </button>

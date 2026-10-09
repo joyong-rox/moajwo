@@ -280,3 +280,32 @@ def test_csv_semicolon_and_tab_delimiters_still_detected(tmp_path: Path) -> None
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         sheet = parse_file(path, path.name).sheets[0]
         assert sheet.columns == ["시도", "인구"] and sheet.data_rows == 1
+
+
+def test_code_and_time_columns_stay_text_quantities_become_numbers(tmp_path: Path) -> None:
+    """코드·번호·시각 열은 글자 그대로, 수량 열만 숫자로 (실제 자료: 무인민원발급기 설치정보)."""
+    lines = [
+        "시도코드,관리번호,평일운영시작시각,평일운영종료시각,분류,인구,금액",
+        '6110000,523,0900,1800,011,"1,000",1500',
+        '6110000,524,0700,2200,120,"12,345",30',
+    ]
+    path = tmp_path / "codes.csv"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    sheet = parse_file(path, path.name).sheets[0]
+    rows = [r["cells"] for r in sheet.body]
+    assert rows[0][:5] == ["6110000", "523", "0900", "1800", "011"]  # 이름 표시(코드·번호·시각) / 앞자리 0
+    assert rows[1][:5] == ["6110000", "524", "0700", "2200", "120"]  # 같은 열은 모두 글자
+    assert rows[0][5:] == [1000, 1500] and rows[1][5:] == [12345, 30]  # 수량은 숫자
+    kinds = {(sheet.columns[c["column"]], c["kind"]) for c in sheet.corrections}
+    assert ("인구", "number") in kinds and not any(k == "number" and col.endswith(("코드", "시각")) for col, k in kinds)
+
+
+def test_excel_numbers_in_code_column_are_untouched(tmp_path: Path) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["행정구역코드", "인구"])
+    ws.append([11110, 100])
+    path = tmp_path / "n.xlsx"
+    wb.save(path)
+    sheet = parse_file(path, path.name).sheets[0]
+    assert sheet.body[0]["cells"] == [11110, 100]  # 엑셀에 숫자로 저장된 값은 그대로

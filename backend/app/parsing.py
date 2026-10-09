@@ -97,6 +97,36 @@ def to_number(text: str) -> int | float | None:
     return int(value) if "." not in s and value.is_integer() else value
 
 
+# 이름으로 보아 숫자가 아니라 '식별 기호'인 열 (코드·번호·구분·시각 등). '시각장애인…'은 시각(時刻)이 아니다.
+_TEXT_COLUMN_HINT = re.compile(
+    r"(코드|번호|구분|우편|전화|연락처|일련|시각(?!장애)|(?<![0-9A-Za-z])id(?![0-9A-Za-z]))", re.IGNORECASE
+)
+_DIGITS_ONLY = re.compile(r"^\d+$")
+
+
+def text_columns(columns: list[str], grid: list[list[Cell]], raw: list[list[Any]], body_start: int) -> set[int]:
+    """숫자로 바꾸면 안 되는 열을 고른다 (열 전체를 같은 기준으로).
+
+    - 이름에 코드·번호·시각 같은 표시가 있거나, 앞자리 0이 있는 숫자 글자('0900', '011')가 섞인 열
+    - 같은 열에서 '0900'은 글자, '1800'은 숫자가 되는 뒤섞임과 코드의 앞자리 0 손실을 막는다.
+    - 천 단위 구분('1,000')이 쓰인 열은 수량으로 보고 숫자로 둔다. 엑셀에 숫자로 저장된 셀은 대상이 아니다.
+    """
+    keep: set[int] = set()
+    for j, name in enumerate(columns):
+        texts = [
+            raw[r][j].strip() for r in range(body_start, len(grid)) if j < len(raw[r]) and isinstance(raw[r][j], str)
+        ]
+        converted = [s for s in texts if to_number(s) is not None]
+        if not converted:
+            continue  # 글자에서 숫자로 바뀌는 셀이 없는 열
+        if any(_GROUPED_NUMBER.match(s) and not _PLAIN_NUMBER.match(s) for s in converted):
+            continue
+        leading_zero = any(len(s) > 1 and s.startswith("0") and _DIGITS_ONLY.match(s) for s in texts)
+        if leading_zero or _TEXT_COLUMN_HINT.search(name or ""):
+            keep.add(j)
+    return keep
+
+
 def normalize_cell(value: Any) -> Cell:
     if value is None:
         return None
@@ -416,6 +446,13 @@ def analyze_sheet(name: str, raw: list[list[Any]], filled: set[tuple[int, int]] 
     block = detect_header_block(grid)
     header_rows = grid[block[0] : block[1] + 1] if block else []
     body_start = block[1] + 1 if block else 0
+    columns = _column_names(header_rows, width)
+    # 코드·번호·시각 열은 파일에 적힌 글자 그대로 둔다 (열 전체를 같은 기준으로)
+    for j in text_columns(columns, grid, raw, body_start):
+        for r in range(body_start, len(grid)):
+            source = raw[r][j] if j < len(raw[r]) else None
+            if isinstance(source, str) and isinstance(grid[r][j], int | float):
+                grid[r][j] = source.strip()
 
     counts = {"data": 0, "empty": 0, "subtotal": 0, "note": 0}
     missing_total = 0
@@ -463,7 +500,7 @@ def analyze_sheet(name: str, raw: list[list[Any]], filled: set[tuple[int, int]] 
         name=name,
         header_row=block[0] + 1 if block else None,
         header_row_end=block[1] + 1 if block else None,
-        columns=_column_names(header_rows, width),
+        columns=columns,
         data_rows=counts["data"],
         empty_rows=counts["empty"],
         subtotal_rows=counts["subtotal"],

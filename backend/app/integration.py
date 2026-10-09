@@ -209,12 +209,14 @@ class _EntityNormalizer:
         return res.ref, "용어사전 정식명칭과 일치합니다.", 1.0
 
 
-def _display_name(ref: EntityRef, field_key: str) -> str:
+def _display_name(ref: EntityRef, field_key: str, has_sido: bool = True) -> str:
     """시군구 열에는 시도를 뺀 이름을 쓴다. 정식명칭은 '시도명 시군구명' 형식이므로 첫 공백 뒤를 쓴다.
 
     (자료의 시도 값이 '서울' 같은 약칭이어도 '서울특별시 강서구' → '강서구'가 되도록 접두어를 떼지 않는다)
+    단, 같은 시트에 시도 열이 없으면 정식명칭 그대로 둔다
+    ('중구'·'강서구'처럼 시도마다 같은 이름이 있어 줄이면 구분이 사라진다).
     """
-    if field_key == "sigungu" and " " in ref.name:
+    if field_key == "sigungu" and has_sido and " " in ref.name:
         return ref.name.split(" ", 1)[1]
     return ref.name
 
@@ -314,7 +316,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                         )
                         if ref is not None:
                             row[label_index[f"{c.label} 코드"]] = ref.code
-                            shown = _display_name(ref, c.field_key)
+                            shown = _display_name(ref, c.field_key, sido_col is not None)
                             if shown != value:
                                 value, kind, reason, confidence = shown, "entity", why, conf
                     row[label_index[c.label]] = value
