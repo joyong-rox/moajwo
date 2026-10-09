@@ -6,6 +6,7 @@ import {
   UNAUTHORIZED_EVENT,
   type Health,
   type Me,
+  type Role,
   type ValidationRequest,
 } from './api'
 import Account from './Account'
@@ -163,7 +164,7 @@ function Workspace() {
           {path !== '/' && (
             <>
               {route === undefined && <NotFound />}
-              {route !== undefined && !allowed && <Forbidden />}
+              {route !== undefined && !allowed && <Forbidden roles={route.roles} />}
               {allowed && <h1 className="page-title">{route.label}</h1>}
               {allowed && path === '/automations' && <Automations />}
               {allowed && path === '/runs' && <Runs />}
@@ -205,6 +206,11 @@ function Sidebar({ path }: { path: string }) {
         <strong>Moajwo</strong>
         <span>문서취합 자동화 도구</span>
       </div>
+      {/* 로그인한 계정과 역할을 맨 위에 뱃지로 보여준다 */}
+      <div className="side-account" aria-label={`로그인: ${me.display_name} (${me.role_label})`}>
+        <span className="side-account-name">{me.display_name}</span>
+        <RoleBadge role={me.role} />
+      </div>
       <nav className="side-nav" aria-label="메뉴">
         {ROUTES.filter((r) => r.inMenu && r.roles.includes(me.role)).map((r) => (
           <MenuLink key={r.path} to={r.path} label={r.label} active={path === r.path} />
@@ -214,9 +220,14 @@ function Sidebar({ path }: { path: string }) {
           데이터 연결 (DB·Kibana) <span className="side-badge">준비 중</span>
         </button>
       </nav>
+      {/* 권한 없는 관리 메뉴는 그리지 않고, 그런 메뉴가 있다는 것만 알린다 */}
+      {me.role !== 'owner' && (
+        <p className="side-locked">
+          <LockIcon />
+          {me.role === 'user' ? '관리 메뉴는 관리자 권한이 있어야 보입니다.' : '일부 메뉴는 소유자 권한이 있어야 보입니다.'}
+        </p>
+      )}
       <div className="side-user">
-        <span className="side-user-name">{me.display_name}</span>
-        <span className="side-user-role">{me.role_label}</span>
         <div className="side-user-actions">
           <MenuLink to="/account" label="내 계정" active={path === '/account'} />
           <button type="button" className="side-logout" onClick={signOut}>
@@ -238,10 +249,33 @@ function NotFound() {
   )
 }
 
-function Forbidden() {
+const ROLE_SHORT: Record<Role, string> = { user: '일반', admin: '관리자', owner: '소유자' }
+
+function RoleBadge({ role }: { role: Role }) {
+  return <span className={`role-badge is-${role}`}>{ROLE_SHORT[role]}</span>
+}
+
+function LockIcon() {
+  return (
+    <svg className="lock-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false">
+      <rect x="3" y="7" width="10" height="7" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" strokeWidth="1.5" />
+    </svg>
+  )
+}
+
+function Forbidden({ roles }: { roles: Role[] }) {
+  const { me } = useAuth()
+  const need = roles.includes('admin') ? '관리자 또는 소유자' : '소유자'
   return (
     <section className="page-error" aria-label="권한 없음">
-      <h1 className="page-title">403 · 이 화면을 볼 권한이 없습니다</h1>
+      <h1 className="page-title">
+        <LockIcon />
+        403 · 이 화면을 볼 권한이 없습니다
+      </h1>
+      <p>
+        필요한 권한: <strong>{need}</strong> · 내 권한: <RoleBadge role={me.role} />
+      </p>
       <p>필요하면 관리자에게 권한을 요청하세요.</p>
       <MenuLink to="/" label="홈으로" active={false} />
     </section>

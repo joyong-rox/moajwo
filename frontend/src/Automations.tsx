@@ -10,6 +10,8 @@ import {
   type AutomationRunResult,
   type StoredFile,
 } from './api'
+import { ProgressPanel } from './Progress'
+import { REVIEW_STAGES } from './progressStages'
 import ReviewPanel from './ReviewPanel'
 import { formatDuration, formatTime, STATUS_CLASS } from './runFormat'
 
@@ -104,6 +106,7 @@ function AutomationDetail({
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<AutomationRunResult | null>(null)
   const [openReview, setOpenReview] = useState<number | null>(null)
+  const [running, setRunning] = useState(false) // 자동화 실행 중 (업로드 중과 구분)
 
   const loadFiles = useCallback(() => {
     listFiles()
@@ -135,6 +138,7 @@ function AutomationDetail({
 
   async function run() {
     setBusy(true)
+    setRunning(true)
     setError(null)
     setResult(null)
     setOpenReview(null)
@@ -150,6 +154,7 @@ function AutomationDetail({
       setError(`실행 실패: ${errorText(err)}`)
     } finally {
       setBusy(false)
+      setRunning(false)
     }
   }
 
@@ -260,6 +265,7 @@ function AutomationDetail({
         </button>
       </div>
 
+      {running && <ProgressPanel stages={REVIEW_STAGES} title="자동화 규칙 적용 중" />}
       {error && (
         <p className="upload-error" role="alert">
           {error}

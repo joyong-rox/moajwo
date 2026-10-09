@@ -11,6 +11,8 @@ import {
   type MappingStatus,
   type StandardFieldInfo,
 } from './api'
+import { ProgressPanel } from './Progress'
+import { MAPPING_STAGES } from './progressStages'
 
 const STATUS_LABEL: Record<MappingStatus, string> = {
   auto: '자동 적용',
@@ -105,6 +107,7 @@ function Mapping({ fileId }: { fileId: number }) {
       <button type="button" className="mapping-run" onClick={() => void run()} disabled={busy}>
         {busy ? '열 매핑 분석 중… (LLM 사용 시 수십 초)' : mapping ? '열 매핑 다시 분석' : '열 매핑 분석'}
       </button>
+      {busy && <ProgressPanel stages={MAPPING_STAGES} />}
       {error && (
         <p className="upload-error" role="alert">
           {error}
@@ -115,7 +118,7 @@ function Mapping({ fileId }: { fileId: number }) {
           {(mapping.embedding === 'unavailable' || mapping.llm === 'unavailable') && (
             <p className="mapping-warn" role="status">
               {mapping.embedding === 'unavailable' && '임베딩(bge-m3)을 사용할 수 없어 문자열 유사도만 사용했습니다. '}
-              {mapping.llm === 'unavailable' && 'LLM(Ollama)을 사용할 수 없어 일부 열이 미해결로 남았습니다.'}
+              {mapping.llm === 'unavailable' && 'LLM을 사용할 수 없어 일부 열이 미해결로 남았습니다 (설정의 LLM 제공자·연결 확인).'}
             </p>
           )}
           {mapping.sheets.map((sheet) => (

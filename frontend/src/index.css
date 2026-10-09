@@ -1962,3 +1962,465 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---- 개선 (단계 8 이후) : 넓은 검토 패널·압축 행, 역할 뱃지, LLM 설정, 진행 표시 — 새 클래스만 추가 ---- */
+
+/* 사전 검토: 본문 영역을 거의 다 쓰는 너비, 여백 축소 */
+.shell-main .review-panel.review-panel-wide {
+  width: min(1680px, calc(100vw - var(--shell-side) - 24px));
+  padding: 12px 16px;
+}
+
+.review-panel-wide .review-score {
+  margin: 10px 0;
+  padding: 10px 14px;
+}
+
+.review-panel-wide .review-score-value strong {
+  font-size: 2.4rem;
+}
+
+.review-panel-wide .review-group {
+  margin-top: 12px;
+}
+
+/* 표 머리글처럼 보이는 열 이름 줄 (행과 같은 격자) */
+.review-cols {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1.7fr) minmax(0, 1fr) minmax(220px, auto);
+  gap: 12px;
+  padding: 0 12px 4px 14px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+}
+
+.review-panel-wide .review-items {
+  gap: 2px;
+}
+
+/* 한 줄 행: 종류 | 이전 → 이후 | 위치 | 결정 */
+.review-item.review-compact > summary {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1.7fr) minmax(0, 1fr) minmax(220px, auto);
+  align-items: center;
+  gap: 12px;
+  min-height: 34px;
+  padding: 3px 10px;
+}
+
+.review-compact .review-kind {
+  min-width: 0;
+}
+
+/* 핵심 정보: 이전값 → 이후값 */
+.review-compact .review-change {
+  flex: none;
+  font-size: 0.98rem;
+}
+
+.review-compact .review-after {
+  font-weight: 700;
+}
+
+.review-compact .review-arrow {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.review-compact .review-where {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.review-compact .review-controls {
+  justify-content: flex-end;
+  margin-left: 0;
+}
+
+.review-compact .review-controls select {
+  max-width: 200px;
+}
+
+/* 부드러운 아코디언: 펼칠 때 근거가 살짝 내려오며 나타난다 */
+.review-compact[open] > .review-reason {
+  animation: review-reveal 0.18s ease-out;
+}
+
+@keyframes review-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.review-compact > .review-reason {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  padding: 6px 12px 8px;
+}
+
+.review-reason-text {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+/* 긴 근거(LLM 문장 등)는 두 줄까지만 보이고 전체 보기 창으로 연다 */
+.review-reason-text.is-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+.review-reason-more {
+  min-height: 28px;
+  padding: 2px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.review-dialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.review-dialog::backdrop {
+  background: rgb(15 23 32 / 45%);
+}
+
+.review-dialog-body {
+  display: grid;
+  gap: 8px;
+  padding: 18px 20px;
+}
+
+.review-dialog-body h3 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.review-dialog-kind,
+.review-dialog-where {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.review-dialog-reason {
+  margin: 0;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 860px) {
+  .review-cols {
+    display: none;
+  }
+
+  .review-item.review-compact > summary {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+    padding: 6px 10px;
+  }
+
+  .review-compact .review-controls {
+    justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .review-compact[open] > .review-reason {
+    animation: none;
+  }
+}
+
+/* 역할 뱃지 · 권한 안내 */
+.role-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.role-badge.is-user {
+  background: var(--tag-bg);
+  color: var(--muted);
+}
+
+.role-badge.is-admin {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.role-badge.is-owner {
+  border-color: var(--pii-border);
+  background: var(--pii-bg);
+  color: var(--pii-text);
+}
+
+.side-account {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.side-account-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.side-locked {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.lock-icon {
+  flex: none;
+  margin-top: 2px;
+  vertical-align: -2px;
+}
+
+.page-error .role-badge {
+  vertical-align: 1px;
+}
+
+/* LLM 제공자 설정 */
+.llm-current {
+  margin: 8px 0;
+}
+
+.llm-external-tag {
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.llm-form {
+  display: grid;
+  gap: 10px;
+}
+
+.llm-modes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.llm-modes legend {
+  margin-bottom: 6px;
+  font-size: 0.875rem;
+}
+
+.llm-mode {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.llm-mode.is-selected {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.llm-mode input {
+  margin-top: 4px;
+}
+
+.llm-mode-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.llm-mode-text span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.llm-warning {
+  padding: 10px 12px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: 0.85rem;
+}
+
+/* 진행 표시: 막대 + 단계 */
+.progress {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.progress-title {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.progress-bar {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--tag-bg);
+}
+
+.progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.25s ease-out;
+}
+
+.progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.progress-percent {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.progress-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.75rem;
+}
+
+.progress-steps li {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+}
+
+.progress-steps li.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.progress-steps li.is-done {
+  border-color: var(--pass-text);
+  color: var(--pass-text);
+}
+
+.skeleton-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.skeleton-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.skeleton-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.skeleton-line {
+  height: 10px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--tag-bg) 25%, var(--border) 50%, var(--tag-bg) 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.2s linear infinite;
+}
+
+.skeleton-line.is-short {
+  width: 60%;
+}
+
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-line {
+    animation: none;
+  }
+
+  .progress-fill {
+    transition: none;
+  }
+}
+
+.page-title .lock-icon {
+  margin-right: 8px;
+  width: 1em;
+  height: 1em;
+}

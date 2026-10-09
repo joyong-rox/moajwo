@@ -1,4 +1,4 @@
-import { useEffect, useState, type MouseEvent } from 'react'
+import { useEffect, useRef, useState, type MouseEvent } from 'react'
 import {
   completeReview,
   createReview,
@@ -15,6 +15,8 @@ import {
   type ValidationRequest,
 } from './api'
 import IntegrationResult from './IntegrationResult'
+import { ProgressPanel } from './Progress'
+import { REVIEW_STAGES } from './progressStages'
 
 const KIND_LABEL: Record<string, string> = {
   mapping: '열 매핑',
@@ -65,6 +67,8 @@ function ReviewPanel({
   const [uploaded, setUploaded] = useState<StoredFile[]>([])
   // 다시 검사할 때 바꿀 파일: {검토 중인 파일 id: 고친 파일 id}
   const [replace, setReplace] = useState<Record<number, number>>({})
+  // 긴 근거 문장을 크게 보여주는 창
+  const [reasonItem, setReasonItem] = useState<ReviewItem | null>(null)
 
   useEffect(() => {
     // 패널이 열릴 때 한 번 검토를 만든다 (새로 열면 App이 패널을 새로 만든다)
@@ -111,7 +115,7 @@ function ReviewPanel({
   }
 
   return (
-    <section className="review-panel" aria-label="통합 전 사전 검토">
+    <section className="review-panel review-panel-wide" aria-label="통합 전 사전 검토">
       <div className="review-head">
         <h2>통합 전 사전 검토</h2>
         <button type="button" className="mapping-confirm" onClick={onClose}>
@@ -119,11 +123,7 @@ function ReviewPanel({
         </button>
       </div>
 
-      {loading && (
-        <p className="upload-drop-hint" role="status">
-          검토 항목을 만드는 중… (LLM 판정이 필요한 열이 있으면 수십 초)
-        </p>
-      )}
+      {loading && <ProgressPanel stages={REVIEW_STAGES} title="검토 항목을 만드는 중 (LLM 판정이 필요한 열이 있으면 수십 초)" />}
       {error && (
         <p className="upload-error" role="alert">
           {error}
@@ -146,6 +146,7 @@ function ReviewPanel({
               onDecide={(item, decision, choice) =>
                 void run(item.id, () => decideReviewItem(review.id, item.id, decision, choice))
               }
+              onOpenReason={setReasonItem}
             />
           ))}
 
@@ -156,7 +157,7 @@ function ReviewPanel({
                 {review.items
                   .filter((i) => i.category === 'warning')
                   .map((i) => (
-                    <ItemRow key={i.id} item={i} disabled />
+                    <ItemRow key={i.id} item={i} disabled onOpenReason={setReasonItem} />
                   ))}
               </ul>
             </details>
@@ -250,6 +251,7 @@ function ReviewPanel({
           </div>
         </>
       )}
+      {reasonItem && <ReasonDialog item={reasonItem} onClose={() => setReasonItem(null)} />}
     </section>
   )
 }
@@ -346,9 +348,10 @@ type GroupProps = {
   hint: string
   busyItem: number | null
   onDecide: (item: ReviewItem, decision: 'approved' | 'rejected', choice: string | null) => void
+  onOpenReason: (item: ReviewItem) => void
 }
 
-function ItemGroup({ review, category, title, hint, busyItem, onDecide }: GroupProps) {
+function ItemGroup({ review, category, title, hint, busyItem, onDecide, onOpenReason }: GroupProps) {
   const items = review.items.filter((i) => i.category === category)
   return (
     <section className={`review-group is-${category}`}>
@@ -358,17 +361,26 @@ function ItemGroup({ review, category, title, hint, busyItem, onDecide }: GroupP
       {items.length === 0 ? (
         <p className="upload-drop-hint">없음</p>
       ) : (
-        <ul className="review-items">
-          {items.map((i) => (
-            <ItemRow
-              key={i.id}
-              item={i}
-              disabled={review.status !== 'in_review' || busyItem !== null || !review.can_edit}
-              busy={busyItem === i.id}
-              onDecide={onDecide}
-            />
-          ))}
-        </ul>
+        <>
+          <div className="review-cols" aria-hidden="true">
+            <span>종류</span>
+            <span>이전 → 이후</span>
+            <span>위치</span>
+            <span>{category === 'pending' ? '결정' : '상태'}</span>
+          </div>
+          <ul className="review-items">
+            {items.map((i) => (
+              <ItemRow
+                key={i.id}
+                item={i}
+                disabled={review.status !== 'in_review' || busyItem !== null || !review.can_edit}
+                busy={busyItem === i.id}
+                onDecide={onDecide}
+                onOpenReason={onOpenReason}
+              />
+            ))}
+          </ul>
+        </>
       )}
     </section>
   )
@@ -383,14 +395,22 @@ function choicesOf(item: ReviewItem): Choice[] {
   return []
 }
 
+// 이보다 긴 근거(주로 LLM 문장)는 두 줄로 줄이고 '전체 보기' 창으로 연다
+const LONG_REASON = 110
+
+function shortReason(text: string) {
+  return text.length > LONG_REASON ? `${text.slice(0, LONG_REASON)}…` : text
+}
+
 type RowProps = {
   item: ReviewItem
   disabled?: boolean
   busy?: boolean
   onDecide?: GroupProps['onDecide']
+  onOpenReason?: (item: ReviewItem) => void
 }
 
-function ItemRow({ item, disabled, busy, onDecide }: RowProps) {
+function ItemRow({ item, disabled, busy, onDecide, onOpenReason }: RowProps) {
   const choices = choicesOf(item)
   const initial = item.choice ?? (item.kind === 'mapping' ? item.payload.field_key ?? choices[0]?.value : choices[0]?.value) ?? ''
   const [choice, setChoice] = useState(initial)
@@ -400,10 +420,13 @@ function ItemRow({ item, disabled, busy, onDecide }: RowProps) {
     e.stopPropagation()
   }
   const decided = item.decision ? (item.decision === 'approved' ? '승인됨' : '거부됨') : null
+  const where = location(item)
+  const long = item.reason.length > LONG_REASON || item.reason_source === 'llm'
   return (
     <li>
-      <details className={`review-item is-${item.category}${item.decision ? ` is-${item.decision}` : ''}${item.excluded ? ' is-excluded' : ''}`}>
-        <summary>
+      <details className={`review-item review-compact is-${item.category}${item.decision ? ` is-${item.decision}` : ''}${item.excluded ? ' is-excluded' : ''}`}>
+        {/* 접힌 상태에서도 마우스를 올리면 근거 요약이 툴팁으로 보인다 */}
+        <summary title={`근거: ${shortReason(item.reason)}`}>
           <span className="review-kind">{KIND_LABEL[item.kind] ?? item.kind}</span>
           <span className="review-change">
             <span className="review-before">{item.before ?? '-'}</span>
@@ -412,8 +435,10 @@ function ItemRow({ item, disabled, busy, onDecide }: RowProps) {
             </span>
             <span className="review-after">{item.after ?? '-'}</span>
           </span>
-          <span className="review-where">{location(item)}</span>
-          {item.category === 'pending' && onDecide && (
+          <span className="review-where" title={where}>
+            {where}
+          </span>
+          {item.category === 'pending' && onDecide ? (
             <span className="review-controls" onClick={stop}>
               {choices.length > 0 && (
                 <select
@@ -449,17 +474,66 @@ function ItemRow({ item, disabled, busy, onDecide }: RowProps) {
               </button>
               {busy ? <span className="review-state">저장 중…</span> : decided && <span className="review-state">{decided}</span>}
             </span>
+          ) : (
+            <span className="review-controls">{decided && <span className="review-state">{decided}</span>}</span>
           )}
-          {item.category !== 'pending' && decided && <span className="review-state">{decided}</span>}
         </summary>
-        <p className="review-reason">
+        <div className="review-reason">
+          <span className={`review-source is-${item.reason_source}`}>
+            {item.reason_source === 'llm' ? 'LLM 생성 문장' : '규칙 문장'}
+          </span>{' '}
+          <span className={`review-reason-text${long ? ' is-clamped' : ''}`}>{item.reason}</span>
+          {long && onOpenReason && (
+            <button type="button" className="review-reason-more" onClick={() => onOpenReason(item)}>
+              전체 보기
+            </button>
+          )}
+        </div>
+      </details>
+    </li>
+  )
+}
+
+/** 상세 보정 근거 전체를 보여주는 창 (Esc·바깥 클릭·닫기 버튼으로 닫힘) */
+function ReasonDialog({ item, onClose }: { item: ReviewItem; onClose: () => void }) {
+  const ref = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    const dialog = ref.current
+    if (dialog && !dialog.open) dialog.showModal()
+  }, [])
+  return (
+    <dialog
+      ref={ref}
+      className="review-dialog"
+      aria-labelledby="review-dialog-title"
+      onClose={onClose}
+      onClick={(e) => {
+        if (e.target === ref.current) ref.current?.close() // 바깥(배경) 클릭
+      }}
+    >
+      <div className="review-dialog-body">
+        <p className="review-dialog-kind">{KIND_LABEL[item.kind] ?? item.kind}</p>
+        <h3 id="review-dialog-title" className="review-change">
+          <span className="review-before">{item.before ?? '-'}</span>
+          <span className="review-arrow" aria-hidden="true">
+            →
+          </span>
+          <span className="review-after">{item.after ?? '-'}</span>
+        </h3>
+        <p className="review-dialog-where">{location(item)}</p>
+        <p className="review-dialog-reason">
           <span className={`review-source is-${item.reason_source}`}>
             {item.reason_source === 'llm' ? 'LLM 생성 문장' : '규칙 문장'}
           </span>{' '}
           {item.reason}
         </p>
-      </details>
-    </li>
+        <div className="review-actions">
+          <button type="button" className="mapping-confirm" onClick={() => ref.current?.close()} autoFocus>
+            닫기
+          </button>
+        </div>
+      </div>
+    </dialog>
   )
 }
 

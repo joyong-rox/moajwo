@@ -20,7 +20,7 @@ from typing import Any, Literal
 
 from rapidfuzz import fuzz
 
-from app import admin_codes, ollama
+from app import admin_codes, llm, ollama
 from app.parsing import Cell
 
 logger = logging.getLogger(__name__)
@@ -467,4 +467,5 @@ def _round(value: float | None) -> float | None:
 
 @lru_cache(maxsize=1)
 def get_engine() -> MappingEngine:
-    return MappingEngine(load_dictionary(), embed_fn=ollama.embed, llm_fn=ollama.chat_json)
+    # 임베딩은 항상 로컬 Ollama, 3단계 판정은 설정된 LLM 제공자(기본 로컬 Ollama)
+    return MappingEngine(load_dictionary(), embed_fn=ollama.embed, llm_fn=llm.chat_json)

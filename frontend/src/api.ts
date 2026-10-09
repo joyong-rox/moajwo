@@ -128,15 +128,36 @@ export async function saveDecisions(fileId: number, decisions: DecisionInput[]):
 
 export const ACCEPTED_EXTENSIONS = ['.xlsx', '.xls', '.csv']
 
-export async function uploadFiles(files: File[]): Promise<UploadResult[]> {
+/** 업로드. onProgress(0~1)로 실제 전송 진행률을 알린다 (fetch는 업로드 진행률을 주지 않아 XHR 사용). */
+export function uploadFiles(files: File[], onProgress?: (fraction: number) => void): Promise<UploadResult[]> {
   const body = new FormData()
   for (const file of files) body.append('files', file, file.name)
-  const res = await apiFetch(`${API_BASE}/files`, { method: 'POST', body })
-  if (!res.ok) {
-    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
-    throw new Error(typeof detail === 'string' ? detail : `HTTP ${res.status}`)
-  }
-  return (await res.json()) as UploadResult[]
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${API_BASE}/files`)
+    xhr.withCredentials = true
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.(e.loaded / e.total)
+    }
+    xhr.upload.onload = () => onProgress?.(1)
+    xhr.onerror = () => reject(new Error('네트워크 오류로 업로드하지 못했습니다.'))
+    xhr.onload = () => {
+      let data: unknown = null
+      try {
+        data = JSON.parse(xhr.responseText)
+      } catch {
+        data = null
+      }
+      if (xhr.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data as UploadResult[])
+        return
+      }
+      const detail = (data as { detail?: unknown } | null)?.detail
+      reject(new Error(typeof detail === 'string' ? detail : `HTTP ${xhr.status}`))
+    }
+    xhr.send(body)
+  })
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -698,4 +719,48 @@ export async function saveAutomationBaseline(id: number, minutes: number | null)
       ...jsonBody({ manual_baseline_minutes: minutes }),
     }),
   )
+}
+
+// ---------------------------------------------------------------- LLM 제공자 (소유자)
+
+export type LlmMode = 'ollama' | 'openai' | 'anthropic' | 'custom'
+export type LlmSettings = {
+  mode: LlmMode
+  mode_label: string
+  model: string | null
+  effective_model: string | null
+  base_url: string | null
+  effective_base_url: string
+  api_key_set: boolean
+  api_key_hint: string | null
+  is_external: boolean
+  modes: Record<LlmMode, string>
+  default_models: Partial<Record<LlmMode, string>>
+  embedding: string
+  updated_at: string | null
+  updated_by_name: string | null
+}
+
+export async function fetchLlmSettings(): Promise<LlmSettings> {
+  return json(await apiFetch(`${API_BASE}/settings/llm`))
+}
+
+/** api_key: undefined = 저장된 키 유지, '' = 삭제, 값 = 새 키 */
+export async function saveLlmSettings(body: {
+  mode: LlmMode
+  model: string | null
+  base_url: string | null
+  api_key?: string
+}): Promise<LlmSettings> {
+  return json(await apiFetch(`${API_BASE}/settings/llm`, { method: 'PUT', ...jsonBody(body) }))
+}
+
+export async function testLlmSettings(): Promise<{
+  ok: boolean
+  mode_label: string
+  model: string | null
+  latency_ms: number
+  message: string
+}> {
+  return json(await apiFetch(`${API_BASE}/settings/llm/test`, { method: 'POST' }))
 }

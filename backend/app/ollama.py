@@ -63,11 +63,11 @@ def embed(texts: list[str]) -> list[list[float]]:
     return vectors
 
 
-def chat_json(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+def chat_json(system: str, user: str, schema: dict[str, Any], model: str | None = None) -> dict[str, Any]:
     body = _post(
         "/api/chat",
         {
-            "model": OLLAMA_LLM_MODEL,
+            "model": model or OLLAMA_LLM_MODEL,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
             "format": schema,
             "stream": False,

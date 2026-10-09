@@ -4,6 +4,8 @@
 """
 
 import json
+import logging
+import time
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
@@ -12,12 +14,16 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import llm
 from app.auth import ManagerDep, OwnerDep
+from app.config import OLLAMA_EMBED_MODEL
 from app.db import get_session
 from app.mapping import get_engine
 from app.models import AppSetting, Automation, MappingApproval, PromotionCandidate, StandardTerm, User
 from app.promotion import PROMOTION_THRESHOLD, PromotionError, approve, reject
 from app.timefmt import utc_to_kst
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["admin"])
 
@@ -257,3 +263,116 @@ def update_automation_baseline(
     automation.manual_baseline_minutes = body.manual_baseline_minutes
     db.commit()
     return settings_out(db)
+
+
+# ---------------------------------------------------------------- LLM 제공자 (소유자)
+
+
+class LlmSettingsOut(BaseModel):
+    mode: Literal["ollama", "openai", "anthropic", "custom"]
+    mode_label: str
+    model: str | None  # 입력한 모델 (비우면 기본 모델)
+    effective_model: str | None
+    base_url: str | None
+    effective_base_url: str
+    api_key_set: bool  # API 키 자체는 돌려주지 않는다
+    api_key_hint: str | None  # 끝 4자리만
+    is_external: bool
+    modes: dict[str, str]
+    default_models: dict[str, str]
+    embedding: str
+    updated_at: datetime | None
+    updated_by_name: str | None
+
+
+def llm_settings_out(db: Session) -> LlmSettingsOut:
+    config = llm.load(db)
+    row = db.get(AppSetting, llm.SETTING_KEY)
+    names = _names(db, {row.updated_by} if row is not None and row.updated_by else set())
+    return LlmSettingsOut(
+        mode=config.mode,  # type: ignore[arg-type]
+        mode_label=llm.MODE_LABEL[config.mode],
+        model=config.model,
+        effective_model=config.effective_model,
+        base_url=config.base_url,
+        effective_base_url=config.effective_base_url,
+        api_key_set=bool(config.api_key),
+        api_key_hint=llm.masked_key(config.api_key),
+        is_external=config.is_external,
+        modes=llm.MODE_LABEL,
+        default_models={k: v for k, v in llm.DEFAULT_MODEL.items() if v},
+        embedding=f"로컬 Ollama {OLLAMA_EMBED_MODEL} (모든 모드 공통)",
+        updated_at=utc_to_kst(row.updated_at) if row is not None else None,
+        updated_by_name=names.get(row.updated_by) if row is not None and row.updated_by else None,
+    )
+
+
+@router.get("/settings/llm", response_model=LlmSettingsOut)
+def read_llm_settings(_: OwnerDep, db: Annotated[Session, Depends(get_session)]) -> LlmSettingsOut:
+    return llm_settings_out(db)
+
+
+class LlmSettingsIn(BaseModel):
+    mode: Literal["ollama", "openai", "anthropic", "custom"]
+    model: str | None = Field(default=None, max_length=200)
+    base_url: str | None = Field(default=None, max_length=500)
+    # None = 저장된 키 유지, "" = 키 삭제, 값 = 새 키
+    api_key: str | None = Field(default=None, max_length=500)
+
+
+@router.put("/settings/llm", response_model=LlmSettingsOut)
+def update_llm_settings(
+    body: LlmSettingsIn, actor: OwnerDep, db: Annotated[Session, Depends(get_session)]
+) -> LlmSettingsOut:
+    """LLM 제공자를 바꾼다. 기본(로컬 Ollama) 외의 모드는 열 이름·샘플 값이 외부로 전송된다."""
+    previous = llm.load(db)
+    keep_key = body.api_key is None and previous.mode == body.mode
+    api_key = previous.api_key if keep_key else (body.api_key or "").strip() or None
+    config = llm.LlmConfig(
+        mode=body.mode,
+        model=(body.model or "").strip() or None,
+        base_url=(body.base_url or "").strip().rstrip("/") or None,
+        api_key=api_key if body.mode != "ollama" else None,
+    )
+    try:
+        llm.validate(config)
+    except llm.LlmError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    row = db.get(AppSetting, llm.SETTING_KEY)
+    if row is None:
+        row = AppSetting(key=llm.SETTING_KEY, value="{}")
+        db.add(row)
+    row.value = config.to_json()
+    row.updated_by, row.updated_at = actor.id, datetime.now(UTC)
+    db.commit()
+    llm.set_current(config)
+    logger.info("llm provider set to %s by user %s", config.mode, actor.id)  # 키·주소는 기록하지 않는다
+    return llm_settings_out(db)
+
+
+class LlmTestOut(BaseModel):
+    ok: bool
+    mode_label: str
+    model: str | None
+    latency_ms: int
+    message: str
+
+
+@router.post("/settings/llm/test", response_model=LlmTestOut)
+def test_llm_settings(_: OwnerDep, db: Annotated[Session, Depends(get_session)]) -> LlmTestOut:
+    """저장된 설정으로 짧은 질문 하나를 보내 연결을 확인한다 (자료 내용은 보내지 않음)."""
+    config = llm.load(db)
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
+    started = time.perf_counter()
+    try:
+        answer = llm.chat_json("연결 확인용 요청입니다.", 'JSON {"ok": true} 로만 답하세요.', schema, config=config)
+        ok, message = bool(answer.get("ok")), "연결되었습니다."
+    except llm.LlmError as exc:
+        ok, message = False, str(exc)
+    return LlmTestOut(
+        ok=ok,
+        mode_label=llm.MODE_LABEL[config.mode],
+        model=config.effective_model,
+        latency_ms=round((time.perf_counter() - started) * 1000),
+        message=message,
+    )

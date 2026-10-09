@@ -1,6 +1,8 @@
 import { useRef, useState, type DragEvent } from 'react'
 import Mapping from './Mapping'
 import PiiNotice from './PiiNotice'
+import { ProgressPanel, SkeletonRows } from './Progress'
+import { UPLOAD_STAGES } from './progressStages'
 import { ACCEPTED_EXTENSIONS, uploadFiles, type Cell, type RowKind, type SheetSummary, type UploadResult } from './api'
 
 const KIND_LABEL: Record<RowKind, string> = { data: '데이터', empty: '빈 행', subtotal: '소계/합계', note: '주석' }
@@ -22,6 +24,9 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [results, setResults] = useState<UploadResult[]>([])
+  // 처리 중인 파일 이름과 실제 업로드 진행률 (0~1). 브라우저가 진행률을 알려주지 않으면 null → 시간 기준 단계 표시
+  const [pending, setPending] = useState<string[]>([])
+  const [sent, setSent] = useState<number | null>(null)
 
   async function handleFiles(list: FileList | null) {
     if (!list || list.length === 0 || busy) return
@@ -32,14 +37,17 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
     if (accepted.length === 0) return
 
     setBusy(true)
+    setPending(accepted.map((f) => f.name))
+    setSent(null)
     try {
-      const uploaded = await uploadFiles(accepted)
+      const uploaded = await uploadFiles(accepted, setSent)
       setResults((prev) => [...uploaded, ...prev])
       onUploaded?.()
     } catch (err) {
       setError(`업로드 실패: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setBusy(false)
+      setPending([])
       if (inputRef.current) inputRef.current.value = ''
     }
   }
@@ -83,6 +91,17 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
           onChange={(e) => void handleFiles(e.target.files)}
         />
       </div>
+
+      {busy && (
+        <>
+          <ProgressPanel
+            stages={UPLOAD_STAGES}
+            uploadFraction={sent ?? undefined}
+            title={`${pending.length}개 파일 처리 중 — 끝나면 행 수·헤더·매핑 분석이 아래에 표시됩니다`}
+          />
+          <SkeletonRows names={pending} />
+        </>
+      )}
 
       {error && (
         <p className="upload-error" role="alert">

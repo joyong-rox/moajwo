@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchSettings, saveAutomationBaseline, saveBaseline, type Settings as SettingsData } from './api'
+import LlmSettings from './LlmSettings'
 import { formatTime } from './runFormat'
 
 function parseMinutes(text: string): number | null | undefined {
@@ -139,4 +140,14 @@ function Settings() {
   )
 }
 
-export default Settings
+/** 설정 화면: 수동 기준 소요 시간 + LLM 제공자 */
+function SettingsPage() {
+  return (
+    <>
+      <Settings />
+      <LlmSettings />
+    </>
+  )
+}
+
+export default SettingsPage
