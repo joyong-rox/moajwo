@@ -2424,3 +2424,17 @@ body {
   width: 1em;
   height: 1em;
 }
+
+/* 통합 결과: 표준 항목이 없는 열 포함 선택 */
+.integration-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 0.9rem;
+}
+
+.integration-option input {
+  margin-top: 4px;
+}
+

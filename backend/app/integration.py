@@ -118,6 +118,7 @@ class _Built:
     changes: list[Change] = field(default_factory=list)
     files: list[dict[str, Any]] = field(default_factory=list)
     dropped_columns: list[dict[str, Any]] = field(default_factory=list)
+    unmapped_columns: list[str] = field(default_factory=list)  # 원래 이름으로 넣은 '해당 없음' 열
 
 
 # ---------------------------------------------------------------- 값 비교
@@ -129,8 +130,8 @@ def _is_number(value: Any) -> bool:
 
 def same(a: Any, b: Any) -> bool:
     """파일에 적힌 값과 결과 값이 같은지 (3.0과 3은 같음, '1,000'과 1000은 다름)."""
-    if a is None or b is None:
-        return a is None and b is None
+    if a is None or b is None:  # CSV의 빈 문자열('')과 빈 칸은 같은 빈 값
+        return a in (None, "") and b in (None, "")
     if _is_number(a) and _is_number(b):
         return float(a) == float(b)
     if isinstance(a, datetime | date) or isinstance(b, datetime | date):
@@ -152,10 +153,23 @@ def text(value: Any) -> str | None:
 # ---------------------------------------------------------------- 결과 데이터 만들기
 
 
-def _columns(sheet_columns: list[str], mappings: list[ColumnMapping]) -> tuple[list[_Column], list[dict[str, Any]]]:
+def _columns(
+    sheet_columns: list[str],
+    mappings: list[ColumnMapping],
+    include_unmapped: bool = False,
+    standard_labels: frozenset[str] = frozenset(),
+) -> tuple[list[_Column], list[dict[str, Any]]]:
+    """include_unmapped: '해당 없음'으로 확정한 열(표준 항목이 없는 열)도 원래 열 이름으로 결과에 넣는다."""
     used: set[str] = set()
     columns, dropped = [], []
     for j, m in enumerate(mappings):
+        if include_unmapped and not m.field_key and m.status == "confirmed":
+            label = sheet_columns[j]
+            if label in standard_labels or label in used:  # 표준 항목 열과 섞이지 않게 구분
+                label = f"{label} (원본 열)"
+            used.add(label)
+            columns.append(_Column(j, sheet_columns[j], label, None, m))
+            continue
         if not m.field_key or m.status not in ("confirmed", "auto"):
             reason = "'해당 없음'으로 확정" if m.status == "confirmed" else "확정되지 않은 매핑"
             dropped.append({"column": sheet_columns[j], "reason": reason})
@@ -205,7 +219,7 @@ def _display_name(ref: EntityRef, field_key: str) -> str:
     return ref.name
 
 
-def build(db: Session, session: ReviewSession) -> _Built:
+def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -> _Built:
     if session.status != "ready":
         raise IntegrationError("검토가 끝난(검토 완료) 세션만 통합할 수 있습니다.")
     params = json.loads(session.params)
@@ -224,6 +238,7 @@ def build(db: Session, session: ReviewSession) -> _Built:
     normalizer = _EntityNormalizer(EntityResolver(glossary, params.get("expected_period")), choices, session.id)
 
     built = _Built(labels=list(PROVENANCE))
+    standard_labels = frozenset(f.label for f in engine.fields)
     label_index: dict[str, int] = {}
 
     def column_at(label: str) -> int:
@@ -249,7 +264,10 @@ def build(db: Session, session: ReviewSession) -> _Built:
                 decisions=decisions.get(sheet.name),
                 standard=standard,
             ).columns
-            columns, dropped = _columns(sheet.columns, mappings)
+            columns, dropped = _columns(sheet.columns, mappings, include_unmapped, standard_labels)
+            for c in columns:
+                if c.field_key is None and c.label not in built.unmapped_columns:
+                    built.unmapped_columns.append(c.label)
             for d in dropped:
                 built.dropped_columns.append({"file": record.original_name, "sheet": sheet.name, **d})
             for c in columns:
@@ -364,6 +382,8 @@ def _classify(original: Any, value: Any, c: _Column) -> tuple[str, str]:
         return "number", f"숫자 문자열 '{original.strip()}'을(를) 숫자로 바꿨습니다 (천 단위 쉼표·공백 제거)."
     if isinstance(original, str) and isinstance(value, str) and original.strip() == value:
         return "trim", "앞뒤 공백을 지웠습니다."
+    if isinstance(original, str) and not original.strip() and value is None:
+        return "trim", "공백만 있던 칸을 빈 칸으로 정리했습니다."
     return "other", f"원본 값 '{text(original)}'을(를) '{text(value)}'(으)로 읽었습니다."
 
 
@@ -462,6 +482,10 @@ def _write_summary(ws: Any, built: _Built, summary: dict[str, Any]) -> None:
         ("변경 건수 (셀)", summary["cell_change_count"]),
         ("열 이름 매핑", summary["column_change_count"]),
         ("경고 건수", summary["warning_count"]),
+        (
+            "표준 항목이 없는 열",
+            f"원래 이름으로 포함 ({len(built.unmapped_columns)}개)" if summary.get("include_unmapped") else "넣지 않음",
+        ),
     ]:
         ws.append([key, value])
 
@@ -522,10 +546,23 @@ def pending_run(db: Session, session: ReviewSession) -> IntegrationRun | None:
     return None
 
 
-def integrate(db: Session, session: ReviewSession) -> IntegrationRun:
+def include_unmapped_default(db: Session, session: ReviewSession) -> bool:
+    """자동화로 실행한 검토면 그 자동화에 저장한 선택, 아니면 넣지 않음(기존 동작)."""
+    if session.automation_id is None:
+        return False
+    automation = db.get(Automation, session.automation_id)
+    if automation is None:
+        return False
+    return bool(json.loads(automation.output_format).get("include_unmapped", False))
+
+
+def integrate(db: Session, session: ReviewSession, include_unmapped: bool | None = None) -> IntegrationRun:
+    """include_unmapped: None이면 자동화 설정(없으면 False)을 따른다."""
     started = datetime.now(KST)
     run = pending_run(db, session)
-    built = build(db, session)
+    if include_unmapped is None:
+        include_unmapped = include_unmapped_default(db, session)
+    built = build(db, session, include_unmapped)
     now = datetime.now(KST)
     items = session_items(db, session)
     warning_count = summarize(session, items).warnings
@@ -565,6 +602,8 @@ def integrate(db: Session, session: ReviewSession) -> IntegrationRun:
         "files": built.files,
         "dropped_columns": built.dropped_columns,
         "columns": built.labels,
+        "include_unmapped": include_unmapped,
+        "unmapped_columns": built.unmapped_columns,
     }
     target = _output_path(run.id, now)
     tmp_path: Path | None = None

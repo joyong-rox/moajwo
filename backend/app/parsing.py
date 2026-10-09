@@ -210,17 +210,22 @@ def decode_csv(raw: bytes) -> tuple[str, str]:
 
 def _read_csv(path: Path, sheet_name: str) -> tuple[dict[str, list[list[Any]]], str]:
     text, encoding = decode_csv(path.read_bytes())
+    # 구분자만 추측하고 따옴표 규칙은 표준(RFC 4180: " 로 감싸고 "" 로 이스케이프)으로 고정한다.
+    # Sniffer의 따옴표 추측은 표본·Python 버전에 따라 달라져 쉼표가 든 값을 잘못 나눌 수 있다.
     try:
-        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
+        delimiter = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|").delimiter
     except csv.Error:
-        dialect = csv.excel
-    rows = [list(r) for r in csv.reader(io.StringIO(text, newline=""), dialect)]
+        delimiter = ","
+    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, quotechar='"', doublequote=True)
+    rows = [list(r) for r in reader]
     return {sheet_name: rows}, encoding
 
 
 # ---------------------------------------------------------------- 분석
 
-_SUBTOTAL_ANYWHERE = re.compile(r"(소계|합계|총계|누계|subtotal|grandtotal)", re.IGNORECASE)
+# 합계 단어는 라벨 끝에 올 때만 본다 ('영업1팀 소계', '합계(전체)').
+# '소계민원센터'처럼 이름 앞부분에 있는 것은 지명이다.
+_SUBTOTAL_ANYWHERE = re.compile(r"(소계|합계|총계|누계|subtotal|grandtotal)(\([^)]*\))?$", re.IGNORECASE)
 # '전국'은 시도·시군구 통계에서 전체 합계 행이다.
 _SUBTOTAL_EXACT = re.compile(r"^(계|합|총|전국|total|sum)$", re.IGNORECASE)
 _SUBTOTAL_MAX_LEN = 20  # 긴 문장 속 '합계' 단어는 소계 행으로 보지 않는다
@@ -391,6 +396,8 @@ def _corrections(
                 kind, before = "number", mask_cell(original.strip())
             elif isinstance(original, str) and isinstance(value, str) and original != value:
                 kind, before = "trim", mask_cell(original)
+            elif isinstance(original, str) and original and not original.strip() and value is None:
+                kind, before = "trim", original  # 공백만 있던 칸 → 빈 칸
             else:
                 continue
             item = found.setdefault(

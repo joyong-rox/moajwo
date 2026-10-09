@@ -209,3 +209,24 @@ def test_automation_rejects_bad_requests(client: TestClient) -> None:
     res = client.post(f"/automations/{automation['id']}/run", json={"file_ids": [999999]})
     assert res.status_code == 422
     assert client.post(f"/automations/{automation['id']}/run", json={"file_ids": []}).status_code == 422
+
+
+def test_automation_keeps_include_unmapped_choice(client: TestClient) -> None:
+    review = client.post("/reviews", json={"file_ids": [_upload(client, "9월e.xlsx", SEPT)]}).json()
+    _approve_all(client, review)
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = client.post(f"/reviews/{review['id']}/integrate", json={"include_unmapped": True}).json()
+    unmapped = run["summary"]["unmapped_columns"]
+    assert unmapped  # 거부한 열(해당 없음)이 원래 이름으로 들어감
+    automation = client.post(f"/runs/{run['id']}/automation", json={"name": "원래 열 포함"}).json()
+    assert automation["output_format"]["include_unmapped"] is True
+
+    same = [SEPT[0]] + [[*r[:2], 7000, *r[3:]] for r in SEPT[1:]]
+    res = client.post(f"/automations/{automation['id']}/run", json={"file_ids": [_upload(client, "10월e.xlsx", same)]})
+    out = res.json()["run"]
+    if out["status"] == "review":  # 확인 항목이 남으면 검토 패널 기본값도 자동화 설정을 따른다
+        rv = client.get(f"/reviews/{res.json()['review_id']}").json()
+        assert rv["include_unmapped_default"] is True
+    else:
+        assert out["summary"]["include_unmapped"] is True
+        assert set(unmapped) <= set(out["summary"]["columns"])

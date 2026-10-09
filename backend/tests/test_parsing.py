@@ -220,3 +220,63 @@ def test_two_level_header_with_total_column(tmp_path: Path, group_first: bool) -
     assert (sheet.header_row, sheet.header_row_end) == (top, top + 1)
     assert sheet.columns == ["시군구", "인구_남", "인구_여", "인구_계"]
     assert (sheet.data_rows, sheet.subtotal_rows) == (2, 0)
+
+
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("합계", True),
+        ("소계", True),
+        ("계", True),
+        ("전국", True),
+        ("영업1팀 소계", True),
+        ("서울특별시 합계", True),
+        ("합계(전체)", True),
+        ("누계 (9월)", True),
+        ("소계민원센터", False),  # 실제 자료: 무인민원발급기 이름 (지명 '소계'로 시작)
+        ("합계동 행정복지센터", False),
+        ("총계리 마을회관", False),
+        ("2025년 연간 집행 실적 총괄 합계표 작성 기준 안내", False),  # 긴 문장
+    ],
+)
+def test_subtotal_label_only_at_end(label: str, expected: bool) -> None:
+    from app.parsing import is_subtotal_label
+
+    assert is_subtotal_label(label) is expected
+
+
+def test_place_name_with_subtotal_word_is_data_row(tmp_path: Path) -> None:
+    """공공데이터(무인민원발급기 설치정보)에서 발급기명이 '소계…'인 행을 소계로 오판해 통합이 막히던 문제."""
+    path = tmp_path / "kiosk.csv"
+    lines = ["관리기관명,발급기명,도로코드", "경상남도 창원시,소계민원센터,4100312", "경상남도 창원시,의창구청,4100313"]
+    path.write_bytes("\r\n".join(lines).encode("cp949"))
+    sheet = parse_file(path, path.name).sheets[0]
+    assert (sheet.data_rows, sheet.subtotal_rows) == (2, 0)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 값 안의 큰따옴표("" 이스케이프) — Sniffer가 doublequote=False로 추측하면 열이 밀렸다
+        'id,설명,값\n1,"안내 ""무인"" 발급기, 1층",10\n2,일반,20\n3,"쉼표, 포함",30\n',
+        # 다른 열의 작은따옴표 — Sniffer가 따옴표를 '로 추측하면 "x, y"가 둘로 나뉘었다
+        "id,설명,값\n1,'A',10\n2,'B',20\n3,\"x, y\",30\n",
+    ],
+)
+def test_csv_quotes_follow_standard(tmp_path: Path, text: str) -> None:
+    path = tmp_path / "q.csv"
+    path.write_text(text, encoding="utf-8")
+    sheet = parse_file(path, path.name).sheets[0]
+    assert sheet.columns == ["id", "설명", "값"] and sheet.data_rows == 3
+    assert all(len(row["cells"]) == 3 for row in sheet.body)
+    values = [row["cells"][1] for row in sheet.body]
+    assert '안내 "무인" 발급기, 1층' in values or "x, y" in values
+
+
+def test_csv_semicolon_and_tab_delimiters_still_detected(tmp_path: Path) -> None:
+    for delimiter in (";", "\t"):
+        path = tmp_path / f"d{ord(delimiter)}.csv"
+        lines = [delimiter.join(["시도", "인구"]), delimiter.join(["서울", "100"])]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        sheet = parse_file(path, path.name).sheets[0]
+        assert sheet.columns == ["시도", "인구"] and sheet.data_rows == 1

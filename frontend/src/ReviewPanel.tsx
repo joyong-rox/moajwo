@@ -221,7 +221,9 @@ function ReviewPanel({
                 {message}
               </p>
             )}
-            {review.status === 'ready' && review.can_edit && <IntegrationResult reviewId={review.id} />}
+            {review.status === 'ready' && review.can_edit && (
+              <IntegrationResult reviewId={review.id} defaultIncludeUnmapped={review.include_unmapped_default} />
+            )}
             <details className="review-replace">
               <summary>원본을 고친 파일로 바꿔 다시 검사</summary>
               <p className="upload-drop-hint">

@@ -372,6 +372,7 @@ export type Review = {
   created_by: number | null
   created_by_name: string | null
   can_edit: boolean
+  include_unmapped_default: boolean
 }
 export type ReviewChangeItem = {
   category: ReviewCategory
@@ -465,6 +466,8 @@ export type IntegrationRun = {
     column_change_count?: number
     change_counts?: Record<string, number>
     columns?: string[]
+    include_unmapped?: boolean
+    unmapped_columns?: string[]
   }
   error: string | null
   created_at: string
@@ -472,8 +475,15 @@ export type IntegrationRun = {
 
 export const runDownloadUrl = (runId: number) => `${API_BASE}/runs/${runId}/download`
 
-export async function integrateReview(reviewId: number): Promise<IntegrationRun> {
-  return json(await apiFetch(`${API_BASE}/reviews/${reviewId}/integrate`, { method: 'POST' }))
+/** includeUnmapped: 표준 항목이 없는('해당 없음') 열도 원래 이름으로 결과에 넣을지 */
+export async function integrateReview(reviewId: number, includeUnmapped?: boolean): Promise<IntegrationRun> {
+  return json(
+    await apiFetch(`${API_BASE}/reviews/${reviewId}/integrate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ include_unmapped: includeUnmapped ?? null }),
+    }),
+  )
 }
 
 export async function listRuns(reviewId: number): Promise<IntegrationRun[]> {

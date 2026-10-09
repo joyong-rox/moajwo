@@ -214,3 +214,50 @@ def test_review_preview_matches_integration(client: TestClient) -> None:
         if ch["kind"] in ("number", "ffill", "trim"):
             actual[ch["kind"]] = actual.get(ch["kind"], 0) + 1
     assert preview == actual and {"number", "ffill", "trim"} <= set(actual)
+
+
+def _csv_review(client: TestClient, name: str) -> int:
+    """사전에 없는 열(설치장소상세위치·운영메모)이 있는 CSV. 매핑 확인 항목은 모두 거부('해당 없음')한다."""
+    lines = ["기관명,집행액,설치장소상세위치,운영메모", "행안부,1000,본관 1층,", "기상청,2500,,야간 운영"]
+    data = "\r\n".join(lines).encode("cp949")
+    fid = client.post("/files", files=[("files", (name, data, "text/csv"))]).json()[0]["id"]
+    review = client.post("/reviews", json={"file_ids": [fid]}).json()
+    for item in [i for i in review["items"] if i["category"] == "pending"]:
+        if item["kind"] == "mapping":
+            body = {"decision": "rejected"}
+        else:
+            candidates = item["payload"].get("candidates") or []
+            body = {"decision": "approved", "choice": candidates[0]["code"]} if candidates else {"decision": "rejected"}
+        assert client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json=body).status_code == 200
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    return review["id"]
+
+
+def test_unmapped_columns_kept_with_original_names_when_asked(client: TestClient) -> None:
+    rid = _csv_review(client, "설치정보.csv")
+    plain = client.post(f"/reviews/{rid}/integrate").json()  # 기본: 넣지 않음 (기존 동작)
+    assert "설치장소상세위치" not in plain["summary"]["columns"]
+    assert {d["column"] for d in plain["summary"]["dropped_columns"]} >= {"설치장소상세위치", "운영메모"}
+
+    res = client.post(f"/reviews/{rid}/integrate", json={"include_unmapped": True})
+    assert res.status_code == 201, res.text
+    run = res.json()
+    cols = run["summary"]["columns"]
+    assert {"설치장소상세위치", "운영메모"} <= set(cols) and run["summary"]["include_unmapped"] is True
+    assert not [d for d in run["summary"]["dropped_columns"] if d["column"] in ("설치장소상세위치", "운영메모")]
+    wb = openpyxl.load_workbook(io.BytesIO(client.get(f"/runs/{run['id']}/download").content))
+    data = wb[DATA_SHEET]
+    header = [c.value for c in data[1]]
+    j = header.index("설치장소상세위치") + 1
+    assert [data.cell(row=r, column=j).value for r in (2, 3)] == ["본관 1층", None]
+    summary = {r[0]: r[1] for r in wb[SUMMARY_SHEET].iter_rows(values_only=True) if r and r[0]}
+    assert summary["표준 항목이 없는 열"] == "원래 이름으로 포함 (2개)"
+
+
+def test_blank_csv_cells_are_not_changes(client: TestClient) -> None:
+    """CSV의 빈 칸('')을 '바뀐 셀'로 기록·색칠하지 않는다 (실제 자료에서 빈 칸 수천 개가 변경으로 잡히던 문제)."""
+    rid = _csv_review(client, "빈칸.csv")
+    run = client.post(f"/reviews/{rid}/integrate", json={"include_unmapped": True}).json()
+    changes = client.get(f"/runs/{run['id']}/changes", params={"limit": 1000}).json()["items"]
+    blanks = [c for c in changes if c["column"] in ("설치장소상세위치", "운영메모")]
+    assert blanks == [] and "other" not in run["summary"]["change_counts"]

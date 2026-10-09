@@ -11,8 +11,16 @@ const CHANGE_LABEL: Record<string, string> = {
 }
 
 /** 검토가 끝난 세션으로 통합 결과 엑셀을 만들고, 만든 결과 목록을 보여준다. */
-function IntegrationResult({ reviewId }: { reviewId: number }) {
+function IntegrationResult({
+  reviewId,
+  defaultIncludeUnmapped = false,
+}: {
+  reviewId: number
+  defaultIncludeUnmapped?: boolean
+}) {
   const [runs, setRuns] = useState<IntegrationRun[]>([])
+  // 표준 항목이 없는 열(검토에서 '해당 없음')도 원래 이름으로 결과에 넣을지 (자동화로 저장하면 이 선택도 저장)
+  const [includeUnmapped, setIncludeUnmapped] = useState(defaultIncludeUnmapped)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -30,7 +38,7 @@ function IntegrationResult({ reviewId }: { reviewId: number }) {
     setBusy(true)
     setError(null)
     try {
-      const created = await integrateReview(reviewId)
+      const created = await integrateReview(reviewId, includeUnmapped)
       setRuns((prev) => [created, ...prev])
     } catch (err) {
       setError(`통합 실패: ${err instanceof Error ? err.message : String(err)}`)
@@ -46,6 +54,15 @@ function IntegrationResult({ reviewId }: { reviewId: number }) {
   const finished = runs.filter((r) => r.status !== 'review')
   return (
     <div className="integration">
+      <label className="integration-option">
+        <input
+          type="checkbox"
+          checked={includeUnmapped}
+          disabled={busy}
+          onChange={(e) => setIncludeUnmapped(e.target.checked)}
+        />
+        표준 항목이 없는 열도 원래 이름으로 포함 (검토에서 '해당 없음'으로 정한 열)
+      </label>
       <div className="review-actions">
         <button type="button" className="mapping-run" disabled={busy} onClick={() => void run()}>
           {busy ? '통합 결과 만드는 중…' : '통합 결과 만들기 (엑셀)'}
@@ -70,6 +87,9 @@ function IntegrationResult({ reviewId }: { reviewId: number }) {
             <span className="review-chip is-pending">셀 변경 {latest.summary.cell_change_count ?? 0}건</span>
             <span className="review-chip">열 이름 매핑 {latest.summary.column_change_count ?? 0}건</span>
             <span className="review-chip">경고 {latest.warning_count}건</span>
+            {latest.summary.include_unmapped && (
+              <span className="review-chip">원래 이름으로 포함한 열 {latest.summary.unmapped_columns?.length ?? 0}개</span>
+            )}
           </p>
           <p className="upload-drop-hint">
             {Object.entries(latest.summary.change_counts ?? {})

@@ -84,7 +84,10 @@ def save_from_run(db: Session, run: IntegrationRun, name: str, owner_id: int | N
         column_rules=json.dumps(rules["columns"], ensure_ascii=False),
         entity_rules=json.dumps(rules["entities"], ensure_ascii=False),
         validation=json.dumps({k: params.get(k) for k in VALIDATION_KEYS}, ensure_ascii=False),
-        output_format=json.dumps({"columns": summary.get("columns", [])}, ensure_ascii=False),
+        output_format=json.dumps(
+            {"columns": summary.get("columns", []), "include_unmapped": bool(summary.get("include_unmapped"))},
+            ensure_ascii=False,
+        ),
         updated_at=datetime.now(KST),
     )
     db.add(automation)

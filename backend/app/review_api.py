@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
 from app.db import get_session
 from app.files import get_file_for
+from app.integration import include_unmapped_default
 from app.models import Automation, ReviewItem, ReviewSession, SourceFile, User
 from app.review import (
     ReviewError,
@@ -78,6 +79,7 @@ class ReviewOut(BaseModel):
     created_by: int | None = None
     created_by_name: str | None = None
     can_edit: bool = True  # 이 검토를 만든 사람만 승인·완료·다시 검사할 수 있다 (다른 사람은 조회만)
+    include_unmapped_default: bool = False  # 통합할 때 '표준 항목이 없는 열 포함'의 기본값 (자동화 설정)
 
 
 def review_out(
@@ -141,6 +143,7 @@ def review_out(
         automation_name=automation.name if automation is not None else None,
         created_by=session.created_by,
         created_by_name=creator.display_name if creator is not None else None,
+        include_unmapped_default=include_unmapped_default(db, session),
         can_edit=user is None or session.created_by == user.id or (session.created_by is None and user.is_manager),
     )
 

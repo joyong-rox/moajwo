@@ -116,8 +116,18 @@ def _latest_session(db: Session, session_id: int) -> int:
     return session_id
 
 
+class IntegrateIn(BaseModel):
+    # 표준 항목이 없는('해당 없음') 열도 원래 이름으로 넣을지. 비우면 자동화 설정(없으면 넣지 않음)
+    include_unmapped: bool | None = None
+
+
 @router.post("/reviews/{review_id}/integrate", response_model=RunOut, status_code=status.HTTP_201_CREATED)
-def integrate_review(review_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> RunOut:
+def integrate_review(
+    review_id: int,
+    db: Annotated[Session, Depends(get_session)],
+    user: CurrentUserDep,
+    body: IntegrateIn | None = None,
+) -> RunOut:
     """검토가 끝난 세션으로 새 결과 엑셀을 만든다. 실행할 때마다 새 파일을 만든다 (원본은 덮어쓰지 않음).
     검토를 만든 사람만 실행한다."""
     session = db.get(ReviewSession, review_id)
@@ -125,7 +135,7 @@ def integrate_review(review_id: int, db: Annotated[Session, Depends(get_session)
         raise HTTPException(status.HTTP_404_NOT_FOUND, "검토 세션을 찾을 수 없습니다.")
     ensure_own(user, session.created_by, "검토 세션")
     try:
-        run = integrate(db, session)
+        run = integrate(db, session, body.include_unmapped if body else None)
     except IntegrationError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     return runs_out(db, [run])[0]
