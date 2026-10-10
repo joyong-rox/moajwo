@@ -38,3 +38,57 @@ def test_base_sido_entries_seeded_and_removed(tmp_path: Path) -> None:
     assert db.execute("SELECT count(*) FROM glossary_entries WHERE source = 'base'").fetchone()[0] == 0
     assert db.execute("SELECT count(*) FROM glossary_entries WHERE source = 'example'").fetchone()[0] > 0
     db.close()
+
+
+def test_reorganization_entries_and_successor_aliases(tmp_path: Path) -> None:
+    from app.glossary import AliasEntry, Entry, Glossary, period_end
+
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    entries = [
+        Entry(code, name, type_label or "", sido, sigungu, _d(start), _d(end))
+        for code, name, type_label, sido, sigungu, start, end in db.execute(
+            "SELECT code, name, type_label, sido_code, sigungu_code, valid_from, valid_to FROM glossary_entries"
+        )
+    ]
+    aliases: dict[str, list[AliasEntry]] = {}
+    for normalized, target, start, source in db.execute(
+        "SELECT normalized, target_code, valid_from, source FROM glossary_aliases"
+    ):
+        aliases.setdefault(normalized, []).append(AliasEntry(target, _d(start), base=source == "base"))
+    assert (
+        db.execute("SELECT count(*) FROM glossary_entries WHERE code IN ('3500000', '3501000', '5805000')").fetchone()[
+            0
+        ]
+        == 3
+    )
+    db.close()
+
+    g = Glossary(entries, aliases)
+    for name, period, code in [
+        ("인천 동구", "2025-04", "3500000"),
+        ("인천 동구", "2026-08", "3501000"),
+        ("광주 동구", "2026-08", "5805000"),
+        ("전남 목포시", "2026-08", "5780000"),
+        ("광주", "2024-03", "6290000"),
+        ("전남", "2024-03", "6460000"),
+        ("강원 춘천시", "2022-12", "4180000"),
+        ("경북 군위군", "2026-08", "5141000"),
+    ]:
+        res = g.resolve(name, period_end(period), "region")
+        assert (res.status, res.ref.code if res.ref else None) == ("resolved", code), (name, period)
+
+    _alembic(tmp_path, "downgrade", "0011_sido_base_entries")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM glossary_aliases WHERE source = 'base'").fetchone()[0] == 0
+    assert db.execute("SELECT count(*) FROM glossary_entries WHERE code = '3500000'").fetchone()[0] == 0
+    assert (
+        db.execute("SELECT count(*) FROM glossary_entries WHERE code = '6290000'").fetchone()[0] == 1
+    )  # 0011 항목은 유지
+    db.close()
+
+
+def _d(value: str | None):
+    from datetime import date
+
+    return date.fromisoformat(value) if value else None

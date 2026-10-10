@@ -237,7 +237,9 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
     choices = {
         i.before: i.choice for i in items if i.kind == "entity" and i.decision == "approved" and i.choice and i.before
     }
-    normalizer = _EntityNormalizer(EntityResolver(glossary, params.get("expected_period")), choices, session.id)
+    normalizer = _EntityNormalizer(
+        EntityResolver(glossary, params.get("expected_period") or params.get("name_period")), choices, session.id
+    )
 
     built = _Built(labels=list(PROVENANCE))
     standard_labels = frozenset(f.label for f in engine.fields)

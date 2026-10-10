@@ -31,6 +31,7 @@ from app.validation import (
     SheetInput,
     ValidationParams,
     ValidationResult,
+    reference_period,
     row_entity_names,
     validate,
 )
@@ -252,6 +253,11 @@ def create_session(
     glossary = get_glossary(db)
     files = [_file_input(t) for t in targets]
     result = validate(files, vparams, [_file_input(b) for b in baseline], glossary=glossary)
+    # 이름 해석 기준 기간 (기준 기간이 없으면 자료에서 추정). 통합도 같은 기준으로 이름을 바꾸도록 남긴다
+    name_period, inferred = reference_period(files, vparams.expected_period)
+    params = {k: v for k, v in params.items() if k != "name_period"}  # 다시 검사면 이전 추정값은 버린다
+    if inferred:
+        params["name_period"] = name_period
     run = save_run(db, json.dumps(params, ensure_ascii=False), result, user_id)
 
     session = ReviewSession(
@@ -271,7 +277,7 @@ def create_session(
         items += _mapping_items(loaded, rules)
         items += _correction_items(loaded)
     labels = {f.key: f.label for f in engine.fields}
-    items += _entity_items(result, files, EntityResolver(glossary, vparams.expected_period), labels, rules)
+    items += _entity_items(result, files, EntityResolver(glossary, name_period), labels, rules)
     for item in items:
         item.session_id = session.id
         db.add(item)

@@ -1,6 +1,8 @@
 """열 이름 → 표준 사전 매핑 엔진.
 
 1) 표준 사전 정확 일치 → 2) rapidfuzz + bge-m3 임베딩 유사도 → 3) 1·2단계 미해결 열만 로컬 LLM(Ollama)
+날짜 필터: 샘플이 모두 날짜·기간 형식이면 지역·용어 판별 없이 날짜 항목(기준일자·월·연도)으로 정한다.
+  사용자가 이 파일에서 확정한 열, 사용자의 학습 별칭, 열 이름이 이미 날짜 항목인 경우는 그대로 둔다.
 LLM에는 미해결 열 하나씩, 열 이름과 샘플 값 5개만 보낸다 (전체 데이터를 넘기지 않는다).
 """
 
@@ -21,6 +23,7 @@ from typing import Any, Literal
 from rapidfuzz import fuzz
 
 from app import admin_codes, llm, ollama
+from app.glossary import DATE_VALUE
 from app.parsing import Cell
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,7 @@ class StandardField:
     label: str
     description: str
     aliases: tuple[str, ...]
+    modifier: bool = False  # 관용·자가용처럼 다른 항목의 구분으로 붙는 항목 ('승용_관용' → 승용차 (관용))
 
     @property
     def texts(self) -> tuple[str, ...]:
@@ -93,7 +97,9 @@ class MappingResult:
 def load_dictionary(path: Path = DICTIONARY_PATH) -> list[StandardField]:
     data = json.loads(path.read_text(encoding="utf-8"))
     fields = [
-        StandardField(f["key"], f["label"], f.get("description", ""), tuple(f.get("aliases", [])))
+        StandardField(
+            f["key"], f["label"], f.get("description", ""), tuple(f.get("aliases", [])), bool(f.get("modifier"))
+        )
         for f in data["fields"]
     ]
     keys = [f.key for f in fields]
@@ -123,6 +129,8 @@ class ColumnName:
     parts: tuple[str, ...]  # 2단 헤더 'A_B'의 각 부분 (뒤쪽 = 더 구체적)
     display: str  # 임베딩/LLM에 보낼 사람이 읽는 형태
     qualifier: str | None
+    raw_parts: tuple[str, ...] = ()  # parts의 원래 글자 (구분 표시용)
+    bracketed: tuple[str, ...] = ()  # 괄호 안 글자 ('승용(관용)' → '관용'). 사전 단어일 때만 구분으로 쓴다
 
 
 def split_column_name(column: str) -> ColumnName:
@@ -132,7 +140,34 @@ def split_column_name(column: str) -> ColumnName:
     raw_parts = [p for p in re.split(r"[_/]", cleaned) if normalize(p)]
     parts = tuple(normalize(p) for p in raw_parts) if len(raw_parts) > 1 else ()
     display = " ".join(p.strip() for p in raw_parts) or text
-    return ColumnName(column, normalize(cleaned), parts, display, ",".join(years) or None)
+    bracketed = tuple(m.group(0)[1:-1].strip() for m in _PAREN.finditer(_YEAR.sub("", text)))
+    shown = tuple(p.strip() for p in raw_parts) if parts else ()
+    return ColumnName(column, normalize(cleaned), parts, display, ",".join(years) or None, shown, bracketed)
+
+
+# 2단 헤더에서 구분으로만 쓰이는 합계 단어 ('승용_계' → 승용차 (계))
+TOTAL_WORDS = frozenset({"계", "소계", "합계", "총계", "전체"})
+DATE_FIELDS = frozenset({"base_date", "month", "year"})
+_DATE_YEAR = re.compile(r"^(?:19|20)\d{2}\s*년$")
+_DATE_MONTH = re.compile(r"^(?:19|20)\d{2}\s*(?:[-./]\s*\d{1,2}\.?|년\s*\d{1,2}\s*월)$")
+
+
+def date_field_for(samples: list[Cell]) -> str | None:
+    """샘플이 모두 날짜·기간 글자면 맞는 날짜 항목 key: '2026년' → year, '2026-08' → month, 그 밖 → base_date.
+
+    숫자 셀(2024 등)은 수량과 헷갈리므로 보지 않고, 8자리 숫자 글자('20260831')는 코드와 겹쳐 날짜로 보지 않는다.
+    """
+    values = [s for s in samples if s is not None]
+    if not values or not all(isinstance(v, str) for v in values):
+        return None
+    texts = [str(v).strip() for v in values]
+    if not all(DATE_VALUE.match(t) and not t.isdigit() for t in texts):
+        return None
+    if all(_DATE_YEAR.match(t) for t in texts):
+        return "year"
+    if all(_DATE_MONTH.match(t) for t in texts):
+        return "month"
+    return "base_date"
 
 
 # ---------------------------------------------------------------- 유사도
@@ -333,6 +368,7 @@ class MappingEngine:
     ) -> bool:
         key = self._exact.get(name.primary)
         if key is not None:
+            key = self._with_bracketed(name, result, key)
             self._apply(result, key, "auto", "exact", 1.0, "표준 사전과 정확히 일치")
             return True
         key = standard.get(name.primary)
@@ -343,12 +379,48 @@ class MappingEngine:
         if key in self._by_key:
             self._apply(result, key, "auto", "learned", 1.0, "사용자가 확정한 열 이름(학습된 별칭)과 일치")
             return True
-        for part in reversed(name.parts):  # 2단 헤더는 아래(뒤) 부분이 더 구체적
-            key = self._exact.get(part)
-            if key is not None:
-                self._apply(result, key, "review", "exact_part", 0.9, "열 이름의 일부가 표준 사전과 일치")
+        return self._part_match(name, result)
+
+    def _with_bracketed(self, name: ColumnName, result: ColumnMapping, key: str) -> str:
+        """괄호 안이 사전 단어면 단위가 아니라 구분이다.
+
+        '승용(관용)' → 승용차 (관용), '관용(승용차)' → 승용차 (관용). '예산(백만원)'의 단위 괄호는 그대로 무시한다.
+        """
+        words = [(b, k) for b in name.bracketed if (k := self._exact.get(normalize(b))) is not None]
+        if not words:
+            return key
+        if self._by_key[key].modifier:  # 구분 단어가 앞에 온 형태: 괄호 안의 주 항목으로 바꾼다
+            main = next(((b, k) for b, k in words if not self._by_key[k].modifier), None)
+            if main is not None:
+                words = [(name.display, key), *[w for w in words if w != main]]
+                key = main[1]
+        result.qualifier = " ".join(q for q in (result.qualifier, *(b for b, _ in words)) if q)
+        return key
+
+    def _part_match(self, name: ColumnName, result: ColumnMapping) -> bool:
+        """2단 헤더 'A_B'의 일부가 사전과 일치. 아래(뒤) 부분이 더 구체적이지만, 관용·계 같은 구분 단어보다
+        승용차 같은 주 항목을 먼저 고른다. 나머지 부분이 구분 단어뿐이면 자동 적용, 아니면 확인 대상."""
+        hits = [(i, k) for i, part in enumerate(name.parts) if (k := self._exact.get(part)) is not None]
+        if not hits:
+            return False
+        index, key = ([h for h in hits if not self._by_key[h[1]].modifier] or hits)[-1]
+        others = [i for i in range(len(name.parts)) if i != index]
+
+        def is_qualifier(part: str) -> bool:
+            if part in TOTAL_WORDS:
                 return True
-        return False
+            k = self._exact.get(part)
+            return k is not None and self._by_key[k].modifier and not self._by_key[key].modifier
+
+        if others and all(is_qualifier(name.parts[i]) for i in others):
+            extra = " ".join(name.raw_parts[i] for i in others)
+            result.qualifier = " ".join(q for q in (result.qualifier, extra) if q)
+            self._apply(
+                result, key, "auto", "exact_part", 1.0, "열 이름이 표준 항목과 구분 단어(관용·계 등)로 이루어짐"
+            )
+        else:
+            self._apply(result, key, "review", "exact_part", 0.9, "열 이름의 일부가 표준 사전과 일치")
+        return True
 
     # -- 2단계
     def _similarity(self, name: ColumnName, sims: dict[str, float] | None, result: ColumnMapping) -> None:
@@ -421,6 +493,13 @@ class MappingEngine:
                     result.status, result.method, result.reason = "confirmed", "user", "사용자가 '해당 없음'으로 확정"
                 continue
             self._exact_match(name, result, learned, standard)
+            date_key = date_field_for(result.samples)
+            if date_key is None or result.field_key in DATE_FIELDS or result.method == "learned":
+                continue  # 날짜가 아니거나, 열 이름이 이미 날짜 항목이거나, 사용자의 학습 별칭이면 그대로
+            result.qualifier = name.qualifier
+            example = next(str(s) for s in result.samples if s is not None)
+            reason = f"샘플이 모두 날짜·기간 형식(예: {example}) — 지역·용어 판별 없이 날짜 항목으로 처리"
+            self._apply(result, date_key, "auto", "pattern", 1.0, reason)
 
         sims, embedding_status = self._embed_columns(names)
         for i, (name, result) in enumerate(zip(names, results, strict=True)):

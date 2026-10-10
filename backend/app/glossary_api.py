@@ -33,7 +33,9 @@ def _entry(e: GlossaryEntry) -> Entry:
 def get_glossary(session: Session) -> Glossary:
     aliases: dict[str, list[AliasEntry]] = {}
     for a in session.scalars(select(GlossaryAlias)):
-        aliases.setdefault(a.normalized, []).append(AliasEntry(a.target_code, a.valid_from, a.valid_to))
+        aliases.setdefault(a.normalized, []).append(
+            AliasEntry(a.target_code, a.valid_from, a.valid_to, base=a.source == "base")
+        )
     return Glossary([_entry(e) for e in session.scalars(select(GlossaryEntry))], aliases)
 
 
@@ -44,7 +46,7 @@ class InfoOut(BaseModel):
     entries: int
     region_entries: int  # 시도코드가 있는 항목 (자치단체)
     example_entries: int
-    base_entries: int  # 기본 광역 항목 (마이그레이션 0011)
+    base_entries: int  # 기본 항목 (광역 0011, 개편 기초자치단체 0012)
     aliases: int
     region_code_table_date: str
 
@@ -98,10 +100,11 @@ def _entry_out(e: GlossaryEntry, aliases: list[str]) -> EntryOut:
     )
 
 
-def _aliases_by_code(session: Session) -> dict[str, list[str]]:
+def _aliases_by_code(session: Session, include_base: bool = True) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for a in session.scalars(select(GlossaryAlias).order_by(GlossaryAlias.id)):
-        out.setdefault(a.target_code, []).append(a.alias)
+        if include_base or a.source != "base":
+            out.setdefault(a.target_code, []).append(a.alias)
     return out
 
 
@@ -193,7 +196,8 @@ def download_template() -> Response:
 @router.get("/export.csv")
 def export_glossary(session: Annotated[Session, Depends(get_session)]) -> Response:
     entries = list(session.scalars(select(GlossaryEntry).order_by(GlossaryEntry.code)))
-    return _csv_response(export_csv(entries, _aliases_by_code(session)), "용어사전.csv")
+    # 기본 별칭(개편 승계)은 유효기간이 있어 별칭 칸(기간 없음)으로 내보내면 다시 올릴 때 기간이 사라진다 → 뺀다
+    return _csv_response(export_csv(entries, _aliases_by_code(session, include_base=False)), "용어사전.csv")
 
 
 # ---------------------------------------------------------------- 해석

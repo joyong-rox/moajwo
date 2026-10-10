@@ -113,7 +113,7 @@ class GlossaryAlias(Base):
     valid_from: Mapped[date | None] = mapped_column(Date)
     valid_to: Mapped[date | None] = mapped_column(Date)
     note: Mapped[str | None] = mapped_column(String(500))
-    source: Mapped[str] = mapped_column(String(16), default="user")  # example / upload / user
+    source: Mapped[str] = mapped_column(String(16), default="user")  # example / upload / user / base(개편 승계)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

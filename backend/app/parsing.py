@@ -486,6 +486,36 @@ def _column_names(header_rows: list[list[Cell]], width: int) -> list[str]:
     return names
 
 
+def merged_duplicate_columns(
+    grid: list[list[Cell]], header: tuple[int, int] | None, columns: list[str], filled: set[tuple[int, int]]
+) -> list[int]:
+    """머리글이 가로 병합돼 생긴 복제 열 (버릴 열 번호).
+
+    가로 병합은 범위 전체를 왼쪽 위 값으로 채우므로 '자가용', '자가용_2', '자가용_3'처럼 같은 이름의 열이 생긴다.
+    같은 이름 구간에서 머리글 칸이 병합으로 채워졌고, 본문 값도 모든 행에서 구간 안의 앞 열과 같으면 복제로 본다.
+    값이 하나라도 다른 열(예: '시군구' 병합 아래 '천안시 | 동남구')은 실제 데이터라 남긴다.
+    """
+    if header is None:
+        return []
+    top, bottom = header
+    body = grid[bottom + 1 :]
+    base = [re.sub(r"_\d+$", "", c) for c in columns]
+    drop: list[int] = []
+    kept_in_run: list[int] = []
+    for j in range(len(columns)):
+        merged = j > 0 and any(
+            (r, j) in filled and grid[r][j] is not None and grid[r][j] == grid[r][j - 1] for r in range(top, bottom + 1)
+        )
+        if not merged or base[j] != base[j - 1]:
+            kept_in_run = [j]
+            continue
+        if any(all(row[j] == row[k] for row in body) for k in kept_in_run):
+            drop.append(j)
+        else:
+            kept_in_run.append(j)
+    return drop
+
+
 def _corrections(
     raw: list[list[Any]], grid: list[list[Cell]], body: list[dict[str, Any]], filled: set[tuple[int, int]]
 ) -> list[dict[str, Any]]:
@@ -521,9 +551,18 @@ def analyze_sheet(name: str, raw: list[list[Any]], filled: set[tuple[int, int]] 
     grid = _trim([[normalize_cell(v) for v in row] for row in raw])
     width = len(grid[0]) if grid else 0
     block = detect_header_block(grid)
+    columns = _column_names(grid[block[0] : block[1] + 1] if block else [], width)
+    drop = set(merged_duplicate_columns(grid, block, columns, filled or set()))
+    if drop:  # 머리글 가로 병합으로 생긴 복제 열은 버린다 (남는 열 이름은 그대로 — 저장된 매핑 확정과 맞춤)
+        keep = [j for j in range(width) if j not in drop]
+        grid = [[row[j] for j in keep] for row in grid]
+        raw = [[row[j] if j < len(row) else None for j in keep] for row in raw]
+        position = {j: i for i, j in enumerate(keep)}
+        filled = {(r, position[c]) for r, c in (filled or set()) if c in position}
+        columns = [columns[j] for j in keep]
+        width = len(keep)
     header_rows = grid[block[0] : block[1] + 1] if block else []
     body_start = block[1] + 1 if block else 0
-    columns = _column_names(header_rows, width)
     # 코드·번호·시각 열은 파일에 적힌 글자 그대로 둔다 (열 전체를 같은 기준으로)
     for j in text_columns(columns, grid, raw, body_start):
         for r in range(body_start, len(grid)):

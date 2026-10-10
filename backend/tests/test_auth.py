@@ -331,8 +331,13 @@ def test_dashboard_counts_same_content_once(accounts) -> None:
     u = accounts["user4"]
     rows = [["기관명", "집행액"], ["행정안전부", 1], ["기상청", 2], ["인사혁신처", 3]]
     before = u.get("/dashboard").json()["validated_rows"]
-    first = _upload(u, rows, "같은내용.xlsx")
-    second = _upload(u, rows, "같은내용_다시.xlsx")
+    data = _xlsx(
+        rows
+    )  # 한 번 만든 바이트를 두 번 올린다 (xlsx는 저장 시각이 들어가 다시 만들면 sha256이 달라질 수 있음)
+    first, second = (
+        u.post("/files", files=[("files", (name, data, XLSX))]).json()[0]["id"]
+        for name in ("같은내용.xlsx", "같은내용_다시.xlsx")
+    )
     assert u.post("/validation", json={"file_ids": [first]}).status_code == 200
     mid = u.get("/dashboard").json()["validated_rows"]
     assert u.post("/validation", json={"file_ids": [second]}).status_code == 200

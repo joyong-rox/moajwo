@@ -297,3 +297,87 @@ def test_import_fills_missing_region_codes_and_keeps_existing(client: TestClient
     entry = next(e for e in client.get("/glossary/entries", params={"q": "3010000"}).json() if e["code"] == "3010000")
     assert (entry["sido_code"], entry["sigungu_code"]) == ("11", "140")
     client.delete(f"/glossary/entries/{entry['id']}")
+
+
+REORG = [
+    Entry("6280000", "인천광역시", "광역자치단체", "28"),
+    Entry("3500000", "인천광역시 동구", "기초자치단체", "28", "140", valid_to=date(2026, 6, 30)),
+    Entry("3490000", "인천광역시 중구", "기초자치단체", "28", "110", valid_to=date(2026, 6, 30)),
+    Entry("3501000", "인천광역시 제물포구", "기초자치단체", "28", "125", valid_from=date(2026, 7, 1)),
+    Entry("3491000", "인천광역시 영종구", "기초자치단체", "28", "155", valid_from=date(2026, 7, 1)),
+]
+REORG_ALIASES = {
+    "인천동구": [AliasEntry("3501000", date(2026, 7, 1), base=True)],
+    "인천중구": [
+        AliasEntry("3501000", date(2026, 7, 1), base=True),
+        AliasEntry("3491000", date(2026, 7, 1), base=True),
+    ],
+}
+
+
+def test_reorganized_names_follow_reference_date() -> None:
+    g = Glossary(REORG, REORG_ALIASES)
+    before = g.resolve("인천 동구", period_end("2025-04"), "region")
+    after = g.resolve("인천 동구", period_end("2026-08"), "region")
+    assert (before.status, before.ref.code) == ("resolved", "3500000")
+    assert (after.status, after.ref.code, after.note) == ("resolved", "3501000", None)
+    split = g.resolve("인천 중구", period_end("2026-08"), "region")
+    assert split.status == "ambiguous" and {c.code for c in split.candidates} == {"3501000", "3491000"}
+
+
+def test_user_alias_and_valid_name_beat_base_alias() -> None:
+    """사용자가 등록한 별칭, 기준일에 유효한 정식명칭은 기본 별칭(개편 승계)보다 먼저다."""
+    user = {"인천동구": [*REORG_ALIASES["인천동구"], AliasEntry("3491000")]}
+    g = Glossary(REORG, user)
+    assert g.resolve("인천 동구", period_end("2026-08"), "region").ref.code == "3491000"
+    current_old_name = [*REORG[:1], Entry("3500000", "인천광역시 동구", "기초자치단체", "28", "140"), *REORG[2:]]
+    g = Glossary(current_old_name, REORG_ALIASES)  # 사용자가 옛 이름을 현행 항목으로 올렸으면 그 항목
+    assert g.resolve("인천광역시 동구", period_end("2026-08"), "region").ref.code == "3500000"
+
+
+def test_date_values_are_not_names() -> None:
+    g = glossary()
+    for value in ("2026-08", "2026년", "2026.08.31", "2026년 8월"):
+        res = g.resolve(value, AT, "region")
+        assert (res.status, res.candidates) == ("unknown", []), value
+
+
+def test_reference_period_inferred_from_file(tmp_path: Path) -> None:
+    """기준 기간이 없으면 자료의 기간(파일명 8자리 날짜 포함)으로 '광주'·'전남' 같은 옛 이름을 해석한다."""
+    entries = [
+        Entry("6290000", "광주광역시", "광역자치단체", "29", valid_to=date(2026, 6, 30)),
+        Entry("6460000", "전라남도", "광역자치단체", "46", valid_to=date(2026, 6, 30)),
+        Entry("6130000", "전남광주통합특별시", "광역자치단체", "12", valid_from=date(2026, 7, 1)),
+    ]
+    rows = [["지역", "관용"], ["광주", 1], ["전남", 2]]
+    path = make_xlsx(tmp_path / "수소차_20240331.xlsx", rows)
+    result = validate([make_input(path)], ValidationParams(), glossary=Glossary(entries, {}))
+    assert result.entities == []
+    assert any("자료의 기간(2024-03)" in n for n in result.notes)
+    # 기준 기간을 주면 그 기간이 먼저다 (통합 후 기준이면 옛 이름으로 표시)
+    result = validate([make_input(path)], ValidationParams(expected_period="2026-08"), glossary=Glossary(entries, {}))
+    assert {e.value for e in result.entities} == {"광주", "전남"}
+
+
+def test_export_leaves_out_base_aliases(client: TestClient) -> None:
+    """기본 별칭(개편 승계, 유효기간 있음)은 내보내지 않는다 — 다시 올리면 기간 없는 별칭이 되기 때문."""
+    from app.db import SessionLocal
+    from app.models import GlossaryAlias
+
+    csv = "코드,정식명칭,유형\n3501000,인천광역시 제물포구,기초자치단체\n".encode()
+    assert client.post("/glossary/import", files=[("file", ("g.csv", csv, "text/csv"))]).json()["applied"]
+    with SessionLocal() as db:
+        db.add(
+            GlossaryAlias(
+                alias="인천 동구",
+                normalized="인천동구",
+                target_code="3501000",
+                valid_from=date(2026, 7, 1),
+                source="base",
+            )
+        )
+        db.commit()
+    assert "인천 동구" not in client.get("/glossary/export.csv").text
+    entry = next(e for e in client.get("/glossary/entries", params={"q": "3501000"}).json() if e["code"] == "3501000")
+    assert "인천 동구" in entry["aliases"]  # 목록 화면에는 보인다
+    client.delete(f"/glossary/entries/{entry['id']}")

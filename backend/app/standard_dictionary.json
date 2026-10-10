@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "표준 열 사전. key는 바꾸지 말고 label/aliases/description만 추가·수정한다. 정확 일치는 공백·가운뎃점·단위 괄호를 무시하고 비교한다.",
+  "description": "표준 열 사전. key는 바꾸지 말고 label/aliases/description만 추가·수정한다. 정확 일치는 공백·가운뎃점·단위 괄호를 무시하고 비교한다. modifier가 true인 항목(관용·자가용·영업용)은 '승용_관용'·'승용(관용)'처럼 다른 항목과 함께 쓰이면 그 항목의 구분(qualifier)으로 붙는다.",
   "fields": [
     { "key": "org_name", "label": "기관명", "description": "정부부처·공공기관 이름", "aliases": ["기관", "기관명칭", "부처", "부처명", "소속기관", "소관부처", "소관기관", "기관구분", "중앙행정기관"] },
     { "key": "org_code", "label": "기관코드", "description": "기관을 식별하는 코드", "aliases": ["기관 코드", "부처코드", "기관번호"] },
@@ -26,6 +26,22 @@
     { "key": "department", "label": "담당부서", "description": "업무를 맡은 부서", "aliases": ["부서", "부서명", "담당과", "소관부서", "주관부서"] },
     { "key": "manager", "label": "담당자", "description": "업무 담당자 이름", "aliases": ["담당", "담당자명", "작성자", "책임자"] },
     { "key": "phone", "label": "연락처", "description": "전화번호", "aliases": ["전화번호", "전화", "담당자연락처", "담당자 전화", "담당자 전화번호", "내선번호"] },
-    { "key": "note", "label": "비고", "description": "참고 사항", "aliases": ["참고", "기타", "특이사항", "메모", "비고란"] }
+    { "key": "note", "label": "비고", "description": "참고 사항", "aliases": ["참고", "기타", "특이사항", "메모", "비고란"] },
+    { "key": "vehicles_total", "label": "자동차 등록대수", "description": "등록된 자동차 수(대) 합계", "aliases": ["자동차", "등록대수", "자동차등록대수", "자동차 수", "자동차대수", "차량수", "차량대수", "등록차량수", "총등록대수"] },
+    { "key": "passenger_car", "label": "승용차", "description": "승용자동차 등록대수(대)", "aliases": ["승용", "승용자동차", "승용차수", "승용차대수"] },
+    { "key": "van", "label": "승합차", "description": "승합자동차 등록대수(대)", "aliases": ["승합", "승합자동차", "승합차수", "승합차대수"] },
+    { "key": "truck", "label": "화물차", "description": "화물자동차 등록대수(대)", "aliases": ["화물", "화물자동차", "화물차수", "화물차대수"] },
+    { "key": "special_vehicle", "label": "특수차", "description": "특수자동차 등록대수(대)", "aliases": ["특수", "특수자동차", "특수차수", "특수차대수"] },
+    { "key": "motorcycle", "label": "이륜차", "description": "이륜자동차 신고·등록대수(대)", "aliases": ["이륜", "이륜자동차", "이륜차수", "이륜차대수", "오토바이"] },
+    { "key": "eco_friendly_car", "label": "친환경차", "description": "친환경자동차(전기·수소·하이브리드) 등록대수(대)", "aliases": ["친환경", "친환경자동차", "친환경차량", "친환경차수"] },
+    { "key": "electric_car", "label": "전기차", "description": "전기자동차 등록대수(대)", "aliases": ["전기자동차", "전기차수", "전기차대수", "EV"] },
+    { "key": "hydrogen_car", "label": "수소차", "description": "수소(연료전지)자동차 등록대수(대)", "aliases": ["수소자동차", "수소전기차", "수소전기자동차", "수소차수", "수소연료전지차", "FCEV"] },
+    { "key": "hybrid_car", "label": "하이브리드차", "description": "하이브리드자동차 등록대수(대)", "aliases": ["하이브리드", "하이브리드자동차", "HEV"] },
+    { "key": "vehicle_type", "label": "차종", "description": "자동차 종류 이름(승용·승합·화물·특수 등)", "aliases": ["차종별", "차종구분", "차종명", "차량종류", "자동차종류"] },
+    { "key": "vehicle_use", "label": "용도", "description": "자동차 용도 이름(관용·자가용·영업용 등)", "aliases": ["용도별", "용도구분", "차량용도"] },
+    { "key": "fuel_type", "label": "연료", "description": "자동차 사용 연료 이름(휘발유·경유·LPG·전기 등)", "aliases": ["연료별", "연료구분", "연료종류", "사용연료"] },
+    { "key": "government_use", "label": "관용", "description": "관용(국가·지자체 소유) 차량 수(대)", "aliases": ["관용차", "관용차량"], "modifier": true },
+    { "key": "private_use", "label": "자가용", "description": "자가용(비사업용) 차량 수(대)", "aliases": ["자가용차", "비사업용"], "modifier": true },
+    { "key": "commercial_use", "label": "영업용", "description": "영업용(사업용) 차량 수(대)", "aliases": ["영업용차", "사업용"], "modifier": true }
   ]
 }

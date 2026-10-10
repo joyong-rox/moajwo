@@ -567,6 +567,33 @@ def collect_periods(file: FileInput) -> list[PeriodEvidence]:
     return evidence
 
 
+# 공공데이터 파일명의 8자리 날짜 (예: _20240331). 올린 날일 수도 있어 기간 검사에는 쓰지 않고,
+# 기준 기간이 없을 때 기관·지역 이름 해석 기준일의 마지막 단서로만 쓴다.
+_FILE_DATE = re.compile(r"(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?!\d)")
+
+
+def reference_period(files: list[FileInput], expected: str | None) -> tuple[str | None, bool]:
+    """기관·지역 이름을 해석할 기준 기간과 추정 여부.
+
+    기준 기간이 있으면 그 값. 없으면 파일마다 찾은 대표 기간(기간 검사와 같은 근거, 없으면 파일명의 8자리 날짜)이
+    모두 같을 때 그 기간을 쓴다 ('광주'·'인천 동구' 같은 개편 전 이름을 자료 시점의 항목으로 해석).
+    """
+    if expected:
+        return expected, False
+    found: set[str] = set()
+    for f in files:
+        evidence = collect_periods(f)
+        if evidence:
+            months = [e.period for e in evidence if len(e.period) == 7]
+            found.add(statistics.mode(months or [e.period for e in evidence]))
+        elif dates := _FILE_DATE.findall(f.file_name):
+            year, month = dates[-1]
+            found.add(f"{year}-{month}")
+    if len(found) == 1:
+        return found.pop(), True
+    return None, False
+
+
 def _period_matches(found: str, expected: str) -> bool:
     if len(found) == 4 or len(expected) == 4:
         return found[:4] == expected[:4]
@@ -890,8 +917,11 @@ def validate(
     glossary: Glossary | None = None,
 ) -> ValidationResult:
     """glossary가 주어지면 기관·지역 이름을 용어사전 항목 코드로 비교한다 (기준일 = 기준 기간 말일)."""
-    resolver = EntityResolver(glossary, params.expected_period)
+    period, inferred = reference_period(files, params.expected_period)
+    resolver = EntityResolver(glossary, period)
     notes: list[str] = []
+    if inferred and glossary is not None:
+        notes.append(f"기준 기간이 없어 자료의 기간({period})을 기준으로 기관·지역 이름을 해석했습니다.")
     blocks: list[BlockIssue] = []
     warnings: list[WarningIssue] = []
 

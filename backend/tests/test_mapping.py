@@ -258,3 +258,73 @@ def test_learned_alias_and_decisions() -> None:
     # 확정은 사전 일치보다 우선한다
     assert (m["부처"].status, m["부처"].field_key) == ("confirmed", "budget")
     assert llm.calls == []  # 확정된 열은 LLM으로 가지 않는다
+
+
+def test_date_samples_bypass_region_and_term_matching() -> None:
+    """샘플이 모두 날짜·기간이면 지역·용어 판별 없이 날짜 항목으로 (LLM에도 보내지 않음)."""
+    llm = FakeLlm({"열1": {"key": "sido", "confidence": 0.9, "reason": "지역"}})
+    engine = MappingEngine(load_dictionary(), None, llm)
+    columns = ["열1", "데이터기준일", "구분", "지역", "월(Monthly)", "번호"]
+    samples = [["2026-08", "2026-07"], ["2025-12-31"], ["2012년", "2013년"], ["2026.08.31"], ["2026-08"], ["20260831"]]
+    m = _by_column(engine.map_columns(columns, samples))
+    assert (m["열1"].field_key, m["열1"].status, m["열1"].method) == ("month", "auto", "pattern")
+    assert (m["데이터기준일"].field_key, m["데이터기준일"].method) == ("base_date", "pattern")
+    assert m["구분"].field_key == "year"
+    assert (m["지역"].field_key, m["지역"].method) == ("base_date", "pattern")  # 열 이름보다 값이 날짜임이 분명
+    assert (m["월(Monthly)"].field_key, m["월(Monthly)"].method) == ("month", "exact")  # 이름이 이미 날짜 항목
+    assert m["번호"].field_key != "base_date"  # 8자리 숫자 글자는 코드일 수 있어 날짜로 보지 않음
+    assert llm.calls == [] or all("열 이름: 열1\n" not in c for c in llm.calls)
+
+
+def test_date_filter_keeps_user_decisions_and_learned_aliases() -> None:
+    engine = MappingEngine(load_dictionary(), None, None)
+    m = _by_column(
+        engine.map_columns(
+            ["작성시점", "기록"],
+            [["2026-08"], ["2026-08-31"]],
+            learned={normalize("작성시점"): "note"},
+            decisions={"기록": None},
+        )
+    )
+    assert (m["작성시점"].field_key, m["작성시점"].method) == ("note", "learned")
+    assert (m["기록"].status, m["기록"].field_key) == ("confirmed", None)
+
+
+def test_vehicle_terms_and_usage_qualifiers() -> None:
+    """차량 분야 기본 항목: 승용·승합·화물·특수 + 관용·자가용·영업용·계는 구분(qualifier)으로 붙는다."""
+    engine = MappingEngine(load_dictionary(), None, None)
+    columns = [
+        "승용_관용",
+        "승합_계",
+        "승용(자가용)",
+        "관용(화물차)",
+        "2024_특수차_영업용",
+        "승용차 수",
+        "이륜자동차",
+        "전기차",
+        "수소전기차",
+        "친환경차",
+        "차종별",
+        "용도별",
+        "연료별",
+        "관용",
+        "총계_관용",
+        "예산(백만원)",
+    ]
+    m = _by_column(engine.map_columns(columns, [[1]] * len(columns), use_llm=False))
+    got = {c: (m[c].field_key, m[c].qualifier, m[c].status) for c in columns}
+    assert got["승용_관용"] == ("passenger_car", "관용", "auto")
+    assert got["승합_계"] == ("van", "계", "auto")
+    assert got["승용(자가용)"] == ("passenger_car", "자가용", "auto")
+    assert got["관용(화물차)"] == ("truck", "관용", "auto")
+    assert got["2024_특수차_영업용"] == ("special_vehicle", "2024 영업용", "auto")
+    assert got["승용차 수"][0] == "passenger_car" and got["이륜자동차"][0] == "motorcycle"
+    assert [got[c][0] for c in ("전기차", "수소전기차", "친환경차")] == [
+        "electric_car",
+        "hydrogen_car",
+        "eco_friendly_car",
+    ]
+    assert [got[c][0] for c in ("차종별", "용도별", "연료별")] == ["vehicle_type", "vehicle_use", "fuel_type"]
+    assert got["관용"] == ("government_use", None, "auto")
+    assert got["총계_관용"] == ("government_use", "총계", "auto")
+    assert got["예산(백만원)"] == ("budget", None, "auto")  # 단위 괄호는 구분이 아니다

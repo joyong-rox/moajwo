@@ -392,3 +392,29 @@ def test_only_info_sheet_is_still_read(tmp_path: Path) -> None:
     wb.save(path)
     result = parse_file(path)
     assert [s.name for s in result.sheets] == ["설명"] and result.skipped_sheets == []
+
+
+def test_horizontal_merge_duplicate_columns_dropped(tmp_path: Path) -> None:
+    """머리글·본문이 함께 가로 병합된 복제 열(자가용_2, _3)은 버리고, 값이 다른 열(구 이름)은 남긴다 (충남 양식)."""
+    rows = [
+        [None, None, None, None, "승   용", None, None, None, "승   합"],
+        ["시도", "시군구", None, None, "관용", "자가용", None, "계", "계"],
+        ["충남", "계", None, None, 280, 310825, None, 311105, 7423],
+        ["충남", "천안시", None, "동남구", 112, 122934, None, 123046, 3407],
+        ["충남", "천안시", None, "서북구", 168, 187891, None, 188059, 4016],
+        ["충남", "공주시", None, None, 0, 0, None, 0, 0],
+    ]
+    merges = ("E1:H1", "B2:D2", "F2:G2", "B3:D3", "F3:G3", "B4:C4", "F4:G4", "B5:C5", "F5:G5", "B6:D6", "F6:G6")
+    sheet = parse_file(_xlsx_rows(tmp_path, rows, merges)).sheets[0]
+    assert sheet.columns == ["시도", "시군구", "시군구_3", "승용_관용", "승용_자가용", "승용_계", "승합_계"]
+    data = [r["cells"] for r in sheet.body if r["kind"] == "data"]
+    assert data[0] == ["충남", "천안시", "동남구", 112, 122934, 123046, 3407]
+    assert data[2] == ["충남", "공주시", "공주시", 0, 0, 0, 0]
+    assert len(sheet.preview[0]["cells"]) == 7 and all(c["column"] < 7 for c in sheet.corrections)
+
+
+def test_same_header_names_without_merge_are_kept(tmp_path: Path) -> None:
+    """병합이 아닌 같은 이름 열(CSV 등)은 값이 같아도 버리지 않는다."""
+    path = tmp_path / "same.csv"
+    path.write_text("구분,인구,인구\n가,1,1\n나,2,2\n", encoding="utf-8")
+    assert parse_file(path).sheets[0].columns == ["구분", "인구", "인구_2"]

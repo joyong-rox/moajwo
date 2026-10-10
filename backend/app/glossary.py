@@ -5,7 +5,9 @@
 - 자치단체는 시도코드(2자리)·시군구코드(3자리)를 속성으로 가진다. 지역 약칭(서울, 서울 강서구 …)과
   데이터의 지역코드 열 연결에 쓴다. 법정동 코드는 쓰지 않는다.
 
-해석 순서: 별칭(유효기간 반영) → 정식명칭 → 지역 약칭 → 유사 이름 추천.
+해석 순서: 별칭(유효기간 반영) → 정식명칭 → 기본 별칭(행정구역 개편 승계) → 지역 약칭 → 유사 이름 추천.
+사용자가 올리거나 등록한 별칭·항목이 기본 데이터(마이그레이션 시드)보다 항상 먼저다.
+날짜 형식 값('2026-08', '2026년')은 이름으로 해석하지 않는다 (유사 이름 후보도 만들지 않음).
 같은 이름이 기준일에 유효한 항목 여러 개로 갈리면 '모호'로 돌려준다 (임의로 고르지 않는다).
 """
 
@@ -100,6 +102,7 @@ class AliasEntry:
     target_code: str
     valid_from: date | None = None
     valid_to: date | None = None
+    base: bool = False  # 기본 데이터(개편 전 이름 → 승계 항목). 사용자 별칭·정식명칭보다 뒤에 쓴다
 
     def valid_at(self, at: date | None) -> bool:
         return _valid(self.valid_from, self.valid_to, at)
@@ -129,6 +132,18 @@ def sido_short_names(name: str) -> set[str]:
             # 충청북도·경상남도·전라북도처럼 세 글자 + '도'는 첫 글자와 끝 글자로 줄여 쓴다 (충북·경남·전북)
             return {base, base[0] + base[2]} if len(base) == 3 else {base}
     return set()
+
+
+# 날짜·기간 값: 2026-08, 2026.08.31, 2026/8, 2026년, 2026년 8월, 20260831
+DATE_VALUE = re.compile(
+    r"^(?:19|20)\d{2}(?:\s*[-./]\s*\d{1,2}(?:\s*[-./]\s*\d{1,2})?\.?"
+    r"|\s*년(?:\s*\d{1,2}\s*월(?:\s*\d{1,2}\s*일)?)?|(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))"
+    r"(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$"
+)
+
+
+def looks_like_date(text: str) -> bool:
+    return bool(DATE_VALUE.match(unicodedata.normalize("NFKC", text).strip()))
 
 
 def prefer_for_field(field_key: str | None) -> Prefer:
@@ -188,9 +203,12 @@ class Glossary:
         norm = normalize_name(name)
         if not norm:
             return Resolution(name, "unknown")
+        if looks_like_date(name):
+            return Resolution(name, "unknown", note="날짜 형식 값 — 기관·지역 이름으로 해석하지 않음")
 
         aliases = [a for a in self.aliases.get(norm, []) if a.valid_at(at)]
-        targets = list({e.code: e for a in aliases if (e := self.entries.get(a.target_code))}.values())
+        user_aliases = [a for a in aliases if not a.base]
+        targets = list({e.code: e for a in user_aliases if (e := self.entries.get(a.target_code))}.values())
         if len(targets) == 1:
             return Resolution(name, "resolved", "alias", entity_ref(targets[0]), note=self._ended_note(targets[0], at))
         if targets:
@@ -198,10 +216,19 @@ class Glossary:
             return Resolution(name, "ambiguous", "alias", candidates=refs, note="별칭이 여러 항목에 연결됨")
 
         matches = self._index.get(norm, [])
-        if not matches:
-            return Resolution(name, "unknown", candidates=self.suggest(norm, at), note="용어사전에 없는 이름")
         valid = [(e, short) for e, short in matches if e.valid_at(at)]
         exact = [e for e, short in valid if not short]
+        if not exact:  # 개편 전 이름 → 승계 항목 (기본 별칭). 기준일에 유효한 정식명칭이 있으면 그쪽이 먼저다
+            successors = list(
+                {e.code: e for a in aliases if a.base and (e := self.entries.get(a.target_code))}.values()
+            )
+            if len(successors) == 1:
+                return Resolution(name, "resolved", "alias", entity_ref(successors[0]))
+            if successors:
+                refs = [entity_ref(e) for e in successors]
+                return Resolution(name, "ambiguous", "alias", candidates=refs, note="행정구역 개편으로 나뉜 지역")
+        if not matches:
+            return Resolution(name, "unknown", candidates=self.suggest(norm, at), note="용어사전에 없는 이름")
         picked = exact or [e for e, _ in valid]
         if len(picked) > 1:  # 이름이 겹치면 기준 열 성격(지역/기관)에 맞는 항목을 우선
             preferred = [e for e in picked if e.is_region == (prefer == "region")]

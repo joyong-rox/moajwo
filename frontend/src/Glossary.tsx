@@ -98,7 +98,7 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
       {info && (
         <p className="upload-drop-hint">
           등록 항목 {info.entries}개 (자치단체 {info.region_entries}
-          {info.base_entries > 0 && ` · 기본 광역 ${info.base_entries}`}
+          {info.base_entries > 0 && ` · 기본 ${info.base_entries}`}
           {info.example_entries > 0 && ` · 예시 ${info.example_entries}`}) · 별칭 {info.aliases}개 · 항목은 7자리
           코드로 식별, 시도 2자리·시군구 3자리 코드 확인 기준 {info.region_code_table_date}
         </p>
