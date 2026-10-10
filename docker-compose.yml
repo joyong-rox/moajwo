@@ -1,0 +1,30 @@
+name: moajwo
+
+services:
+  backend:
+    build: ./backend
+    environment:
+      MOAJWO_DATA_DIR: /app/data
+      # 호스트에서 실행 중인 로컬 Ollama (외부 LLM API는 사용하지 않음)
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-bge-m3}
+      OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-qwen2.5:7b}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - moajwo-data:/app/data
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  moajwo-data:

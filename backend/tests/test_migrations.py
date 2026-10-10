@@ -1,0 +1,169 @@
+"""마이그레이션 0011: 기본 광역 항목과 빈 시도·시군구 코드 채우기 (빈 임시 DB에 alembic을 실제로 실행)."""
+
+import os
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+BACKEND = Path(__file__).resolve().parent.parent
+
+
+def _alembic(data_dir: Path, *args: str) -> None:
+    env = {**os.environ, "MOAJWO_DATA_DIR": str(data_dir), "PYTHONIOENCODING": "utf-8"}
+    env.pop("DATABASE_URL", None)
+    subprocess.run([sys.executable, "-m", "alembic", *args], cwd=BACKEND, env=env, check=True, capture_output=True)
+
+
+def test_base_sido_entries_seeded_and_removed(tmp_path: Path) -> None:
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    rows = {r[0]: r[1:] for r in db.execute("SELECT code, name, sido_code, valid_to, source FROM glossary_entries")}
+    # 현행 광역 16개 + 폐지 광역 4개가 모두 있다 (예시 항목과 겹치는 코드는 예시를 그대로 둠)
+    for code in ("6110000", "5690000", "6430000", "6130000", "6530000", "6540000", "6290000", "6420000"):
+        assert code in rows, code
+    assert rows["5690000"][:2] == ("세종특별자치시", "36")
+    assert rows["6290000"][2] == "2026-06-30"  # 광주광역시: 통합 전날까지
+    # 예시 기초자치단체 항목도 시도 코드가 채워져 있다
+    assert (
+        db.execute(
+            "SELECT count(*) FROM glossary_entries WHERE type_label LIKE '%자치단체' AND sido_code IS NULL"
+        ).fetchone()[0]
+        == 0
+    )
+    db.close()
+
+    _alembic(tmp_path, "downgrade", "0010_users_roles")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM glossary_entries WHERE source = 'base'").fetchone()[0] == 0
+    assert db.execute("SELECT count(*) FROM glossary_entries WHERE source = 'example'").fetchone()[0] > 0
+    db.close()
+
+
+def test_reorganization_entries_and_successor_aliases(tmp_path: Path) -> None:
+    from app.glossary import AliasEntry, Entry, Glossary, period_end
+
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    entries = [
+        Entry(code, name, type_label or "", sido, sigungu, _d(start), _d(end))
+        for code, name, type_label, sido, sigungu, start, end in db.execute(
+            "SELECT code, name, type_label, sido_code, sigungu_code, valid_from, valid_to FROM glossary_entries"
+        )
+    ]
+    aliases: dict[str, list[AliasEntry]] = {}
+    for normalized, target, start, source in db.execute(
+        "SELECT normalized, target_code, valid_from, source FROM glossary_aliases"
+    ):
+        aliases.setdefault(normalized, []).append(AliasEntry(target, _d(start), base=source == "base"))
+    assert (
+        db.execute("SELECT count(*) FROM glossary_entries WHERE code IN ('3500000', '3501000', '5805000')").fetchone()[
+            0
+        ]
+        == 3
+    )
+    db.close()
+
+    g = Glossary(entries, aliases)
+    for name, period, code in [
+        ("인천 동구", "2025-04", "3500000"),
+        ("인천 동구", "2026-08", "3501000"),
+        ("광주 동구", "2026-08", "5805000"),
+        ("전남 목포시", "2026-08", "5780000"),
+        ("광주", "2024-03", "6290000"),
+        ("전남", "2024-03", "6460000"),
+        ("강원 춘천시", "2022-12", "4180000"),
+        ("경북 군위군", "2026-08", "5141000"),
+    ]:
+        res = g.resolve(name, period_end(period), "region")
+        assert (res.status, res.ref.code if res.ref else None) == ("resolved", code), (name, period)
+
+    _alembic(tmp_path, "downgrade", "0011_sido_base_entries")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM glossary_aliases WHERE source = 'base'").fetchone()[0] == 0
+    assert db.execute("SELECT count(*) FROM glossary_entries WHERE code = '3500000'").fetchone()[0] == 0
+    assert (
+        db.execute("SELECT count(*) FROM glossary_entries WHERE code = '6290000'").fetchone()[0] == 1
+    )  # 0011 항목은 유지
+    db.close()
+
+
+def _d(value: str | None):
+    from datetime import date
+
+    return date.fromisoformat(value) if value else None
+
+
+def test_general_gu_entries(tmp_path: Path) -> None:
+    from app.glossary import AliasEntry, Entry, Glossary, period_end
+
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    gu = db.execute(
+        "SELECT count(*), sum(sido_code IS NULL) FROM glossary_entries WHERE type_label = '일반구'"
+    ).fetchone()
+    assert gu == (41, 0)
+    entries = [
+        Entry(code, name, type_label or "", sido, sigungu, _d(start), _d(end))
+        for code, name, type_label, sido, sigungu, start, end in db.execute(
+            "SELECT code, name, type_label, sido_code, sigungu_code, valid_from, valid_to FROM glossary_entries"
+        )
+    ]
+    aliases: dict[str, list[AliasEntry]] = {}
+    for normalized, target, start, source in db.execute(
+        "SELECT normalized, target_code, valid_from, source FROM glossary_aliases"
+    ):
+        aliases.setdefault(normalized, []).append(AliasEntry(target, _d(start), base=source == "base"))
+    db.close()
+    g = Glossary(entries, aliases)
+    for name, period, code in [
+        ("경기 고양시 덕양구", "2025-04", "3950000"),
+        ("고양시 덕양구", None, "3950000"),
+        ("경남 창원시 마산합포구", "2026-08", "5670156"),
+        ("충남 천안시 서북구", "2026-08", "5660000"),
+        ("전북 전주시 완산구", "2023-05", "4650000"),
+        ("전북 전주시 완산구", "2026-08", "4651000"),
+    ]:
+        res = g.resolve(name, period_end(period), "region")
+        assert (res.status, res.ref.code if res.ref else None) == ("resolved", code), (name, period)
+
+    _alembic(tmp_path, "downgrade", "0012_reorg_base_entries")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM glossary_entries WHERE type_label = '일반구'").fetchone()[0] == 0
+    assert db.execute("SELECT count(*) FROM glossary_aliases WHERE source = 'base'").fetchone()[0] == 180  # 0012 유지
+    db.close()
+
+
+def test_direction_gu_are_ambiguous_and_sejong_duplicates_resolve(tmp_path: Path) -> None:
+    """시도 없는 '남구'·'중구'는 여러 항목 → 모호, '세종 세종특별자치시' 같은 중복 표기는 세종으로 (0014)."""
+    from app.glossary import AliasEntry, Entry, Glossary, period_end
+
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    entries = [
+        Entry(code, name, type_label or "", sido, sigungu, _d(start), _d(end))
+        for code, name, type_label, sido, sigungu, start, end in db.execute(
+            "SELECT code, name, type_label, sido_code, sigungu_code, valid_from, valid_to FROM glossary_entries"
+        )
+    ]
+    aliases: dict[str, list[AliasEntry]] = {}
+    for normalized, target, start, source in db.execute(
+        "SELECT normalized, target_code, valid_from, source FROM glossary_aliases"
+    ):
+        aliases.setdefault(normalized, []).append(AliasEntry(target, _d(start), base=source == "base"))
+    db.close()
+    g = Glossary(entries, aliases)
+    for name in ("남구", "중구", "동구", "서구", "북구"):
+        for period in (None, "2024-03"):
+            res = g.resolve(name, period_end(period), "region")
+            assert res.status == "ambiguous" and len(res.candidates) >= 4, (name, period, res)
+    assert g.resolve("부산 남구", None, "region").ref.code == "3310000"
+    for name in ("세종 세종특별자치시", "세종시 세종특별자치시", "세종특별자치시 세종특별자치시"):
+        res = g.resolve(name, period_end("2026-08"), "region")
+        assert (res.status, res.ref.code if res.ref else None) == ("resolved", "5690000"), name
+
+    _alembic(tmp_path, "downgrade", "0013_general_gu_entries")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM glossary_entries WHERE code = '3310000'").fetchone()[0] == 0
+    assert db.execute("SELECT count(*) FROM glossary_aliases WHERE target_code = '5690000'").fetchone()[0] == 0
+    db.close()
