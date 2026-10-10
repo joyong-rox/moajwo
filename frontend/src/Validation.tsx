@@ -270,7 +270,9 @@ function ValidationResult({ run, onPiiChanged, onGlossaryChanged, canManageGloss
       </p>
 
       <section className="validation-group group-block">
-        <h3>차단 {run.blocks.length}건 · 통합 불가</h3>
+        <h3>
+          차단 {run.blocks.length}건{run.blocks.length > 0 && ' · 통합 불가'}
+        </h3>
         {run.blocks.length ? <IssueTable issues={run.blocks} /> : <p className="upload-drop-hint">없음</p>}
       </section>
 

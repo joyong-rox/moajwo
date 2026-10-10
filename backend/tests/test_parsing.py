@@ -309,3 +309,86 @@ def test_excel_numbers_in_code_column_are_untouched(tmp_path: Path) -> None:
     wb.save(path)
     sheet = parse_file(path, path.name).sheets[0]
     assert sheet.body[0]["cells"] == [11110, 100]  # 엑셀에 숫자로 저장된 값은 그대로
+
+
+def _xlsx_rows(tmp_path: Path, rows: list[list], merges: tuple[str, ...] = (), sheets: dict | None = None) -> Path:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "데이터"
+    for r in rows:
+        ws.append(r)
+    for m in merges:
+        ws.merge_cells(m)
+    for name, extra in (sheets or {}).items():
+        other = wb.create_sheet(name)
+        for r in extra:
+            other.append(r)
+    path = tmp_path / "form.xlsx"
+    wb.save(path)
+    return path
+
+
+def test_header_found_below_long_title_block(tmp_path: Path) -> None:
+    """정부 양식: 제목·작성일·빈 행·'항목 : 값' 설명 행 뒤 7~8행에 머리글 (예전 탐지 범위 1~3행 밖)."""
+    rows = [
+        ["자동차 통계표 조회(시군구전체)", None, None, None],
+        ["다운로드 시간 : 2026-10-10", None, None, None],
+        [None, "검색기간 : 202608 ~ 202608", "검색분야 : 종합일반", "단위 : 대"],
+        [None, None, None, None],
+        [None, None, None, None],
+        [None, None, None, None],
+        ["시도", "시군구", "승용", "승용"],
+        ["시도", "시군구", "관용", "자가용"],
+        ["전국", "합 계", 2259, 1004632],
+        ["충남", "천안시", 300, 250000],
+    ]
+    sheet = parse_file(_xlsx_rows(tmp_path, rows)).sheets[0]
+    assert (sheet.header_row, sheet.header_row_end) == (7, 8)
+    assert sheet.columns == ["시도", "시군구", "승용_관용", "승용_자가용"]
+    # 머리글의 '계'·'총계' 같은 글자 때문에 머리글이 합계 행으로 분류되지 않는다 (실제 합계 행만 소계)
+    assert (sheet.data_rows, sheet.subtotal_rows) == (1, 1)
+
+
+def test_vertical_split_header_and_spaced_labels(tmp_path: Path) -> None:
+    """'구별/차종별'처럼 위·아래 줄에 흩어진 머리글을 한 줄로 합치고, '총   계' 정렬 공백을 지운다."""
+    rows = [
+        [None, None, None, None, None],
+        [None, "2026년 8월말 자동차 등록현황", "2026년 8월말 자동차 등록현황", None, None],
+        [None, None, None, None, "8.31. 현재"],
+        [None, None, "차종별", "총   계", "승용차"],
+        [None, "구  별", None, "총   계", "승용차"],
+        [None, "총   계", "총  계", 750374, 646873],
+        [None, None, "관  용", 2336, 749],
+    ]
+    sheet = parse_file(_xlsx_rows(tmp_path, rows, ("B2:C2",))).sheets[0]
+    assert (sheet.header_row, sheet.header_row_end) == (4, 5)
+    assert sheet.columns[1:] == ["구별", "차종별", "총계", "승용차"]
+
+
+def test_three_level_kosis_header_and_info_sheet_skipped(tmp_path: Path) -> None:
+    rows = [
+        ["월별(1)", 2024, 2024, 2024],
+        ["월별(1)", "총계", "총계", "승용차"],
+        ["월별(1)", "계", "관용", "계"],
+        ["합계", 1002889, 5860, 773919],
+        ["1월", 994549, 5778, 764786],
+    ]
+    info = [["○ 통계표명", "자동차등록"], ["○ 출처", "기본통계"]]
+    result = parse_file(_xlsx_rows(tmp_path, rows, sheets={"메타정보": info}))
+    assert [s.name for s in result.sheets] == ["데이터"] and result.skipped_sheets == ["메타정보"]
+    sheet = result.sheets[0]
+    assert (sheet.header_row, sheet.header_row_end) == (1, 3)
+    assert sheet.columns == ["월별(1)", "2024_총계_계", "2024_총계_관용", "2024_승용차_계"]
+    assert (sheet.data_rows, sheet.subtotal_rows) == (1, 1)
+
+
+def test_only_info_sheet_is_still_read(tmp_path: Path) -> None:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "설명"
+    ws.append(["항목", "값"])
+    ws.append(["가", 1])
+    path = tmp_path / "info.xlsx"
+    wb.save(path)
+    result = parse_file(path)
+    assert [s.name for s in result.sheets] == ["설명"] and result.skipped_sheets == []

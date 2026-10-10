@@ -5,7 +5,8 @@
 - 누적 절약 시간: 완료된 실행마다 max(0, 수동 기준 소요 시간 - 실제 처리 시간)의 합
   · 수동 기준 소요 시간: 소유자가 설정에서 정한 값 (자동화별 값이 있으면 그 값). 정하지 않았으면 계산하지 않는다.
   · 실제 처리 시간: 실행 기록의 시작 → 종료 시각 (지금 설정 기준으로 다시 계산)
-- 검증한 행 수: 검증(검토 포함)을 한 번 이상 거친 파일들의 데이터 행 수 (같은 파일을 다시 검사해도 한 번만)
+- 검증한 행 수: 검증(검토 포함)을 한 번 이상 거친 파일들의 데이터 행 수
+  (같은 파일을 다시 검사하거나, 내용이 같은 파일(sha256)을 다시 올려 검사해도 한 번만 센다)
 - 통합 전 발견한 오류 건수: 검토에서 찾은 차단 오류 + 검증 경고. 다시 검사에서 이전 검사와 같은 항목은 다시 세지 않는다.
 """
 
@@ -90,10 +91,12 @@ def _validated_rows(db: Session, user_id: int | None) -> tuple[int, int]:
         except (ValueError, TypeError, AttributeError):
             continue
     rows = 0
+    seen: set[str] = set()  # 내용이 같은 파일(sha256)은 다시 올려도 한 번만 센다
     for fid in sorted(file_ids):
         record = db.get(SourceFile, fid)
-        if record is None:
+        if record is None or record.sha256 in seen:
             continue
+        seen.add(record.sha256)
         if record.data_rows is None:  # 행 수를 기록하기 전에 올린 파일은 한 번 읽어 채운다
             try:
                 record.data_rows = load_parsed(db, fid)[1].data_rows
@@ -101,7 +104,7 @@ def _validated_rows(db: Session, user_id: int | None) -> tuple[int, int]:
             except HTTPException:
                 continue
         rows += record.data_rows or 0
-    return rows, len(file_ids)
+    return rows, len(seen)
 
 
 def _issue_key(item: ReviewItem, file_map: dict[int, int]) -> tuple[Any, ...]:

@@ -2438,3 +2438,19 @@ body {
   margin-top: 4px;
 }
 
+/* 사전 검토: 머리글(열 이름)을 못 찾은 파일 안내 */
+.review-header-warning {
+  margin: 0 0 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  font-size: 0.9rem;
+}
+
+.review-header-warning ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+

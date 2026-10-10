@@ -249,3 +249,51 @@ def test_template_export_roundtrip_and_aliases(client: TestClient) -> None:
     assert all(a["target_code"] != "1741000" for a in client.get("/glossary/aliases").json())
     info = client.get("/glossary/info").json()
     assert info["region_code_table_date"] == "2026-09-30" and info["region_entries"] >= 2
+
+
+def test_sido_short_names_common_forms() -> None:
+    from app.glossary import sido_short_names
+
+    assert sido_short_names("충청북도") == {"충청북", "충북"}
+    assert sido_short_names("경상남도") == {"경상남", "경남"}
+    assert sido_short_names("세종특별자치시") == {"세종", "세종시"}
+    # '제주시'는 실제 기초자치단체 이름이라 도(특별자치도)에는 '…시' 약칭을 만들지 않는다
+    assert sido_short_names("제주특별자치도") == {"제주"}
+
+
+def test_region_shorts_resolve_with_base_entries() -> None:
+    """기본 광역 항목 + 코드가 채워진 기초 항목이면 '세종', '충북', '서울 중구'를 해석한다."""
+    entries = [
+        Entry("5690000", "세종특별자치시", "광역자치단체", "36", None),
+        Entry("6430000", "충청북도", "광역자치단체", "43", None),
+        Entry("6110000", "서울특별시", "광역자치단체", "11", None),
+        Entry("3010000", "서울특별시 중구", "기초자치단체", "11", "140"),
+    ]
+    g = Glossary(entries, {})
+    for name, code in [("세종", "5690000"), ("충북", "6430000"), ("서울 중구", "3010000")]:
+        res = g.resolve(name, AT, prefer="region")
+        assert (res.status, res.ref.code if res.ref else None) == ("resolved", code), name
+
+
+def test_infer_region_codes_from_admin_table() -> None:
+    from app.admin_codes import infer_region_codes
+
+    assert infer_region_codes("서울특별시 강남구") == ("11", "680")
+    assert infer_region_codes("서울특별시") == ("11", None)
+    assert infer_region_codes("전남광주통합특별시 목포시") == ("12", "110")
+    assert infer_region_codes("광주광역시") == ("29", None)  # 말소 코드도 찾는다
+    assert infer_region_codes("행정안전부") is None
+
+
+def test_import_fills_missing_region_codes_and_keeps_existing(client: TestClient) -> None:
+    csv = "코드,정식명칭,유형\n3010000,서울특별시 중구,기초자치단체\n".encode()
+    report = client.post("/glossary/import", files=[("file", ("g.csv", csv, "text/csv"))]).json()
+    assert report["applied"] and any("행정동 코드표로" in w["message"] for w in report["warnings"])
+    entry = next(e for e in client.get("/glossary/entries", params={"q": "3010000"}).json() if e["code"] == "3010000")
+    assert (entry["sido_code"], entry["sigungu_code"]) == ("11", "140")
+    # 코드표에 없는 이름으로 다시 올려도(빈 칸) 이미 있는 코드는 지우지 않는다
+    csv = "코드,정식명칭,유형\n3010000,서울 중구청,기초자치단체\n".encode()
+    assert client.post("/glossary/import", files=[("file", ("g.csv", csv, "text/csv"))]).json()["applied"]
+    entry = next(e for e in client.get("/glossary/entries", params={"q": "3010000"}).json() if e["code"] == "3010000")
+    assert (entry["sido_code"], entry["sigungu_code"]) == ("11", "140")
+    client.delete(f"/glossary/entries/{entry['id']}")

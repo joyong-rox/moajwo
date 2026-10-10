@@ -34,6 +34,7 @@ const KIND_LABEL: Record<string, string> = {
   mom_outlier: '전월 대비 이상치',
   blank_value: '공백 값',
   unit_estimate: '단위 추정',
+  header_missing: '헤더 확인 필요',
 }
 
 const GROUPS: { category: ReviewCategory; title: string; hint: string }[] = [
@@ -142,6 +143,20 @@ function ReviewPanel({
       {review && !loading && (
         <>
           <ScoreHeader review={review} />
+          {review.items.some((i) => i.kind === 'header_missing') && (
+            <div className="review-header-warning" role="alert">
+              <strong>머리글(열 이름)을 확인하세요</strong>
+              <ul>
+                {review.items
+                  .filter((i) => i.kind === 'header_missing')
+                  .map((i) => (
+                    <li key={i.id}>
+                      {i.file_name}: {i.reason}
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          )}
           <RecheckHistory review={review} />
 
           {GROUPS.map((g) => (
@@ -369,7 +384,9 @@ function ItemGroup({ review, category, title, hint, busyItem, onDecide, onOpenRe
   return (
     <section className={`review-group is-${category}`}>
       <h3>
-        {title} {items.length}건 <span className="review-group-hint">{hint}</span>
+        {title} {items.length}건{' '}
+        {/* 차단이 없으면 '고쳐야 통합할 수 있다'는 안내를 보이지 않는다 */}
+        {(category !== 'block' || items.length > 0) && <span className="review-group-hint">{hint}</span>}
       </h3>
       {items.length === 0 ? (
         <p className="upload-drop-hint">없음</p>

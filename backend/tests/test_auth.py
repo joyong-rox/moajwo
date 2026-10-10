@@ -324,3 +324,17 @@ def test_glossary_name_learning_needs_manager(accounts) -> None:
     if not had_entry:  # 같은 테스트 DB를 쓰는 용어사전 테스트에 영향이 없도록
         with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
             con.execute("delete from glossary_entries where code = '1550000'")
+
+
+def test_dashboard_counts_same_content_once(accounts) -> None:
+    """같은 파일을 다시 올려 검사해도(내용 sha256이 같으면) '검증한 행 수'에 한 번만 더한다."""
+    u = accounts["user4"]
+    rows = [["기관명", "집행액"], ["행정안전부", 1], ["기상청", 2], ["인사혁신처", 3]]
+    before = u.get("/dashboard").json()["validated_rows"]
+    first = _upload(u, rows, "같은내용.xlsx")
+    second = _upload(u, rows, "같은내용_다시.xlsx")
+    assert u.post("/validation", json={"file_ids": [first]}).status_code == 200
+    mid = u.get("/dashboard").json()["validated_rows"]
+    assert u.post("/validation", json={"file_ids": [second]}).status_code == 200
+    after = u.get("/dashboard").json()["validated_rows"]
+    assert mid - before == 3 and after == mid

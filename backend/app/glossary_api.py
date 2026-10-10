@@ -44,6 +44,7 @@ class InfoOut(BaseModel):
     entries: int
     region_entries: int  # 시도코드가 있는 항목 (자치단체)
     example_entries: int
+    base_entries: int  # 기본 광역 항목 (마이그레이션 0011)
     aliases: int
     region_code_table_date: str
 
@@ -54,6 +55,7 @@ def info(session: Annotated[Session, Depends(get_session)]) -> InfoOut:
         entries=session.scalar(select(func.count(GlossaryEntry.id))) or 0,
         region_entries=session.scalar(select(func.count()).where(GlossaryEntry.sido_code.is_not(None))) or 0,
         example_entries=session.scalar(select(func.count()).where(GlossaryEntry.source == "example")) or 0,
+        base_entries=session.scalar(select(func.count()).where(GlossaryEntry.source == "base")) or 0,
         aliases=session.scalar(select(func.count(GlossaryAlias.id))) or 0,
         region_code_table_date=admin_codes.load_table().effective_date,
     )

@@ -48,6 +48,7 @@ class UploadResultOut(BaseModel):
     data_rows: int = 0
     sheets: list[SheetOut] = []
     pii: dict[str, Any] | None = None  # 개인정보 탐지 요약 (마스킹 값과 위치만)
+    skipped_sheets: list[str] = []  # 통계표 설명 시트(메타정보·설명·안내)는 읽지 않음
     error: str | None = None
 
 
@@ -104,6 +105,7 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
         result.pii = {**summary, "acknowledged": False}
 
     result.encoding = parsed.encoding
+    result.skipped_sheets = parsed.skipped_sheets
     result.sheet_count = len(parsed.sheets)
     result.data_rows = parsed.data_rows
     # body(전체 행)는 크므로 응답 모델에 필요한 필드만 읽는다.

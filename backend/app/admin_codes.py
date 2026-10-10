@@ -84,3 +84,32 @@ def load_table() -> AdminCodeTable:
         if current is None or (current.abolished and not area.abolished):
             by_prefix[length][key] = area
     return AdminCodeTable(by_code, by_prefix, meta["effective_date"])
+
+
+def _compact(text: str) -> str:
+    return "".join(text.split())
+
+
+@lru_cache(maxsize=1)
+def _name_index() -> dict[str, tuple[str, str | None]]:
+    """정식명칭(공백 무시) → (시도 2자리, 시군구 3자리 또는 None). 현존 코드를 말소 코드보다 우선한다."""
+    table = load_table()
+    index: dict[str, tuple[str, str | None]] = {}
+    current: dict[str, bool] = {}
+    for length in (2, 5):
+        for prefix, area in table.by_prefix[length].items():
+            name = _compact(area.sido if length == 2 else f"{area.sido}{area.sigungu or ''}")
+            alive = area.abolished is None
+            if name in index and current[name] and not alive:
+                continue
+            index[name] = (prefix[:2], prefix[2:5] if length == 5 else None)
+            current[name] = alive
+    return index
+
+
+def infer_region_codes(name: str) -> tuple[str, str | None] | None:
+    """자치단체 정식명칭으로 시도·시군구 코드를 찾는다. '서울특별시 강남구' → ('11', '680'), '경기도' → ('41', None).
+
+    용어사전 업로드에서 비어 있는 코드를 채우는 데 쓴다 (못 찾으면 None).
+    """
+    return _name_index().get(_compact(name))

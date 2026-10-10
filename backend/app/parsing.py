@@ -22,7 +22,8 @@ from app.pii import PiiReport, mask_cell, scan_grid
 SUPPORTED_EXTENSIONS = (".xlsx", ".xls", ".csv")
 
 # 헤더는 1~3행 안에서만 찾는다.
-HEADER_SEARCH_ROWS = 3
+HEADER_SEARCH_ROWS = 100  # 제목·작성일·빈 행이 길게 이어지는 정부 양식도 머리글을 찾도록
+FALLBACK_HEADER_ROWS = 3  # 숫자 데이터가 없는 표(글자 목록 등)는 예전처럼 위 3행에서 찾는다
 PREVIEW_ROWS = 20
 SAMPLES_PER_COLUMN = 5  # 매핑(특히 LLM)에 넘기는 열별 샘플 값 수
 CHARDET_MIN_CONFIDENCE = 0.5
@@ -62,6 +63,7 @@ class SheetResult:
 class FileResult:
     sheets: list[SheetResult]
     encoding: str | None = None  # csv만
+    skipped_sheets: list[str] = field(default_factory=list)  # 건너뛴 설명 시트
 
     @property
     def pii(self) -> PiiReport:
@@ -314,14 +316,50 @@ def _header_texts(row: list[Cell]) -> set[str]:
     return {c for c in row if isinstance(c, str) and not is_missing(c) and not _is_note([c])}
 
 
-def detect_header_row(rows: list[list[Cell]]) -> int | None:
-    """1~3행 중 '서로 다른 텍스트 셀'이 가장 많은 행을 헤더로 본다 (0-based).
+# '검색기간 : 202608 ~ 202608', '단위 : 대' 같은 '항목 : 값' 설명 칸
+_META_CELL = re.compile(r"^[^:：]{1,20}[:：]\s*\S")
 
-    병합된 제목·단위 행은 ffill 후 같은 값이 반복되므로 고유 값이 1개뿐이라 자연스럽게 밀린다.
-    동점이면 위쪽 행을 고른다. 텍스트 셀이 하나도 없으면 None.
+
+def _has_data_number(row: list[Cell]) -> bool:
+    """연도가 아닌 숫자가 있는 행 = 데이터 행 (머리글의 '2025' 같은 연도는 제외)."""
+    return any(
+        isinstance(c, int | float)
+        and not isinstance(c, bool)
+        and not (isinstance(c, int) and _YEAR_MIN <= c <= _YEAR_MAX)
+        for c in row
+    )
+
+
+def _is_meta_row(row: list[Cell]) -> bool:
+    texts = [c for c in row if isinstance(c, str)]
+    return bool(texts) and sum(1 for t in texts if _META_CELL.match(t)) * 2 >= len(set(texts))
+
+
+def _is_header_candidate(row: list[Cell]) -> bool:
+    """머리글이 될 수 있는 행: 서로 다른 글자 칸 2개 이상, 숫자 데이터 없음, '항목 : 값' 설명 행 아님.
+
+    머리글의 '총계'·'계' 같은 글자는 합계 행 판정과 무관하게 열 이름으로 본다.
     """
+    return len(_header_texts(row)) >= 2 and not _has_data_number(row) and not _is_meta_row(row)
+
+
+def detect_header_row(rows: list[list[Cell]]) -> int | None:
+    """머리글 행 (0-based).
+
+    1) 처음 나오는 데이터 행(연도가 아닌 숫자가 있는 행)을 찾고, 그 위의 머리글 후보 중
+       '서로 다른 글자 칸'이 가장 많은 행을 고른다 (동점이면 위쪽). 제목·작성일·빈 행·설명 행은 건너뛴다.
+       병합된 제목 행은 ffill 후 같은 값이 반복되므로 고유 값이 1개뿐이라 후보가 되지 않는다.
+    2) 숫자 데이터가 없는 표는 예전처럼 위 3행 중 글자 칸이 가장 많은 행.
+    """
+    limit = min(len(rows), HEADER_SEARCH_ROWS)
+    candidates: list[int] = []
+    for i in range(limit):
+        if _has_data_number(rows[i]) and candidates:
+            return max(candidates, key=lambda k: (len(_header_texts(rows[k])), -k))
+        if _is_header_candidate(rows[i]):
+            candidates.append(i)
     best, best_score = None, 0
-    for i, row in enumerate(rows[:HEADER_SEARCH_ROWS]):
+    for i, row in enumerate(rows[:FALLBACK_HEADER_ROWS]):
         score = len(_header_texts(row))
         if score > best_score:
             best, best_score = i, score
@@ -364,21 +402,49 @@ def _is_two_level(top: list[Cell], sub: list[Cell]) -> bool:
         return False
     for start, end in runs:
         cells = sub[start:end]
-        if any(c is None for c in cells) or len(set(cells)) != len(cells):
+        # 하위 칸도 가로 병합(같은 값 반복)일 수 있다 — 구간을 둘 이상으로 나누기만 하면 된다
+        if any(c is None for c in cells) or len(set(cells)) < 2:
             return False
     return True
 
 
+def _is_vertical_split(top: list[Cell], sub: list[Cell], after: list[Cell] | None) -> bool:
+    """세로로 나뉜 머리글: 위·아래 두 줄에 열 이름이 흩어져 있고 바로 아래부터 데이터.
+
+    예) 5행 ['', '차종별', '총계', '승용차'] / 6행 ['구별', '', '총계', '승용차'] / 7행 데이터.
+    아래 줄의 각 칸은 위 칸과 같거나 위 칸이 비어 있어야 하고, 위가 빈 칸에 이름이 하나 이상 있어야 한다.
+    """
+    if after is None or not _has_data_number(after) or not _is_header_candidate(sub):
+        return False
+    pairs = [(t, b) for t, b in zip(top, sub, strict=False) if b is not None]
+    return bool(pairs) and all(t is None or t == b for t, b in pairs) and any(t is None for t, _ in pairs)
+
+
+MAX_HEADER_ROWS = 3  # 머리글은 최대 3줄 (예: KOSIS '2024' / '총계·승용차' / '계·관용')
+
+
 def detect_header_block(rows: list[list[Cell]]) -> tuple[int, int] | None:
-    """헤더 구간 (top, bottom) 0-based. 1단이면 top == bottom."""
+    """헤더 구간 (top, bottom) 0-based. 1단이면 top == bottom.
+
+    머리글 행(detect_header_row)에서 아래·위로, 가로 병합(그룹 머리글) 또는 세로 분할(위·아래 줄에 흩어진
+    열 이름)로 이어지는 줄을 최대 3줄까지 묶는다. 그 위의 제목·작성일·빈 행은 머리글에 넣지 않는다.
+    """
     h = detect_header_row(rows)
     if h is None:
         return None
-    if h > 0 and _is_two_level(rows[h - 1], rows[h]):
-        return h - 1, h
-    if h + 1 < len(rows) and _is_two_level(rows[h], rows[h + 1]):
-        return h, h + 1
-    return h, h
+
+    def connected(upper: int, lower: int) -> bool:
+        after = rows[lower + 1] if lower + 1 < len(rows) else None
+        if _is_two_level(rows[upper], rows[lower]):
+            return True
+        return bool(_header_texts(rows[upper])) and _is_vertical_split(rows[upper], rows[lower], after)
+
+    top = bottom = h
+    while bottom + 1 < len(rows) and bottom - top + 1 < MAX_HEADER_ROWS and connected(bottom, bottom + 1):
+        bottom += 1
+    while top > 0 and bottom - top + 1 < MAX_HEADER_ROWS and connected(top - 1, top):
+        top -= 1
+    return top, bottom
 
 
 def _trim(grid: list[list[Cell]]) -> list[list[Cell]]:
@@ -389,6 +455,17 @@ def _trim(grid: list[list[Cell]]) -> list[list[Cell]]:
     return [(r + [None] * width)[:width] for r in grid]
 
 
+_SPACED_SYLLABLES = re.compile(r"^[가-힣](?:\s+[가-힣])+$")
+
+
+def _tidy_header(value: Cell) -> str | None:
+    """정렬용 공백을 지운다: '총   계' → '총계', '승   합' → '승합' (한 글자씩 띄어 쓴 경우만)."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return re.sub(r"\s+", "", text) if _SPACED_SYLLABLES.match(text) else text
+
+
 def _column_names(header_rows: list[list[Cell]], width: int) -> list[str]:
     """헤더 행(1~2줄)을 위→아래로 합쳐 열 이름을 만든다. 예: '인구' + '2025' → '인구_2025'."""
     names: list[str] = []
@@ -396,9 +473,9 @@ def _column_names(header_rows: list[list[Cell]], width: int) -> list[str]:
     for i in range(width):
         parts: list[str] = []
         for row in header_rows:
-            value = row[i]
-            if value is not None and (not parts or str(value) != parts[-1]):
-                parts.append(str(value))
+            value = _tidy_header(row[i])
+            if value is not None and (not parts or value != parts[-1]):
+                parts.append(value)
         name = "_".join(parts) or f"열{i + 1}"
         if name in seen:
             seen[name] += 1
@@ -517,6 +594,10 @@ def analyze_sheet(name: str, raw: list[list[Any]], filled: set[tuple[int, int]] 
     )
 
 
+# KOSIS 등 내려받기 파일에 딸린 통계표 설명 시트 ('메타정보', '설명', '안내')
+_INFO_SHEET = re.compile(r"(메타|설명|안내)")
+
+
 def parse_file(path: Path, original_name: str | None = None) -> FileResult:
     """original_name: 사용자가 올린 파일명. CSV는 시트가 없어 이 이름(확장자 제외)을 시트명으로 쓴다."""
     ext = path.suffix.lower()
@@ -535,5 +616,9 @@ def parse_file(path: Path, original_name: str | None = None) -> FileResult:
         raise
     except Exception as exc:  # 손상/암호화 파일 등 라이브러리별 예외를 사용자 메시지로 통일
         raise ParseError(f"파일을 읽을 수 없습니다 ({type(exc).__name__}).") from exc
-    sheet_results = [analyze_sheet(n, g, filled.get(n)) for n, g in sheets.items()]
-    return FileResult(sheets=sheet_results, encoding=encoding)
+    names = list(sheets)
+    skipped = [n for n in names if _INFO_SHEET.search(n)]
+    if len(skipped) == len(names):  # 시트가 설명 시트뿐이면 그대로 읽는다
+        skipped = []
+    sheet_results = [analyze_sheet(n, g, filled.get(n)) for n, g in sheets.items() if n not in skipped]
+    return FileResult(sheets=sheet_results, encoding=encoding, skipped_sheets=skipped)

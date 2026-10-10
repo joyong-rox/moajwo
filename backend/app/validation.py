@@ -24,7 +24,7 @@ from app.glossary import Glossary, Resolution, period_end, prefer_for_field
 from app.parsing import Cell, SheetResult, is_missing, is_subtotal_label
 
 BlockCode = Literal["sum_mismatch", "required_entity_missing", "period_mismatch"]
-WarningCode = Literal["mom_outlier", "blank_value", "unit_estimate"]
+WarningCode = Literal["mom_outlier", "blank_value", "unit_estimate", "header_missing"]
 Status = Literal["blocked", "pii_confirmation_required", "passed_with_warnings", "passed"]
 
 BLOCK_LABEL: dict[str, str] = {
@@ -36,6 +36,7 @@ WARNING_LABEL: dict[str, str] = {
     "mom_outlier": "전월 대비 이상치",
     "blank_value": "공백 값",
     "unit_estimate": "단위 추정",
+    "header_missing": "헤더 확인 필요",
 }
 
 # 합산하면 안 되는 항목 (비율·연월·코드·연락처)
@@ -199,14 +200,42 @@ _SUBTOTAL_WORDS = re.compile(r"(소계|합계|총계|누계|계)$")
 def _subtotal_group(cells: list[Cell]) -> tuple[int, str] | None:
     """소계 행이 묶는 그룹 (열 번호, 그룹 값). None이면 전체 합계(전국·합계·총계)."""
     label_idx = next((j for j, c in enumerate(cells) if is_subtotal_label(c)), None)
-    for j, c in enumerate(cells):  # '서울특별시 | 계' 형태: 라벨이 아닌 다른 텍스트가 그룹 값
-        if j != label_idx and isinstance(c, str) and not is_missing(c) and not is_subtotal_label(c):
-            return j, c
+
+    def group_text(j: int) -> bool:
+        c = cells[j]
+        return j != label_idx and isinstance(c, str) and not is_missing(c) and not is_subtotal_label(c)
+
+    # '서울특별시 | 계' 형태: 라벨 바로 왼쪽(가장 가까운) 텍스트가 그룹 값
+    # ('2026-08 | 서울 | 계'에서 그룹은 '서울'이지 맨 앞의 '2026-08'이 아니다)
+    if label_idx is not None:
+        for j in range(label_idx - 1, -1, -1):
+            if group_text(j):
+                return j, cells[j]  # type: ignore[return-value]
+    for j in range(len(cells)):
+        if group_text(j):
+            return j, cells[j]  # type: ignore[return-value]
     if label_idx is not None:  # '영업1팀 소계' 형태: 라벨에서 합계 단어를 뗀 나머지가 그룹 값
         rest = _SUBTOTAL_WORDS.sub("", str(cells[label_idx]).strip()).strip()
         if rest and rest != str(cells[label_idx]).strip():
             return label_idx, rest
     return None
+
+
+# 시점 라벨: '1월', '2024년', '2024-01', '2024.01월', '1분기', '상반기'
+_PERIOD_LABEL = re.compile(r"^(?:(?:19|20)\d{2}\s*(?:년|[-./]\s*\d{1,2}\s*월?)?|\d{1,2}\s*월|[1-4]\s*분기|[상하]반기)$")
+
+
+def _is_stock_series(total: dict[str, Any], data: list[dict[str, Any]]) -> bool:
+    """맨 위(모든 데이터 행보다 앞)의 전체 합계이고, 데이터 행이 시점 계열(월·연도·분기)인지.
+
+    KOSIS 등 누적 통계(월말 등록 대수)는 합계 행이 연말 값이라 월별 합과 같지 않다.
+    지역별 표의 맨 위 '전국'은 하위 행이 지역 이름이라 여기에 해당하지 않아 그대로 검사한다.
+    """
+    if not data or total["row"] > min(r["row"] for r in data):
+        return False
+    labels = [next((c for c in r["cells"] if isinstance(c, str) and c.strip()), None) for r in data]
+    periods = sum(1 for label in labels if label is not None and _PERIOD_LABEL.match(label.strip()))
+    return periods * 10 >= len(data) * 8  # 80% 이상
 
 
 def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[BlockIssue]:
@@ -219,14 +248,28 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
     for row in subtotals:
         cells: list[Cell] = row["cells"]
         group = groups[id(row)]
+        if group is None and _is_stock_series(row, data):
+            notes.append(
+                f"{file.file_name} / {sheet.sheet.name} {row['row']}행: 맨 위 합계 행 아래가 시점(월·연도) 계열이라 "
+                "누적 자료(월말 등록 대수 등)로 보고 합계 검사를 하지 않았습니다."
+            )
+            continue
         if group is None:
             # 전체 합계 = 그룹 소계 행 + 어느 그룹에도 속하지 않은 데이터 행
             # (하위 행이 일부만 실린 '서울특별시 계' 같은 소계도 올바르게 반영된다)
             def grouped(r: dict[str, Any]) -> bool:
                 return any(r["cells"][g[0]] == g[1] for g in (groups[id(x)] for x in group_rows) if g)
 
-            children = group_rows + [r for r in data if not grouped(r)]
+            ungrouped = [r for r in data if not grouped(r)]
+            children = group_rows + ungrouped
             label = next((str(c) for c in cells if is_subtotal_label(c)), "합계")
+            if len(group_rows) == 1 and not ungrouped:
+                # 예) 충청남도 자료에 '전국' 행이 함께 실린 경우: 자료에는 한 그룹만 있어 전체 합계와 비교할 수 없다
+                notes.append(
+                    f"{file.file_name} / {sheet.sheet.name} {row['row']}행 '{label}': 자료에 하위 그룹이 하나뿐이라 "
+                    "전체 합계 검사 생략 (일부 지역만 담긴 자료로 봄)"
+                )
+                continue
         else:
             col, value = group
             children = [r for r in data if r["cells"][col] == value]
@@ -237,6 +280,7 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
                 "하위 데이터 행을 찾지 못해 합계 검사 생략"
             )
             continue
+        row_issues: list[BlockIssue] = []
         for j, total in enumerate(cells):
             if not _is_number(total) or not _additive(sheet, j):
                 continue
@@ -255,7 +299,7 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
             unit = 10 ** -max([_decimals(total), *(_decimals(n) for n in numbers)])
             tolerance = 0.5 * unit * len(numbers) + 1e-9 * abs(computed)
             if abs(computed - total) > tolerance:
-                issues.append(
+                row_issues.append(
                     BlockIssue(
                         "sum_mismatch",
                         f"'{label}' 행의 '{columns[j]}' 값 {_fmt(total)}이(가) 하위 {len(numbers)}행 합계 "
@@ -269,7 +313,47 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
                         actual=total,
                     )
                 )
+        if row_issues and (n := _rows_below_match(sheet, row)):
+            notes.append(
+                f"{file.file_name} / {sheet.sheet.name} {row['row']}행 '{label}': 라벨로 묶은 하위 행과는 다르지만 "
+                f"바로 아래 {n}행의 합과 모든 열이 같아, 위쪽에 놓인 소계로 보고 통과시켰습니다."
+            )
+            continue
+        issues.extend(row_issues)
     return issues
+
+
+def _rows_below_match(sheet: SheetInput, total_row: dict[str, Any]) -> int:
+    """합계 행 바로 아래 이어지는 데이터 행을 하나씩 더해, 숫자 열이 모두 합계와 같아지는 행 수 (없으면 0).
+
+    병합 셀 때문에 소계 라벨이 '계'로만 보이고 소계가 하위 행보다 위에 놓인 양식(예: '천안시 계' 다음
+    '동남구', '서북구')을 알아본다. 모든 숫자 열이 동시에 맞아야 하므로 우연히 맞을 가능성은 사실상 없다.
+    """
+    body = sheet.sheet.body
+    start = next((i for i, r in enumerate(body) if r is total_row), None)
+    if start is None:
+        return 0
+    cols = [j for j, c in enumerate(total_row["cells"]) if _is_number(c) and _additive(sheet, j)]
+    if not cols:
+        return 0
+    sums = dict.fromkeys(cols, 0.0)
+    places = {j: _decimals(total_row["cells"][j]) for j in cols}
+    count = 0
+    for r in body[start + 1 :]:
+        if r["kind"] != "data":
+            break
+        count += 1
+        for j in cols:
+            v = r["cells"][j]
+            if _is_number(v):
+                sums[j] += v
+                places[j] = max(places[j], _decimals(v))
+        # 허용 오차는 본 합계 검사와 같다 (행 수 × 마지막 자리의 절반)
+        if all(
+            abs(sums[j] - total_row["cells"][j]) <= 0.5 * 10 ** -places[j] * count + 1e-9 * abs(sums[j]) for j in cols
+        ):
+            return count
+    return 0
 
 
 # ---------------------------------------------------------------- 차단: 필수 기관 누락
@@ -615,6 +699,37 @@ def check_mom(
     return issues
 
 
+# ---------------------------------------------------------------- 경고: 헤더 확인 필요
+
+_GENERATED_COLUMN = re.compile(r"^열\d+$")
+
+
+def check_header(file: FileInput, sheet: SheetInput) -> list[WarningIssue]:
+    """머리글을 못 찾았거나, 열 이름이 '열1·열2…' 같은 자동 이름뿐이거나, 정상 열 이름이 2개 미만이면 경고.
+
+    (제목이 열마다 반복된 '제목', '제목_2' 같은 이름은 하나로 센다.) 이 상태로는 숫자 검사(합계·이상치)가
+    아무것도 검사하지 못하고 '문제 없음'처럼 보일 수 있다.
+    """
+    columns = sheet.sheet.columns
+    real = {re.sub(r"_\d+$", "", c) for c in columns if not _GENERATED_COLUMN.match(c)}
+    if sheet.sheet.header_row is not None and len(real) >= 2:
+        return []
+    shown = ", ".join(columns[:4]) + (" …" if len(columns) > 4 else "")
+    return [
+        WarningIssue(
+            "header_missing",
+            f"'{sheet.sheet.name}' 시트에서 열 이름(머리글)을 제대로 찾지 못했습니다 (열: {shown}). "
+            "원본의 머리글 위치를 확인하세요 — 이대로면 합계·이상치 검사가 되지 않아 '문제 없음'처럼 보일 수 있습니다.",
+            file.file_id,
+            file.file_name,
+            sheet.sheet.name,
+            sheet.sheet.header_row,
+            None,
+            actual=len(real),
+        )
+    ]
+
+
 # ---------------------------------------------------------------- 경고: 공백 값
 
 
@@ -789,6 +904,7 @@ def validate(
     warnings.extend(check_mom(files, baseline or [], params, notes, resolver))
     for f in files:
         for s in f.sheets:
+            warnings.extend(check_header(f, s))
             warnings.extend(check_blanks(f, s))
     warnings.extend(check_units(files))
 

@@ -229,7 +229,7 @@ def test_unit_estimate_warnings(tmp_path: Path) -> None:
 def test_block_and_warning_codes_are_disjoint() -> None:
     assert not set(get_args(BlockCode)) & set(get_args(WarningCode))
     assert set(get_args(BlockCode)) == {"sum_mismatch", "required_entity_missing", "period_mismatch"}
-    assert set(get_args(WarningCode)) == {"mom_outlier", "blank_value", "unit_estimate"}
+    assert set(get_args(WarningCode)) == {"mom_outlier", "blank_value", "unit_estimate", "header_missing"}
 
 
 def test_status_precedence_and_separation(tmp_path: Path) -> None:
@@ -277,3 +277,78 @@ def test_preview_and_samples_are_masked_but_body_is_not(tmp_path: Path) -> None:
     assert sheet.samples[1] == ["800101-1******", "850101-2******"]
     # 검증용 본문은 원래 값을 유지한다 (파싱 결과 자체를 바꾸지 않음)
     assert sheet.body[0]["cells"][1] == "800101-1234567"
+
+
+def test_header_missing_warning(tmp_path: Path) -> None:
+    """머리글을 못 찾은 표(숫자만 있음)는 검증이 '문제 없음'으로 지나가지 않고 헤더 확인 경고를 낸다."""
+    path = make_xlsx(tmp_path / "noheader.xlsx", [[1, 2, 3], [4, 5, 6]])
+    result = validate([make_input(path)], ValidationParams())
+    assert "header_missing" in codes(result.warnings)
+    good = validate([make_input(make_xlsx(tmp_path / "ok.xlsx", GOOD_ROWS, GOOD_MERGES))], ValidationParams())
+    assert "header_missing" not in codes(good.warnings)
+
+
+def test_stock_series_top_total_not_summed(tmp_path: Path) -> None:
+    """KOSIS 누적 통계: 맨 위 '합계'(연말 값) 아래가 월 계열이면 월별 합과 비교하지 않는다."""
+    rows = [["월별", "인구"], ["합계", 1002889], ["1월", 994549], ["2월", 995905], ["3월", 1002889]]
+    result = validate([make_input(make_xlsx(tmp_path / "stock.xlsx", rows))], ValidationParams())
+    assert "sum_mismatch" not in codes(result.blocks)
+    assert any("누적 자료" in n for n in result.notes)
+
+
+def test_top_national_total_still_checked(tmp_path: Path) -> None:
+    """지역별 표의 맨 위 '전국'은 그대로 합계를 검사한다 (하위 행이 시점 계열이 아님)."""
+    rows = [["시도", "인구"], ["전국", 999], ["서울", 100], ["부산", 200]]
+    result = validate([make_input(make_xlsx(tmp_path / "nat.xlsx", rows))], ValidationParams())
+    assert "sum_mismatch" in codes(result.blocks)
+
+
+def test_subtotal_group_is_nearest_text_left_of_label(tmp_path: Path) -> None:
+    """'2026-08 | 서울 | 계' 행의 그룹은 '서울'(라벨 바로 왼쪽)이다.
+
+    맨 앞 '2026-08'로 묶으면 같은 달 전국 행 전체와 비교하게 된다.
+    """
+    rows = [
+        ["월", "시도명", "시군구", "대수"],
+        ["2026-08", "서울", "계", 300],
+        ["2026-08", "서울", "강남구", 100],
+        ["2026-08", "서울", "강서구", 200],
+        ["2026-08", "부산", "계", 50],
+        ["2026-08", "부산", "중구", 50],
+    ]
+    result = validate([make_input(make_xlsx(tmp_path / "month.xlsx", rows))], ValidationParams())
+    assert "sum_mismatch" not in codes(result.blocks)
+    rows[2][3] = 999  # 서울 계와 하위 합이 다르면 그대로 차단
+    result = validate([make_input(make_xlsx(tmp_path / "month2.xlsx", rows))], ValidationParams())
+    assert [b.row for b in result.blocks if b.code == "sum_mismatch"] == [2]
+
+
+def test_national_total_with_single_region_is_skipped(tmp_path: Path) -> None:
+    """한 시도 자료에 '전국' 행이 함께 실린 경우: 하위 그룹이 하나뿐이라 전체 합계는 검사하지 않는다."""
+    rows = [
+        ["시도", "시군구", "대수"],
+        ["전국", "합계", 9999],
+        ["충남", "계", 300],
+        ["충남", "천안시", 100],
+        ["충남", "공주시", 200],
+    ]
+    result = validate([make_input(make_xlsx(tmp_path / "one.xlsx", rows))], ValidationParams())
+    assert "sum_mismatch" not in codes(result.blocks)
+    assert any("하위 그룹이 하나뿐" in n for n in result.notes)
+
+
+def test_subtotal_placed_above_its_rows(tmp_path: Path) -> None:
+    """병합 셀로 라벨이 '계'만 보이고 소계가 하위 행 위에 놓인 양식 (충청남도 자동차 등록현황 '천안시 계')."""
+    rows = [
+        ["시도", "시군구", "구", "관용", "자가용"],
+        ["충남", "계", "계", 280, 310825],
+        ["충남", "천안시", "동남구", 112, 122934],
+        ["충남", "천안시", "서북구", 168, 187891],
+        ["충남", "공주시", "공주시", 241, 43046],
+    ]
+    result = validate([make_input(make_xlsx(tmp_path / "above.xlsx", rows))], ValidationParams())
+    assert "sum_mismatch" not in codes(result.blocks)
+    assert any("위쪽에 놓인 소계" in n for n in result.notes)
+    rows[2][3] = 150  # 아래 행과도 맞지 않으면 그대로 차단
+    result = validate([make_input(make_xlsx(tmp_path / "above2.xlsx", rows))], ValidationParams())
+    assert "sum_mismatch" in codes(result.blocks)

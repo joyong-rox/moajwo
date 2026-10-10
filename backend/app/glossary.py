@@ -120,11 +120,14 @@ class Resolution:
 
 
 def sido_short_names(name: str) -> set[str]:
-    """'서울특별시' → {'서울', '서울시'}, '경기도' → {'경기'}"""
+    """'서울특별시' → {'서울', '서울시'}, '경기도' → {'경기'}, '충청북도' → {'충청북', '충북'}"""
     for suffix in _SIDO_SUFFIXES:
         if name.endswith(suffix) and len(name) > len(suffix):
             base = name[: -len(suffix)]
-            return {base} if suffix == "도" else {base, base + "시"}
+            if not suffix.endswith("도"):  # '…시' 계열만 '서울시'처럼 쓴다 ('제주시'는 실제 기초자치단체 이름)
+                return {base, base + "시"}
+            # 충청북도·경상남도·전라북도처럼 세 글자 + '도'는 첫 글자와 끝 글자로 줄여 쓴다 (충북·경남·전북)
+            return {base, base[0] + base[2]} if len(base) == 3 else {base}
     return set()
 
 

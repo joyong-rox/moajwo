@@ -226,7 +226,26 @@ def check_rows(session: Session, rows: list[ImportRow], report: ImportReport) ->
                 {"row": row.row, "message": f"같은 코드가 {seen[row.code]}행에도 있습니다: {row.code}"}
             )
         seen[row.code] = row.row
+    _fill_region_codes(rows, report)
     _region_warnings(session, rows, report, set(seen))
+
+
+def _fill_region_codes(rows: list[ImportRow], report: ImportReport) -> None:
+    """시도·시군구 코드가 빈 자치단체 행은 정식명칭으로 행정동 코드표에서 찾아 채운다.
+
+    ('서울', '서울 강서구' 같은 지역 약칭은 이 코드로 만들어지므로 비어 있으면 약칭을 해석하지 못한다)
+    """
+    filled = 0
+    for row in rows:
+        if row.sido_code is not None:
+            continue
+        found = admin_codes.infer_region_codes(row.name)
+        if found is not None:
+            row.sido_code, row.sigungu_code = found
+            filled += 1
+    if filled:
+        message = f"행정동 코드표로 시도·시군구 코드를 채웠습니다 ({filled}행, 정식명칭 기준)."
+        report.warnings.append({"row": None, "message": message})
 
 
 def apply_rows(session: Session, rows: list[ImportRow], report: ImportReport) -> None:
@@ -241,8 +260,9 @@ def apply_rows(session: Session, rows: list[ImportRow], report: ImportReport) ->
         entry.name = row.name
         entry.normalized = normalize_name(row.name)
         entry.type_label = row.type_label
-        entry.sido_code = row.sido_code
-        entry.sigungu_code = row.sigungu_code
+        if row.sido_code is not None or entry.sido_code is None:  # 비어 있고 코드표에서도 못 찾으면 기존 코드 유지
+            entry.sido_code = row.sido_code
+            entry.sigungu_code = row.sigungu_code
         entry.valid_from = row.valid_from
         entry.valid_to = row.valid_to
         entry.previous_codes = ",".join(row.previous_codes) or None

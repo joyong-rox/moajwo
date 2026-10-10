@@ -52,6 +52,7 @@ export type UploadResult = {
   data_rows: number
   sheets: SheetSummary[]
   pii: PiiSummary | null
+  skipped_sheets?: string[]
   error: string | null
 }
 
@@ -246,7 +247,7 @@ export type GlossaryEntry = {
   valid_to: string | null
   previous_codes: string | null
   note: string | null
-  source: 'example' | 'upload' | 'user'
+  source: 'example' | 'upload' | 'user' | 'base'
   active: boolean
   aliases: string[]
 }
@@ -264,6 +265,7 @@ export type GlossaryInfo = {
   entries: number
   region_entries: number
   example_entries: number
+  base_entries: number
   aliases: number
   region_code_table_date: string
 }

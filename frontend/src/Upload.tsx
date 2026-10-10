@@ -133,6 +133,8 @@ function FileSummary({ result, onPiiChanged }: { result: UploadResult; onPiiChan
           <span className="upload-file-meta">
             시트 {result.sheet_count}개 · 데이터 {result.data_rows.toLocaleString('ko-KR')}행
             {result.encoding && ` · ${result.encoding.toUpperCase()}`}
+            {result.skipped_sheets && result.skipped_sheets.length > 0 &&
+              ` · 설명 시트 건너뜀: ${result.skipped_sheets.join(', ')}`}
           </span>
         )}
       </div>
