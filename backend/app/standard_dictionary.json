@@ -42,6 +42,8 @@
     { "key": "fuel_type", "label": "연료", "description": "자동차 사용 연료 이름(휘발유·경유·LPG·전기 등)", "aliases": ["연료별", "연료구분", "연료종류", "사용연료"] },
     { "key": "government_use", "label": "관용", "description": "관용(국가·지자체 소유) 차량 수(대)", "aliases": ["관용차", "관용차량"], "modifier": true },
     { "key": "private_use", "label": "자가용", "description": "자가용(비사업용) 차량 수(대)", "aliases": ["자가용차", "비사업용"], "modifier": true },
-    { "key": "commercial_use", "label": "영업용", "description": "영업용(사업용) 차량 수(대)", "aliases": ["영업용차", "사업용"], "modifier": true }
+    { "key": "commercial_use", "label": "영업용", "description": "영업용(사업용) 차량 수(대)", "aliases": ["영업용차", "사업용"], "modifier": true },
+    { "key": "total", "label": "합계", "description": "여러 항목을 더한 합계·총계 값", "aliases": ["계", "소계", "총계", "총합계", "전체", "합"], "modifier": true },
+    { "key": "registration_count", "label": "등록건수", "description": "등록 처리 건수(업체·신고·자격 등록 등)", "aliases": ["등록 건수", "등록수"] }
   ]
 }

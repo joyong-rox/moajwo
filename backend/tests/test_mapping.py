@@ -328,3 +328,47 @@ def test_vehicle_terms_and_usage_qualifiers() -> None:
     assert got["관용"] == ("government_use", None, "auto")
     assert got["총계_관용"] == ("government_use", "총계", "auto")
     assert got["예산(백만원)"] == ("budget", None, "auto")  # 단위 괄호는 구분이 아니다
+
+
+def test_total_columns_map_to_total_without_llm() -> None:
+    """'총계'·'계'·'소계'·'총계_계'는 LLM으로 넘기지 않고 합계 항목으로 자동 적용 ('승용_계'는 승용차 (계) 그대로)."""
+    llm = FakeLlm({})
+    engine = MappingEngine(load_dictionary(), None, llm)
+    columns = ["총계", "계", "소계", "총합계", "총계_계", "2024_총계_계", "승용_계", "총계_관용"]
+    m = _by_column(engine.map_columns(columns, [[1]] * len(columns)))
+    for c in ("총계", "계", "소계", "총합계", "총계_계"):
+        assert (m[c].field_key, m[c].status, m[c].qualifier) == ("total", "auto", None), c
+    assert (m["2024_총계_계"].field_key, m["2024_총계_계"].qualifier) == ("total", "2024")
+    assert (m["승용_계"].field_key, m["승용_계"].qualifier) == ("passenger_car", "계")
+    assert (m["총계_관용"].field_key, m["총계_관용"].qualifier) == ("government_use", "총계")
+    assert llm.calls == []
+
+
+def test_registration_count_is_exact_not_vehicle_total() -> None:
+    engine = MappingEngine(load_dictionary(), None, None)
+    m = _by_column(engine.map_columns(["등록건수", "건수", "등록대수"], [[2017], [3], [5]], use_llm=False))
+    assert (m["등록건수"].field_key, m["등록건수"].method, m["등록건수"].status) == (
+        "registration_count",
+        "exact",
+        "auto",
+    )
+    assert m["건수"].field_key == "count"
+    assert m["등록대수"].field_key == "vehicles_total"
+
+
+def test_short_vehicle_words_need_vehicle_context() -> None:
+    """'화물'·'특수'는 같은 표에 차량 관련 열이 있을 때만 자동 적용, 없으면 확인 대상으로 내린다."""
+    engine = MappingEngine(load_dictionary(), None, None)
+    cargo = _by_column(engine.map_columns(["항만", "화물", "특수", "화물차"], [["부산"], [1], [2], [3]], use_llm=False))
+    assert (cargo["화물"].field_key, cargo["화물"].status) == ("truck", "review")
+    assert "차량 관련 열" in cargo["화물"].reason
+    assert (cargo["특수"].field_key, cargo["특수"].status) == ("special_vehicle", "review")
+    assert cargo["화물차"].status == "auto"  # 뜻이 분명한 이름은 그대로
+    vehicle = _by_column(engine.map_columns(["승용", "승합", "화물", "특수_관용"], [[1]] * 4, use_llm=False))
+    assert (vehicle["화물"].status, vehicle["특수_관용"].status) == ("auto", "auto")
+
+
+def test_context_guard_keeps_user_decisions() -> None:
+    engine = MappingEngine(load_dictionary(), None, None)
+    m = _by_column(engine.map_columns(["화물"], [[1]], use_llm=False, decisions={"화물": "truck"}))
+    assert (m["화물"].status, m["화물"].field_key) == ("confirmed", "truck")

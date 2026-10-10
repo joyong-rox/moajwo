@@ -92,3 +92,43 @@ def _d(value: str | None):
     from datetime import date
 
     return date.fromisoformat(value) if value else None
+
+
+def test_general_gu_entries(tmp_path: Path) -> None:
+    from app.glossary import AliasEntry, Entry, Glossary, period_end
+
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    gu = db.execute(
+        "SELECT count(*), sum(sido_code IS NULL) FROM glossary_entries WHERE type_label = '일반구'"
+    ).fetchone()
+    assert gu == (41, 0)
+    entries = [
+        Entry(code, name, type_label or "", sido, sigungu, _d(start), _d(end))
+        for code, name, type_label, sido, sigungu, start, end in db.execute(
+            "SELECT code, name, type_label, sido_code, sigungu_code, valid_from, valid_to FROM glossary_entries"
+        )
+    ]
+    aliases: dict[str, list[AliasEntry]] = {}
+    for normalized, target, start, source in db.execute(
+        "SELECT normalized, target_code, valid_from, source FROM glossary_aliases"
+    ):
+        aliases.setdefault(normalized, []).append(AliasEntry(target, _d(start), base=source == "base"))
+    db.close()
+    g = Glossary(entries, aliases)
+    for name, period, code in [
+        ("경기 고양시 덕양구", "2025-04", "3950000"),
+        ("고양시 덕양구", None, "3950000"),
+        ("경남 창원시 마산합포구", "2026-08", "5670156"),
+        ("충남 천안시 서북구", "2026-08", "5660000"),
+        ("전북 전주시 완산구", "2023-05", "4650000"),
+        ("전북 전주시 완산구", "2026-08", "4651000"),
+    ]:
+        res = g.resolve(name, period_end(period), "region")
+        assert (res.status, res.ref.code if res.ref else None) == ("resolved", code), (name, period)
+
+    _alembic(tmp_path, "downgrade", "0012_reorg_base_entries")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM glossary_entries WHERE type_label = '일반구'").fetchone()[0] == 0
+    assert db.execute("SELECT count(*) FROM glossary_aliases WHERE source = 'base'").fetchone()[0] == 180  # 0012 유지
+    db.close()

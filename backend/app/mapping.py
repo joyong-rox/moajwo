@@ -145,8 +145,15 @@ def split_column_name(column: str) -> ColumnName:
     return ColumnName(column, normalize(cleaned), parts, display, ",".join(years) or None, shown, bracketed)
 
 
-# 2단 헤더에서 구분으로만 쓰이는 합계 단어 ('승용_계' → 승용차 (계))
-TOTAL_WORDS = frozenset({"계", "소계", "합계", "총계", "전체"})
+# 2단 헤더에서 구분으로만 쓰이는 합계 단어 ('승용_계' → 승용차 (계)). 이 단어만으로 된 이름('총계_계')은 합계 항목
+TOTAL_WORDS = frozenset({"계", "소계", "합계", "총계", "총합계", "전체"})
+TOTAL_KEY = "total"
+# '화물'·'특수'처럼 차량 외 통계(물동량 등)에도 쓰이는 짧은 이름 → 같은 표에 차량 관련 열이 있을 때만 자동 적용
+CONTEXT_TERMS: dict[str, frozenset[str]] = {
+    "truck": frozenset({"화물"}),
+    "special_vehicle": frozenset({"특수"}),
+}
+VEHICLE_CONTEXT = ("승용", "승합", "자동차", "차량", "이륜", "차종")
 DATE_FIELDS = frozenset({"base_date", "month", "year"})
 _DATE_YEAR = re.compile(r"^(?:19|20)\d{2}\s*년$")
 _DATE_MONTH = re.compile(r"^(?:19|20)\d{2}\s*(?:[-./]\s*\d{1,2}\.?|년\s*\d{1,2}\s*월)$")
@@ -413,14 +420,35 @@ class MappingEngine:
             return k is not None and self._by_key[k].modifier and not self._by_key[key].modifier
 
         if others and all(is_qualifier(name.parts[i]) for i in others):
-            extra = " ".join(name.raw_parts[i] for i in others)
-            result.qualifier = " ".join(q for q in (result.qualifier, extra) if q)
+            # 합계 항목에는 '총계'·'계' 같은 합계 단어를 구분으로 다시 붙이지 않는다 ('총계_계' → 합계)
+            shown = [i for i in others if not (key == TOTAL_KEY and name.parts[i] in TOTAL_WORDS)]
+            extra = " ".join(name.raw_parts[i] for i in shown)
+            result.qualifier = " ".join(q for q in (result.qualifier, extra) if q) or None
             self._apply(
                 result, key, "auto", "exact_part", 1.0, "열 이름이 표준 항목과 구분 단어(관용·계 등)로 이루어짐"
             )
         else:
             self._apply(result, key, "review", "exact_part", 0.9, "열 이름의 일부가 표준 사전과 일치")
         return True
+
+    # -- 도메인 문맥: '화물'·'특수' 같은 짧은 이름은 차량 통계일 때만 자동 적용
+    def _guard_context(self, names: list[ColumnName], results: list[ColumnMapping], columns: list[str]) -> None:
+        vehicle = any(term in normalize(c) for c in columns for term in VEHICLE_CONTEXT)
+        if vehicle:
+            return
+        for name, result in zip(names, results, strict=True):
+            short = CONTEXT_TERMS.get(result.field_key or "")
+            if short is None or result.status != "auto" or result.method not in ("exact", "exact_part", "similarity"):
+                continue
+            tokens = {name.primary, *name.parts, *(normalize(b) for b in name.bracketed)}
+            clear = {normalize(t) for t in self._by_key[result.field_key].texts} - short
+            if tokens & clear:  # '화물차'·'화물자동차'처럼 뜻이 분명한 이름은 그대로
+                continue
+            result.status = "review"
+            result.reason = (
+                f"'{result.column}'은(는) 차량 외 통계(물동량 등)에도 쓰이는 이름이라, 같은 표에 차량 관련 열"
+                "(승용·승합·자동차·차량·이륜 등)이 없으면 자동 적용하지 않음 (사용자 확인 필요)"
+            )
 
     # -- 2단계
     def _similarity(self, name: ColumnName, sims: dict[str, float] | None, result: ColumnMapping) -> None:
@@ -504,6 +532,7 @@ class MappingEngine:
         sims, embedding_status = self._embed_columns(names)
         for i, (name, result) in enumerate(zip(names, results, strict=True)):
             self._similarity(name, sims[i] if sims is not None else None, result)
+        self._guard_context(names, results, columns)
 
         for result in results:
             if result.status != "unresolved":
