@@ -132,3 +132,38 @@ def test_general_gu_entries(tmp_path: Path) -> None:
     assert db.execute("SELECT count(*) FROM glossary_entries WHERE type_label = '일반구'").fetchone()[0] == 0
     assert db.execute("SELECT count(*) FROM glossary_aliases WHERE source = 'base'").fetchone()[0] == 180  # 0012 유지
     db.close()
+
+
+def test_direction_gu_are_ambiguous_and_sejong_duplicates_resolve(tmp_path: Path) -> None:
+    """시도 없는 '남구'·'중구'는 여러 항목 → 모호, '세종 세종특별자치시' 같은 중복 표기는 세종으로 (0014)."""
+    from app.glossary import AliasEntry, Entry, Glossary, period_end
+
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    entries = [
+        Entry(code, name, type_label or "", sido, sigungu, _d(start), _d(end))
+        for code, name, type_label, sido, sigungu, start, end in db.execute(
+            "SELECT code, name, type_label, sido_code, sigungu_code, valid_from, valid_to FROM glossary_entries"
+        )
+    ]
+    aliases: dict[str, list[AliasEntry]] = {}
+    for normalized, target, start, source in db.execute(
+        "SELECT normalized, target_code, valid_from, source FROM glossary_aliases"
+    ):
+        aliases.setdefault(normalized, []).append(AliasEntry(target, _d(start), base=source == "base"))
+    db.close()
+    g = Glossary(entries, aliases)
+    for name in ("남구", "중구", "동구", "서구", "북구"):
+        for period in (None, "2024-03"):
+            res = g.resolve(name, period_end(period), "region")
+            assert res.status == "ambiguous" and len(res.candidates) >= 4, (name, period, res)
+    assert g.resolve("부산 남구", None, "region").ref.code == "3310000"
+    for name in ("세종 세종특별자치시", "세종시 세종특별자치시", "세종특별자치시 세종특별자치시"):
+        res = g.resolve(name, period_end("2026-08"), "region")
+        assert (res.status, res.ref.code if res.ref else None) == ("resolved", "5690000"), name
+
+    _alembic(tmp_path, "downgrade", "0013_general_gu_entries")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM glossary_entries WHERE code = '3310000'").fetchone()[0] == 0
+    assert db.execute("SELECT count(*) FROM glossary_aliases WHERE target_code = '5690000'").fetchone()[0] == 0
+    db.close()
