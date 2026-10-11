@@ -16,6 +16,7 @@ from app.files import get_file_for, load_parsed
 from app.glossary_api import get_glossary
 from app.mapping import get_engine
 from app.models import SourceFile, ValidationRun
+from app.pii import mask_text
 from app.promotion import load_standard
 from app.validation import (
     BLOCK_LABEL,
@@ -187,6 +188,9 @@ def _file_input(
 
 def _issue_out(issue: Any, labels: dict[str, str]) -> IssueOut:
     data = asdict(issue)
+    data["message"] = mask_text(data["message"])  # 메시지·열 이름에 든 개인정보는 가린다
+    if data.get("column"):
+        data["column"] = mask_text(data["column"])
     return IssueOut(label=labels[issue.code], **data)
 
 

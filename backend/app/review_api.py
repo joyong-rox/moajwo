@@ -14,9 +14,11 @@ from app.db import get_session
 from app.files import get_file_for
 from app.integration import include_unmapped_default
 from app.models import Automation, ReviewItem, ReviewSession, SourceFile, User
+from app.pii import mask_text
 from app.review import (
     ReviewError,
     ReviewPermissionError,
+    can_change_file,
     changes,
     complete,
     create_session,
@@ -48,6 +50,9 @@ class ReviewItemOut(BaseModel):
     decision: str | None
     choice: str | None
     excluded: bool
+    # 이 항목의 결정이 원본 파일(매핑 확정·개인정보 확인)을 바꾸는데, 검토를 만든 사람이 그 파일을 올린 사람이 아니면
+    # False (조회 전용). 화면은 버튼을 끄고 안내하며, 서버는 결정 요청을 403으로 거부한다.
+    can_change: bool = True
 
 
 class ReviewFileOut(BaseModel):
@@ -83,6 +88,11 @@ class ReviewOut(BaseModel):
     include_unmapped_default: bool = False  # 통합할 때 '표준 항목이 없는 열 포함'의 기본값 (자동화 설정)
 
 
+def _masked(text: str | None) -> str | None:
+    """검토 항목의 열 이름·값을 화면으로 보낼 때 개인정보를 가린다 (DB의 기록은 연결용 원문 그대로)."""
+    return mask_text(text) if text else text
+
+
 def review_out(
     db: Session, session: ReviewSession, learned: dict[str, int] | None = None, user: CurrentUser | None = None
 ) -> ReviewOut:
@@ -95,6 +105,9 @@ def review_out(
     for fid in json.loads(session.file_ids):
         record = db.get(SourceFile, fid)
         files.append(ReviewFileOut(id=fid, name=record.original_name if record else "?", excluded=fid in excluded))
+    writable = {
+        fid: can_change_file(db, fid, session.created_by) for fid in {i.file_id for i in items if i.file_id is not None}
+    }
     return ReviewOut(
         id=session.id,
         status=session.status,
@@ -119,15 +132,16 @@ def review_out(
                 file_name=i.file_name,
                 sheet=i.sheet,
                 row=i.row,
-                column=i.column,
-                before=i.before,
-                after=i.after,
-                reason=i.reason,
+                column=_masked(i.column),
+                before=_masked(i.before),
+                after=_masked(i.after),
+                reason=mask_text(i.reason),
                 reason_source=i.reason_source,
                 payload=json.loads(i.payload),
                 decision=i.decision,
                 choice=i.choice,
                 excluded=i.file_id in excluded and i.kind != "pii",
+                can_change=writable.get(i.file_id, True) if i.kind in ("mapping", "pii") else True,
             )
             for i in items
         ],

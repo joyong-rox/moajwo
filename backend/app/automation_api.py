@@ -17,9 +17,15 @@ from app.automation import AutomationError, delete_automation, run_automation, s
 from app.db import get_session
 from app.integration_api import RunOut, runs_out
 from app.models import Automation, IntegrationRun, SourceFile, User
+from app.pii import mask_text
 from app.review import session_items, summarize
 
 router = APIRouter(tags=["automation"])
+
+
+def _masked_format(fmt: dict[str, Any]) -> dict[str, Any]:
+    """결과 열 이름(표준 항목이 없는 열은 원래 열 이름)에 든 개인정보를 가린다."""
+    return {**fmt, "columns": [mask_text(c) for c in fmt.get("columns", [])]} if "columns" in fmt else fmt
 
 
 class AutomationOut(BaseModel):
@@ -52,10 +58,10 @@ def automation_out(db: Session, a: Automation) -> AutomationOut:
         owner_name=owner.display_name if owner is not None else None,
         manual_baseline_minutes=a.manual_baseline_minutes,
         source_run_id=a.source_run_id,
-        column_rules=json.loads(a.column_rules),
+        column_rules=[{**r, "column": mask_text(r.get("column") or "")} for r in json.loads(a.column_rules)],
         entity_rules=json.loads(a.entity_rules),
         validation=json.loads(a.validation),
-        output_format=json.loads(a.output_format),
+        output_format=_masked_format(json.loads(a.output_format)),
         created_at=a.created_at,
         updated_at=a.updated_at,
         run_count=count,

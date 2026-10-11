@@ -110,6 +110,12 @@ function ReviewPanel({
       .catch(() => undefined)
   }
 
+  // 결정이 거부된 뒤(권한이 바뀐 경우 등) 서버의 최신 상태로 화면을 맞춘다
+  function refresh(): Promise<void> {
+    if (!review) return Promise.resolve()
+    return getReview(review.id).then(setReview, () => undefined)
+  }
+
   async function run(itemId: number | null, fn: () => Promise<Review>): Promise<boolean> {
     setBusyItem(itemId)
     setError(null)
@@ -168,7 +174,9 @@ function ReviewPanel({
               hint={g.hint}
               busyItem={busyItem}
               onDecide={(item, decision, choice) =>
-                void run(item.id, () => decideReviewItem(review.id, item.id, decision, choice))
+                void run(item.id, () => decideReviewItem(review.id, item.id, decision, choice)).then((ok) => {
+                  if (!ok) void refresh()
+                })
               }
               onOpenReason={setReasonItem}
               fields={fields}
@@ -284,6 +292,12 @@ function ReviewPanel({
 }
 
 function ScoreHeader({ review }: { review: Review }) {
+  // 남이 올린 파일의 매핑·개인정보 항목 (서버가 판단한 조회 전용 항목)
+  const readOnlyFiles = [
+    ...new Set(
+      review.items.filter((i) => i.category === 'pending' && i.can_change === false).map((i) => i.file_name ?? `#${i.file_id}`),
+    ),
+  ]
   const level = review.counts.block ? 'is-block' : review.counts.pending_open ? 'is-pending' : 'is-ok'
   return (
     <div className={`review-score ${level}`}>
@@ -295,6 +309,11 @@ function ScoreHeader({ review }: { review: Review }) {
         {!review.can_edit && (
           <p className="review-automation">
             {review.created_by_name ?? '다른 사용자'}님의 검토입니다 — 조회만 할 수 있습니다 (승인·완료·통합은 만든 사람만).
+          </p>
+        )}
+        {review.can_edit && readOnlyFiles.length > 0 && (
+          <p className="review-automation" role="note">
+            조회 전용이며 파일을 올린 사용자만 변경할 수 있습니다 — {readOnlyFiles.join(', ')}의 열 매핑·개인정보 항목은 승인·거부할 수 없습니다.
           </p>
         )}
         {review.automation_name && (
@@ -403,7 +422,7 @@ function ItemGroup({ review, category, title, hint, busyItem, onDecide, onOpenRe
               <ItemRow
                 key={i.id}
                 item={i}
-                disabled={review.status !== 'in_review' || busyItem !== null || !review.can_edit}
+                disabled={review.status !== 'in_review' || busyItem !== null || !review.can_edit || i.can_change === false}
                 busy={busyItem === i.id}
                 onDecide={onDecide}
                 onOpenReason={onOpenReason}
@@ -529,7 +548,13 @@ function ItemRow({ item, disabled, busy, onDecide, onOpenReason, fields = [] }: 
               >
                 거부
               </button>
-              {busy ? <span className="review-state">저장 중…</span> : decided && <span className="review-state">{decided}</span>}
+              {busy ? (
+                <span className="review-state">저장 중…</span>
+              ) : item.can_change === false ? (
+                <span className="review-state">조회 전용</span>
+              ) : (
+                decided && <span className="review-state">{decided}</span>
+              )}
             </span>
           ) : (
             <span className="review-controls">{decided && <span className="review-state">{decided}</span>}</span>

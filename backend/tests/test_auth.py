@@ -432,3 +432,72 @@ def test_recheck_and_automation_cannot_write_other_users_file(accounts) -> None:
     res = admin.post(f"/automations/{automation_id}/run", json={"file_ids": [victim]})
     assert res.status_code in (201, 403, 422), res.text
     assert _decision_rows(victim) == []
+
+
+PII_ROWS = [
+    ["기관명", "alice@example.com", "bob@example.com", "집행액"],
+    ["행정안전부", "정상", "검토", 1000],
+    ["기상청", "보류", "정상", 2500],
+]
+
+
+def test_pii_column_names_masked_in_api_and_ids_keep_decisions(accounts) -> None:
+    """후속 검증 ④: 업로드·매핑·확정·검토 응답에 개인정보 열 이름 원문이 없고, 마스킹이 같아지는 두 열도 column_id로
+    따로 확정되며 재분석에서 유지된다. 무권한 사용자는 볼 수 없다."""
+    u1, u2 = accounts["user1"], accounts["user2"]
+    upload = u1.post("/files", files=[("files", ("개인정보머리글.xlsx", _xlsx(PII_ROWS), XLSX))])
+    assert upload.status_code == 200, upload.text
+    assert "alice@example.com" not in upload.text and "bob@example.com" not in upload.text
+    fid = upload.json()[0]["id"]
+    mapping = u1.post(f"/files/{fid}/mapping?use_llm=false")
+    assert "alice@example.com" not in mapping.text and "bob@example.com" not in mapping.text
+    cols = mapping.json()["sheets"][0]["columns"]
+    ids = [c["column_id"] for c in cols]
+    assert len(set(ids)) == len(ids) == 4
+    a, b = cols[1], cols[2]
+    res = u1.put(
+        f"/files/{fid}/mapping/decisions",
+        json={"decisions": [
+            {"sheet": "현황", "column_id": a["column_id"], "field_key": "note"},
+            {"sheet": "현황", "column_id": b["column_id"], "field_key": None},
+            {"sheet": "현황", "column": "집행액", "field_key": "expenditure"},  # 예전 방식(원래 이름)도 호환
+        ]},
+    )  # fmt: skip
+    assert res.status_code == 200, res.text
+    assert "alice@example.com" not in res.text
+    assert sorted(_decision_rows(fid)) == sorted(
+        [("alice@example.com", "note"), ("bob@example.com", None), ("집행액", "expenditure")]
+    )
+    again = {c["column_id"]: c for c in u1.post(f"/files/{fid}/mapping?use_llm=false").json()["sheets"][0]["columns"]}
+    assert (again[a["column_id"]]["status"], again[a["column_id"]]["field_key"]) == ("confirmed", "note")
+    assert (again[b["column_id"]]["status"], again[b["column_id"]]["field_key"]) == ("confirmed", None)
+    bad = u1.put(
+        f"/files/{fid}/mapping/decisions",
+        json={"decisions": [{"sheet": "현황", "column_id": "c99", "field_key": None}]},
+    )
+    assert bad.status_code == 422 and "example.com" not in bad.text
+    assert u2.post(f"/files/{fid}/mapping?use_llm=false").status_code == 404  # 무권한
+    # 검토 기록(DB에는 연결용 원문)도 화면 응답에서는 가려진다
+    review = u1.post("/reviews", json={"file_ids": [fid]})
+    assert review.status_code == 201 and "alice@example.com" not in review.text
+    again_review = u1.get(f"/reviews/{review.json()['id']}")
+    assert "alice@example.com" not in again_review.text and "bob@example.com" not in again_review.text
+
+
+def test_review_items_report_read_only_per_file(accounts) -> None:
+    """후속 검증 ⑤: 검토 응답이 항목별 변경 가능 여부(can_change)를 알려 준다 — 여러 사람의 파일이 섞인 검토 포함."""
+    u3, admin = accounts["user3"], accounts["admin1"]
+    rows = [["기관명", "후속검증 전용 메모"], ["행정안전부", "정상"], ["기상청", "검토"]]
+    other = _upload(u3, rows, "u3후속.xlsx")
+    mine = _upload(admin, [["기관명", "관리자 전용 메모"], ["행정안전부", "정상"]], "admin후속.xlsx")
+    review = admin.post("/reviews", json={"file_ids": [other, mine]}).json()
+    by_file = {}
+    for item in review["items"]:
+        if item["category"] == "pending" and item["kind"] == "mapping":
+            by_file[item["file_id"]] = item["can_change"]
+    assert by_file == {other: False, mine: True}, by_file
+    own_item = next(
+        i for i in review["items"] if i["category"] == "pending" and i["kind"] == "mapping" and i["file_id"] == mine
+    )
+    res = admin.post(f"/reviews/{review['id']}/items/{own_item['id']}/decision", json={"decision": "rejected"})
+    assert res.status_code == 200, res.text

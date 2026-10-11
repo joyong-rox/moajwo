@@ -20,6 +20,7 @@ from app.config import OLLAMA_EMBED_MODEL
 from app.db import get_session
 from app.mapping import get_engine
 from app.models import AppSetting, Automation, MappingApproval, PromotionCandidate, StandardTerm, User
+from app.pii import mask_text
 from app.promotion import PROMOTION_THRESHOLD, PromotionError, approve, reject
 from app.timefmt import utc_to_kst
 
@@ -66,8 +67,8 @@ def candidate_out(db: Session, c: PromotionCandidate) -> CandidateOut:
     names = _names(db, set(approver_ids) | ({c.reviewed_by} if c.reviewed_by else set()))
     return CandidateOut(
         id=c.id,
-        column_name=c.column_name,
-        normalized=c.normalized,
+        column_name=mask_text(c.column_name),
+        normalized=mask_text(c.normalized),
         field_key=c.field_key,
         field_label=labels.get(c.field_key),
         approver_count=c.approver_count,
@@ -156,8 +157,8 @@ def list_standard_terms(_: ManagerDep, db: Annotated[Session, Depends(get_sessio
     return [
         StandardTermOut(
             id=t.id,
-            term=t.term,
-            normalized=t.normalized,
+            term=mask_text(t.term),
+            normalized=mask_text(t.normalized),
             field_key=t.field_key,
             field_label=labels.get(t.field_key),
             approved_by_name=names.get(t.approved_by) if t.approved_by else None,
