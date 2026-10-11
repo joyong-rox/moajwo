@@ -134,16 +134,9 @@ def sido_short_names(name: str) -> set[str]:
     return set()
 
 
-# 날짜·기간 값: 2026-08, 2026.08.31, 2026/8, 2026년, 2026년 8월, 20260831
-DATE_VALUE = re.compile(
-    r"^(?:19|20)\d{2}(?:\s*[-./]\s*\d{1,2}(?:\s*[-./]\s*\d{1,2})?\.?"
-    r"|\s*년(?:\s*\d{1,2}\s*월(?:\s*\d{1,2}\s*일)?)?|(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))"
-    r"(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$"
-)
-
-
 def looks_like_date(text: str) -> bool:
-    return bool(DATE_VALUE.match(unicodedata.normalize("NFKC", text).strip()))
+    """날짜·기간 값인지 (2026-08, 2026.08.31, 2026년 8월, 20260831 …). 매핑·기간 검사와 같은 parse_date_value 규칙."""
+    return parse_date_value(text) is not None
 
 
 DateKind = Literal["year", "month", "date"]
@@ -249,7 +242,7 @@ class Glossary:
         user_aliases = [a for a in aliases if not a.base]
         targets = list({e.code: e for a in user_aliases if (e := self.entries.get(a.target_code))}.values())
         if len(targets) == 1:
-            return Resolution(name, "resolved", "alias", entity_ref(targets[0]), note=self._ended_note(targets[0], at))
+            return self._out_of_period(name, "alias", targets[0], at)
         if targets:
             refs = [entity_ref(e) for e in targets]
             return Resolution(name, "ambiguous", "alias", candidates=refs, note="별칭이 여러 항목에 연결됨")
@@ -280,7 +273,7 @@ class Glossary:
             return Resolution(name, "ambiguous", "name", candidates=refs, note="같은 이름의 항목이 여러 개")
         ended = list({e.code: e for e, _ in matches}.values())
         if len(ended) == 1:
-            return Resolution(name, "resolved", "name", entity_ref(ended[0]), note=self._ended_note(ended[0], at))
+            return self._out_of_period(name, "name", ended[0], at)
         refs = [entity_ref(e) for e in ended]
         return Resolution(name, "ambiguous", "name", candidates=refs, note="기준일에 유효한 항목이 없음")
 
@@ -301,6 +294,17 @@ class Glossary:
         out.extend(self.suggest(normalize_name(ref.name), at))
         unique = {r.code: r for r in out if r.code != ref.code}
         return list(unique.values())[:SUGGEST_LIMIT]
+
+    def _out_of_period(self, name: str, via: Via, entry: Entry, at: date | None) -> Resolution:
+        """기준일 밖 항목.
+
+        폐지된 항목은 옛 자료 비교를 위해 그 항목으로 해석하되 안내를 붙이고(통합에서 자동으로 바꾸지 않음),
+        아직 시작하지 않은 항목은 확정하지 않고 후보로만 보여 준다 (미래 항목이 다른 경로로 확정되지 않도록).
+        """
+        note = self._ended_note(entry, at)
+        if entry.valid_from and (at or date.today()) < entry.valid_from:
+            return Resolution(name, "unknown", via, candidates=[entity_ref(entry)], note=note)
+        return Resolution(name, "resolved", via, entity_ref(entry), note=note)
 
     @staticmethod
     def _ended_note(entry: Entry, at: date | None) -> str | None:

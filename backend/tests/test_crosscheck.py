@@ -171,10 +171,34 @@ def test_monthly_flow_total_is_checked(tmp_path: Path) -> None:
 
 
 def test_stock_series_needs_evidence_and_records_it(tmp_path: Path) -> None:
-    rows = [["월별", "승용차"], ["합계", 773919], ["1월", 764786], ["2월", 765931]]
+    # 시점 값 항목(승용차 등록대수) + 합계가 한 시점(2월)의 값과 같음 → 누적 자료로 보고 근거를 남긴다
+    rows = [["월별", "승용차"], ["합계", 765931], ["1월", 764786], ["2월", 765931], ["3월", 765120]]
     result = validate([make_input(make_xlsx(tmp_path / "t.xlsx", rows))], ValidationParams())
     assert "sum_mismatch" not in codes(result.blocks)
     assert any("누적 자료" in n and "승용차" in n for n in result.notes)
+
+
+@pytest.mark.parametrize("column", ["전입 인구", "인구 이동", "보유 차량 증감"])
+def test_broad_item_names_do_not_exempt_monthly_flow(tmp_path: Path, column: str) -> None:
+    """⑦ 재검증: 열 이름의 넓은 단어('인구' 등)만으로 월별 발생 실적의 합계 오류를 예외로 두지 않는다."""
+    rows = [["월", column], ["합계", 999], ["1월", 10], ["2월", 20]]
+    result = validate([make_input(make_xlsx(tmp_path / "t.xlsx", rows))], ValidationParams())
+    assert "sum_mismatch" in codes(result.blocks)
+
+
+def test_stock_field_with_total_unlike_any_period_is_checked(tmp_path: Path) -> None:
+    """⑦ 재검증: 시점 값 항목이라도 합계가 어느 시점 값과도 다르면(발생 실적일 수 있음) 그대로 검사한다."""
+    rows = [["월별", "승용차"], ["합계", 773919], ["1월", 764786], ["2월", 765931]]
+    result = validate([make_input(make_xlsx(tmp_path / "t.xlsx", rows))], ValidationParams())
+    assert "sum_mismatch" in codes(result.blocks)
+
+
+def test_kosis_like_total_equal_to_last_month_is_stock(tmp_path: Path) -> None:
+    """⑦ 재검증: KOSIS 등록대수처럼 합계 = 마지막 시점(12월) 값이면 항목 이름과 관계없이 누적 자료."""
+    rows = [["월별(1)", "2024_총계_계"], ["합계", 1002889], ["1월", 994549], ["11월", 1002336], ["12월", 1002889]]
+    result = validate([make_input(make_xlsx(tmp_path / "t.xlsx", rows))], ValidationParams())
+    assert "sum_mismatch" not in codes(result.blocks)
+    assert any("마지막 시점(12월)" in n for n in result.notes)
 
 
 # ---------------------------------------------------------------- ⑨ 미래 용어사전 항목
@@ -299,3 +323,137 @@ def test_above_subtotal_with_hidden_value_is_not_accepted(tmp_path: Path) -> Non
     ]
     result = validate([make_input(make_xlsx(tmp_path / "t.xlsx", rows))], ValidationParams())
     assert not any("위쪽에 놓인 소계" in n for n in result.notes)
+
+
+def test_future_entries_are_candidates_not_keys(tmp_path: Path) -> None:
+    """⑨ 재검증: 아직 시작하지 않은 항목·별칭 대상은 이름·별칭 어느 경로로도 확정 키가 되지 않고 후보로만 나온다."""
+    future = Entry("9990001", "미래구청", "기관", valid_from=date(2099, 1, 1))
+    g = Glossary([future, Entry("1741000", "행정안전부", "중앙행정기관")], {"미래": [AliasEntry("9990001")]})
+    for name in ("미래구청", "미래"):
+        res = g.resolve(name)
+        assert (res.status, res.key) == ("unknown", None), (name, res)
+        assert [c.code for c in res.candidates] == ["9990001"] and "부터 유효" in (res.note or "")
+    f = make_input(make_xlsx(tmp_path / "t.xlsx", [["기관명", "집행액"], ["행정안전부", 1], ["미래구청", 2]]))
+    notes = {e.value: e for e in validate([f], ValidationParams(), glossary=g).entities}
+    assert notes["미래구청"].status == "unknown" and notes["미래구청"].candidates[0]["code"] == "9990001"
+    ended = Glossary([Entry("1051000", "기획재정부", valid_to=date(2025, 12, 31))], {})
+    assert ended.resolve("기획재정부").status == "resolved"  # 폐지 항목은 기존처럼 옛 자료 비교용으로 해석 + 안내
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2026-08", "2026년 8월", "2026.08.31", "2026년 8월 31일", "2026년", "2026-13", "2026-02-30", "서울", "1월"],
+)
+def test_one_date_rule_for_mapping_period_and_glossary(value: str) -> None:
+    """⑥ 재검증: 매핑 날짜 필터·기간 해석·용어 해석이 같은 판정을 쓴다 (실제로 없는 날짜는 셋 다 날짜 아님)."""
+    from app.glossary import looks_like_date, parse_date_value
+
+    is_date = parse_date_value(value) is not None
+    assert looks_like_date(value) is is_date
+    assert (date_field_for([value]) is not None) is is_date
+    assert is_date is (value not in ("2026-13", "2026-02-30", "서울", "1월"))
+
+
+def test_header_search_scope_is_bounded(tmp_path: Path) -> None:
+    """③ 재검증: 머리글 후보는 100행, 첫 데이터 행은 200행 안에서 찾는다. 글자 목록 뒤 멀리 떨어진 숫자 한 줄로
+    본문 행을 머리글로 고르지 않고(예전처럼 위 3행 규칙), 다단 머리글은 그대로 찾는다."""
+    from app.parsing import DATA_SEARCH_ROWS, detect_header_row
+
+    text_list = [["기관", "담당"]] + [[f"기관{i}", f"담당 부서 {i} 과"] for i in range(300)] + [["합계", 3]]
+    assert detect_header_row(text_list) == 0
+    far = [["지역", "인구"]] + [[None, None]] * (DATA_SEARCH_ROWS + 5) + [["서울", 100]]
+    assert detect_header_row(far) == 0  # 데이터가 범위 밖이면 대체 규칙(위 3행)
+    rows = [["통계표", None, None]] + [[None, None, None]] * 96 + [["지역", "인구", None], ["지역", 2024, 2025]]
+    rows += [["서울", 100, 110]]
+    sheet = parse_file(_xlsx_rows(tmp_path, rows, ("B98:C98", "A98:A99"))).sheets[0]
+    assert (sheet.header_row, sheet.header_row_end) == (98, 99) and sheet.columns == ["지역", "인구_2024", "인구_2025"]
+
+
+_SETUP_CHILD = r"""
+import json, os, sys, time
+from pathlib import Path
+from fastapi import HTTPException, Response
+from app import auth_api
+from app.db import SessionLocal
+
+flag_dir, name = Path(sys.argv[1]), sys.argv[2]
+real_hash = auth_api.hash_password
+
+def gated_hash(password):  # '계정 0개' 검사를 통과한 뒤, 두 프로세스가 모두 여기 올 때까지 기다린다
+    (flag_dir / f"ready-{name}").touch()
+    deadline = time.time() + 20
+    while len(list(flag_dir.glob("ready-*"))) < 2 and time.time() < deadline:
+        time.sleep(0.02)
+    return real_hash(password)
+
+auth_api.hash_password = gated_hash
+with SessionLocal() as db:
+    try:
+        auth_api.setup(auth_api.SetupIn(username=name, display_name=name, password="password-123"), Response(), db)
+        print(json.dumps({"name": name, "result": "created"}))
+    except HTTPException as exc:
+        print(json.dumps({"name": name, "result": exc.status_code}))
+"""
+
+
+def test_initial_owner_race_across_processes(tmp_path: Path) -> None:
+    """④ 재검증: 별도 프로세스·별도 DB 연결의 동시 최초 설정에서도 소유자는 한 명, 진 쪽은 409·계정/세션 없음."""
+    import json
+    import os
+    import sqlite3
+    import subprocess
+    import sys
+
+    data = tmp_path / "data"
+    flags = tmp_path / "flags"
+    data.mkdir()
+    flags.mkdir()
+    env = {**os.environ, "MOAJWO_DATA_DIR": str(data), "PYTHONIOENCODING": "utf-8"}
+    env.pop("DATABASE_URL", None)
+    backend = Path(__file__).resolve().parent.parent
+    env["PYTHONPATH"] = str(backend)  # 자식 스크립트는 임시 폴더에 있으므로 app 패키지 경로를 알려 준다
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=backend, env=env, check=True,
+                   capture_output=True)  # fmt: skip
+    script = tmp_path / "child.py"
+    script.write_text(_SETUP_CHILD, encoding="utf-8")
+    procs = [
+        subprocess.Popen(
+            [sys.executable, str(script), str(flags), n],
+            cwd=backend,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )  # fmt: skip
+        for n in ("ownera", "ownerb")
+    ]
+    outputs = [p.communicate(timeout=60) for p in procs]
+    assert all(out.strip() for out, _ in outputs), [err[-500:] for _, err in outputs]
+    results = [json.loads(out.strip().splitlines()[-1]) for out, _ in outputs]
+    assert sorted(str(r["result"]) for r in results) == ["409", "created"], results
+    winner = next(r["name"] for r in results if r["result"] == "created")
+    with sqlite3.connect(data / "moajwo.db") as db:
+        users = db.execute("SELECT id, username, role FROM users").fetchall()
+        sessions = db.execute("SELECT DISTINCT user_id FROM auth_sessions").fetchall()
+    assert [(u[1], u[2]) for u in users] == [(winner, "owner")]
+    assert sessions == [(users[0][0],)]
+
+
+def test_mapping_logs_do_not_contain_pii_column_names(caplog: pytest.LogCaptureFixture) -> None:
+    """⑤ 재검증: 임베딩·LLM을 쓸 수 없는 오류 경로에서도 로그에 열 이름 원문이 남지 않는다."""
+    import logging
+
+    from app import ollama
+
+    def broken_embed(texts: list[str]) -> list[list[float]]:
+        raise ollama.OllamaError("embedding down")
+
+    def broken_llm(system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        raise ollama.OllamaError("llm down")
+
+    engine = MappingEngine(load_dictionary(), broken_embed, broken_llm)
+    with caplog.at_level(logging.DEBUG):
+        result = engine.map_columns(["alice@example.com", "900101-1234567"], [["가"], ["나"]])
+    assert result.embedding == "unavailable" and result.llm == "unavailable"
+    assert "alice@example.com" not in caplog.text and "1234567" not in caplog.text

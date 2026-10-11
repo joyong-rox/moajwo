@@ -250,10 +250,10 @@ STOCK_FIELDS = frozenset(
         "government_use", "private_use", "commercial_use",
     }
 )  # fmt: skip
+# 파일명·시트명·제목에서만 찾는다 ('인구' 같은 넓은 단어는 '전입 인구' 같은 발생 실적에도 쓰여 근거로 쓰지 않음)
 _STOCK_WORDS = (
     "등록대수",
     "등록현황",
-    "인구",
     "세대수",
     "잔액",
     "재고",
@@ -271,16 +271,40 @@ def _field_labels() -> dict[str, str]:
     return {f.key: f.label for f in load_dictionary()}
 
 
-def _stock_basis(file: FileInput, sheet: SheetInput) -> str | None:
-    """누적·잔액 통계라고 볼 근거 (없으면 None)."""
+def _same_values(sheet: SheetInput, total: dict[str, Any], row: dict[str, Any]) -> bool:
+    """합계 행과 어떤 데이터 행의 합산 가능한 숫자 열이 모두 같은지 (표시 단위 반올림 허용)."""
+    cols = [j for j, c in enumerate(total["cells"]) if _is_number(c) and _additive(sheet, j)]
+    if not cols:
+        return False
+    for j in cols:
+        a, b = total["cells"][j], row["cells"][j]
+        if not _is_number(b) or abs(a - b) > 0.5 * 10 ** -max(_decimals(a), _decimals(b)) + 1e-9 * abs(a):
+            return False
+    return True
+
+
+def _stock_basis(file: FileInput, sheet: SheetInput, total: dict[str, Any], data: list[dict[str, Any]]) -> str | None:
+    """누적·잔액(시점 값) 통계라고 볼 근거 (없으면 None).
+
+    1) 합계가 마지막 시점 행의 값과 모든 숫자 열에서 같다 (연말·월말 값 — KOSIS 등록대수의 '합계' = 12월 값).
+    2) 시점 값 항목(인구수·자동차 등록대수 등으로 확정·자동 매핑된 열)이나 파일명·시트명·제목의 표기('등록대수',
+       '잔액', '누계', '말 기준' 등)가 있고, 합계가 어느 한 시점 행의 값과 같다.
+    시점 라벨만 있거나 합계가 어느 시점 값과도 다르면(월별 발생 건수·집행액의 합계 오류) 근거로 보지 않는다.
+    """
+    last = max(data, key=lambda r: r["row"])
+    if _same_values(sheet, total, last):
+        label = next((c for c in last["cells"] if isinstance(c, str) and c.strip()), f"{last['row']}행")
+        return f"합계가 마지막 시점({label}) 값과 같음"
+    if not any(_same_values(sheet, total, r) for r in data):
+        return None
     labels = _field_labels()
     fields = [c for c in sheet.columns if c.field_key in STOCK_FIELDS and _additive(sheet, c.index)]
     if fields:
         names = ", ".join(dict.fromkeys(labels.get(c.field_key, c.field_key) for c in fields))
-        return f"항목이 시점 값({names})"
-    texts = [file.file_name, sheet.sheet.name, *sheet.sheet.title_texts, *sheet.sheet.columns]
+        return f"항목이 시점 값({names})이고 합계가 한 시점의 값과 같음"
+    texts = [file.file_name, sheet.sheet.name, *sheet.sheet.title_texts]
     word = next((w for w in _STOCK_WORDS for t in texts if w in t), None)
-    return f"'{word}' 표기" if word else None
+    return f"'{word}' 표기가 있고 합계가 한 시점의 값과 같음" if word else None
 
 
 def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[BlockIssue]:
@@ -293,10 +317,10 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
     for row in subtotals:
         cells: list[Cell] = row["cells"]
         group = groups[id(row)]
-        if group is None and _is_stock_series(row, data) and (basis := _stock_basis(file, sheet)):
+        if group is None and _is_stock_series(row, data) and (basis := _stock_basis(file, sheet, row, data)):
             notes.append(
                 f"{file.file_name} / {sheet.sheet.name} {row['row']}행: 맨 위 합계 행 아래가 시점(월·연도) 계열이고 "
-                f"{basis}이라 누적 자료(월말 등록 대수 등)로 보고 합계 검사를 하지 않았습니다."
+                f"{basis} — 누적 자료(월말 등록 대수 등)로 보고 합계 검사를 하지 않았습니다."
             )
             continue
         if group is None:

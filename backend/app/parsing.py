@@ -21,8 +21,11 @@ from app.pii import PiiReport, mask_cell, scan_grid
 
 SUPPORTED_EXTENSIONS = (".xlsx", ".xls", ".csv")
 
-# 헤더는 1~3행 안에서만 찾는다.
-HEADER_SEARCH_ROWS = 100  # 제목·작성일·빈 행이 길게 이어지는 정부 양식도 머리글을 찾도록
+# 머리글 탐색 범위 (숫자 데이터가 없는 표는 위 FALLBACK_HEADER_ROWS행 규칙)
+HEADER_SEARCH_ROWS = 100  # 제목·작성일·빈 행이 길게 이어지는 정부 양식도 머리글을 찾도록 (머리글 후보 수집 범위)
+# 머리글 후보 뒤 첫 데이터 행을 찾는 범위 (100행째 머리글 + 101행 데이터 같은 경계를 위해 후보 범위보다 넓게).
+# 글자만 있는 긴 목록을 끝까지 훑거나, 멀리 떨어진 숫자 한 줄 때문에 본문 행을 머리글로 고르지 않도록 제한한다.
+DATA_SEARCH_ROWS = 200
 FALLBACK_HEADER_ROWS = 3  # 숫자 데이터가 없는 표(글자 목록 등)는 예전처럼 위 3행에서 찾는다
 PREVIEW_ROWS = 20
 SAMPLES_PER_COLUMN = 5  # 매핑(특히 LLM)에 넘기는 열별 샘플 값 수
@@ -352,7 +355,7 @@ def detect_header_row(rows: list[list[Cell]]) -> int | None:
     2) 숫자 데이터가 없는 표는 예전처럼 위 3행 중 글자 칸이 가장 많은 행.
     """
     candidates: list[int] = []
-    for i, row in enumerate(rows):
+    for i, row in enumerate(rows[:DATA_SEARCH_ROWS]):
         if _has_data_number(row) and candidates:
             return max(candidates, key=lambda k: (len(_header_texts(rows[k])), -k))
         if i < HEADER_SEARCH_ROWS:

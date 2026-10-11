@@ -248,3 +248,57 @@ def test_0015_marks_existing_installs_and_keeps_new_ones_open(tmp_path: Path) ->
     db = sqlite3.connect(new / "moajwo.db")
     assert db.execute("SELECT count(*) FROM app_settings WHERE key = 'owner_setup'").fetchone()[0] == 0
     db.close()
+
+
+def test_setup_stays_closed_after_0015_upgrade(tmp_path: Path) -> None:
+    """④·0015 재검증: 계정이 있는 기존 DB를 올린 뒤 실제 setup 함수가 409로 막히고 계정 수는 그대로다."""
+    from fastapi import HTTPException, Response
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app import auth_api
+
+    _alembic(tmp_path, "upgrade", "0014_direction_gu_sejong")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute(
+        "INSERT INTO users (username, display_name, password_hash, role, is_active, failed_logins)"
+        " VALUES ('boss', 'BOSS', 'x', 'owner', 1, 0)"
+    )
+    db.commit()
+    db.close()
+    _alembic(tmp_path, "upgrade", "head")
+    Session = sessionmaker(create_engine(f"sqlite:///{(tmp_path / 'moajwo.db').as_posix()}"))
+    with Session() as session:
+        try:
+            auth_api.setup(
+                auth_api.SetupIn(username="late", display_name="late", password="password-123"), Response(), session
+            )
+            raise AssertionError("setup이 열려 있음")
+        except HTTPException as exc:
+            assert exc.status_code == 409
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT username, role FROM users").fetchall() == [("boss", "owner")]
+    db.close()
+
+
+def test_kept_base_entries_do_not_duplicate_on_reupgrade(tmp_path: Path) -> None:
+    """⑬ 재검증: downgrade에서 남긴 기본 항목·사용자가 고친 항목이 다시 upgrade해도 중복·충돌하지 않는다."""
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute(
+        "INSERT INTO glossary_aliases (alias, normalized, target_code, source)"
+        " VALUES ('제물포', '제물포', '3501000', 'user')"
+    )
+    db.execute("UPDATE glossary_entries SET name = '서울특별시(수정)', source = 'upload' WHERE code = '6110000'")
+    db.commit()
+    db.close()
+    _alembic(tmp_path, "downgrade", "0010_users_roles")
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    dup = db.execute("SELECT code, count(*) FROM glossary_entries GROUP BY code HAVING count(*) > 1").fetchall()
+    seoul = db.execute("SELECT name, source FROM glossary_entries WHERE code = '6110000'").fetchone()
+    alias = db.execute(
+        "SELECT count(*) FROM glossary_aliases WHERE normalized = '제물포' AND source = 'user'"
+    ).fetchone()[0]
+    db.close()
+    assert dup == [] and seoul == ("서울특별시(수정)", "upload") and alias == 1
