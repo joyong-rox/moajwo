@@ -103,6 +103,22 @@ def mask_cell(cell: object) -> object:
     return cell
 
 
+def mask_nested(value: object) -> object:
+    """응답으로 내보낼 dict·list 안의 모든 글자를 마스킹한다 (키·숫자·코드는 그대로)."""
+    if isinstance(value, str):
+        return mask_text(value)
+    if isinstance(value, dict):
+        return {k: mask_nested(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [mask_nested(v) for v in value]
+    return value
+
+
+def has_pii(text: str) -> bool:
+    """개인정보 형식(이메일·휴대전화·주민등록번호)이 들어 있는지."""
+    return mask_text(text) != text
+
+
 def scan_grid(sheet: str, grid: list[list[object]], report: PiiReport) -> None:
     for r, row in enumerate(grid):
         for c, cell in enumerate(row):

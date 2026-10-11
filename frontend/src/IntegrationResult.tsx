@@ -14,9 +14,11 @@ const CHANGE_LABEL: Record<string, string> = {
 function IntegrationResult({
   reviewId,
   defaultIncludeUnmapped = false,
+  piiIncluded = false,
 }: {
   reviewId: number
   defaultIncludeUnmapped?: boolean
+  piiIncluded?: boolean // 개인정보 포함을 승인해 통합에 들어가는 파일이 있음
 }) {
   const [runs, setRuns] = useState<IntegrationRun[]>([])
   // 표준 항목이 없는 열(검토에서 '해당 없음')도 원래 이름으로 결과에 넣을지 (자동화로 저장하면 이 선택도 저장)
@@ -72,6 +74,13 @@ function IntegrationResult({
         실행할 때마다 새 결과 파일을 만듭니다 (원본은 바꾸지 않음). 시트: 통합 데이터(보정한 셀 색 표시) · 변경 내역 · 처리
         요약.
       </p>
+      {piiIncluded && (
+        <p className="upload-drop-hint" role="note">
+          개인정보 포함을 승인한 파일이 있습니다 — 결과 엑셀에는 화면과 달리 원본 값이 마스킹 없이 들어갑니다 (통합 데이터·열
+          머리글·셀 메모·변경 내역 시트). 포함을 거부한 파일은 결과에서 빠지며, 결과 파일은 이 실행 기록을 볼 수 있는 사람(본인·관리자·소유자)만
+          내려받을 수 있습니다.
+        </p>
+      )}
       {error && (
         <p className="upload-error" role="alert">
           {error}

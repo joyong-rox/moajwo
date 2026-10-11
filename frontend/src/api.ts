@@ -210,7 +210,8 @@ export type ValidationRun = {
 
 export type EntityCandidate = { code: string; name: string; type: string }
 export type EntityNote = {
-  value: string
+  value: string // 화면 표시용 (개인정보 형식은 마스킹)
+  registrable?: boolean // false = 개인정보 형식이 있어 별칭 등록 불가
   field: string
   status: 'unknown' | 'ambiguous' | 'abolished'
   note: string | null

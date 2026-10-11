@@ -501,3 +501,92 @@ def test_review_items_report_read_only_per_file(accounts) -> None:
     )
     res = admin.post(f"/reviews/{review['id']}/items/{own_item['id']}/decision", json={"decision": "rejected"})
     assert res.status_code == 200, res.text
+
+
+PII_RAW = ("carol@example.com", "010-3456-7890", "3456-7890", "900101-1234567", "1234567", "dave@example.com")
+
+
+def _no_raw(text: str) -> bool:
+    return not any(raw in text for raw in PII_RAW)
+
+
+def test_pii_values_masked_in_validation_review_and_history(accounts, caplog) -> None:
+    """병합 전 보완 ③: 기관·지역 값, 열 이름, 오류 근거(필수 기관), 참고, 검토 payload, 과거 기록 조회, 로그 어디에도
+    개인정보 원문이 없다. 개인정보 형식 이름은 별칭 등록 불가로 표시되고, 정상 이름은 그대로 등록할 수 있다."""
+    import logging
+
+    u1, u2 = accounts["user1"], accounts["user2"]
+    rows = [
+        ["기관명", "dave@example.com", "집행액"],
+        ["carol@example.com", "x", 1],
+        ["010-3456-7890 담당", "y", 2],
+        ["900101-1234567", "z", 3],
+        ["기상청", "w", 4],
+    ]
+    fid = _upload(u1, rows, "개인정보값.xlsx")
+    caplog.set_level(logging.DEBUG)
+    run = u1.post(
+        "/validation",
+        json={"file_ids": [fid], "required_entities": ["carol@example.com", "기상청"], "entity_field": "org_name"},
+    )
+    assert run.status_code == 200 and _no_raw(run.text), run.text
+    body = run.json()
+    regs = {e["value"]: e["registrable"] for e in body["entities"]}
+    assert regs and all(v is False for k, v in regs.items() if "*" in k) and regs.get("기상청", True) is True
+    past = u1.get(f"/validation/{body['id']}")
+    assert past.status_code == 200 and _no_raw(past.text)
+    assert u2.get(f"/validation/{body['id']}").status_code in (403, 404)  # 다른 사용자의 기록
+    review = u1.post("/reviews", json={"file_ids": [fid], "required_entities": ["carol@example.com"]})
+    assert review.status_code == 201 and _no_raw(review.text)
+    again = u1.get(f"/reviews/{review.json()['id']}")
+    assert _no_raw(again.text)
+    assert _no_raw(caplog.text)
+    # 다른 사용자가 이 검토의 항목 id를 자기 검토 경로로 보내도 막힌다
+    item = review.json()["items"][0]
+    own = u2.post("/reviews", json={"file_ids": [_upload(u2, ROWS, "u2자료.xlsx")]}).json()
+    res = u2.post(f"/reviews/{own['id']}/items/{item['id']}/decision", json={"decision": "rejected"})
+    assert res.status_code == 404
+    assert (
+        u2.post(
+            f"/reviews/{review.json()['id']}/items/{item['id']}/decision", json={"decision": "rejected"}
+        ).status_code
+        == 404
+    )
+
+
+def test_result_workbook_pii_policy(accounts) -> None:
+    """병합 전 보완 ④: 머리글에만 개인정보가 있어도 탐지·확인 절차에 들어가고, 포함을 거부한 파일은 결과·변경 내역에
+    없으며, 승인한 파일의 원문은 결과 엑셀에 들어갈 수 있다(정책). 결과 다운로드·실행 기록은 권한이 있는 사람만."""
+    u4, u2, admin = accounts["user4"], accounts["user2"], accounts["admin1"]
+    header_only = _upload(
+        u4, [["기관명", "erin@example.com", "집행액"], ["행정안전부", "a", 1], ["기상청", "b", 2]], "머리글만.xlsx"
+    )
+    body_pii = _upload(u4, [["기관명", "연락처", "집행액"], ["인사혁신처", "010-5678-1234", 3]], "본문.xlsx")
+    review = u4.post("/reviews", json={"file_ids": [header_only, body_pii]}).json()
+    pii_items = {i["file_id"]: i for i in review["items"] if i["category"] == "pending" and i["kind"] == "pii"}
+    assert set(pii_items) == {header_only, body_pii}  # 머리글만 있는 파일도 확인 대상
+    for item in [i for i in review["items"] if i["category"] == "pending"]:
+        decision = "rejected" if item["kind"] == "pii" and item["file_id"] == body_pii else "approved"
+        if item["kind"] == "mapping":
+            decision = "rejected"  # '해당 없음'으로 확정
+        if item["kind"] == "entity":
+            decision = "rejected"
+        res = u4.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json={"decision": decision})
+        assert res.status_code == 200, res.text
+    assert u4.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = u4.post(f"/reviews/{review['id']}/integrate", json={"include_unmapped": True})
+    assert run.status_code == 201, run.text
+    run_id = run.json()["id"]
+    download = u4.get(f"/runs/{run_id}/download")
+    assert download.status_code == 200
+    wb = openpyxl.load_workbook(io.BytesIO(download.content))
+    texts = [str(c.value) for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.value is not None] + [
+        c.comment.text for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.comment
+    ]
+    joined = "\n".join(texts)
+    assert "인사혁신처" not in joined and "010-5678-1234" not in joined  # 포함 거부 파일은 결과·변경 내역에 없음
+    assert "머리글만.xlsx" in joined and "erin@example.com" in joined  # 승인한 파일의 원문 머리글은 결과에 남을 수 있음
+    assert u2.get(f"/runs/{run_id}/download").status_code == 404  # 다른 일반 사용자
+    assert u2.get(f"/runs/{run_id}").status_code == 404
+    assert admin.get(f"/runs/{run_id}").status_code == 200  # 관리자·소유자는 조회 가능 (기존 정책)
+    assert "erin@example.com" not in admin.get(f"/runs/{run_id}").text  # 실행 기록 응답(화면)은 마스킹

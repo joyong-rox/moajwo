@@ -365,8 +365,8 @@ function EntityNotes({
             </tr>
           </thead>
           <tbody>
-            {entities.map((e) => (
-              <tr key={`${e.field}:${e.value}`}>
+            {entities.map((e, i) => (
+              <tr key={`${e.field}:${e.value}:${i}`}>
                 <th scope="row">
                   {e.value}
                   <div className="glossary-meta">
@@ -383,6 +383,8 @@ function EntityNotes({
                         ? `${e.candidates.map((c) => `${c.name}(${c.code})`).join(', ')} — 사전 등록은 관리자에게 요청 (검토에서 이번 통합에만 연결할 수 있음)`
                         : '후보 없음 — 사전 등록은 관리자에게 요청'}
                     </span>
+                  ) : e.registrable === false ? (
+                    <span className="upload-drop-hint">개인정보 형식이 든 이름이라 별칭으로 등록할 수 없습니다 (원본 확인 필요)</span>
                   ) : done[e.value] ? (
                     <span className="mapping-message">→ {done[e.value]} 등록됨 (다시 검증하면 반영)</span>
                   ) : e.candidates.length ? (

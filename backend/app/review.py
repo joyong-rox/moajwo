@@ -23,7 +23,7 @@ from app.glossary_api import get_glossary
 from app.mapping import ColumnMapping, MappingEngine, get_engine, normalize, split_column_name
 from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile, User
 from app.parsing import FileResult, SheetResult
-from app.pii import PII_LABEL
+from app.pii import PII_LABEL, has_pii
 from app.promotion import load_standard, record_approval
 from app.validation import (
     EntityResolver,
@@ -725,6 +725,9 @@ def complete(db: Session, session: ReviewSession, learn_names: bool = True) -> d
                 if key and learn_column(db, engine, item.file_id, item.column, key, session.created_by) is None:
                     learned["columns"] += 1
             elif item.kind == "entity" and item.category == "pending" and item.choice and item.before:
+                if has_pii(item.before):  # 개인정보 형식이 든 이름은 모두가 쓰는 용어사전 별칭으로 학습하지 않는다
+                    learned["names_skipped"] += 1
+                    continue
                 if not learn_names:
                     learned["names_skipped"] += 1
                     continue

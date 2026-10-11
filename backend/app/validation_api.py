@@ -16,7 +16,7 @@ from app.files import get_file_for, load_parsed
 from app.glossary_api import get_glossary
 from app.mapping import get_engine
 from app.models import SourceFile, ValidationRun
-from app.pii import mask_text
+from app.pii import has_pii, mask_nested, mask_text
 from app.promotion import load_standard
 from app.validation import (
     BLOCK_LABEL,
@@ -132,7 +132,9 @@ class PiiStatusOut(BaseModel):
 
 
 class EntityNoteOut(BaseModel):
-    value: str
+    value: str  # 화면 표시용 (개인정보 형식은 마스킹)
+    # False = 이름에 개인정보 형식이 있어 별칭으로 등록할 수 없음 (원문을 화면으로 보내지 않으므로)
+    registrable: bool = True
     field: str
     status: str
     note: str | None
@@ -195,8 +197,24 @@ def _issue_out(issue: Any, labels: dict[str, str]) -> IssueOut:
 
 
 def _validation_out(run: ValidationRun) -> ValidationOut:
+    """저장된 검증 결과를 화면으로 보낼 때 개인정보 형식을 가린다 (과거 기록 포함, DB 기록은 그대로)."""
     body = json.loads(run.result)
+    for key in ("blocks", "warnings"):
+        body[key] = [_masked_issue(i) for i in body.get(key, [])]
+    body["notes"] = [mask_text(n) for n in body.get("notes", [])]
+    body["entities"] = [
+        {**mask_nested(e), "registrable": not has_pii(str(e.get("value", "")))} for e in body.get("entities", [])
+    ]
+    body["pii"] = mask_nested(body.get("pii", []))
     return ValidationOut(id=run.id, status=run.status, created_at=run.created_at, **body)
+
+
+def _masked_issue(issue: dict[str, Any]) -> dict[str, Any]:
+    out = dict(issue)
+    for key in ("message", "column", "expected", "actual", "file_name", "sheet"):
+        if isinstance(out.get(key), str):
+            out[key] = mask_text(out[key])
+    return out
 
 
 @router.post("/validation", response_model=ValidationOut)

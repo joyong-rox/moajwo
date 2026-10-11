@@ -255,7 +255,13 @@ function ReviewPanel({
               </p>
             )}
             {review.status === 'ready' && review.can_edit && (
-              <IntegrationResult reviewId={review.id} defaultIncludeUnmapped={review.include_unmapped_default} />
+              <IntegrationResult
+                reviewId={review.id}
+                defaultIncludeUnmapped={review.include_unmapped_default}
+                piiIncluded={review.items.some(
+                  (i) => i.kind === 'pii' && !review.files.some((f) => f.id === i.file_id && f.excluded),
+                )}
+              />
             )}
             <details className="review-replace">
               <summary>원본을 고친 파일로 바꿔 다시 검사</summary>

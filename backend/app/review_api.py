@@ -14,7 +14,7 @@ from app.db import get_session
 from app.files import get_file_for
 from app.integration import include_unmapped_default
 from app.models import Automation, ReviewItem, ReviewSession, SourceFile, User
-from app.pii import mask_text
+from app.pii import mask_nested, mask_text
 from app.review import (
     ReviewError,
     ReviewPermissionError,
@@ -137,7 +137,7 @@ def review_out(
                 after=_masked(i.after),
                 reason=mask_text(i.reason),
                 reason_source=i.reason_source,
-                payload=json.loads(i.payload),
+                payload=mask_nested(json.loads(i.payload)),
                 decision=i.decision,
                 choice=i.choice,
                 excluded=i.file_id in excluded and i.kind != "pii",
@@ -145,7 +145,7 @@ def review_out(
             )
             for i in items
         ],
-        params=json.loads(session.params),
+        params=mask_nested(json.loads(session.params)),  # 입력 조건(필수 기관 등)의 개인정보 형식도 가린다
         validation_run_id=session.validation_run_id,
         created_at=session.created_at,
         completed_at=session.completed_at,
