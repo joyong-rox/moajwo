@@ -577,3 +577,60 @@ def client_with_entry():
         yield c, "9300001"
         entry = next(e for e in c.get("/glossary/entries", params={"q": "9300001"}).json() if e["code"] == "9300001")
         c.delete(f"/glossary/entries/{entry['id']}")
+
+
+# ---------------------------------------------------------------- 최종 확인 ②: 표 근거를 모든 열에 일괄 적용하지 않음
+
+
+def _with_fields(tmp_path: Path, name: str, rows: list[list], fields: dict[str, str], title: str | None = None):
+    """사용자가 확정한 매핑(field)을 그대로 쓰는 입력 — 흐름 표기 열이 차량·인구 항목으로 확정된 경우 재현용."""
+    from app.validation import FileInput, MappedColumn, SheetInput
+
+    if title:
+        rows = [[title] + [None] * (len(rows[0]) - 1), *rows]
+    sheet = parse_file(make_xlsx(tmp_path / name, rows)).sheets[0]
+    cols = [MappedColumn(i, c, fields[c], None) for i, c in enumerate(sheet.columns) if c in fields]
+    return validate([FileInput(1, name, [SheetInput(sheet, cols)])], ValidationParams())
+
+
+def test_file_name_evidence_does_not_cover_flow_column(tmp_path: Path) -> None:
+    """'자동차 등록현황' 파일명은 등록대수 열의 근거일 수 있지만 신규등록건수(합계 20 ≠ 30)까지 예외로 두지 않는다."""
+    rows = [["월", "등록대수", "신규등록건수"], ["합계", 200, 20], ["1월", 100, 10], ["2월", 200, 20]]
+    result = validate([make_input(make_xlsx(tmp_path / "자동차 등록현황.xlsx", rows))], ValidationParams())
+    blocked = {b.column for b in result.blocks if b.code == "sum_mismatch"}
+    assert blocked == {"신규등록건수"}, result.blocks
+    assert any("'등록대수'" in n and "누적 자료" in n for n in result.notes)
+
+
+@pytest.mark.parametrize(("column", "field"), [("신규 승용차", "passenger_car"), ("전입 인구", "population"),
+                                               ("증감 세대수", "households")])  # fmt: skip
+def test_flow_wording_beats_stock_mapping(tmp_path: Path, column: str, field: str) -> None:
+    """흐름 표기(신규·전입·증감 등)가 있는 열은 차량·인구 항목으로 확정돼 있어도 자동 예외로 두지 않고 이유를 남긴다."""
+    rows = [["월", column], ["합계", 20], ["1월", 10], ["2월", 20]]
+    result = _with_fields(tmp_path, "t.xlsx", rows, {column: field})
+    assert "sum_mismatch" in codes(result.blocks)
+    assert any("발생 실적 표기" in n for n in result.notes)
+
+
+def test_title_cumulative_word_with_monthly_flow_column(tmp_path: Path) -> None:
+    """제목에 '누계'가 있어도 월별 발생 실적 열은 예외가 아니다 (근거가 표 전체가 아니라 열마다 필요)."""
+    rows = [["월", "등록대수", "월별 발생건수"], ["합계", 200, 20], ["1월", 100, 10], ["2월", 200, 20]]
+    result = validate(
+        [make_input(make_xlsx(tmp_path / "t.xlsx", [["2026년 누계 현황", None, None], *rows]))], ValidationParams()
+    )
+    assert {b.column for b in result.blocks if b.code == "sum_mismatch"} == {"월별 발생건수"}
+
+
+def test_duplicate_latest_period_is_ambiguous(tmp_path: Path) -> None:
+    """가장 늦은 시점이 두 번 나오면(어느 값이 마지막인지 모호) 자동 예외를 두지 않고 이유를 남긴다."""
+    rows = [["월별", "승용차"], ["합계", 300], ["1월", 100], ["2월", 300], ["2월", 290]]
+    result = _sum_result(tmp_path, rows)
+    assert "sum_mismatch" in codes(result.blocks)
+    assert any("중복" in n for n in result.notes)
+
+
+def test_reverse_order_with_title_evidence_single_column(tmp_path: Path) -> None:
+    """역순 자료 + 열이 하나뿐이면 제목 표기('말 기준')가 그 열의 근거가 된다 (KOSIS 시점 값 처리 유지)."""
+    rows = [["월", "잔액"], ["합계", 300], ["3월", 300], ["2월", 200], ["1월", 100]]
+    result = _sum_result(tmp_path, rows, title="2026년 3월말 기준 잔액")
+    assert "sum_mismatch" not in codes(result.blocks)

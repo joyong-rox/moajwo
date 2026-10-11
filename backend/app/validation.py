@@ -24,6 +24,7 @@ from typing import Any, Literal
 from app.glossary import Glossary, Resolution, parse_date_value, period_end, prefer_for_field
 from app.mapping import load_dictionary
 from app.parsing import Cell, SheetResult, is_missing, is_subtotal_label
+from app.pii import mask_cell
 
 BlockCode = Literal["sum_mismatch", "required_entity_missing", "period_mismatch"]
 WarningCode = Literal["mom_outlier", "blank_value", "unit_estimate", "header_missing"]
@@ -182,7 +183,24 @@ def _decimals(value: float) -> int:
     return max(0, -exponent) if isinstance(exponent, int) else 0
 
 
+def pii_columns(sheet: SheetInput) -> set[int]:
+    """본문(데이터·소계 행)에 개인정보 형식(정수로 저장된 주민등록번호 포함)이 있는 열. 이런 열은 합산하지 않는다."""
+    cached = sheet.__dict__.get("_pii_columns")
+    if cached is None:
+        cached = {
+            j
+            for r in sheet.sheet.body
+            if r["kind"] in ("data", "subtotal")
+            for j, c in enumerate(r["cells"])
+            if c is not None and not isinstance(c, float) and mask_cell(c) != c
+        }
+        sheet.__dict__["_pii_columns"] = cached
+    return cached
+
+
 def _additive(sheet: SheetInput, index: int) -> bool:
+    if index in pii_columns(sheet):
+        return False  # 주민등록번호 등이 든 열의 합계·증감은 의미가 없고 값이 결과로 새어 나갈 수 있다
     name = sheet.sheet.columns[index]
     mapped = next((c for c in sheet.columns if c.index == index), None)
     if mapped is not None and mapped.field_key in NON_ADDITIVE_FIELDS:
@@ -301,12 +319,16 @@ def _period_key(label: str | None) -> tuple[str, tuple[int, ...]] | None:
     return None
 
 
-def _latest_period_row(data: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """라벨을 해석해 가장 늦은 시점의 데이터 행 (물리적 마지막 행이 아니라). 형식이 섞이거나 해석할 수 없으면 None."""
+def _latest_period_row(data: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None]:
+    """라벨을 해석해 가장 늦은 시점의 데이터 행 (물리적 마지막 행이 아니라)과, 정하지 못했으면 그 이유."""
     keys = [(_period_key(_row_label(r)), r) for r in data]
     if any(k is None for k, _ in keys) or len({k[0] for k, _ in keys if k}) != 1:
-        return None
-    return max(((k, r) for k, r in keys if k is not None), key=lambda t: t[0][1])[1]
+        return None, "시점 라벨의 형식이 섞이거나 해석할 수 없어 시점 순서를 알 수 없음"
+    top = max(k[1] for k, _ in keys if k is not None)
+    latest = [r for k, r in keys if k is not None and k[1] == top]
+    if len(latest) > 1:
+        return None, f"가장 늦은 시점({_row_label(latest[0])})이 중복되어 어느 값이 마지막인지 모호함"
+    return latest[0], None
 
 
 def _close(a: Cell, b: Cell) -> bool:
@@ -315,40 +337,70 @@ def _close(a: Cell, b: Cell) -> bool:
     return abs(a - b) <= 0.5 * 10 ** -max(_decimals(a), _decimals(b)) + 1e-9 * abs(a)  # type: ignore[operator]
 
 
+# 열 이름의 흐름(발생 실적) 표기 — 차량·인구 항목으로 매핑돼 있어도 이 표기가 있으면 자동 예외로 두지 않는다
+_FLOW_WORDS = ("신규", "전입", "전출", "발생", "증감", "증가", "감소", "말소", "처리", "접수", "신청", "건수", "실적",
+               "출생", "사망", "유입", "유출")  # fmt: skip
+# 열 이름 자체의 시점 값 표기
+_COLUMN_STOCK_WORDS = ("등록대수", "잔액", "누계", "재고", "보유", "현원", "인구수", "세대수")
+
+
 def _stock_columns(
     file: FileInput, sheet: SheetInput, total: dict[str, Any], data: list[dict[str, Any]]
-) -> tuple[dict[int, str], str | None, str | None]:
-    """누적·잔액(시점 값) 통계로 보고 합계 검사를 하지 않을 열 → 근거, 마지막 시점 라벨, (적용하지 못한 이유).
+) -> tuple[dict[int, str], str | None, list[str]]:
+    """누적·잔액(시점 값) 통계로 보고 합계 검사를 하지 않을 열 → 근거, 마지막 시점 라벨, 예외를 두지 않은 이유들.
 
-    열마다 판단한다. 두 조건이 모두 있어야 한다.
-    1) 독립 근거: 그 열이 시점 값 항목(인구수·자동차 등록대수 등)으로 매핑됨, 또는 합계 항목 열인데 같은 표의
-       다른 숫자 열이 모두 시점 값 항목, 또는 파일명·시트명·제목에 '등록대수'·'잔액'·'누계'·'말 기준' 같은 표기.
-    2) 합계가 **가장 늦은 시점**(라벨로 판단, 물리적 마지막 행이 아님)의 값과 같다.
-    '마지막 값과 같다'만으로는 정하지 않는다 (월별 건수 합계 20 = 2월 20처럼 우연히 같을 수 있음).
+    열마다 판단하고, 두 조건이 모두 있어야 한다.
+    1) 그 열의 독립 근거: 시점 값 항목(인구수·자동차 등록대수 등)으로 매핑됨, 열 이름의 시점 값 표기('등록대수'·'잔액'·
+       '누계' 등), 또는 구성 항목이 모두 시점 값인 합계 열.
+       파일명·시트명·제목의 표기는 **숫자 열이 하나뿐일 때만** 그 열의 근거로 쓴다
+       (여러 열이면 어느 열을 뜻하는지 모호해 모든 열에 일괄 적용하지 않음).
+       열 이름에 흐름 표기('신규'·'전입'·'증감'·'건수' 등)가 있으면 매핑·표기보다 우선해 자동 예외를 두지 않는다.
+    2) 합계가 **가장 늦은 시점**(라벨로 판단, 물리적 마지막 행이 아님, 중복이면 모호)의 값과 같다.
     """
-    latest = _latest_period_row(data)
+    latest, why_not = _latest_period_row(data)
     if latest is None:
-        return {}, None, "시점 라벨의 형식이 섞이거나 해석할 수 없어 시점 순서를 알 수 없음"
+        return {}, None, [why_not or "시점 순서를 알 수 없음"]
     labels = _field_labels()
+    names = sheet.sheet.columns
     mapped = {c.index: c.field_key for c in sheet.columns}
     cols = [j for j, c in enumerate(total["cells"]) if _is_number(c) and _additive(sheet, j)]
-    stock = [j for j in cols if mapped.get(j) in STOCK_FIELDS]
-    inherit = bool(stock) and all(j in stock or mapped.get(j) == "total" for j in cols)
+    flow = {j: next(w for w in _FLOW_WORDS if w in names[j]) for j in cols if any(w in names[j] for w in _FLOW_WORDS)}
     texts = [file.file_name, sheet.sheet.name, *sheet.sheet.title_texts]
     word = next((w for w in _STOCK_WORDS for t in texts if w in t), None)
-    out: dict[int, str] = {}
+    own: dict[int, str] = {}
     for j in cols:
-        if j in stock:
-            reason = f"'{labels.get(mapped[j] or '', mapped[j])}' 항목"
-        elif inherit and mapped.get(j) == "total":
-            reason = "구성 항목이 모두 시점 값인 합계 열"
-        elif word:
-            reason = f"'{word}' 표기"
-        else:
+        if j in flow:
             continue
-        if _close(total["cells"][j], latest["cells"][j]):
-            out[j] = reason
-    return out, _row_label(latest), None
+        if mapped.get(j) in STOCK_FIELDS:
+            own[j] = f"'{labels.get(mapped[j] or '', mapped[j])}' 항목"
+        elif (w := next((w for w in _COLUMN_STOCK_WORDS if w in names[j]), None)) is not None:
+            own[j] = f"열 이름의 '{w}' 표기"
+    for j in cols:
+        if (
+            j not in flow
+            and j not in own
+            and mapped.get(j) == "total"
+            and own
+            and all(k in own or k == j for k in cols)
+        ):
+            own[j] = "구성 항목이 모두 시점 값인 합계 열"
+    if word and len(cols) == 1 and cols[0] not in flow and cols[0] not in own:
+        own[cols[0]] = f"'{word}' 표기"
+    cautions: list[str] = []
+    blocked_flow = [
+        j for j in flow if mapped.get(j) in STOCK_FIELDS or word or any(w in names[j] for w in _COLUMN_STOCK_WORDS)
+    ]
+    if blocked_flow:
+        detail = ", ".join(f"'{names[j]}'('{flow[j]}')" for j in blocked_flow)
+        cautions.append(f"발생 실적 표기가 있는 열은 시점 값 근거가 있어도 자동 예외를 두지 않음: {detail}")
+    unclaimed = [j for j in cols if j not in own and j not in flow]
+    if word and len(cols) > 1 and unclaimed:
+        detail = ", ".join(f"'{names[j]}'" for j in unclaimed)
+        cautions.append(
+            f"표 이름의 '{word}' 표기는 숫자 열이 여러 개라 어느 열을 뜻하는지 모호해 근거로 쓰지 않음: {detail}"
+        )
+    out = {j: reason for j, reason in own.items() if _close(total["cells"][j], latest["cells"][j])}
+    return out, _row_label(latest), cautions
 
 
 def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[BlockIssue]:
@@ -363,7 +415,7 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
         group = groups[id(row)]
         stock_cols: dict[int, str] = {}
         if group is None and _is_stock_series(row, data):
-            stock_cols, latest_label, why_not = _stock_columns(file, sheet, row, data)
+            stock_cols, latest_label, cautions = _stock_columns(file, sheet, row, data)
             where = f"{file.file_name} / {sheet.sheet.name} {row['row']}행"
             if stock_cols:
                 detail = ", ".join(f"'{columns[j]}'({reason})" for j, reason in stock_cols.items())
@@ -371,8 +423,8 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
                     f"{where}: 맨 위 합계 행 아래가 시점 계열이고 합계가 마지막 시점({latest_label}) 값과 같아, "
                     f"다음 열은 누적 자료(월말 등록 대수 등)로 보고 합계 검사를 하지 않았습니다: {detail}"
                 )
-            elif why_not:
-                notes.append(f"{where}: {why_not} — 누적 자료 예외를 적용하지 않고 합계를 그대로 검사했습니다.")
+            for caution in cautions:
+                notes.append(f"{where}: {caution} — 이런 열은 누적 자료 예외 없이 합계를 그대로 검사했습니다.")
             numeric = [j for j, c in enumerate(cells) if _is_number(c) and _additive(sheet, j)]
             if stock_cols and all(j in stock_cols for j in numeric):
                 continue
@@ -404,6 +456,14 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
             continue
         row_issues: list[BlockIssue] = []
         for j, total in enumerate(cells):
+            if _is_number(total) and j in pii_columns(sheet):
+                note = (
+                    f"{file.file_name} / {sheet.sheet.name}: '{columns[j]}' 열은 개인정보가 탐지되어 "
+                    "합계 검사에서 제외했습니다."
+                )
+                if note not in notes:
+                    notes.append(note)
+                continue
             if not _is_number(total) or not _additive(sheet, j) or j in stock_cols:
                 continue
             parts = [r["cells"][j] for r in children]
