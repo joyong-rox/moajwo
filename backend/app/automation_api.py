@@ -59,7 +59,9 @@ def automation_out(db: Session, a: Automation) -> AutomationOut:
         manual_baseline_minutes=a.manual_baseline_minutes,
         source_run_id=a.source_run_id,
         column_rules=[{**r, "column": mask_text(r.get("column") or "")} for r in json.loads(a.column_rules)],
-        entity_rules=json.loads(a.entity_rules),
+        entity_rules={
+            mask_text(k): v for k, v in json.loads(a.entity_rules).items()
+        },  # 사용자 데이터에서 온 이름 키도 가림
         validation=json.loads(a.validation),
         output_format=_masked_format(json.loads(a.output_format)),
         created_at=a.created_at,

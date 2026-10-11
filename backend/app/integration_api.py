@@ -16,7 +16,7 @@ from app.config import DATA_DIR
 from app.db import get_session
 from app.integration import KST, IntegrationError, integrate
 from app.models import Automation, IntegrationRun, ReviewSession, RunChange, User
-from app.pii import mask_text
+from app.pii import mask_nested, mask_text
 
 router = APIRouter(tags=["integration"])
 
@@ -28,11 +28,8 @@ STATUS_LABEL = {"done": "완료", "review": "검토", "failed": "실패", "runni
 
 def _masked_summary(summary: dict[str, Any]) -> dict[str, Any]:
     """실행 요약의 결과 열 이름(표준 항목이 없는 열은 원래 이름)에 든 개인정보를 가린다."""
-    out = dict(summary)
-    for key in ("columns", "unmapped_columns"):
-        if isinstance(out.get(key), list):
-            out[key] = [mask_text(c) if isinstance(c, str) else c for c in out[key]]
-    return out
+    # 키는 고정된 이름이라 그대로 두고, 값(파일·시트·열 이름, 뺀 열 목록 등 중첩 글자)만 가린다
+    return mask_nested(summary)  # type: ignore[return-value]
 
 
 def _masked_change(change: "ChangeOut") -> "ChangeOut":

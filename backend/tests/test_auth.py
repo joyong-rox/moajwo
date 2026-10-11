@@ -590,3 +590,62 @@ def test_result_workbook_pii_policy(accounts) -> None:
     assert u2.get(f"/runs/{run_id}").status_code == 404
     assert admin.get(f"/runs/{run_id}").status_code == 200  # 관리자·소유자는 조회 가능 (기존 정책)
     assert "erin@example.com" not in admin.get(f"/runs/{run_id}").text  # 실행 기록 응답(화면)은 마스킹
+
+
+def test_numeric_rrn_never_reaches_responses_and_history(accounts) -> None:
+    """최종 확인 ③: 정수로 저장된 주민등록번호가 합계 검사·과거 검증 결과·저장된 검토 항목·자동화 규칙 키로 새지 않는다.
+    다른 파일의 13자리 금액, 같은 파일의 일반 숫자·식별자는 그대로다."""
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Automation, ReviewItem, ReviewSession, User, ValidationRun
+
+    u3 = accounts["user3"]
+    raw_int, raw_grouped = 9001011234567, "9,001,011,234,567"
+    rows = [["기관명", "번호값", "집행액"], ["합계", raw_int, 3], [8502022345678, 8502022345678, 1], ["기상청", 1, 2]]
+    fid = _upload(u3, rows, "숫자주민번호.xlsx")
+    run = u3.post("/validation", json={"file_ids": [fid]})
+    assert run.status_code == 200 and str(raw_int) not in run.text and raw_grouped not in run.text
+    assert any("개인정보가 탐지되어 합계 검사에서 제외" in n for n in run.json()["notes"])
+    # 예전 방식으로 저장된 과거 기록(원문 expected/actual·메시지)도 조회 응답에서는 가린다
+    with SessionLocal() as db:
+        user_id = db.scalar(select(User.id).where(User.username == "user3"))
+        legacy = {
+            "blocks": [{"code": "sum_mismatch", "label": "합계 불일치", "file_id": fid,
+                        "file_name": "숫자주민번호.xlsx",
+                        "sheet": "현황", "row": 2, "column": "번호값", "expected": 8502022345679.0, "actual": raw_int,
+                        "message": f"'합계' 행의 '번호값' 값 {raw_grouped}이(가) 다릅니다."},
+                       {"code": "sum_mismatch", "label": "합계 불일치", "file_id": fid + 999, "file_name": "금액.xlsx",
+                        "sheet": "현황", "row": 2, "column": "예산", "expected": 1, "actual": raw_int,
+                        "message": f"금액 {raw_grouped}"}],
+            "warnings": [], "notes": [], "entities": [],
+            "pii": [{"file_id": fid, "file_name": "숫자주민번호.xlsx", "counts": {"rrn": 2, "mobile": 0, "email": 0},
+                     "items": [], "acknowledged": False}],
+        }  # fmt: skip
+        record = ValidationRun(
+            status="blocked", params="{}", result=json.dumps(legacy, ensure_ascii=False), created_by=user_id
+        )
+        db.add(record)
+        session = ReviewSession(status="in_review", params="{}", file_ids=json.dumps([fid]), excluded_file_ids="[]",
+                                remember_format=False, created_by=user_id)  # fmt: skip
+        db.add(session)
+        db.flush()
+        db.add(ReviewItem(session_id=session.id, category="block", kind="sum_mismatch", file_id=fid,
+                          reason=f"값 {raw_grouped}",
+                          reason_source="rule", payload=json.dumps({"rows": [2], "value": raw_int}), before=raw_grouped,
+                          after="8,502,022,345,679 (하위 행 합계)"))  # fmt: skip
+        db.add(Automation(name="키확인", owner_id=user_id, column_rules="[]", validation="{}", output_format="{}",
+                          entity_rules=json.dumps({"850202-2345678": "1741000", "기상청": "1360000"})))  # fmt: skip
+        db.commit()
+        run_id, review_id = record.id, session.id
+    past = u3.get(f"/validation/{run_id}").json()
+    first = json.dumps(past["blocks"][0], ensure_ascii=False)  # 주민등록번호가 탐지된 파일의 기록
+    assert raw_grouped not in first and str(raw_int) not in first
+    assert past["blocks"][0]["expected"] != 8502022345679.0  # 주민등록번호에서 계산된 13자리 값도 가린다
+    assert (
+        past["blocks"][1]["actual"] == raw_int and raw_grouped in past["blocks"][1]["message"]
+    )  # 다른 파일의 금액은 그대로
+    shown = u3.get(f"/reviews/{review_id}").text
+    assert raw_grouped not in shown and str(raw_int) not in shown
+    autos = u3.get("/automations").text
+    assert "850202-2345678" not in autos and "기상청" in autos

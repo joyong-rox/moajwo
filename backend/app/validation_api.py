@@ -16,7 +16,7 @@ from app.files import get_file_for, load_parsed
 from app.glossary_api import get_glossary
 from app.mapping import get_engine
 from app.models import SourceFile, ValidationRun
-from app.pii import has_pii, mask_nested, mask_text
+from app.pii import has_pii, mask_nested, mask_rrn_number, mask_text
 from app.promotion import load_standard
 from app.validation import (
     BLOCK_LABEL,
@@ -199,8 +199,9 @@ def _issue_out(issue: Any, labels: dict[str, str]) -> IssueOut:
 def _validation_out(run: ValidationRun) -> ValidationOut:
     """저장된 검증 결과를 화면으로 보낼 때 개인정보 형식을 가린다 (과거 기록 포함, DB 기록은 그대로)."""
     body = json.loads(run.result)
+    rrn_files = {p.get("file_id") for p in body.get("pii", []) if p.get("counts", {}).get("rrn")}
     for key in ("blocks", "warnings"):
-        body[key] = [_masked_issue(i) for i in body.get(key, [])]
+        body[key] = [_masked_issue(i, i.get("file_id") in rrn_files) for i in body.get(key, [])]
     body["notes"] = [mask_text(n) for n in body.get("notes", [])]
     body["entities"] = [
         {**mask_nested(e), "registrable": not has_pii(str(e.get("value", "")))} for e in body.get("entities", [])
@@ -209,10 +210,14 @@ def _validation_out(run: ValidationRun) -> ValidationOut:
     return ValidationOut(id=run.id, status=run.status, created_at=run.created_at, **body)
 
 
-def _masked_issue(issue: dict[str, Any]) -> dict[str, Any]:
+def _masked_issue(issue: dict[str, Any], rrn_file: bool = False) -> dict[str, Any]:
+    """rrn_file: 주민등록번호가 탐지된 파일의 기록 — 정수로 저장된 주민등록번호 형태 숫자(과거 기록의 expected/actual·
+    쉼표로 끊은 메시지 숫자)도 가린다. 다른 파일의 금액·통계 숫자는 그대로 둔다."""
     out = dict(issue)
     for key in ("message", "column", "expected", "actual", "file_name", "sheet"):
-        if isinstance(out.get(key), str):
+        if rrn_file and key in ("message", "expected", "actual"):
+            out[key] = mask_rrn_number(out.get(key))
+        elif isinstance(out.get(key), str):
             out[key] = mask_text(out[key])
     return out
 

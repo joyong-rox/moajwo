@@ -14,7 +14,7 @@ from app.db import get_session
 from app.files import get_file_for
 from app.integration import include_unmapped_default
 from app.models import Automation, ReviewItem, ReviewSession, SourceFile, User
-from app.pii import mask_nested, mask_text
+from app.pii import mask_nested, mask_rrn_number, mask_text
 from app.review import (
     ReviewError,
     ReviewPermissionError,
@@ -105,6 +105,19 @@ def review_out(
     for fid in json.loads(session.file_ids):
         record = db.get(SourceFile, fid)
         files.append(ReviewFileOut(id=fid, name=record.original_name if record else "?", excluded=fid in excluded))
+    rrn_files = {
+        fid
+        for fid in {i.file_id for i in items if i.file_id is not None}
+        if (rec := db.get(SourceFile, fid)) is not None
+        and rec.pii_summary
+        and json.loads(rec.pii_summary).get("counts", {}).get("rrn")
+    }
+
+    def shown(i: ReviewItem, text: str | None) -> str | None:
+        if not text:
+            return text
+        return str(mask_rrn_number(text)) if i.file_id in rrn_files else mask_text(text)
+
     writable = {
         fid: can_change_file(db, fid, session.created_by) for fid in {i.file_id for i in items if i.file_id is not None}
     }
@@ -133,11 +146,11 @@ def review_out(
                 sheet=i.sheet,
                 row=i.row,
                 column=_masked(i.column),
-                before=_masked(i.before),
-                after=_masked(i.after),
-                reason=mask_text(i.reason),
+                before=shown(i, i.before),
+                after=shown(i, i.after),
+                reason=shown(i, i.reason) or "",
                 reason_source=i.reason_source,
-                payload=mask_nested(json.loads(i.payload)),
+                payload=mask_nested(json.loads(i.payload), rrn_numbers=i.file_id in rrn_files),
                 decision=i.decision,
                 choice=i.choice,
                 excluded=i.file_id in excluded and i.kind != "pii",
