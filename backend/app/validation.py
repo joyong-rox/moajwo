@@ -271,40 +271,84 @@ def _field_labels() -> dict[str, str]:
     return {f.key: f.label for f in load_dictionary()}
 
 
-def _same_values(sheet: SheetInput, total: dict[str, Any], row: dict[str, Any]) -> bool:
-    """합계 행과 어떤 데이터 행의 합산 가능한 숫자 열이 모두 같은지 (표시 단위 반올림 허용)."""
-    cols = [j for j, c in enumerate(total["cells"]) if _is_number(c) and _additive(sheet, j)]
-    if not cols:
-        return False
-    for j in cols:
-        a, b = total["cells"][j], row["cells"][j]
-        if not _is_number(b) or abs(a - b) > 0.5 * 10 ** -max(_decimals(a), _decimals(b)) + 1e-9 * abs(a):
-            return False
-    return True
+_MONTH_LABEL = re.compile(r"^(\d{1,2})\s*월$")
+_YEAR_LABEL = re.compile(r"^((?:19|20)\d{2})$")
+_QUARTER_LABEL = re.compile(r"^([1-4])\s*분기$")
+_HALF_LABEL = re.compile(r"^([상하])반기$")
 
 
-def _stock_basis(file: FileInput, sheet: SheetInput, total: dict[str, Any], data: list[dict[str, Any]]) -> str | None:
-    """누적·잔액(시점 값) 통계라고 볼 근거 (없으면 None).
+def _row_label(row: dict[str, Any]) -> str | None:
+    return next((c.strip() for c in row["cells"] if isinstance(c, str) and c.strip()), None)
 
-    1) 합계가 마지막 시점 행의 값과 모든 숫자 열에서 같다 (연말·월말 값 — KOSIS 등록대수의 '합계' = 12월 값).
-    2) 시점 값 항목(인구수·자동차 등록대수 등으로 확정·자동 매핑된 열)이나 파일명·시트명·제목의 표기('등록대수',
-       '잔액', '누계', '말 기준' 등)가 있고, 합계가 어느 한 시점 행의 값과 같다.
-    시점 라벨만 있거나 합계가 어느 시점 값과도 다르면(월별 발생 건수·집행액의 합계 오류) 근거로 보지 않는다.
-    """
-    last = max(data, key=lambda r: r["row"])
-    if _same_values(sheet, total, last):
-        label = next((c for c in last["cells"] if isinstance(c, str) and c.strip()), f"{last['row']}행")
-        return f"합계가 마지막 시점({label}) 값과 같음"
-    if not any(_same_values(sheet, total, r) for r in data):
+
+def _period_key(label: str | None) -> tuple[str, tuple[int, ...]] | None:
+    """시점 라벨의 (형식, 정렬 키). '2026-08'·'2026년 8월' → 연월, '2026'·'2026년' → 연, '8월' → 월, 분기, 반기."""
+    if not label:
         return None
+    if (m := _YEAR_LABEL.match(label)) is not None:
+        return "y", (int(m.group(1)),)
+    if (parsed := parse_date_value(label)) is not None:
+        kind, period = parsed
+        if kind == "year":
+            return "y", (int(period),)
+        return "ym", (int(period[:4]), int(period[5:7]))
+    if (m := _MONTH_LABEL.match(label)) is not None and 1 <= int(m.group(1)) <= 12:
+        return "m", (int(m.group(1)),)
+    if (m := _QUARTER_LABEL.match(label)) is not None:
+        return "q", (int(m.group(1)),)
+    if (m := _HALF_LABEL.match(label)) is not None:
+        return "h", (0 if m.group(1) == "상" else 1,)
+    return None
+
+
+def _latest_period_row(data: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """라벨을 해석해 가장 늦은 시점의 데이터 행 (물리적 마지막 행이 아니라). 형식이 섞이거나 해석할 수 없으면 None."""
+    keys = [(_period_key(_row_label(r)), r) for r in data]
+    if any(k is None for k, _ in keys) or len({k[0] for k, _ in keys if k}) != 1:
+        return None
+    return max(((k, r) for k, r in keys if k is not None), key=lambda t: t[0][1])[1]
+
+
+def _close(a: Cell, b: Cell) -> bool:
+    if not _is_number(a) or not _is_number(b):
+        return False
+    return abs(a - b) <= 0.5 * 10 ** -max(_decimals(a), _decimals(b)) + 1e-9 * abs(a)  # type: ignore[operator]
+
+
+def _stock_columns(
+    file: FileInput, sheet: SheetInput, total: dict[str, Any], data: list[dict[str, Any]]
+) -> tuple[dict[int, str], str | None, str | None]:
+    """누적·잔액(시점 값) 통계로 보고 합계 검사를 하지 않을 열 → 근거, 마지막 시점 라벨, (적용하지 못한 이유).
+
+    열마다 판단한다. 두 조건이 모두 있어야 한다.
+    1) 독립 근거: 그 열이 시점 값 항목(인구수·자동차 등록대수 등)으로 매핑됨, 또는 합계 항목 열인데 같은 표의
+       다른 숫자 열이 모두 시점 값 항목, 또는 파일명·시트명·제목에 '등록대수'·'잔액'·'누계'·'말 기준' 같은 표기.
+    2) 합계가 **가장 늦은 시점**(라벨로 판단, 물리적 마지막 행이 아님)의 값과 같다.
+    '마지막 값과 같다'만으로는 정하지 않는다 (월별 건수 합계 20 = 2월 20처럼 우연히 같을 수 있음).
+    """
+    latest = _latest_period_row(data)
+    if latest is None:
+        return {}, None, "시점 라벨의 형식이 섞이거나 해석할 수 없어 시점 순서를 알 수 없음"
     labels = _field_labels()
-    fields = [c for c in sheet.columns if c.field_key in STOCK_FIELDS and _additive(sheet, c.index)]
-    if fields:
-        names = ", ".join(dict.fromkeys(labels.get(c.field_key, c.field_key) for c in fields))
-        return f"항목이 시점 값({names})이고 합계가 한 시점의 값과 같음"
+    mapped = {c.index: c.field_key for c in sheet.columns}
+    cols = [j for j, c in enumerate(total["cells"]) if _is_number(c) and _additive(sheet, j)]
+    stock = [j for j in cols if mapped.get(j) in STOCK_FIELDS]
+    inherit = bool(stock) and all(j in stock or mapped.get(j) == "total" for j in cols)
     texts = [file.file_name, sheet.sheet.name, *sheet.sheet.title_texts]
     word = next((w for w in _STOCK_WORDS for t in texts if w in t), None)
-    return f"'{word}' 표기가 있고 합계가 한 시점의 값과 같음" if word else None
+    out: dict[int, str] = {}
+    for j in cols:
+        if j in stock:
+            reason = f"'{labels.get(mapped[j] or '', mapped[j])}' 항목"
+        elif inherit and mapped.get(j) == "total":
+            reason = "구성 항목이 모두 시점 값인 합계 열"
+        elif word:
+            reason = f"'{word}' 표기"
+        else:
+            continue
+        if _close(total["cells"][j], latest["cells"][j]):
+            out[j] = reason
+    return out, _row_label(latest), None
 
 
 def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[BlockIssue]:
@@ -317,12 +361,21 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
     for row in subtotals:
         cells: list[Cell] = row["cells"]
         group = groups[id(row)]
-        if group is None and _is_stock_series(row, data) and (basis := _stock_basis(file, sheet, row, data)):
-            notes.append(
-                f"{file.file_name} / {sheet.sheet.name} {row['row']}행: 맨 위 합계 행 아래가 시점(월·연도) 계열이고 "
-                f"{basis} — 누적 자료(월말 등록 대수 등)로 보고 합계 검사를 하지 않았습니다."
-            )
-            continue
+        stock_cols: dict[int, str] = {}
+        if group is None and _is_stock_series(row, data):
+            stock_cols, latest_label, why_not = _stock_columns(file, sheet, row, data)
+            where = f"{file.file_name} / {sheet.sheet.name} {row['row']}행"
+            if stock_cols:
+                detail = ", ".join(f"'{columns[j]}'({reason})" for j, reason in stock_cols.items())
+                notes.append(
+                    f"{where}: 맨 위 합계 행 아래가 시점 계열이고 합계가 마지막 시점({latest_label}) 값과 같아, "
+                    f"다음 열은 누적 자료(월말 등록 대수 등)로 보고 합계 검사를 하지 않았습니다: {detail}"
+                )
+            elif why_not:
+                notes.append(f"{where}: {why_not} — 누적 자료 예외를 적용하지 않고 합계를 그대로 검사했습니다.")
+            numeric = [j for j, c in enumerate(cells) if _is_number(c) and _additive(sheet, j)]
+            if stock_cols and all(j in stock_cols for j in numeric):
+                continue
         if group is None:
             # 전체 합계 = 그룹 소계 행 + 어느 그룹에도 속하지 않은 데이터 행
             # (하위 행이 일부만 실린 '서울특별시 계' 같은 소계도 올바르게 반영된다)
@@ -351,7 +404,7 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
             continue
         row_issues: list[BlockIssue] = []
         for j, total in enumerate(cells):
-            if not _is_number(total) or not _additive(sheet, j):
+            if not _is_number(total) or not _additive(sheet, j) or j in stock_cols:
                 continue
             parts = [r["cells"][j] for r in children]
             if any(isinstance(p, str) and is_missing(p) and p not in ZERO_MARKERS for p in parts):

@@ -171,8 +171,9 @@ def test_monthly_flow_total_is_checked(tmp_path: Path) -> None:
 
 
 def test_stock_series_needs_evidence_and_records_it(tmp_path: Path) -> None:
-    # 시점 값 항목(승용차 등록대수) + 합계가 한 시점(2월)의 값과 같음 → 누적 자료로 보고 근거를 남긴다
-    rows = [["월별", "승용차"], ["합계", 765931], ["1월", 764786], ["2월", 765931], ["3월", 765120]]
+    # 시점 값 항목(승용차 등록대수) + 합계가 가장 늦은 시점(3월)의 값과 같음 → 누적 자료로 보고 근거를 남긴다
+    # (병합 전 보완: 중간 시점과 같은 것만으로는 예외로 두지 않는다)
+    rows = [["월별", "승용차"], ["합계", 765120], ["1월", 764786], ["2월", 765931], ["3월", 765120]]
     result = validate([make_input(make_xlsx(tmp_path / "t.xlsx", rows))], ValidationParams())
     assert "sum_mismatch" not in codes(result.blocks)
     assert any("누적 자료" in n and "승용차" in n for n in result.notes)
@@ -193,12 +194,12 @@ def test_stock_field_with_total_unlike_any_period_is_checked(tmp_path: Path) -> 
     assert "sum_mismatch" in codes(result.blocks)
 
 
-def test_kosis_like_total_equal_to_last_month_is_stock(tmp_path: Path) -> None:
-    """⑦ 재검증: KOSIS 등록대수처럼 합계 = 마지막 시점(12월) 값이면 항목 이름과 관계없이 누적 자료."""
+def test_lone_total_column_equal_to_last_month_is_checked(tmp_path: Path) -> None:
+    """병합 전 보완: 시점 값 근거가 없는 합계 열 하나는 '마지막 시점 값과 같다'만으로 예외로 두지 않는다.
+    (지난 라운드에는 항목 이름과 관계없이 예외였다 — 실제 KOSIS 형태는 test_kosis_vehicle_table_with_total_column)"""
     rows = [["월별(1)", "2024_총계_계"], ["합계", 1002889], ["1월", 994549], ["11월", 1002336], ["12월", 1002889]]
     result = validate([make_input(make_xlsx(tmp_path / "t.xlsx", rows))], ValidationParams())
-    assert "sum_mismatch" not in codes(result.blocks)
-    assert any("마지막 시점(12월)" in n for n in result.notes)
+    assert "sum_mismatch" in codes(result.blocks)
 
 
 # ---------------------------------------------------------------- ⑨ 미래 용어사전 항목
@@ -457,3 +458,122 @@ def test_mapping_logs_do_not_contain_pii_column_names(caplog: pytest.LogCaptureF
         result = engine.map_columns(["alice@example.com", "900101-1234567"], [["가"], ["나"]])
     assert result.embedding == "unavailable" and result.llm == "unavailable"
     assert "alice@example.com" not in caplog.text and "1234567" not in caplog.text
+
+
+# ---------------------------------------------------------------- 병합 전 보완 ②: 누적 예외의 독립 근거
+
+
+def _sum_result(tmp_path: Path, rows: list[list], name: str = "t.xlsx", title: str | None = None):
+    if title:
+        rows = [[title] + [None] * (len(rows[0]) - 1), *rows]
+    path = make_xlsx(tmp_path / name, rows, merges=(f"A1:{chr(64 + len(rows[1]))}1",) if title else ())
+    return validate([make_input(path)], ValidationParams())
+
+
+def test_count_total_equal_to_last_month_is_still_checked(tmp_path: Path) -> None:
+    """마지막 값과 같다는 것만으로는 누적 자료가 아니다 (건수 합계 20 vs 실제 30 → 차단)."""
+    result = _sum_result(tmp_path, [["월", "건수"], ["합계", 20], ["1월", 10], ["2월", 20]])
+    assert "sum_mismatch" in codes(result.blocks)
+    assert not any("누적 자료" in n for n in result.notes)
+
+
+@pytest.mark.parametrize("column", ["집행액", "전입 인구"])
+def test_flow_totals_equal_to_last_month_are_checked(tmp_path: Path, column: str) -> None:
+    result = _sum_result(tmp_path, [["월", column], ["합계", 20], ["1월", 10], ["2월", 20]])
+    assert "sum_mismatch" in codes(result.blocks)
+
+
+def test_stock_uses_latest_period_not_physical_last_row(tmp_path: Path) -> None:
+    """역순(12월이 맨 위) 자료도 마지막 시점(12월) 값으로 판단한다."""
+    rows = [["월별", "승용차"], ["합계", 1002889], ["12월", 1002889], ["11월", 1002336], ["1월", 994549]]
+    result = _sum_result(tmp_path, rows)
+    assert "sum_mismatch" not in codes(result.blocks)
+    assert any("마지막 시점(12월)" in n and "승용차" in n for n in result.notes)
+    # 물리적 마지막 행(1월)과 같다는 이유로는 예외를 두지 않는다
+    rows = [["월별", "승용차"], ["합계", 994549], ["12월", 1002889], ["11월", 1002336], ["1월", 994549]]
+    assert "sum_mismatch" in codes(_sum_result(tmp_path, rows, "rev2.xlsx").blocks)
+
+
+def test_mixed_period_labels_are_not_guessed(tmp_path: Path) -> None:
+    """시점 순서를 알 수 없으면(서로 다른 형식이 섞임) 예외를 적용하지 않고 이유를 남긴다."""
+    rows = [["월별", "승용차"], ["합계", 300], ["2024년", 100], ["2월", 300], ["1분기", 200]]
+    result = _sum_result(tmp_path, rows)
+    assert "sum_mismatch" in codes(result.blocks)
+    assert any("시점 순서" in n for n in result.notes)
+
+
+def test_mixed_nature_columns_are_judged_per_column(tmp_path: Path) -> None:
+    """시점 값 열(인구)과 발생 실적 열(전입건수)이 섞인 표: 인구만 예외, 전입건수 합계 오류는 차단."""
+    rows = [["월", "인구", "전입건수"], ["합계", 1200, 15], ["1월", 1100, 10], ["2월", 1200, 20]]
+    result = _sum_result(tmp_path, rows)
+    blocked = {b.column for b in result.blocks if b.code == "sum_mismatch"}
+    assert blocked == {"전입건수"}
+    assert any("누적 자료" in n and "인구" in n for n in result.notes)
+
+
+def test_kosis_vehicle_table_with_total_column(tmp_path: Path) -> None:
+    """KOSIS 등록대수: 항목이 모두 등록대수(승용차 등)이고 합계 열(총계_계)도 같은 성격이면 표 전체 예외."""
+    rows = [
+        ["월별(1)", "2024_총계_계", "2024_승용차_계", "2024_승합차_계"],
+        ["합계", 1002889, 773919, 28938],
+        ["1월", 994549, 764786, 29357],
+        ["12월", 1002889, 773919, 28938],
+    ]
+    result = _sum_result(tmp_path, rows)
+    assert "sum_mismatch" not in codes(result.blocks)
+    assert any("마지막 시점(12월)" in n for n in result.notes)
+
+
+def test_title_wording_is_independent_evidence(tmp_path: Path) -> None:
+    """항목 매핑이 없어도 제목의 '말 기준 잔액' 같은 표기는 독립 근거가 된다."""
+    rows = [["월", "금액"], ["합계", 300], ["1월", 100], ["2월", 300]]
+    result = _sum_result(tmp_path, rows, title="2026년 2월말 기준 대출 잔액")
+    assert "sum_mismatch" not in codes(result.blocks)
+    assert any("'잔액' 표기" in n for n in result.notes)
+
+
+def test_alias_api_and_learning_never_store_pii_names(client_with_entry) -> None:
+    """병합 전 보완 ③: 별칭 등록 API와 검토 완료 학습 모두 개인정보 형식 이름을 별칭으로 저장하지 않는다."""
+    from sqlalchemy import select as sql_select
+
+    from app.db import SessionLocal
+    from app.models import GlossaryAlias, ReviewItem, ReviewSession
+    from app.review import complete
+
+    client, code = client_with_entry
+    bad = client.post("/glossary/aliases", json={"alias": "carol@example.com 담당", "target_code": code})
+    assert bad.status_code == 422 and "carol@example.com" not in bad.text
+    ok = client.post("/glossary/aliases", json={"alias": "정상별칭기관", "target_code": code})
+    assert ok.status_code == 201, ok.text
+    with SessionLocal() as db:
+        session = ReviewSession(
+            status="in_review", params="{}", file_ids="[]", excluded_file_ids="[]", remember_format=True
+        )
+        db.add(session)
+        db.flush()
+        db.add(
+            ReviewItem(
+                session_id=session.id, category="pending", kind="entity", reason="r", reason_source="rule",
+                payload="{}", before="carol@example.com 담당", choice=code, decision="approved",
+            )
+        )  # fmt: skip
+        db.commit()
+        learned = complete(db, session, learn_names=True)
+        stored = db.scalar(sql_select(GlossaryAlias.id).where(GlossaryAlias.alias == "carol@example.com 담당"))
+    assert stored is None and learned["names"] == 0 and learned["names_skipped"] == 1
+
+
+@pytest.fixture()
+def client_with_entry():
+    from fastapi.testclient import TestClient
+
+    from app.db import Base, engine
+    from app.main import app
+
+    Base.metadata.create_all(engine)
+    with TestClient(app) as c:
+        csv = "코드,정식명칭,유형\n9300001,교차검증청,중앙행정기관\n".encode()
+        assert c.post("/glossary/import", files=[("file", ("g.csv", csv, "text/csv"))]).json()["applied"]
+        yield c, "9300001"
+        entry = next(e for e in c.get("/glossary/entries", params={"q": "9300001"}).json() if e["code"] == "9300001")
+        c.delete(f"/glossary/entries/{entry['id']}")
