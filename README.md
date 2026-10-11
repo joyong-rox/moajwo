@@ -340,7 +340,7 @@ docker compose down -v && docker compose up -d
 
 ## 운영 반영 · 백업 · 롤백
 
-운영 DB·업로드 볼륨 백업, 반영 명령, 예상 중단, 반영 후 점검, 롤백 절차는 [docs/DEPLOY.md](docs/DEPLOY.md)에 있습니다.
+운영 DB·업로드 볼륨 백업, 반영 명령(`scripts/deploy.sh`, 실패 시 중단 조건), 중단 시간, 반영 후 점검, 롤백 절차와 **알려진 제한**은 [docs/DEPLOY.md](docs/DEPLOY.md)에 있습니다. 배포 스크립트의 실패 처리 시험: `bash scripts/test_deploy.sh`.
 
 ## DB 마이그레이션
 
