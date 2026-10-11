@@ -26,3 +26,6 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 운영 백업 (운영 데이터가 들어 있음 — 커밋하지 않음)
+backups/
