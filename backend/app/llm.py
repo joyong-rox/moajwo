@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import urllib.error
 import urllib.request
@@ -139,6 +140,22 @@ def masked_key(key: str | None) -> str | None:
 # ---------------------------------------------------------------- 호출
 
 
+ERROR_DETAIL_CHARS = 200
+# 오류 본문에 섞일 수 있는 인증 정보: 'Bearer …', 'x-api-key: …', 'sk-…' 형태의 키
+_AUTH_VALUE = re.compile(r"(?i)\b(bearer|basic)\s+[^\s\"',;}]+")
+_KEY_FIELD = re.compile(r"(?i)\b(x-api-key|api[_-]?key|authorization)([\"']?\s*[:=]\s*[\"']?)[^\s\"',;}]+")
+_KEY_LIKE = re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}")
+
+
+def redact(text: str, secret: str | None) -> str:
+    """오류 메시지에서 API 키·인증 헤더 값을 지운다 (길이를 자르기 전에 호출)."""
+    if secret:
+        text = text.replace(secret, "[API Key]")
+    text = _AUTH_VALUE.sub(r"\1 [API Key]", text)
+    text = _KEY_FIELD.sub(r"\1\2[API Key]", text)
+    return _KEY_LIKE.sub("[API Key]", text)
+
+
 def _post(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float, secret: str | None) -> Any:
     req = urllib.request.Request(
         url,
@@ -148,13 +165,14 @@ def _post(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: f
     )
 
     def clean(text: str) -> str:
-        return text.replace(secret, "[API Key]") if secret else text
+        return redact(text, secret)
 
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
             return json.loads(res.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = clean(exc.read().decode("utf-8", "replace")[:200])
+        # 비밀값을 먼저 지운 뒤 길이를 자른다 (자른 뒤에 지우면 경계에 걸친 키 앞부분이 남는다)
+        detail = clean(exc.read().decode("utf-8", "replace"))[:ERROR_DETAIL_CHARS]
         raise LlmError(f"LLM HTTP {exc.code}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
         raise LlmError(clean(f"LLM 연결 실패: {exc}")) from exc

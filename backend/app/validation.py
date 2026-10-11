@@ -18,9 +18,11 @@ import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
+from functools import lru_cache
 from typing import Any, Literal
 
-from app.glossary import Glossary, Resolution, period_end, prefer_for_field
+from app.glossary import Glossary, Resolution, parse_date_value, period_end, prefer_for_field
+from app.mapping import load_dictionary
 from app.parsing import Cell, SheetResult, is_missing, is_subtotal_label
 
 BlockCode = Literal["sum_mismatch", "required_entity_missing", "period_mismatch"]
@@ -238,6 +240,49 @@ def _is_stock_series(total: dict[str, Any], data: list[dict[str, Any]]) -> bool:
     return periods * 10 >= len(data) * 8  # 80% 이상
 
 
+# 누적·잔액(시점 값) 통계의 근거: 이런 항목·글자가 있을 때만 맨 위 합계를 연말·월말 값으로 본다.
+# 시점 라벨(1월·2월)만으로는 정하지 않는다 — 월별 발생 건수·집행액의 합계 오류를 놓치지 않도록.
+STOCK_FIELDS = frozenset(
+    {
+        "population", "population_male", "population_female", "households", "headcount",
+        "vehicles_total", "passenger_car", "van", "truck", "special_vehicle", "motorcycle",
+        "eco_friendly_car", "electric_car", "hydrogen_car", "hybrid_car",
+        "government_use", "private_use", "commercial_use",
+    }
+)  # fmt: skip
+_STOCK_WORDS = (
+    "등록대수",
+    "등록현황",
+    "인구",
+    "세대수",
+    "잔액",
+    "재고",
+    "보유",
+    "누계",
+    "누적",
+    "말 기준",
+    "말기준",
+    "말 현재",
+)
+
+
+@lru_cache(maxsize=1)
+def _field_labels() -> dict[str, str]:
+    return {f.key: f.label for f in load_dictionary()}
+
+
+def _stock_basis(file: FileInput, sheet: SheetInput) -> str | None:
+    """누적·잔액 통계라고 볼 근거 (없으면 None)."""
+    labels = _field_labels()
+    fields = [c for c in sheet.columns if c.field_key in STOCK_FIELDS and _additive(sheet, c.index)]
+    if fields:
+        names = ", ".join(dict.fromkeys(labels.get(c.field_key, c.field_key) for c in fields))
+        return f"항목이 시점 값({names})"
+    texts = [file.file_name, sheet.sheet.name, *sheet.sheet.title_texts, *sheet.sheet.columns]
+    word = next((w for w in _STOCK_WORDS for t in texts if w in t), None)
+    return f"'{word}' 표기" if word else None
+
+
 def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[BlockIssue]:
     issues: list[BlockIssue] = []
     data = _data_rows(sheet.sheet)
@@ -248,10 +293,10 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
     for row in subtotals:
         cells: list[Cell] = row["cells"]
         group = groups[id(row)]
-        if group is None and _is_stock_series(row, data):
+        if group is None and _is_stock_series(row, data) and (basis := _stock_basis(file, sheet)):
             notes.append(
-                f"{file.file_name} / {sheet.sheet.name} {row['row']}행: 맨 위 합계 행 아래가 시점(월·연도) 계열이라 "
-                "누적 자료(월말 등록 대수 등)로 보고 합계 검사를 하지 않았습니다."
+                f"{file.file_name} / {sheet.sheet.name} {row['row']}행: 맨 위 합계 행 아래가 시점(월·연도) 계열이고 "
+                f"{basis}이라 누적 자료(월말 등록 대수 등)로 보고 합계 검사를 하지 않았습니다."
             )
             continue
         if group is None:
@@ -313,7 +358,7 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
                         actual=total,
                     )
                 )
-        if row_issues and (n := _rows_below_match(sheet, row)):
+        if row_issues and group is not None and (n := _rows_below_match(sheet, row)):
             notes.append(
                 f"{file.file_name} / {sheet.sheet.name} {row['row']}행 '{label}': 라벨로 묶은 하위 행과는 다르지만 "
                 f"바로 아래 {n}행의 합과 모든 열이 같아, 위쪽에 놓인 소계로 보고 통과시켰습니다."
@@ -327,7 +372,9 @@ def _rows_below_match(sheet: SheetInput, total_row: dict[str, Any]) -> int:
     """합계 행 바로 아래 이어지는 데이터 행을 하나씩 더해, 숫자 열이 모두 합계와 같아지는 행 수 (없으면 0).
 
     병합 셀 때문에 소계 라벨이 '계'로만 보이고 소계가 하위 행보다 위에 놓인 양식(예: '천안시 계' 다음
-    '동남구', '서북구')을 알아본다. 모든 숫자 열이 동시에 맞아야 하므로 우연히 맞을 가능성은 사실상 없다.
+    '동남구', '서북구')을 알아본다. 그룹 소계에만 쓰고(전체 합계 제외), 더한 행들이 한 그룹 전체
+    (어느 글자 열의 같은 값을 가진 데이터 행 전부, 2행 이상)일 때만 인정한다 — 앞의 몇 행 합이 우연히 맞는 것은
+    소계로 보지 않는다. 비공개 값(x, …)이 섞이면 확인할 수 없어 인정하지 않는다.
     """
     body = sheet.sheet.body
     start = next((i for i, r in enumerate(body) if r is total_row), None)
@@ -338,22 +385,38 @@ def _rows_below_match(sheet: SheetInput, total_row: dict[str, Any]) -> int:
         return 0
     sums = dict.fromkeys(cols, 0.0)
     places = {j: _decimals(total_row["cells"][j]) for j in cols}
-    count = 0
+    block: list[dict[str, Any]] = []
     for r in body[start + 1 :]:
         if r["kind"] != "data":
             break
-        count += 1
+        block.append(r)
         for j in cols:
             v = r["cells"][j]
+            if isinstance(v, str) and is_missing(v) and v not in ZERO_MARKERS:
+                return 0
             if _is_number(v):
                 sums[j] += v
                 places[j] = max(places[j], _decimals(v))
         # 허용 오차는 본 합계 검사와 같다 (행 수 × 마지막 자리의 절반)
+        count = len(block)
         if all(
             abs(sums[j] - total_row["cells"][j]) <= 0.5 * 10 ** -places[j] * count + 1e-9 * abs(sums[j]) for j in cols
-        ):
+        ) and _is_whole_group(block, _data_rows(sheet.sheet)):
             return count
     return 0
+
+
+def _is_whole_group(block: list[dict[str, Any]], data: list[dict[str, Any]]) -> bool:
+    """block이 한 그룹 전체인지: 2행 이상이고, 어느 글자 열에서 모두 같은 값이며 그 값을 가진 데이터 행이 block뿐."""
+    if len(block) < 2:
+        return False
+    ids = {id(r) for r in block}
+    for j, value in enumerate(block[0]["cells"]):
+        if not isinstance(value, str) or is_missing(value) or is_subtotal_label(value):
+            continue
+        if all(r["cells"][j] == value for r in block) and {id(r) for r in data if r["cells"][j] == value} == ids:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------- 차단: 필수 기관 누락
@@ -496,7 +559,6 @@ def collect_entity_notes(files: list[FileInput], resolver: EntityResolver) -> li
 
 _TEXT_YM = re.compile(r"((?:19|20)\d{2})\s*(?:년|[.\-/])\s*(\d{1,2})\s*(?:월|[.\-/]|$|\s|\))")
 _TEXT_Y = re.compile(r"((?:19|20)\d{2})\s*년")
-_DATE = re.compile(r"^((?:19|20)\d{2})\s*[.\-/]\s*(\d{1,2})")
 
 
 @dataclass
@@ -550,20 +612,23 @@ def collect_periods(file: FileInput) -> list[PeriodEvidence]:
             cells = row["cells"]
             year = next((y for c in years if (y := _year_of(cells[c.index]))), None)
             month = next((m for c in months if (m := _month_of(cells[c.index])) is not None), None)
-            if year and month:
+            # 월 열에 연도까지 든 값('2026-08', '2026년 8월', 날짜)은 그 자체가 기간이다 (매핑의 날짜 필터와 같은 규칙)
+            full = next(
+                ((c, p[1]) for c in months if isinstance(v := cells[c.index], str) and (p := parse_date_value(v))),
+                None,
+            )
+            if full is not None and full[1][:4] != full[1]:
+                evidence.append(PeriodEvidence(full[1], "월 열", sheet.name, row["row"], full[0].name))
+            elif year and month:
                 col = months[0].name
                 evidence.append(PeriodEvidence(f"{year}-{month:02d}", "연·월 열", sheet.name, row["row"], col))
             elif year:
                 evidence.append(PeriodEvidence(year, "연도 열", sheet.name, row["row"], years[0].name))
             for c in dates:
                 v = cells[c.index]
-                m = _DATE.match(str(v)) if isinstance(v, str) else None
-                if m and 1 <= int(m.group(2)) <= 12:
-                    evidence.append(
-                        PeriodEvidence(
-                            f"{m.group(1)}-{int(m.group(2)):02d}", "기준일 열", sheet.name, row["row"], c.name
-                        )
-                    )
+                parsed = parse_date_value(v) if isinstance(v, str) else None
+                if parsed is not None and parsed[0] != "year":
+                    evidence.append(PeriodEvidence(parsed[1], "기준일 열", sheet.name, row["row"], c.name))
     return evidence
 
 
@@ -572,26 +637,44 @@ def collect_periods(file: FileInput) -> list[PeriodEvidence]:
 _FILE_DATE = re.compile(r"(?<!\d)((?:19|20)\d{2})(0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?!\d)")
 
 
-def reference_period(files: list[FileInput], expected: str | None) -> tuple[str | None, bool]:
-    """기관·지역 이름을 해석할 기준 기간과 추정 여부.
+def reference_period(files: list[FileInput], expected: str | None) -> tuple[str | None, bool, str | None]:
+    """기관·지역 이름을 해석할 (기준 기간, 추정 여부, 추정하지 못한 이유).
 
-    기준 기간이 있으면 그 값. 없으면 파일마다 찾은 대표 기간(기간 검사와 같은 근거, 없으면 파일명의 8자리 날짜)이
-    모두 같을 때 그 기간을 쓴다 ('광주'·'인천 동구' 같은 개편 전 이름을 자료 시점의 항목으로 해석).
+    기준 기간이 있으면 그 값. 없으면 **모든 파일**의 대표 기간(기간 검사와 같은 근거, 없으면 파일명의 8자리 날짜)을
+    확인할 수 있고 모두 같을 때만 그 기간을 쓴다 ('광주'·'인천 동구' 같은 개편 전 이름을 자료 시점의 항목으로 해석).
+    기간을 모르는 파일이 있거나, 파일 안에서 기간이 동률로 갈리거나, 파일끼리 다르면 정하지 않고 이유를 돌려준다
+    (이때 이름은 오늘 기준으로 해석된다).
     """
     if expected:
-        return expected, False
-    found: set[str] = set()
+        return expected, False, None
+    found: dict[str, str] = {}
+    unknown: list[str] = []
+    tied: list[str] = []
     for f in files:
         evidence = collect_periods(f)
         if evidence:
             months = [e.period for e in evidence if len(e.period) == 7]
-            found.add(statistics.mode(months or [e.period for e in evidence]))
+            top = statistics.multimode(months or [e.period for e in evidence])
+            if len(top) > 1:
+                tied.append(f"{f.file_name}({', '.join(sorted(top))})")
+            else:
+                found[f.file_name] = top[0]
         elif dates := _FILE_DATE.findall(f.file_name):
             year, month = dates[-1]
-            found.add(f"{year}-{month}")
-    if len(found) == 1:
-        return found.pop(), True
-    return None, False
+            found[f.file_name] = f"{year}-{month}"
+        else:
+            unknown.append(f.file_name)
+    if unknown:
+        return None, False, f"기간을 알 수 없는 파일이 있어({', '.join(unknown)}) 자료 기간을 정하지 않았습니다."
+    if tied:
+        return None, False, f"파일 안에서 기간이 하나로 정해지지 않아({'; '.join(tied)}) 자료 기간을 정하지 않았습니다."
+    periods = sorted(set(found.values()))
+    if len(periods) == 1:
+        return periods[0], True, None
+    if periods:
+        detail = ", ".join(f"{name}={p}" for name, p in found.items())
+        return None, False, f"파일마다 기간이 달라({detail}) 자료 기간을 정하지 않았습니다."
+    return None, False, None
 
 
 def _period_matches(found: str, expected: str) -> bool:
@@ -917,11 +1000,13 @@ def validate(
     glossary: Glossary | None = None,
 ) -> ValidationResult:
     """glossary가 주어지면 기관·지역 이름을 용어사전 항목 코드로 비교한다 (기준일 = 기준 기간 말일)."""
-    period, inferred = reference_period(files, params.expected_period)
+    period, inferred, why_not = reference_period(files, params.expected_period)
     resolver = EntityResolver(glossary, period)
     notes: list[str] = []
     if inferred and glossary is not None:
         notes.append(f"기준 기간이 없어 자료의 기간({period})을 기준으로 기관·지역 이름을 해석했습니다.")
+    elif why_not and glossary is not None:
+        notes.append(f"기준 기간이 없고 {why_not} 기관·지역 이름은 오늘 기준으로 해석했습니다.")
     blocks: list[BlockIssue] = []
     warnings: list[WarningIssue] = []
 

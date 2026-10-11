@@ -167,3 +167,84 @@ def test_direction_gu_are_ambiguous_and_sejong_duplicates_resolve(tmp_path: Path
     assert db.execute("SELECT count(*) FROM glossary_entries WHERE code = '3310000'").fetchone()[0] == 0
     assert db.execute("SELECT count(*) FROM glossary_aliases WHERE target_code = '5690000'").fetchone()[0] == 0
     db.close()
+
+
+def test_0011_fills_only_empty_region_fields(tmp_path: Path) -> None:
+    """교차 검증 ⑧: 시도·시군구 코드는 각각 빈 칸만 채우고, 사용자가 넣은 값은 추정값과 달라도 그대로 둔다."""
+    _alembic(tmp_path, "upgrade", "0010_users_roles")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    rows = [  # (코드, 정식명칭, 시도, 시군구)
+        ("9000001", "서울특별시 강서구", None, "999"),  # 시도만 빔, 시군구는 사용자 값(코드표 추정 500과 다름)
+        ("9000002", "서울특별시 강남구", "11", None),  # 시군구만 빔
+        ("9000003", "부산광역시 해운대구", None, None),  # 둘 다 빔
+        ("9000004", "서울특별시 종로구", "26", "777"),  # 둘 다 입력 (추정과 다름)
+    ]
+    for code, name, sido, sigungu in rows:
+        db.execute(
+            "INSERT INTO glossary_entries (code, name, normalized, type_label, sido_code, sigungu_code, source)"
+            " VALUES (?, ?, ?, '기초자치단체', ?, ?, 'upload')",
+            (code, name, name.replace(" ", ""), sido, sigungu),
+        )
+    db.commit()
+    db.close()
+    _alembic(tmp_path, "upgrade", "0011_sido_base_entries")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    got = {
+        code: (sido, sigungu, source)
+        for code, sido, sigungu, source in db.execute(
+            "SELECT code, sido_code, sigungu_code, source FROM glossary_entries WHERE code LIKE '90000%'"
+        )
+    }
+    db.close()
+    assert got["9000001"] == ("11", "999", "upload")
+    assert got["9000002"] == ("11", "680", "upload")
+    assert got["9000003"] == ("26", "350", "upload")
+    assert got["9000004"] == ("26", "777", "upload")
+
+
+def test_downgrade_keeps_entries_users_refer_to(tmp_path: Path) -> None:
+    """추가 확인 ⑬: downgrade는 그 revision이 넣은 데이터만 지우고, 사용자 별칭이 가리키는 항목은 남긴다."""
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute(  # 사용자가 0012 기본 항목(인천 제물포구)·0011 기본 항목(부산광역시)에 별칭을 붙였다
+        "INSERT INTO glossary_aliases (alias, normalized, target_code, source) VALUES"
+        " ('제물포', '제물포', '3501000', 'user'), ('부산시청', '부산시청', '6260000', 'user')"
+    )
+    db.commit()
+    db.close()
+    _alembic(tmp_path, "downgrade", "0010_users_roles")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    left = {r[0] for r in db.execute("SELECT code FROM glossary_entries WHERE code IN ('3501000', '6260000')")}
+    aliases = {r[0] for r in db.execute("SELECT normalized FROM glossary_aliases WHERE source = 'user'")}
+    others = db.execute("SELECT count(*) FROM glossary_entries WHERE source = 'base'").fetchone()[0]
+    db.close()
+    assert left == {"3501000", "6260000"} and aliases == {"제물포", "부산시청"}
+    # 남은 기본 항목은 사용자 별칭이 가리키는 제물포구 하나뿐 (부산광역시는 0005 예시 항목이라 원래 base가 아님)
+    assert others == 1
+
+
+def test_0015_marks_existing_installs_and_keeps_new_ones_open(tmp_path: Path) -> None:
+    """④ 관련: 계정이 있는 기존 설치는 업그레이드 후에도 최초 설정이 다시 열리지 않고, 빈 설치는 열려 있다."""
+    old = tmp_path / "old"
+    _alembic(old, "upgrade", "0014_direction_gu_sejong")
+    db = sqlite3.connect(old / "moajwo.db")
+    db.execute(
+        "INSERT INTO users (username, display_name, password_hash, role, is_active, failed_logins)"
+        " VALUES ('boss', 'BOSS', 'x', 'owner', 1, 0)"
+    )
+    db.commit()
+    db.close()
+    _alembic(old, "upgrade", "head")
+    db = sqlite3.connect(old / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM app_settings WHERE key = 'owner_setup'").fetchone()[0] == 1
+    db.close()
+    _alembic(old, "downgrade", "0014_direction_gu_sejong")
+    db = sqlite3.connect(old / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM app_settings WHERE key = 'owner_setup'").fetchone()[0] == 0
+    db.close()
+
+    new = tmp_path / "new"
+    _alembic(new, "upgrade", "head")
+    db = sqlite3.connect(new / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM app_settings WHERE key = 'owner_setup'").fetchone()[0] == 0
+    db.close()

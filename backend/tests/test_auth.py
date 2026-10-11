@@ -4,6 +4,7 @@
 """
 
 import io
+import json
 import sqlite3
 from collections.abc import Iterator
 from typing import Any
@@ -343,3 +344,91 @@ def test_dashboard_counts_same_content_once(accounts) -> None:
     assert u.post("/validation", json={"file_ids": [second]}).status_code == 200
     after = u.get("/dashboard").json()["validated_rows"]
     assert mid - before == 3 and after == mid
+
+
+def _decision_rows(fid: int) -> list[tuple]:
+    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+        return con.execute(
+            "select column_name, field_key from mapping_decisions where source_file_id = ?", (fid,)
+        ).fetchall()
+
+
+def _pii_ack(fid: int) -> object:
+    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+        return con.execute("select pii_acknowledged_at from source_files where id = ?", (fid,)).fetchone()[0]
+
+
+def test_review_cannot_change_other_users_file(accounts) -> None:
+    """교차 검증 ③: 관리자·소유자가 남의 파일로 자기 검토를 만들어 승인해도 원본의 매핑·개인정보 확인은 그대로."""
+    u3, admin, owner = accounts["user3"], accounts["admin1"], accounts["owner"]
+    column = "교차검증 전용 메모"  # 사전·승격 이름에 없는 열 → 확인 필요 항목
+    rows = [
+        ["기관명", column, "담당 연락처"],
+        ["행정안전부", "정상", "010-1234-5678"],
+        ["기상청", "검토", "010-2345-6789"],
+    ]
+    fid = _upload(u3, rows, "u3개인정보.xlsx")
+    # 직접 변경은 막혀 있다 (기존 동작)
+    direct = admin.put(
+        f"/files/{fid}/mapping/decisions",
+        json={"decisions": [{"sheet": "현황", "column": column, "field_key": "note"}]},
+    )
+    assert direct.status_code in (403, 404)
+    for client in (admin, owner):
+        review = client.post("/reviews", json={"file_ids": [fid]})
+        assert review.status_code == 201, review.text  # 조회용 검토는 만들 수 있다
+        review = review.json()
+        pending = {i["kind"]: i for i in review["items"] if i["category"] == "pending"}
+        assert {"mapping", "pii"} <= set(pending), pending
+        for kind in ("mapping", "pii"):
+            res = client.post(
+                f"/reviews/{review['id']}/items/{pending[kind]['id']}/decision",
+                json={"decision": "approved", "choice": "note"} if kind == "mapping" else {"decision": "approved"},
+            )
+            assert res.status_code == 403, (kind, res.text)
+        assert _decision_rows(fid) == [] and _pii_ack(fid) is None  # 부분 변경 없음
+    # 파일 주인은 자기 검토에서 그대로 처리할 수 있다
+    review = u3.post("/reviews", json={"file_ids": [fid]}).json()
+    item = next(i for i in review["items"] if i["category"] == "pending" and i["kind"] == "mapping")
+    res = u3.post(
+        f"/reviews/{review['id']}/items/{item['id']}/decision", json={"decision": "approved", "choice": "note"}
+    )
+    assert res.status_code == 200, res.text
+    assert (column, "note") in _decision_rows(fid)
+
+
+def test_recheck_and_automation_cannot_write_other_users_file(accounts) -> None:
+    """교차 검증 ③: 재검사의 파일 교체와 자동화 실행으로도 남의 파일 매핑을 바꾸지 못한다."""
+    from app.db import SessionLocal
+    from app.models import Automation, User
+    from app.review import column_rule_key
+
+    u4, admin = accounts["user4"], accounts["admin1"]
+    victim = _upload(u4, name="u4대상.xlsx")
+    mine = _upload(admin, name="admin본인.xlsx")
+    own = admin.put(  # 관리자 자기 파일의 확정 → 교체 시 남의 파일로 복사되면 안 된다
+        f"/files/{mine}/mapping/decisions",
+        json={"decisions": [{"sheet": "현황", "column": "집행액", "field_key": "budget"}]},
+    )
+    assert own.status_code == 200, own.text
+    review = admin.post("/reviews", json={"file_ids": [mine]}).json()
+    res = admin.post(f"/reviews/{review['id']}/recheck", json={"replace": {str(mine): victim}})
+    assert res.status_code == 403, res.text
+    assert _decision_rows(victim) == []
+
+    with SessionLocal() as db:
+        admin_id = db.query(User.id).filter(User.username == "admin1").scalar()
+        automation = Automation(
+            name="우회 확인",
+            owner_id=admin_id,
+            column_rules=json.dumps([{"key": column_rule_key(PROMO_COLUMN), "field_key": "note"}]),
+            entity_rules="{}",
+            validation="{}",
+            output_format="{}",
+        )
+        db.add(automation)
+        db.commit()
+        automation_id = automation.id
+    res = admin.post(f"/automations/{automation_id}/run", json={"file_ids": [victim]})
+    assert res.status_code in (201, 403, 422), res.text
+    assert _decision_rows(victim) == []

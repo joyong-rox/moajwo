@@ -13,6 +13,7 @@ Create Date: 2026-10-10
 
 """
 
+import logging
 from collections.abc import Sequence
 from datetime import date
 
@@ -50,6 +51,7 @@ SIDO = [
     ("6450000", "전라북도", "45", None, date(2024, 1, 17), None),
 ]
 
+aliases = sa.table("glossary_aliases", sa.column("target_code", sa.String), sa.column("source", sa.String))
 entries = sa.table(
     "glossary_entries",
     sa.column("id", sa.Integer),
@@ -98,19 +100,39 @@ def upgrade() -> None:
     if new:
         op.bulk_insert(entries, new)
 
-    # 비어 있는 시도·시군구 코드 채우기 (기존 값은 그대로)
-    for entry_id, name in bind.execute(
-        sa.select(entries.c.id, entries.c.name).where(entries.c.sido_code.is_(None))
+    # 비어 있는 시도·시군구 코드 채우기: 각 칸이 비어 있을 때만 채우고, 들어 있는 값은 추정값과 달라도 그대로 둔다
+    # (다르면 로그로 알린다). 시군구는 시도가 추정과 같을 때만 채운다 (다른 시도의 시군구 번호를 붙이지 않도록).
+    conflicts = []
+    for entry_id, code, name, sido, sigungu in bind.execute(
+        sa.select(entries.c.id, entries.c.code, entries.c.name, entries.c.sido_code, entries.c.sigungu_code).where(
+            sa.or_(entries.c.sido_code.is_(None), entries.c.sigungu_code.is_(None))
+        )
     ).all():
         found = infer_region_codes(name)
-        if found is not None:
-            bind.execute(
-                entries.update()
-                .where(entries.c.id == entry_id)
-                .values(sido_code=found[0], sigungu_code=found[1])
-            )
+        if found is None:
+            continue
+        values = {}
+        if sido is None:
+            values["sido_code"] = found[0]
+        if sigungu is None and found[1] is not None and (sido or found[0]) == found[0]:
+            values["sigungu_code"] = found[1]
+        if (sido is not None and sido != found[0]) or (sigungu is not None and sigungu != found[1]):
+            conflicts.append(f"{code} {name}: 저장 {sido}/{sigungu}, 코드표 {found[0]}/{found[1]}")
+        if values:
+            bind.execute(entries.update().where(entries.c.id == entry_id).values(**values))
+    if conflicts:
+        logging.getLogger("alembic.runtime.migration").warning(
+            "용어사전 시도·시군구 코드가 행정동 코드표와 달라 그대로 두었습니다 (%d건): %s",
+            len(conflicts),
+            "; ".join(conflicts[:20]),
+        )
 
 
 def downgrade() -> None:
-    # 넣은 기본 항목만 지운다 (채운 코드는 올바른 값이라 되돌리지 않음)
-    op.execute(entries.delete().where(entries.c.source == SOURCE))
+    # 이 마이그레이션의 기본 항목(SIDO 코드)만 지운다 (채운 코드는 올바른 값이라 되돌리지 않음)
+    # 사용자 별칭(source가 base가 아닌)이 가리키는 항목은 남긴다 (지우면 별칭이 대상 없이 남는다)
+    user_refs = sa.select(aliases.c.target_code).where(aliases.c.source != SOURCE)
+    codes = [s[0] for s in SIDO]
+    op.execute(
+        entries.delete().where(entries.c.source == SOURCE, entries.c.code.in_(codes), entries.c.code.not_in(user_refs))
+    )

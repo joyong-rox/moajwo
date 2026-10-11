@@ -15,12 +15,13 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.auth import MANAGERS
 from app.decisions import DecisionInput, learn_column, load_decisions, load_learned, save_decisions
 from app.files import load_parsed
 from app.glossary import normalize_name
 from app.glossary_api import get_glossary
 from app.mapping import ColumnMapping, MappingEngine, get_engine, normalize, split_column_name
-from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile
+from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile, User
 from app.parsing import FileResult, SheetResult
 from app.pii import PII_LABEL
 from app.promotion import load_standard, record_approval
@@ -44,6 +45,31 @@ BLOCKED_SCORE_CAP = 59
 
 class ReviewError(Exception):
     pass
+
+
+class ReviewPermissionError(ReviewError):
+    """검토는 볼 수 있지만 원본 파일(매핑 확정·개인정보 확인)을 바꿀 권한이 없음 → 403."""
+
+
+def can_change_file(db: Session, file_id: int | None, user_id: int | None) -> bool:
+    """원본 파일의 매핑 확정·개인정보 확인을 바꿀 수 있는지: 파일을 올린 사람만 (주인 없는 옛 파일은 관리자·소유자).
+
+    관리자·소유자도 남의 파일로 만든 검토는 조회만 한다 — 검토 세션의 주인인지와 별개로 파일 권한을 본다.
+    """
+    record = db.get(SourceFile, file_id) if file_id is not None else None
+    if record is None or user_id is None:
+        return False
+    if record.uploaded_by is not None:
+        return record.uploaded_by == user_id
+    user = db.get(User, user_id)
+    return user is not None and user.role in MANAGERS
+
+
+def _ensure_can_change(db: Session, file_id: int | None, user_id: int | None) -> None:
+    if not can_change_file(db, file_id, user_id):
+        raise ReviewPermissionError(
+            "다른 사용자가 올린 파일의 매핑 확정·개인정보 확인은 파일을 올린 사람만 할 수 있습니다 (조회만 가능)."
+        )
 
 
 def _fmt(value: Any) -> str:
@@ -238,7 +264,8 @@ def create_session(
     rules = AutomationRules.of(automation) if automation is not None else None
     if rules is not None:
         for fid in dict.fromkeys(params["file_ids"]):
-            _apply_column_rules(db, engine, fid, rules)
+            if can_change_file(db, fid, user_id):  # 남의 파일에는 규칙을 기록하지 않는다 (검토에서 확인 필요로 보임)
+                _apply_column_rules(db, engine, fid, rules)
     learned, standard = load_learned(db, user_id), load_standard(db)
     targets = [_load(db, fid, engine, learned, use_llm, standard) for fid in dict.fromkeys(params["file_ids"])]
     baseline = [
@@ -254,7 +281,7 @@ def create_session(
     files = [_file_input(t) for t in targets]
     result = validate(files, vparams, [_file_input(b) for b in baseline], glossary=glossary)
     # 이름 해석 기준 기간 (기준 기간이 없으면 자료에서 추정). 통합도 같은 기준으로 이름을 바꾸도록 남긴다
-    name_period, inferred = reference_period(files, vparams.expected_period)
+    name_period, inferred, _ = reference_period(files, vparams.expected_period)
     params = {k: v for k, v in params.items() if k != "name_period"}  # 다시 검사면 이전 추정값은 버린다
     if inferred:
         params["name_period"] = name_period
@@ -616,6 +643,8 @@ def decide(db: Session, session: ReviewSession, item: ReviewItem, decision: str,
         raise ReviewError("검토가 끝난 세션은 바꿀 수 없습니다. 다시 검사해 새 검토를 시작하세요.")
     if item.category != "pending":
         raise ReviewError("확인 필요 항목만 승인·거부할 수 있습니다.")
+    if item.kind in ("mapping", "pii"):
+        _ensure_can_change(db, item.file_id, session.created_by)
     payload = json.loads(item.payload)
     now = datetime.now(UTC)
     if item.kind == "mapping":
@@ -754,6 +783,8 @@ def recheck(db: Session, old: ReviewSession, replace: dict[int, int] | None = No
     for new_id in replace.values():
         if db.get(SourceFile, new_id) is None:
             raise ReviewError(f"파일을 찾을 수 없습니다: {new_id}")
+        _ensure_can_change(db, new_id, old.created_by)  # 이전 확정을 복사해 넣는 것도 그 파일을 바꾸는 일이다
+    for new_id in replace.values():
         _copy_mapping_decisions(db, [k for k, v in replace.items() if v == new_id][0], new_id)
 
     params["file_ids"] = new_ids

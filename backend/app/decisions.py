@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.mapping import MappingEngine, split_column_name
 from app.models import LearnedAlias, MappingDecision
+from app.pii import mask_text
 
 _GENERATED_PREFIX = "열"
 
@@ -97,6 +98,8 @@ def learn_column(
     normalized = name.primary
     if not normalized or (column.startswith(_GENERATED_PREFIX) and column[len(_GENERATED_PREFIX) :].isdigit()):
         return "헤더가 없는 열이라 이름을 학습하지 않음"
+    if mask_text(column) != column:
+        return "열 이름에 개인정보 형식이 있어 이름을 학습하지 않음"
     builtin = engine.exact_key(normalized)
     if builtin == key:
         return "이미 표준 사전에 있는 이름"

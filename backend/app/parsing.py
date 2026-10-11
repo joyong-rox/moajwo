@@ -351,13 +351,16 @@ def detect_header_row(rows: list[list[Cell]]) -> int | None:
        병합된 제목 행은 ffill 후 같은 값이 반복되므로 고유 값이 1개뿐이라 후보가 되지 않는다.
     2) 숫자 데이터가 없는 표는 예전처럼 위 3행 중 글자 칸이 가장 많은 행.
     """
-    limit = min(len(rows), HEADER_SEARCH_ROWS)
     candidates: list[int] = []
-    for i in range(limit):
-        if _has_data_number(rows[i]) and candidates:
+    for i, row in enumerate(rows):
+        if _has_data_number(row) and candidates:
             return max(candidates, key=lambda k: (len(_header_texts(rows[k])), -k))
-        if _is_header_candidate(rows[i]):
-            candidates.append(i)
+        if i < HEADER_SEARCH_ROWS:
+            if _is_header_candidate(row):
+                candidates.append(i)
+        elif not candidates:
+            break  # 탐색 범위(100행) 안에 머리글 후보가 없으면 대체 규칙으로
+        # 후보가 있으면 범위 밖까지 첫 데이터 행을 찾아 후보를 평가한다 (100행째 머리글 + 101행 데이터)
     best, best_score = None, 0
     for i, row in enumerate(rows[:FALLBACK_HEADER_ROWS]):
         score = len(_header_texts(row))
@@ -466,17 +469,24 @@ def _tidy_header(value: Cell) -> str | None:
     return re.sub(r"\s+", "", text) if _SPACED_SYLLABLES.match(text) else text
 
 
-def _column_names(header_rows: list[list[Cell]], width: int) -> list[str]:
-    """헤더 행(1~2줄)을 위→아래로 합쳐 열 이름을 만든다. 예: '인구' + '2025' → '인구_2025'."""
+def _header_names(header_rows: list[list[Cell]], width: int) -> list[str]:
+    """헤더 행(1~3줄)을 위→아래로 합친 열의 머리글 의미 (같은 이름 구분 번호를 붙이기 전)."""
     names: list[str] = []
-    seen: dict[str, int] = {}
     for i in range(width):
         parts: list[str] = []
         for row in header_rows:
             value = _tidy_header(row[i])
             if value is not None and (not parts or value != parts[-1]):
                 parts.append(value)
-        name = "_".join(parts) or f"열{i + 1}"
+        names.append("_".join(parts) or f"열{i + 1}")
+    return names
+
+
+def _column_names(header_rows: list[list[Cell]], width: int) -> list[str]:
+    """헤더 행(1~2줄)을 위→아래로 합쳐 열 이름을 만든다. 예: '인구' + '2025' → '인구_2025'."""
+    names: list[str] = []
+    seen: dict[str, int] = {}
+    for name in _header_names(header_rows, width):
         if name in seen:
             seen[name] += 1
             name = f"{name}_{seen[name]}"
@@ -492,14 +502,15 @@ def merged_duplicate_columns(
     """머리글이 가로 병합돼 생긴 복제 열 (버릴 열 번호).
 
     가로 병합은 범위 전체를 왼쪽 위 값으로 채우므로 '자가용', '자가용_2', '자가용_3'처럼 같은 이름의 열이 생긴다.
-    같은 이름 구간에서 머리글 칸이 병합으로 채워졌고, 본문 값도 모든 행에서 구간 안의 앞 열과 같으면 복제로 본다.
-    값이 하나라도 다른 열(예: '시군구' 병합 아래 '천안시 | 동남구')은 실제 데이터라 남긴다.
+    머리글 전체 의미(구분 번호를 붙이기 전 이름)가 앞 열과 같고 머리글 칸이 병합으로 채워졌으며, 본문 값도 모든
+    행에서 구간 안의 앞 열과 같으면 복제로 본다. '인구_2024'·'인구_2025'처럼 머리글 의미가 다른 열은 값이 같아도
+    남기고, 값이 하나라도 다른 열(예: '시군구' 병합 아래 '천안시 | 동남구')도 실제 데이터라 남긴다.
     """
     if header is None:
         return []
     top, bottom = header
     body = grid[bottom + 1 :]
-    base = [re.sub(r"_\d+$", "", c) for c in columns]
+    base = _header_names(grid[top : bottom + 1], len(columns))
     drop: list[int] = []
     kept_in_run: list[int] = []
     for j in range(len(columns)):

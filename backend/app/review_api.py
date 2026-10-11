@@ -16,6 +16,7 @@ from app.integration import include_unmapped_default
 from app.models import Automation, ReviewItem, ReviewSession, SourceFile, User
 from app.review import (
     ReviewError,
+    ReviewPermissionError,
     changes,
     complete,
     create_session,
@@ -189,6 +190,9 @@ def decide_item(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "검토 항목을 찾을 수 없습니다.")
     try:
         decide(db, session, item, body.decision, body.choice)
+    except ReviewPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     except ReviewError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
@@ -238,6 +242,9 @@ def recheck_review(
         get_file_for(db, user, new_id)
     try:
         session = recheck(db, old, body.replace)
+    except ReviewPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     except ReviewError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
