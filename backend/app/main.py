@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app import (
     admin_api,
+    admin_console,
     auth_api,
     automation_api,
     dashboard,
@@ -36,6 +37,7 @@ for router in (
     integration_api.router,
     automation_api.router,
     admin_api.router,
+    admin_console.router,
     dashboard.router,
 ):
     app.include_router(router, dependencies=LOGIN_REQUIRED)

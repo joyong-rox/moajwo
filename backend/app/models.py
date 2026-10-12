@@ -248,12 +248,15 @@ class Automation(Base):
 
 
 class User(Base):
-    """사용자 계정. role: user(일반) / admin(관리자) / owner(소유자)
+    """사용자 계정. role: owner(최고 관리자·소유자) / user(일반 사용자)
 
     - user: 자기 파일·검토·실행 기록·자동화만 다룬다.
-    - admin: 전체 기록 조회(읽기 전용), 사전 관리, 승격 심사, 일반 사용자 계정 관리.
-    - owner: admin 권한 + 설정(수동 기준 소요 시간), 관리자·소유자 계정 관리.
+    - owner: 전체 기록 조회(읽기 전용), 가입 승인·사용자 관리, 이용 현황, 설정, 공통 사전·승격 심사.
     어떤 역할도 통합 결과 데이터(결과 파일·변경 기록)를 직접 수정할 수 없다.
+    (예전 중간 관리자 역할 admin은 0016에서 user로 바뀌었다.)
+
+    status(계정 상태, 역할과 별개): pending(승인 대기) / active(이용 중) / rejected(가입 반려) / suspended(이용 중지).
+    업무 기능은 active만 쓴다. is_active는 status == 'active'와 항상 같게 유지한다 (이전 코드와의 호환·이중 확인).
     """
 
     __tablename__ = "users"
@@ -263,11 +266,38 @@ class User(Base):
     display_name: Mapped[str] = mapped_column(String(64))
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(16), default="user")
-    is_active: Mapped[bool] = mapped_column(default=True)
+    is_active: Mapped[bool] = mapped_column(default=False)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    status_reason: Mapped[str | None] = mapped_column(String(500))
+    status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failed_logins: Mapped[int] = mapped_column(default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AccountEvent(Base):
+    """계정 관리 이력: 가입 신청·승인·반려·이용 중지·재개·비밀번호 초기화·계정 추가·역할 전환.
+
+    작업자·대상은 이름도 함께 남겨 계정이 바뀌어도 읽을 수 있게 한다. 비밀번호·쿠키·토큰은 남기지 않는다.
+    result: ok(반영됨) / denied(상태 전이가 맞지 않아 반영하지 않음)
+    """
+
+    __tablename__ = "account_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    actor_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    actor_name: Mapped[str | None] = mapped_column(String(32))
+    target_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    target_name: Mapped[str] = mapped_column(String(32))
+    action: Mapped[str] = mapped_column(String(32))
+    before_status: Mapped[str | None] = mapped_column(String(16))
+    after_status: Mapped[str | None] = mapped_column(String(16))
+    before_role: Mapped[str | None] = mapped_column(String(16))
+    after_role: Mapped[str | None] = mapped_column(String(16))
+    reason: Mapped[str | None] = mapped_column(String(500))
+    result: Mapped[str] = mapped_column(String(16), default="ok")
 
 
 class AuthSession(Base):

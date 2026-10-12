@@ -7,7 +7,7 @@ import { formatDuration, formatTime, STATUS_CLASS } from './runFormat'
 /** 실행 기록: runs 테이블 기반 (입력 파일 수, 결과 파일 경로, 상태, 소요 시간). */
 function Runs() {
   const { me } = useAuth()
-  const showUser = isManager(me.role) // 관리자·소유자는 전체 사용자의 실행을 본다
+  const showUser = isManager(me.role) // 최고 관리자는 전체 사용자의 실행을 본다
   const [runs, setRuns] = useState<IntegrationRun[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [openReview, setOpenReview] = useState<number | null>(null)
