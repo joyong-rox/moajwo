@@ -84,7 +84,7 @@ function Mapping({ fileId }: { fileId: number }) {
           return {
             ...sheet,
             columns: sheet.columns.map((c) => {
-              const d = decisions.find((x) => x.column === c.column)
+              const d = decisions.find((x) => x.column_id === c.column_id)
               if (!d) return c
               return {
                 ...c,
@@ -157,13 +157,13 @@ function SheetMapping({ fileId, name, columns, fields, onConfirmed }: SheetProps
   const [error, setError] = useState<string | null>(null)
 
   const count = (s: MappingStatus) => columns.filter((c) => c.status === s).length
-  const choice = (c: ColumnMapping) => draft[c.column] ?? initialChoice(c)
+  const choice = (c: ColumnMapping) => draft[c.column_id] ?? initialChoice(c)
   const pendingSuggestions = columns.filter((c) => c.status !== 'confirmed' && c.field_key !== null)
 
-  async function confirm(items: { column: string; value: string }[]) {
-    const decisions: DecisionInput[] = items.map(({ column, value }) => ({
+  async function confirm(items: { columnId: string; value: string }[]) {
+    const decisions: DecisionInput[] = items.map(({ columnId, value }) => ({
       sheet: name,
-      column,
+      column_id: columnId,
       field_key: value === NONE ? null : value,
     }))
     setSaving(true)
@@ -173,7 +173,7 @@ function SheetMapping({ fileId, name, columns, fields, onConfirmed }: SheetProps
       onConfirmed(name, decisions)
       setDraft((prev) => {
         const next = { ...prev }
-        for (const d of decisions) delete next[d.column]
+        for (const d of decisions) delete next[d.column_id]
         return next
       })
       const learned = res.learned.length ? ` · 새로 학습한 열 이름 ${new Set(res.learned).size}개` : ''
@@ -199,7 +199,7 @@ function SheetMapping({ fileId, name, columns, fields, onConfirmed }: SheetProps
           type="button"
           className="mapping-confirm"
           disabled={saving || pendingSuggestions.length === 0}
-          onClick={() => void confirm(pendingSuggestions.map((c) => ({ column: c.column, value: choice(c) })))}
+          onClick={() => void confirm(pendingSuggestions.map((c) => ({ columnId: c.column_id, value: choice(c) })))}
         >
           제안대로 모두 확정 ({pendingSuggestions.length})
         </button>
@@ -231,7 +231,7 @@ function SheetMapping({ fileId, name, columns, fields, onConfirmed }: SheetProps
               const value = choice(c)
               const changed = value !== initialChoice(c)
               return (
-                <tr key={`${c.column}-${i}`} className={`mapping-row-${c.status}`}>
+                <tr key={`${c.column_id}-${i}`} className={`mapping-row-${c.status}`}>
                   <th scope="row">{c.column}</th>
                   <td>
                     <div className="mapping-pick">
@@ -239,7 +239,7 @@ function SheetMapping({ fileId, name, columns, fields, onConfirmed }: SheetProps
                         aria-label={`${c.column} 표준 항목`}
                         value={value}
                         disabled={saving}
-                        onChange={(e) => setDraft((prev) => ({ ...prev, [c.column]: e.target.value }))}
+                        onChange={(e) => setDraft((prev) => ({ ...prev, [c.column_id]: e.target.value }))}
                       >
                         <option value="">— 선택 —</option>
                         {fields.map((f) => (
@@ -253,7 +253,7 @@ function SheetMapping({ fileId, name, columns, fields, onConfirmed }: SheetProps
                         type="button"
                         className="mapping-confirm"
                         disabled={saving || value === '' || (c.status === 'confirmed' && !changed)}
-                        onClick={() => void confirm([{ column: c.column, value }])}
+                        onClick={() => void confirm([{ columnId: c.column_id, value }])}
                       >
                         확정
                       </button>

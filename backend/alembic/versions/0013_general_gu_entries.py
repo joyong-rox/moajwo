@@ -169,4 +169,9 @@ def downgrade() -> None:
     # 이 마이그레이션이 넣은 기본 항목·별칭만 지운다 (0011·0012 기본 데이터는 그대로)
     targets = list(SUCCESSORS.values())
     op.execute(aliases.delete().where(aliases.c.source == SOURCE, aliases.c.target_code.in_(targets)))
-    op.execute(entries.delete().where(entries.c.source == SOURCE, entries.c.code.in_([e[0] for e in ENTRIES])))
+    # 사용자 별칭(source가 base가 아닌)이 가리키는 항목은 남긴다 (지우면 별칭이 대상 없이 남는다)
+    user_refs = sa.select(aliases.c.target_code).where(aliases.c.source != SOURCE)
+    codes = [e[0] for e in ENTRIES]
+    op.execute(
+        entries.delete().where(entries.c.source == SOURCE, entries.c.code.in_(codes), entries.c.code.not_in(user_refs))
+    )

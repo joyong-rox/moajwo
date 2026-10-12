@@ -62,6 +62,7 @@ class ImportRow:
     previous_codes: list[str]
     aliases: list[str]
     note: str | None
+    inferred: frozenset[str] = frozenset()  # 행정동 코드표로 채운 칸 ('sido_code', 'sigungu_code')
 
 
 @dataclass
@@ -237,11 +238,21 @@ def _fill_region_codes(rows: list[ImportRow], report: ImportReport) -> None:
     """
     filled = 0
     for row in rows:
-        if row.sido_code is not None:
+        if row.sido_code is not None and row.sigungu_code is not None:
             continue
         found = admin_codes.infer_region_codes(row.name)
-        if found is not None:
-            row.sido_code, row.sigungu_code = found
+        if found is None:
+            continue
+        # 빈 칸만 채운다. 사용자가 넣은 값은 코드표 추정과 달라도 그대로 둔다 (다르면 경고는 _region_warnings가 낸다)
+        inferred = set()
+        if row.sido_code is None:
+            row.sido_code = found[0]
+            inferred.add("sido_code")
+        if row.sigungu_code is None and found[1] is not None and row.sido_code == found[0]:
+            row.sigungu_code = found[1]
+            inferred.add("sigungu_code")
+        if inferred:
+            row.inferred = frozenset(inferred)
             filled += 1
     if filled:
         message = f"행정동 코드표로 시도·시군구 코드를 채웠습니다 ({filled}행, 정식명칭 기준)."
@@ -260,9 +271,17 @@ def apply_rows(session: Session, rows: list[ImportRow], report: ImportReport) ->
         entry.name = row.name
         entry.normalized = normalize_name(row.name)
         entry.type_label = row.type_label
-        if row.sido_code is not None or entry.sido_code is None:  # 비어 있고 코드표에서도 못 찾으면 기존 코드 유지
-            entry.sido_code = row.sido_code
-            entry.sigungu_code = row.sigungu_code
+        # 파일에 적힌 코드는 그대로 쓰고, 빈 칸(또는 코드표로 채운 칸)이면 이미 저장된 코드를 지우거나 덮지 않는다
+        sido, sigungu = row.sido_code, row.sigungu_code
+        if "sido_code" in row.inferred and entry.sido_code:
+            sido = entry.sido_code
+        if sigungu is None or "sigungu_code" in row.inferred:
+            if sido == entry.sido_code and entry.sigungu_code is not None:
+                sigungu = entry.sigungu_code
+            elif "sigungu_code" in row.inferred and sido != row.sido_code:
+                sigungu = None  # 다른 시도로 추정한 시군구 번호는 붙이지 않는다
+        if sido is not None or entry.sido_code is None:
+            entry.sido_code, entry.sigungu_code = sido, sigungu
         entry.valid_from = row.valid_from
         entry.valid_to = row.valid_to
         entry.previous_codes = ",".join(row.previous_codes) or None

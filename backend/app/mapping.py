@@ -23,8 +23,9 @@ from typing import Any, Literal
 from rapidfuzz import fuzz
 
 from app import admin_codes, llm, ollama
-from app.glossary import DATE_VALUE
+from app.glossary import parse_date_value
 from app.parsing import Cell
+from app.pii import mask_text
 
 logger = logging.getLogger(__name__)
 
@@ -155,8 +156,6 @@ CONTEXT_TERMS: dict[str, frozenset[str]] = {
 }
 VEHICLE_CONTEXT = ("승용", "승합", "자동차", "차량", "이륜", "차종")
 DATE_FIELDS = frozenset({"base_date", "month", "year"})
-_DATE_YEAR = re.compile(r"^(?:19|20)\d{2}\s*년$")
-_DATE_MONTH = re.compile(r"^(?:19|20)\d{2}\s*(?:[-./]\s*\d{1,2}\.?|년\s*\d{1,2}\s*월)$")
 
 
 def date_field_for(samples: list[Cell]) -> str | None:
@@ -168,11 +167,15 @@ def date_field_for(samples: list[Cell]) -> str | None:
     if not values or not all(isinstance(v, str) for v in values):
         return None
     texts = [str(v).strip() for v in values]
-    if not all(DATE_VALUE.match(t) and not t.isdigit() for t in texts):
+    if any(t.isdigit() for t in texts):
         return None
-    if all(_DATE_YEAR.match(t) for t in texts):
+    parsed = [parse_date_value(t) for t in texts]  # 실제로 없는 월·일이면 날짜가 아니다 (기간 검사와 같은 규칙)
+    if any(p is None for p in parsed):
+        return None
+    kinds = {p[0] for p in parsed if p is not None}
+    if kinds == {"year"}:
         return "year"
-    if all(_DATE_MONTH.match(t) for t in texts):
+    if kinds == {"month"}:
         return "month"
     return "base_date"
 
@@ -242,7 +245,7 @@ def _llm_prompt(fields: list[StandardField], name: ColumnName, samples: list[Cel
     options = "\n".join(f"- {f.key}: {f.label} ({f.description})" for f in fields)
     sample_text = ", ".join(json.dumps(s, ensure_ascii=False) for s in samples) or "(샘플 없음)"
     return (
-        f"표준 항목 목록:\n{options}\n\n열 이름: {name.raw}\n"
+        f"표준 항목 목록:\n{options}\n\n열 이름: {mask_text(name.raw)}\n"
         f"샘플 값({len(samples)}개): {sample_text}\n샘플 형식: {sample_format(samples)}"
     )
 
@@ -360,7 +363,8 @@ class MappingEngine:
             return None, "skipped"
         try:
             field_vectors = self._dictionary_vectors()
-            column_vectors = self._embed_fn([n.display for n in names])
+            # 열 이름에 든 개인정보(이메일·휴대전화·주민등록번호)는 모델 입력 전에 가린다 (식별자는 원래 이름 그대로)
+            column_vectors = self._embed_fn([mask_text(n.display) for n in names])
         except ollama.OllamaError as exc:
             logger.warning("embedding unavailable: %s", exc)
             return None, "unavailable"

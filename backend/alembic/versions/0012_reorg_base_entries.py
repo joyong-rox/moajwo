@@ -334,5 +334,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # 이 마이그레이션이 넣은 기본 별칭·항목만 지운다 (0011의 광역 기본 항목은 그대로)
-    op.execute(aliases.delete().where(aliases.c.source == SOURCE))
-    op.execute(entries.delete().where(entries.c.source == SOURCE, entries.c.code.in_([e[0] for e in ENTRIES])))
+    targets = sorted({t for ts in SUCCESSORS.values() for t in ts})
+    op.execute(aliases.delete().where(aliases.c.source == SOURCE, aliases.c.target_code.in_(targets)))
+    # 사용자 별칭(source가 base가 아닌)이 가리키는 항목은 남긴다 (지우면 별칭이 대상 없이 남는다)
+    user_refs = sa.select(aliases.c.target_code).where(aliases.c.source != SOURCE)
+    codes = [e[0] for e in ENTRIES]
+    op.execute(
+        entries.delete().where(entries.c.source == SOURCE, entries.c.code.in_(codes), entries.c.code.not_in(user_refs))
+    )

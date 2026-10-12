@@ -103,6 +103,50 @@ def mask_cell(cell: object) -> object:
     return cell
 
 
+def mask_nested(value: object, rrn_numbers: bool = False) -> object:
+    """응답으로 내보낼 dict·list 안의 모든 글자를 마스킹한다 (키·숫자·코드는 그대로).
+
+    rrn_numbers: 주민등록번호가 탐지된 파일의 기록이면 주민등록번호 형태의 13자리 숫자도 가린다 (mask_rrn_number).
+    """
+    if isinstance(value, dict):
+        return {k: mask_nested(v, rrn_numbers) for k, v in value.items()}
+    if isinstance(value, list):
+        return [mask_nested(v, rrn_numbers) for v in value]
+    if rrn_numbers:
+        return mask_rrn_number(value)
+    if isinstance(value, str):
+        return mask_text(value)
+    return value
+
+
+_GROUPED_13 = re.compile(r"(?<![\d,])\d{1,3}(?:,\d{3}){4}(?![\d,])")  # 9,001,011,234,567 (13자리)
+
+
+def mask_rrn_number(value: object) -> object:
+    """주민등록번호 형태(13자리, 생년월일·성별 자리 유효)인 숫자와 그 숫자를 쉼표로 끊은 글자만 가린다.
+
+    금액·통계 숫자 전체를 가리지 않도록, 개인정보(주민등록번호)가 탐지된 파일의 기록에만 쓴다.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int | float) and float(value).is_integer() and len(str(int(value))) == 13:
+        text = str(int(value))
+        return mask_text(text) if mask_text(text) != text else value
+    if isinstance(value, str):
+
+        def one(m: re.Match[str]) -> str:
+            digits = m.group(0).replace(",", "")
+            return mask_text(digits) if mask_text(digits) != digits else m.group(0)
+
+        return mask_text(_GROUPED_13.sub(one, value))
+    return value
+
+
+def has_pii(text: str) -> bool:
+    """개인정보 형식(이메일·휴대전화·주민등록번호)이 들어 있는지."""
+    return mask_text(text) != text
+
+
 def scan_grid(sheet: str, grid: list[list[object]], report: PiiReport) -> None:
     for r, row in enumerate(grid):
         for c, cell in enumerate(row):

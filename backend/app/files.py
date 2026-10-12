@@ -15,6 +15,7 @@ from app.decisions import DecisionInput, load_decisions, load_learned, save_deci
 from app.mapping import get_engine
 from app.models import SourceFile
 from app.parsing import SUPPORTED_EXTENSIONS, FileResult, ParseError, parse_file
+from app.pii import mask_text
 from app.promotion import load_standard, record_approval
 from app.storage import MAX_UPLOAD_BYTES, UploadTooLarge, safe_original_name, store_original
 
@@ -109,7 +110,13 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
     result.sheet_count = len(parsed.sheets)
     result.data_rows = parsed.data_rows
     # body(전체 행)는 크므로 응답 모델에 필요한 필드만 읽는다.
-    result.sheets = [SheetOut.model_validate(s, from_attributes=True) for s in parsed.sheets]
+    # 열 이름에 든 개인정보는 화면으로 보내기 전에 가린다 (미리보기 셀은 파서가 이미 마스킹)
+    result.sheets = [
+        SheetOut.model_validate(s, from_attributes=True).model_copy(
+            update={"columns": [mask_text(c) for c in s.columns]}
+        )
+        for s in parsed.sheets
+    ]
     return result
 
 
@@ -121,8 +128,14 @@ class CandidateOut(BaseModel):
     embedding: float | None
 
 
+def column_id(index: int) -> str:
+    """시트 안에서 열을 가리키는 식별자. 화면에는 마스킹한 이름을 보내므로 확정 요청은 이 값으로 받는다."""
+    return f"c{index}"
+
+
 class ColumnMappingOut(BaseModel):
-    column: str
+    column: str  # 화면 표시용 (열 이름의 개인정보는 마스킹)
+    column_id: str  # 확정 요청에 쓰는 식별자 (원래 이름은 서버만 안다)
     samples: list[Any]
     status: str
     method: str
@@ -175,7 +188,20 @@ def map_file_columns(
         # 여러 시트 중 하나라도 실패하면 실패로, 하나라도 성공하면 성공으로 보고한다.
         embedding_status = _merge_status(embedding_status, result.embedding)
         llm_status = _merge_status(llm_status, result.llm)
-        sheets.append(SheetMappingOut(name=sheet.name, columns=[asdict(c) for c in result.columns]))
+        sheets.append(
+            SheetMappingOut(
+                name=sheet.name,
+                columns=[
+                    {
+                        **asdict(c),
+                        "column": mask_text(c.column),
+                        "column_id": column_id(i),
+                        "reason": mask_text(c.reason) if c.reason else c.reason,
+                    }
+                    for i, c in enumerate(result.columns)
+                ],
+            )
+        )
     return FileMappingOut(
         file_id=record.id,
         original_name=record.original_name,
@@ -217,7 +243,8 @@ def load_parsed(session: Session, file_id: int) -> tuple[SourceFile, FileResult]
 
 class DecisionIn(BaseModel):
     sheet: str
-    column: str
+    column_id: str | None = None  # 매핑 응답의 column_id (권장)
+    column: str | None = None  # 예전 방식: 원래 열 이름 (호환용, 개인정보가 없는 이름일 때)
     field_key: str | None  # None = 해당 없음
 
 
@@ -240,25 +267,29 @@ def save_mapping_decisions(
     get_file_for(session, user, file_id, own=True)
     _, parsed = load_parsed(session, file_id)
     engine = get_engine()
-    columns = {s.name: set(s.columns) for s in parsed.sheets}
+    columns = {s.name: s.columns for s in parsed.sheets}
     valid_keys = {f.key for f in engine.fields}
+    inputs: list[DecisionInput] = []
     for d in body.decisions:
-        if d.column not in columns.get(d.sheet, set()):
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 열입니다: {d.sheet} / {d.column}")
+        names = columns.get(d.sheet, [])
+        ids = {column_id(i): name for i, name in enumerate(names)}
+        raw = ids.get(d.column_id) if d.column_id is not None else (d.column if d.column in names else None)
+        if raw is None:
+            shown = d.column_id if d.column_id is not None else mask_text(d.column or "")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 열입니다: {d.sheet} / {shown}")
         if d.field_key is not None and d.field_key not in valid_keys:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 표준 항목입니다: {d.field_key}")
-    result = save_decisions(
-        session,
-        engine,
-        file_id,
-        [DecisionInput(d.sheet, d.column, d.field_key) for d in body.decisions],
-        user_id=user.id,
-    )
-    for d in body.decisions:
+        inputs.append(DecisionInput(d.sheet, raw, d.field_key))
+    result = save_decisions(session, engine, file_id, inputs, user_id=user.id)
+    for d in inputs:
         if d.field_key is not None:
             record_approval(session, engine, user.id, d.column, d.field_key)
     session.commit()
-    return DecisionsOut(saved=result.saved, learned=result.learned, not_learned=result.not_learned)
+    return DecisionsOut(
+        saved=result.saved,
+        learned=[mask_text(n) for n in result.learned],
+        not_learned=[{**n, "column": mask_text(n.get("column", ""))} for n in result.not_learned],
+    )
 
 
 class FieldOut(BaseModel):

@@ -4,12 +4,14 @@
 - 관리자는 일반 사용자 계정을, 소유자는 모든 계정을 관리한다.
 """
 
-from datetime import datetime
+import json
+from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app.auth import (
@@ -30,11 +32,14 @@ from app.auth import (
     verify_password,
 )
 from app.db import get_session
-from app.models import User
+from app.models import AppSetting, User
 from app.timefmt import utc_to_kst
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 users_router = APIRouter(prefix="/users", tags=["users"])
+# 최초 소유자 설정이 끝났다는 표시 (app_settings 기본 키 → 동시 요청 중 하나만 성공).
+# 마이그레이션 0015가 계정이 있는 기존 설치에도 넣어 설정 화면이 다시 열리지 않게 한다.
+SETUP_KEY = "owner_setup"
 
 Role = Literal["user", "admin", "owner"]
 
@@ -76,7 +81,7 @@ class StatusOut(BaseModel):
 
 @router.get("/status", response_model=StatusOut)
 def auth_status(request: Request, db: Annotated[Session, Depends(get_session)]) -> StatusOut:
-    setup_required = (db.scalar(select(func.count(User.id))) or 0) == 0
+    setup_required = (db.scalar(select(func.count(User.id))) or 0) == 0 and db.get(AppSetting, SETUP_KEY) is None
     try:
         row = db.get(User, current_user(request, db).id)
     except HTTPException:
@@ -92,8 +97,13 @@ class SetupIn(BaseModel):
 
 @router.post("/setup", response_model=MeOut, status_code=status.HTTP_201_CREATED)
 def setup(body: SetupIn, response: Response, db: Annotated[Session, Depends(get_session)]) -> MeOut:
-    """계정이 하나도 없을 때만 최초 소유자 계정을 만든다."""
-    if (db.scalar(select(func.count(User.id))) or 0) > 0:
+    """계정이 하나도 없을 때만 최초 소유자 계정을 만든다.
+
+    동시에 들어온 요청이 함께 '계정 0개'를 보더라도 소유자는 한 명만 생기도록, 계정과 같은 트랜잭션에서
+    고정 키(app_settings.key = SETUP_KEY, 기본 키)를 넣는다. 늦은 요청은 기본 키 충돌로 실패해 409가 되고
+    계정·세션을 남기지 않는다 (프로세스 안의 잠금이 아니라 DB 제약으로 막는다).
+    """
+    if (db.scalar(select(func.count(User.id))) or 0) > 0 or db.get(AppSetting, SETUP_KEY) is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "이미 계정이 있습니다. 로그인하세요.")
     username = body.username.strip().lower()
     try:
@@ -101,17 +111,24 @@ def setup(body: SetupIn, response: Response, db: Annotated[Session, Depends(get_
         check_password_rule(body.password)
     except AuthError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    db.add(
-        User(
-            username=username,
-            display_name=body.display_name.strip(),
-            password_hash=hash_password(body.password),
-            role="owner",
-            is_active=True,
-            failed_logins=0,
+    password_hash = hash_password(body.password)
+    try:
+        db.add(AppSetting(key=SETUP_KEY, value=json.dumps({"owner": username}), updated_at=datetime.now(UTC)))
+        db.flush()  # 다른 요청이 먼저 넣었으면 여기서(또는 커밋에서) 기본 키 충돌
+        db.add(
+            User(
+                username=username,
+                display_name=body.display_name.strip(),
+                password_hash=password_hash,
+                role="owner",
+                is_active=True,
+                failed_logins=0,
+            )
         )
-    )
-    db.commit()
+        db.commit()
+    except (IntegrityError, OperationalError) as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "이미 계정이 있습니다. 로그인하세요.") from exc
     user, token = login(db, username, body.password)
     _set_cookie(response, token)
     return me_out(user)

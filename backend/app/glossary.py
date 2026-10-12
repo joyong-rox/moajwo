@@ -50,8 +50,8 @@ def period_end(period: str | None) -> date | None:
 
 
 def _valid(valid_from: date | None, valid_to: date | None, at: date | None) -> bool:
-    if at is None:
-        return valid_to is None or valid_to >= date.today()
+    """기준일(at)에 유효한지. 기준일을 정하지 않으면 오늘로 보고 시작일·종료일을 모두 검사한다."""
+    at = at or date.today()
     return (valid_from is None or valid_from <= at) and (valid_to is None or at <= valid_to)
 
 
@@ -134,16 +134,48 @@ def sido_short_names(name: str) -> set[str]:
     return set()
 
 
-# 날짜·기간 값: 2026-08, 2026.08.31, 2026/8, 2026년, 2026년 8월, 20260831
-DATE_VALUE = re.compile(
-    r"^(?:19|20)\d{2}(?:\s*[-./]\s*\d{1,2}(?:\s*[-./]\s*\d{1,2})?\.?"
-    r"|\s*년(?:\s*\d{1,2}\s*월(?:\s*\d{1,2}\s*일)?)?|(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))"
-    r"(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$"
-)
-
-
 def looks_like_date(text: str) -> bool:
-    return bool(DATE_VALUE.match(unicodedata.normalize("NFKC", text).strip()))
+    """날짜·기간 값인지 (2026-08, 2026.08.31, 2026년 8월, 20260831 …). 매핑·기간 검사와 같은 parse_date_value 규칙."""
+    return parse_date_value(text) is not None
+
+
+DateKind = Literal["year", "month", "date"]
+_TIME = r"(?:[\sT]+\d{1,2}:\d{2}(?::\d{2})?)?"
+_DATE_FORMS: list[tuple[re.Pattern[str], DateKind]] = [
+    (re.compile(r"^((?:19|20)\d{2})\s*년$"), "year"),
+    (re.compile(r"^((?:19|20)\d{2})\s*[-./]\s*(\d{1,2})\.?$"), "month"),
+    (re.compile(r"^((?:19|20)\d{2})\s*년\s*(\d{1,2})\s*월$"), "month"),
+    (re.compile(r"^((?:19|20)\d{2})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})\.?" + _TIME + "$"), "date"),
+    (re.compile(r"^((?:19|20)\d{2})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일" + _TIME + "$"), "date"),
+    (re.compile(r"^((?:19|20)\d{2})(\d{2})(\d{2})$"), "date"),
+]
+
+
+def parse_date_value(text: str) -> tuple[DateKind, str] | None:
+    """날짜·기간 글자 → (종류, 기간). '2026년' → ('year', '2026'), '2026-08'·'2026년 8월' → ('month', '2026-08'),
+    '2026-08-31'·'2026년 8월 31일'·'20260831' → ('date', '2026-08'). 실제로 없는 월·일(2026-13, 2026-02-30)은 None.
+
+    열 매핑의 날짜 필터와 통합 전 검증의 기간 검사가 같은 규칙을 쓴다.
+    8자리 숫자 글자를 날짜로 볼지는 호출하는 쪽이 정한다 (매핑은 코드와 겹쳐 날짜로 보지 않음).
+    """
+    value = unicodedata.normalize("NFKC", text).strip()
+    for pattern, kind in _DATE_FORMS:
+        m = pattern.match(value)
+        if m is None:
+            continue
+        year = int(m.group(1))
+        if kind == "year":
+            return kind, str(year)
+        month = int(m.group(2))
+        if not 1 <= month <= 12:
+            return None
+        if kind == "date":
+            try:
+                date(year, month, int(m.group(3)))
+            except ValueError:
+                return None
+        return kind, f"{year}-{month:02d}"
+    return None
 
 
 def prefer_for_field(field_key: str | None) -> Prefer:
@@ -210,7 +242,7 @@ class Glossary:
         user_aliases = [a for a in aliases if not a.base]
         targets = list({e.code: e for a in user_aliases if (e := self.entries.get(a.target_code))}.values())
         if len(targets) == 1:
-            return Resolution(name, "resolved", "alias", entity_ref(targets[0]), note=self._ended_note(targets[0], at))
+            return self._out_of_period(name, "alias", targets[0], at)
         if targets:
             refs = [entity_ref(e) for e in targets]
             return Resolution(name, "ambiguous", "alias", candidates=refs, note="별칭이 여러 항목에 연결됨")
@@ -241,7 +273,7 @@ class Glossary:
             return Resolution(name, "ambiguous", "name", candidates=refs, note="같은 이름의 항목이 여러 개")
         ended = list({e.code: e for e, _ in matches}.values())
         if len(ended) == 1:
-            return Resolution(name, "resolved", "name", entity_ref(ended[0]), note=self._ended_note(ended[0], at))
+            return self._out_of_period(name, "name", ended[0], at)
         refs = [entity_ref(e) for e in ended]
         return Resolution(name, "ambiguous", "name", candidates=refs, note="기준일에 유효한 항목이 없음")
 
@@ -263,10 +295,23 @@ class Glossary:
         unique = {r.code: r for r in out if r.code != ref.code}
         return list(unique.values())[:SUGGEST_LIMIT]
 
+    def _out_of_period(self, name: str, via: Via, entry: Entry, at: date | None) -> Resolution:
+        """기준일 밖 항목.
+
+        폐지된 항목은 옛 자료 비교를 위해 그 항목으로 해석하되 안내를 붙이고(통합에서 자동으로 바꾸지 않음),
+        아직 시작하지 않은 항목은 확정하지 않고 후보로만 보여 준다 (미래 항목이 다른 경로로 확정되지 않도록).
+        """
+        note = self._ended_note(entry, at)
+        if entry.valid_from and (at or date.today()) < entry.valid_from:
+            return Resolution(name, "unknown", via, candidates=[entity_ref(entry)], note=note)
+        return Resolution(name, "resolved", via, entity_ref(entry), note=note)
+
     @staticmethod
     def _ended_note(entry: Entry, at: date | None) -> str | None:
-        if entry.valid_to and (at is None or at > entry.valid_to):
+        """기준일(없으면 오늘) 밖의 항목 안내. 이런 해석은 후보 안내로만 쓰고 통합에서 자동으로 바꾸지 않는다."""
+        at = at or date.today()
+        if entry.valid_to and at > entry.valid_to:
             return f"{entry.valid_to.isoformat()}까지만 유효한 {entry.type_label or '항목'} — 폐지 또는 개편된 이름"
-        if entry.valid_from and at is not None and at < entry.valid_from:
+        if entry.valid_from and at < entry.valid_from:
             return f"{entry.valid_from.isoformat()}부터 유효한 {entry.type_label or '항목'} — 기준일 이전"
         return None

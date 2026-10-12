@@ -381,3 +381,18 @@ def test_export_leaves_out_base_aliases(client: TestClient) -> None:
     entry = next(e for e in client.get("/glossary/entries", params={"q": "3501000"}).json() if e["code"] == "3501000")
     assert "인천 동구" in entry["aliases"]  # 목록 화면에는 보인다
     client.delete(f"/glossary/entries/{entry['id']}")
+
+
+def test_import_fills_only_empty_code_fields(client: TestClient) -> None:
+    """교차 검증 ⑧ 관련: 업로드에서도 시도·시군구 코드는 각각 빈 칸만 채우고 사용자 값은 그대로 둔다."""
+    # (시군구코드만 있고 시도코드가 빈 행은 업로드 검사에서 오류이므로, 사용자 값 11/999로 시작한다)
+    csv = "코드,정식명칭,유형,시도코드,시군구코드\n9100001,서울특별시 강서구,기초자치단체,11,999\n".encode()
+    report = client.post("/glossary/import", files=[("file", ("g.csv", csv, "text/csv"))]).json()
+    assert report["applied"], report
+    entry = next(e for e in client.get("/glossary/entries", params={"q": "9100001"}).json() if e["code"] == "9100001")
+    assert (entry["sido_code"], entry["sigungu_code"]) == ("11", "999")
+    csv = "코드,정식명칭,유형,시도코드,시군구코드\n9100001,서울특별시 강서구,기초자치단체,11,\n".encode()
+    assert client.post("/glossary/import", files=[("file", ("g.csv", csv, "text/csv"))]).json()["applied"]
+    entry = next(e for e in client.get("/glossary/entries", params={"q": "9100001"}).json() if e["code"] == "9100001")
+    assert (entry["sido_code"], entry["sigungu_code"]) == ("11", "999")  # 같은 시도·빈 시군구로 지우지 않음
+    client.delete(f"/glossary/entries/{entry['id']}")

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.mapping import MappingEngine, split_column_name
 from app.models import MappingApproval, PromotionCandidate, StandardTerm
+from app.pii import mask_text
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ def record_approval(
     normalized = _key(column)
     if not normalized or (column.startswith(_GENERATED_PREFIX) and column[len(_GENERATED_PREFIX) :].isdigit()):
         return None
+    if mask_text(column) != column:
+        return None  # 개인정보가 든 열 이름은 모두가 보는 승격 심사·전사 사전으로 올리지 않는다
     if engine.exact_key(normalized) is not None:
         return None  # 기본 표준 사전이 정한 이름 (같으면 필요 없고, 다르면 사전이 우선)
     if db.scalar(select(StandardTerm.id).where(StandardTerm.normalized == normalized)) is not None:

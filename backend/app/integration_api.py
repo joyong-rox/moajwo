@@ -16,6 +16,7 @@ from app.config import DATA_DIR
 from app.db import get_session
 from app.integration import KST, IntegrationError, integrate
 from app.models import Automation, IntegrationRun, ReviewSession, RunChange, User
+from app.pii import mask_nested, mask_text
 
 router = APIRouter(tags=["integration"])
 
@@ -23,6 +24,24 @@ XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 STATUS_LABEL = {"done": "완료", "review": "검토", "failed": "실패", "running": "실행 중"}
+
+
+def _masked_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """실행 요약의 결과 열 이름(표준 항목이 없는 열은 원래 이름)에 든 개인정보를 가린다."""
+    # 키는 고정된 이름이라 그대로 두고, 값(파일·시트·열 이름, 뺀 열 목록 등 중첩 글자)만 가린다
+    return mask_nested(summary)  # type: ignore[return-value]
+
+
+def _masked_change(change: "ChangeOut") -> "ChangeOut":
+    return change.model_copy(
+        update={
+            "column": mask_text(change.column),
+            "source_column": mask_text(change.source_column),
+            "before": mask_text(change.before) if change.before else change.before,
+            "after": mask_text(change.after) if change.after else change.after,
+            "reason": mask_text(change.reason),
+        }
+    )
 
 
 class RunOut(BaseModel):
@@ -74,7 +93,7 @@ def run_out(run: IntegrationRun, automation_name: str | None = None, user_name: 
         row_count=run.row_count,
         change_count=run.change_count,
         warning_count=run.warning_count,
-        summary=json.loads(run.summary or "{}"),
+        summary=_masked_summary(json.loads(run.summary or "{}")),
         error=run.error,
         created_at=run.created_at,
         started_at=run.started_at,
@@ -212,7 +231,7 @@ def list_changes(
     rows = db.scalars(select(RunChange).where(*where).order_by(RunChange.id).offset(offset).limit(limit))
     return ChangePage(
         total=total,
-        items=[ChangeOut.model_validate(r, from_attributes=True) for r in rows],
+        items=[_masked_change(ChangeOut.model_validate(r, from_attributes=True)) for r in rows],
     )
 
 

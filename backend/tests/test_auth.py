@@ -4,6 +4,7 @@
 """
 
 import io
+import json
 import sqlite3
 from collections.abc import Iterator
 from typing import Any
@@ -343,3 +344,308 @@ def test_dashboard_counts_same_content_once(accounts) -> None:
     assert u.post("/validation", json={"file_ids": [second]}).status_code == 200
     after = u.get("/dashboard").json()["validated_rows"]
     assert mid - before == 3 and after == mid
+
+
+def _decision_rows(fid: int) -> list[tuple]:
+    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+        return con.execute(
+            "select column_name, field_key from mapping_decisions where source_file_id = ?", (fid,)
+        ).fetchall()
+
+
+def _pii_ack(fid: int) -> object:
+    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+        return con.execute("select pii_acknowledged_at from source_files where id = ?", (fid,)).fetchone()[0]
+
+
+def test_review_cannot_change_other_users_file(accounts) -> None:
+    """교차 검증 ③: 관리자·소유자가 남의 파일로 자기 검토를 만들어 승인해도 원본의 매핑·개인정보 확인은 그대로."""
+    u3, admin, owner = accounts["user3"], accounts["admin1"], accounts["owner"]
+    column = "교차검증 전용 메모"  # 사전·승격 이름에 없는 열 → 확인 필요 항목
+    rows = [
+        ["기관명", column, "담당 연락처"],
+        ["행정안전부", "정상", "010-1234-5678"],
+        ["기상청", "검토", "010-2345-6789"],
+    ]
+    fid = _upload(u3, rows, "u3개인정보.xlsx")
+    # 직접 변경은 막혀 있다 (기존 동작)
+    direct = admin.put(
+        f"/files/{fid}/mapping/decisions",
+        json={"decisions": [{"sheet": "현황", "column": column, "field_key": "note"}]},
+    )
+    assert direct.status_code in (403, 404)
+    for client in (admin, owner):
+        review = client.post("/reviews", json={"file_ids": [fid]})
+        assert review.status_code == 201, review.text  # 조회용 검토는 만들 수 있다
+        review = review.json()
+        pending = {i["kind"]: i for i in review["items"] if i["category"] == "pending"}
+        assert {"mapping", "pii"} <= set(pending), pending
+        for kind in ("mapping", "pii"):
+            res = client.post(
+                f"/reviews/{review['id']}/items/{pending[kind]['id']}/decision",
+                json={"decision": "approved", "choice": "note"} if kind == "mapping" else {"decision": "approved"},
+            )
+            assert res.status_code == 403, (kind, res.text)
+        assert _decision_rows(fid) == [] and _pii_ack(fid) is None  # 부분 변경 없음
+    # 파일 주인은 자기 검토에서 그대로 처리할 수 있다
+    review = u3.post("/reviews", json={"file_ids": [fid]}).json()
+    item = next(i for i in review["items"] if i["category"] == "pending" and i["kind"] == "mapping")
+    res = u3.post(
+        f"/reviews/{review['id']}/items/{item['id']}/decision", json={"decision": "approved", "choice": "note"}
+    )
+    assert res.status_code == 200, res.text
+    assert (column, "note") in _decision_rows(fid)
+
+
+def test_recheck_and_automation_cannot_write_other_users_file(accounts) -> None:
+    """교차 검증 ③: 재검사의 파일 교체와 자동화 실행으로도 남의 파일 매핑을 바꾸지 못한다."""
+    from app.db import SessionLocal
+    from app.models import Automation, User
+    from app.review import column_rule_key
+
+    u4, admin = accounts["user4"], accounts["admin1"]
+    victim = _upload(u4, name="u4대상.xlsx")
+    mine = _upload(admin, name="admin본인.xlsx")
+    own = admin.put(  # 관리자 자기 파일의 확정 → 교체 시 남의 파일로 복사되면 안 된다
+        f"/files/{mine}/mapping/decisions",
+        json={"decisions": [{"sheet": "현황", "column": "집행액", "field_key": "budget"}]},
+    )
+    assert own.status_code == 200, own.text
+    review = admin.post("/reviews", json={"file_ids": [mine]}).json()
+    res = admin.post(f"/reviews/{review['id']}/recheck", json={"replace": {str(mine): victim}})
+    assert res.status_code == 403, res.text
+    assert _decision_rows(victim) == []
+
+    with SessionLocal() as db:
+        admin_id = db.query(User.id).filter(User.username == "admin1").scalar()
+        automation = Automation(
+            name="우회 확인",
+            owner_id=admin_id,
+            column_rules=json.dumps([{"key": column_rule_key(PROMO_COLUMN), "field_key": "note"}]),
+            entity_rules="{}",
+            validation="{}",
+            output_format="{}",
+        )
+        db.add(automation)
+        db.commit()
+        automation_id = automation.id
+    res = admin.post(f"/automations/{automation_id}/run", json={"file_ids": [victim]})
+    assert res.status_code in (201, 403, 422), res.text
+    assert _decision_rows(victim) == []
+
+
+PII_ROWS = [
+    ["기관명", "alice@example.com", "bob@example.com", "집행액"],
+    ["행정안전부", "정상", "검토", 1000],
+    ["기상청", "보류", "정상", 2500],
+]
+
+
+def test_pii_column_names_masked_in_api_and_ids_keep_decisions(accounts) -> None:
+    """후속 검증 ④: 업로드·매핑·확정·검토 응답에 개인정보 열 이름 원문이 없고, 마스킹이 같아지는 두 열도 column_id로
+    따로 확정되며 재분석에서 유지된다. 무권한 사용자는 볼 수 없다."""
+    u1, u2 = accounts["user1"], accounts["user2"]
+    upload = u1.post("/files", files=[("files", ("개인정보머리글.xlsx", _xlsx(PII_ROWS), XLSX))])
+    assert upload.status_code == 200, upload.text
+    assert "alice@example.com" not in upload.text and "bob@example.com" not in upload.text
+    fid = upload.json()[0]["id"]
+    mapping = u1.post(f"/files/{fid}/mapping?use_llm=false")
+    assert "alice@example.com" not in mapping.text and "bob@example.com" not in mapping.text
+    cols = mapping.json()["sheets"][0]["columns"]
+    ids = [c["column_id"] for c in cols]
+    assert len(set(ids)) == len(ids) == 4
+    a, b = cols[1], cols[2]
+    res = u1.put(
+        f"/files/{fid}/mapping/decisions",
+        json={"decisions": [
+            {"sheet": "현황", "column_id": a["column_id"], "field_key": "note"},
+            {"sheet": "현황", "column_id": b["column_id"], "field_key": None},
+            {"sheet": "현황", "column": "집행액", "field_key": "expenditure"},  # 예전 방식(원래 이름)도 호환
+        ]},
+    )  # fmt: skip
+    assert res.status_code == 200, res.text
+    assert "alice@example.com" not in res.text
+    assert sorted(_decision_rows(fid)) == sorted(
+        [("alice@example.com", "note"), ("bob@example.com", None), ("집행액", "expenditure")]
+    )
+    again = {c["column_id"]: c for c in u1.post(f"/files/{fid}/mapping?use_llm=false").json()["sheets"][0]["columns"]}
+    assert (again[a["column_id"]]["status"], again[a["column_id"]]["field_key"]) == ("confirmed", "note")
+    assert (again[b["column_id"]]["status"], again[b["column_id"]]["field_key"]) == ("confirmed", None)
+    bad = u1.put(
+        f"/files/{fid}/mapping/decisions",
+        json={"decisions": [{"sheet": "현황", "column_id": "c99", "field_key": None}]},
+    )
+    assert bad.status_code == 422 and "example.com" not in bad.text
+    assert u2.post(f"/files/{fid}/mapping?use_llm=false").status_code == 404  # 무권한
+    # 검토 기록(DB에는 연결용 원문)도 화면 응답에서는 가려진다
+    review = u1.post("/reviews", json={"file_ids": [fid]})
+    assert review.status_code == 201 and "alice@example.com" not in review.text
+    again_review = u1.get(f"/reviews/{review.json()['id']}")
+    assert "alice@example.com" not in again_review.text and "bob@example.com" not in again_review.text
+
+
+def test_review_items_report_read_only_per_file(accounts) -> None:
+    """후속 검증 ⑤: 검토 응답이 항목별 변경 가능 여부(can_change)를 알려 준다 — 여러 사람의 파일이 섞인 검토 포함."""
+    u3, admin = accounts["user3"], accounts["admin1"]
+    rows = [["기관명", "후속검증 전용 메모"], ["행정안전부", "정상"], ["기상청", "검토"]]
+    other = _upload(u3, rows, "u3후속.xlsx")
+    mine = _upload(admin, [["기관명", "관리자 전용 메모"], ["행정안전부", "정상"]], "admin후속.xlsx")
+    review = admin.post("/reviews", json={"file_ids": [other, mine]}).json()
+    by_file = {}
+    for item in review["items"]:
+        if item["category"] == "pending" and item["kind"] == "mapping":
+            by_file[item["file_id"]] = item["can_change"]
+    assert by_file == {other: False, mine: True}, by_file
+    own_item = next(
+        i for i in review["items"] if i["category"] == "pending" and i["kind"] == "mapping" and i["file_id"] == mine
+    )
+    res = admin.post(f"/reviews/{review['id']}/items/{own_item['id']}/decision", json={"decision": "rejected"})
+    assert res.status_code == 200, res.text
+
+
+PII_RAW = ("carol@example.com", "010-3456-7890", "3456-7890", "900101-1234567", "1234567", "dave@example.com")
+
+
+def _no_raw(text: str) -> bool:
+    return not any(raw in text for raw in PII_RAW)
+
+
+def test_pii_values_masked_in_validation_review_and_history(accounts, caplog) -> None:
+    """병합 전 보완 ③: 기관·지역 값, 열 이름, 오류 근거(필수 기관), 참고, 검토 payload, 과거 기록 조회, 로그 어디에도
+    개인정보 원문이 없다. 개인정보 형식 이름은 별칭 등록 불가로 표시되고, 정상 이름은 그대로 등록할 수 있다."""
+    import logging
+
+    u1, u2 = accounts["user1"], accounts["user2"]
+    rows = [
+        ["기관명", "dave@example.com", "집행액"],
+        ["carol@example.com", "x", 1],
+        ["010-3456-7890 담당", "y", 2],
+        ["900101-1234567", "z", 3],
+        ["기상청", "w", 4],
+    ]
+    fid = _upload(u1, rows, "개인정보값.xlsx")
+    caplog.set_level(logging.DEBUG)
+    run = u1.post(
+        "/validation",
+        json={"file_ids": [fid], "required_entities": ["carol@example.com", "기상청"], "entity_field": "org_name"},
+    )
+    assert run.status_code == 200 and _no_raw(run.text), run.text
+    body = run.json()
+    regs = {e["value"]: e["registrable"] for e in body["entities"]}
+    assert regs and all(v is False for k, v in regs.items() if "*" in k) and regs.get("기상청", True) is True
+    past = u1.get(f"/validation/{body['id']}")
+    assert past.status_code == 200 and _no_raw(past.text)
+    assert u2.get(f"/validation/{body['id']}").status_code in (403, 404)  # 다른 사용자의 기록
+    review = u1.post("/reviews", json={"file_ids": [fid], "required_entities": ["carol@example.com"]})
+    assert review.status_code == 201 and _no_raw(review.text)
+    again = u1.get(f"/reviews/{review.json()['id']}")
+    assert _no_raw(again.text)
+    assert _no_raw(caplog.text)
+    # 다른 사용자가 이 검토의 항목 id를 자기 검토 경로로 보내도 막힌다
+    item = review.json()["items"][0]
+    own = u2.post("/reviews", json={"file_ids": [_upload(u2, ROWS, "u2자료.xlsx")]}).json()
+    res = u2.post(f"/reviews/{own['id']}/items/{item['id']}/decision", json={"decision": "rejected"})
+    assert res.status_code == 404
+    assert (
+        u2.post(
+            f"/reviews/{review.json()['id']}/items/{item['id']}/decision", json={"decision": "rejected"}
+        ).status_code
+        == 404
+    )
+
+
+def test_result_workbook_pii_policy(accounts) -> None:
+    """병합 전 보완 ④: 머리글에만 개인정보가 있어도 탐지·확인 절차에 들어가고, 포함을 거부한 파일은 결과·변경 내역에
+    없으며, 승인한 파일의 원문은 결과 엑셀에 들어갈 수 있다(정책). 결과 다운로드·실행 기록은 권한이 있는 사람만."""
+    u4, u2, admin = accounts["user4"], accounts["user2"], accounts["admin1"]
+    header_only = _upload(
+        u4, [["기관명", "erin@example.com", "집행액"], ["행정안전부", "a", 1], ["기상청", "b", 2]], "머리글만.xlsx"
+    )
+    body_pii = _upload(u4, [["기관명", "연락처", "집행액"], ["인사혁신처", "010-5678-1234", 3]], "본문.xlsx")
+    review = u4.post("/reviews", json={"file_ids": [header_only, body_pii]}).json()
+    pii_items = {i["file_id"]: i for i in review["items"] if i["category"] == "pending" and i["kind"] == "pii"}
+    assert set(pii_items) == {header_only, body_pii}  # 머리글만 있는 파일도 확인 대상
+    for item in [i for i in review["items"] if i["category"] == "pending"]:
+        decision = "rejected" if item["kind"] == "pii" and item["file_id"] == body_pii else "approved"
+        if item["kind"] == "mapping":
+            decision = "rejected"  # '해당 없음'으로 확정
+        if item["kind"] == "entity":
+            decision = "rejected"
+        res = u4.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json={"decision": decision})
+        assert res.status_code == 200, res.text
+    assert u4.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = u4.post(f"/reviews/{review['id']}/integrate", json={"include_unmapped": True})
+    assert run.status_code == 201, run.text
+    run_id = run.json()["id"]
+    download = u4.get(f"/runs/{run_id}/download")
+    assert download.status_code == 200
+    wb = openpyxl.load_workbook(io.BytesIO(download.content))
+    texts = [str(c.value) for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.value is not None] + [
+        c.comment.text for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.comment
+    ]
+    joined = "\n".join(texts)
+    assert "인사혁신처" not in joined and "010-5678-1234" not in joined  # 포함 거부 파일은 결과·변경 내역에 없음
+    assert "머리글만.xlsx" in joined and "erin@example.com" in joined  # 승인한 파일의 원문 머리글은 결과에 남을 수 있음
+    assert u2.get(f"/runs/{run_id}/download").status_code == 404  # 다른 일반 사용자
+    assert u2.get(f"/runs/{run_id}").status_code == 404
+    assert admin.get(f"/runs/{run_id}").status_code == 200  # 관리자·소유자는 조회 가능 (기존 정책)
+    assert "erin@example.com" not in admin.get(f"/runs/{run_id}").text  # 실행 기록 응답(화면)은 마스킹
+
+
+def test_numeric_rrn_never_reaches_responses_and_history(accounts) -> None:
+    """최종 확인 ③: 정수로 저장된 주민등록번호가 합계 검사·과거 검증 결과·저장된 검토 항목·자동화 규칙 키로 새지 않는다.
+    다른 파일의 13자리 금액, 같은 파일의 일반 숫자·식별자는 그대로다."""
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Automation, ReviewItem, ReviewSession, User, ValidationRun
+
+    u3 = accounts["user3"]
+    raw_int, raw_grouped = 9001011234567, "9,001,011,234,567"
+    rows = [["기관명", "번호값", "집행액"], ["합계", raw_int, 3], [8502022345678, 8502022345678, 1], ["기상청", 1, 2]]
+    fid = _upload(u3, rows, "숫자주민번호.xlsx")
+    run = u3.post("/validation", json={"file_ids": [fid]})
+    assert run.status_code == 200 and str(raw_int) not in run.text and raw_grouped not in run.text
+    assert any("개인정보가 탐지되어 합계 검사에서 제외" in n for n in run.json()["notes"])
+    # 예전 방식으로 저장된 과거 기록(원문 expected/actual·메시지)도 조회 응답에서는 가린다
+    with SessionLocal() as db:
+        user_id = db.scalar(select(User.id).where(User.username == "user3"))
+        legacy = {
+            "blocks": [{"code": "sum_mismatch", "label": "합계 불일치", "file_id": fid,
+                        "file_name": "숫자주민번호.xlsx",
+                        "sheet": "현황", "row": 2, "column": "번호값", "expected": 8502022345679.0, "actual": raw_int,
+                        "message": f"'합계' 행의 '번호값' 값 {raw_grouped}이(가) 다릅니다."},
+                       {"code": "sum_mismatch", "label": "합계 불일치", "file_id": fid + 999, "file_name": "금액.xlsx",
+                        "sheet": "현황", "row": 2, "column": "예산", "expected": 1, "actual": raw_int,
+                        "message": f"금액 {raw_grouped}"}],
+            "warnings": [], "notes": [], "entities": [],
+            "pii": [{"file_id": fid, "file_name": "숫자주민번호.xlsx", "counts": {"rrn": 2, "mobile": 0, "email": 0},
+                     "items": [], "acknowledged": False}],
+        }  # fmt: skip
+        record = ValidationRun(
+            status="blocked", params="{}", result=json.dumps(legacy, ensure_ascii=False), created_by=user_id
+        )
+        db.add(record)
+        session = ReviewSession(status="in_review", params="{}", file_ids=json.dumps([fid]), excluded_file_ids="[]",
+                                remember_format=False, created_by=user_id)  # fmt: skip
+        db.add(session)
+        db.flush()
+        db.add(ReviewItem(session_id=session.id, category="block", kind="sum_mismatch", file_id=fid,
+                          reason=f"값 {raw_grouped}",
+                          reason_source="rule", payload=json.dumps({"rows": [2], "value": raw_int}), before=raw_grouped,
+                          after="8,502,022,345,679 (하위 행 합계)"))  # fmt: skip
+        db.add(Automation(name="키확인", owner_id=user_id, column_rules="[]", validation="{}", output_format="{}",
+                          entity_rules=json.dumps({"850202-2345678": "1741000", "기상청": "1360000"})))  # fmt: skip
+        db.commit()
+        run_id, review_id = record.id, session.id
+    past = u3.get(f"/validation/{run_id}").json()
+    first = json.dumps(past["blocks"][0], ensure_ascii=False)  # 주민등록번호가 탐지된 파일의 기록
+    assert raw_grouped not in first and str(raw_int) not in first
+    assert past["blocks"][0]["expected"] != 8502022345679.0  # 주민등록번호에서 계산된 13자리 값도 가린다
+    assert (
+        past["blocks"][1]["actual"] == raw_int and raw_grouped in past["blocks"][1]["message"]
+    )  # 다른 파일의 금액은 그대로
+    shown = u3.get(f"/reviews/{review_id}").text
+    assert raw_grouped not in shown and str(raw_int) not in shown
+    autos = u3.get("/automations").text
+    assert "850202-2345678" not in autos and "기상청" in autos

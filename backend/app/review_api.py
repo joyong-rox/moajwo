@@ -14,8 +14,11 @@ from app.db import get_session
 from app.files import get_file_for
 from app.integration import include_unmapped_default
 from app.models import Automation, ReviewItem, ReviewSession, SourceFile, User
+from app.pii import mask_nested, mask_rrn_number, mask_text
 from app.review import (
     ReviewError,
+    ReviewPermissionError,
+    can_change_file,
     changes,
     complete,
     create_session,
@@ -47,6 +50,9 @@ class ReviewItemOut(BaseModel):
     decision: str | None
     choice: str | None
     excluded: bool
+    # 이 항목의 결정이 원본 파일(매핑 확정·개인정보 확인)을 바꾸는데, 검토를 만든 사람이 그 파일을 올린 사람이 아니면
+    # False (조회 전용). 화면은 버튼을 끄고 안내하며, 서버는 결정 요청을 403으로 거부한다.
+    can_change: bool = True
 
 
 class ReviewFileOut(BaseModel):
@@ -82,6 +88,11 @@ class ReviewOut(BaseModel):
     include_unmapped_default: bool = False  # 통합할 때 '표준 항목이 없는 열 포함'의 기본값 (자동화 설정)
 
 
+def _masked(text: str | None) -> str | None:
+    """검토 항목의 열 이름·값을 화면으로 보낼 때 개인정보를 가린다 (DB의 기록은 연결용 원문 그대로)."""
+    return mask_text(text) if text else text
+
+
 def review_out(
     db: Session, session: ReviewSession, learned: dict[str, int] | None = None, user: CurrentUser | None = None
 ) -> ReviewOut:
@@ -94,6 +105,22 @@ def review_out(
     for fid in json.loads(session.file_ids):
         record = db.get(SourceFile, fid)
         files.append(ReviewFileOut(id=fid, name=record.original_name if record else "?", excluded=fid in excluded))
+    rrn_files = {
+        fid
+        for fid in {i.file_id for i in items if i.file_id is not None}
+        if (rec := db.get(SourceFile, fid)) is not None
+        and rec.pii_summary
+        and json.loads(rec.pii_summary).get("counts", {}).get("rrn")
+    }
+
+    def shown(i: ReviewItem, text: str | None) -> str | None:
+        if not text:
+            return text
+        return str(mask_rrn_number(text)) if i.file_id in rrn_files else mask_text(text)
+
+    writable = {
+        fid: can_change_file(db, fid, session.created_by) for fid in {i.file_id for i in items if i.file_id is not None}
+    }
     return ReviewOut(
         id=session.id,
         status=session.status,
@@ -118,19 +145,20 @@ def review_out(
                 file_name=i.file_name,
                 sheet=i.sheet,
                 row=i.row,
-                column=i.column,
-                before=i.before,
-                after=i.after,
-                reason=i.reason,
+                column=_masked(i.column),
+                before=shown(i, i.before),
+                after=shown(i, i.after),
+                reason=shown(i, i.reason) or "",
                 reason_source=i.reason_source,
-                payload=json.loads(i.payload),
+                payload=mask_nested(json.loads(i.payload), rrn_numbers=i.file_id in rrn_files),
                 decision=i.decision,
                 choice=i.choice,
                 excluded=i.file_id in excluded and i.kind != "pii",
+                can_change=writable.get(i.file_id, True) if i.kind in ("mapping", "pii") else True,
             )
             for i in items
         ],
-        params=json.loads(session.params),
+        params=mask_nested(json.loads(session.params)),  # 입력 조건(필수 기관 등)의 개인정보 형식도 가린다
         validation_run_id=session.validation_run_id,
         created_at=session.created_at,
         completed_at=session.completed_at,
@@ -189,6 +217,9 @@ def decide_item(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "검토 항목을 찾을 수 없습니다.")
     try:
         decide(db, session, item, body.decision, body.choice)
+    except ReviewPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     except ReviewError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
@@ -238,6 +269,9 @@ def recheck_review(
         get_file_for(db, user, new_id)
     try:
         session = recheck(db, old, body.replace)
+    except ReviewPermissionError as exc:
+        db.rollback()
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     except ReviewError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc

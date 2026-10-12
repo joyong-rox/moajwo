@@ -74,7 +74,8 @@ export type MappingCandidate = {
 }
 
 export type ColumnMapping = {
-  column: string
+  column: string // 화면 표시용 (열 이름의 개인정보는 서버가 마스킹)
+  column_id: string // 확정 요청에 쓰는 식별자
   samples: Cell[]
   status: MappingStatus
   method: MappingMethod
@@ -111,7 +112,7 @@ export async function fetchFields(): Promise<StandardFieldInfo[]> {
   return (await res.json()) as StandardFieldInfo[]
 }
 
-export type DecisionInput = { sheet: string; column: string; field_key: string | null }
+export type DecisionInput = { sheet: string; column_id: string; field_key: string | null }
 export type DecisionsResult = { saved: number; learned: string[]; not_learned: { column: string; reason: string }[] }
 
 export async function saveDecisions(fileId: number, decisions: DecisionInput[]): Promise<DecisionsResult> {
@@ -209,7 +210,8 @@ export type ValidationRun = {
 
 export type EntityCandidate = { code: string; name: string; type: string }
 export type EntityNote = {
-  value: string
+  value: string // 화면 표시용 (개인정보 형식은 마스킹)
+  registrable?: boolean // false = 개인정보 형식이 있어 별칭 등록 불가
   field: string
   status: 'unknown' | 'ambiguous' | 'abolished'
   note: string | null
@@ -352,6 +354,7 @@ export type ReviewItem = {
   decision: 'approved' | 'rejected' | null
   choice: string | null
   excluded: boolean
+  can_change?: boolean // false = 남이 올린 파일이라 조회 전용 (승인·거부 불가)
 }
 export type Review = {
   id: number

@@ -18,6 +18,7 @@ from app.glossary import AliasEntry, EntityRef, Entry, Glossary, normalize_name,
 from app.glossary_import import CODE_PATTERN, export_csv, import_file, template_csv
 from app.models import GlossaryAlias, GlossaryEntry
 from app.parsing import SUPPORTED_EXTENSIONS
+from app.pii import has_pii
 
 router = APIRouter(prefix="/glossary", tags=["glossary"])
 
@@ -304,6 +305,11 @@ def _overlaps(a_from: date | None, a_to: date | None, b_from: date | None, b_to:
 def create_alias(body: AliasIn, session: Annotated[Session, Depends(get_session)], _: ManagerDep) -> AliasOut:
     if _target(session, body.target_code) is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"용어사전에 없는 코드입니다: {body.target_code}")
+    if has_pii(body.alias):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "개인정보 형식(이메일·휴대전화·주민등록번호)이 든 이름은 별칭으로 등록할 수 없습니다.",
+        )
     normalized = normalize_name(body.alias)
     # 유니크 제약은 유효기간이 비어 있으면(NULL) 중복을 막지 못하므로, 기간이 겹치는 같은 별칭을 직접 확인한다.
     for other in session.scalars(
