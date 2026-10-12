@@ -7,6 +7,10 @@
   결과 데이터(결과 파일·변경 기록)를 직접 바꾸는 기능은 어떤 역할에도 없다.
 - 계정 상태: pending(승인 대기) / active(이용 중) / rejected(가입 반려) / suspended(이용 중지).
   업무 API는 active이면서 is_active인 계정만 쓴다 (요청마다 확인).
+- 인증 버전(users.auth_version): 비밀번호 변경·초기화, 반려·이용 중지는 같은 UPDATE에서 버전을 올린다. 세션은 발급
+  시점의 버전을 저장하고, 요청마다 사용자 버전과 같아야 유효하다. 로그인은 비밀번호를 확인할 때 읽은 버전·이용 중
+  상태를 조건으로 한 UPDATE와 세션 저장을 한 트랜잭션에서 한다 — 확인과 저장 사이에 계정이 바뀌면 세션을 만들지
+  않거나(조건 불일치), 이미 만들었어도 버전이 달라 쓸 수 없다. 버전은 내려가지 않으므로 재개해도 되살아나지 않는다.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from app.db import get_session
@@ -133,6 +137,7 @@ def login(db: Session, username: str, password: str) -> tuple[User, str]:
     """
     now = datetime.now(UTC)
     user = db.scalar(select(User).where(User.username == username.strip().lower()))
+    version = user.auth_version if user is not None else None  # 비밀번호 해시와 같은 행에서 읽은 버전
     if user is not None and user.locked_until is not None and _aware(user.locked_until) > now:
         raise AuthError(f"로그인 실패가 반복되어 잠시 잠겼습니다. {LOCK_MINUTES}분 뒤에 다시 시도하세요.")
     if user is None:
@@ -149,20 +154,30 @@ def login(db: Session, username: str, password: str) -> tuple[User, str]:
         user.failed_logins = 0
         db.commit()
         raise AccountStatusError(user.status if user.status != "active" else "suspended")
-    user.failed_logins = 0
-    user.locked_until = None
-    user.last_login_at = now
+    # 확인한 그대로일 때만 세션을 만든다: 버전·이용 중 상태를 조건으로 한 UPDATE와 세션 저장을 한 트랜잭션에서.
+    # 그 사이 비밀번호 초기화·변경·이용 중지가 커밋됐으면 0행 → 세션 없음 (SQLite 쓰기 잠금으로 직렬화)
+    started = db.execute(
+        update(User)
+        .where(User.id == user.id, User.auth_version == version, User.status == "active", User.is_active.is_(True))
+        .values(failed_logins=0, locked_until=None, last_login_at=now)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if started != 1:
+        db.rollback()
+        raise AuthError("아이디 또는 비밀번호가 올바르지 않습니다.")
     db.execute(delete(AuthSession).where(AuthSession.expires_at < now))
     token = secrets.token_urlsafe(32)
     db.add(
         AuthSession(
             token_hash=_token_hash(token),
             user_id=user.id,
+            auth_version=version,
             created_at=now,
             expires_at=now + timedelta(hours=SESSION_HOURS),
         )
     )
     db.commit()
+    db.refresh(user)
     return user, token
 
 
@@ -182,7 +197,10 @@ def logout(db: Session, token: str | None) -> None:
 
 
 def end_sessions(db: Session, user_id: int) -> None:
-    """비밀번호 변경·초기화·이용 중지·역할 변경 시 그 사용자의 로그인을 모두 끊는다."""
+    """비밀번호 변경·초기화·이용 중지·역할 변경 시 그 사용자의 로그인을 모두 끊는다.
+
+    정리용이다 — 동시 요청에서의 무효화는 인증 버전(auth_version)이 보장한다.
+    """
     db.execute(delete(AuthSession).where(AuthSession.user_id == user_id))
 
 
@@ -207,7 +225,7 @@ def current_user(request: Request, db: Annotated[Session, Depends(get_session)])
         row = db.scalar(select(AuthSession).where(AuthSession.token_hash == _token_hash(token)))
         if row is not None and _aware(row.expires_at) > datetime.now(UTC):
             user = db.get(User, row.user_id)
-            if user is not None and usable(user):
+            if user is not None and usable(user) and row.auth_version == user.auth_version:
                 return CurrentUser(user.id, user.username, user.display_name, user.role)
     raise HTTPException(status.HTTP_401_UNAUTHORIZED, "로그인이 필요합니다.")
 

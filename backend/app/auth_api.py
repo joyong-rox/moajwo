@@ -245,17 +245,33 @@ def change_password(
 ) -> Response:
     row = db.get(User, user.id)
     assert row is not None
+    version = row.auth_version
     if not verify_password(body.current_password, row.password_hash):
         raise HTTPException(status.HTTP_409_CONFLICT, "현재 비밀번호가 올바르지 않습니다.")
     try:
         check_password_rule(body.new_password)
     except AuthError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    row.password_hash = hash_password(body.new_password)
+    # 확인한 그대로일 때만 바꾼다 (그 사이 초기화·중지가 커밋됐으면 0행). 버전을 올려 다른 세션·진행 중 로그인을 무효로
+    changed = db.execute(
+        update(User)
+        .where(User.id == row.id, User.auth_version == version)
+        .values(password_hash=hash_password(body.new_password), auth_version=User.auth_version + 1)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if changed != 1:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "계정 정보가 바뀌었습니다. 다시 로그인한 뒤 시도하세요.")
     end_sessions(db, row.id)
     db.commit()
+    db.refresh(row)
     # 다른 기기의 로그인은 끊고, 지금 화면은 새 세션으로 이어간다
-    _, token = login(db, row.username, body.new_password)
+    try:
+        _, token = login(db, row.username, body.new_password)
+    except AuthError as exc:  # 그 사이 이용 중지·초기화가 끼어든 경우: 변경은 반영됐고 새 세션만 만들지 않는다
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "비밀번호는 바뀌었지만 계정 상태가 바뀌어 다시 로그인해야 합니다."
+        ) from exc
     out = Response(status_code=status.HTTP_204_NO_CONTENT)
     _set_cookie(out, token)
     return out
@@ -473,7 +489,14 @@ def _change_status(db: Session, actor: CurrentUser, user_id: int, action: str, r
     changed = db.execute(
         update(User)
         .where(User.id == user.id, User.status == expected)
-        .values(status=after, is_active=after == "active", status_reason=reason, status_changed_at=datetime.now(UTC))
+        .values(
+            status=after,
+            is_active=after == "active",
+            status_reason=reason,
+            status_changed_at=datetime.now(UTC),
+            # 반려·이용 중지: 버전을 올려 그 전에 만든 쿠키·진행 중 로그인이 재개 후에도 되살아나지 않게
+            auth_version=User.auth_version + (0 if after == "active" else 1),
+        )
         .execution_options(synchronize_session=False)
     ).rowcount
     if changed != 1:
@@ -538,9 +561,17 @@ def reset_password(
         check_password_rule(body.password)
     except AuthError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    user.password_hash = hash_password(body.password)
-    user.failed_logins = 0
-    user.locked_until = None
+    db.execute(
+        update(User)
+        .where(User.id == user.id)
+        .values(
+            password_hash=hash_password(body.password),
+            failed_logins=0,
+            locked_until=None,
+            auth_version=User.auth_version + 1,  # 진행 중이던 이전 비밀번호 로그인·기존 세션을 무효로
+        )
+        .execution_options(synchronize_session=False)
+    )
     end_sessions(db, user.id)
     _event(db, actor, user, "password_reset", user.status, user.status, reason="비밀번호 초기화 · 기존 세션 종료")
     db.commit()

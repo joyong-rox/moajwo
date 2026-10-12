@@ -270,6 +270,8 @@ class User(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending")
     status_reason: Mapped[str | None] = mapped_column(String(500))
     status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 인증 버전: 비밀번호 변경·초기화, 가입 반려·이용 중지 때 1씩 올린다. 세션은 발급 시점의 버전과 같을 때만 유효하다
+    auth_version: Mapped[int] = mapped_column(default=0)
     failed_logins: Mapped[int] = mapped_column(default=0)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -308,6 +310,7 @@ class AuthSession(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    auth_version: Mapped[int] = mapped_column(default=0)  # 발급 시점의 users.auth_version (다르면 무효)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

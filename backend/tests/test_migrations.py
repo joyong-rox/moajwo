@@ -368,3 +368,56 @@ def test_0016_converts_existing_accounts_and_downgrade_restores_roles(tmp_path: 
     assert not db.execute("SELECT name FROM sqlite_master WHERE name = 'account_events'").fetchall()
     assert dict(db.execute("SELECT username, is_active FROM users").fetchall())["ops-user-20261012"] == 0
     db.close()
+
+
+def test_0017_keeps_existing_sessions_and_downgrades(tmp_path: Path) -> None:
+    """0017: 기존 사용자·세션은 버전 0으로 맞춰져 지금 로그인이 그대로 유효하다. downgrade는 두 열만 지운다."""
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from fastapi import HTTPException
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.auth import COOKIE_NAME, current_user
+
+    _alembic(tmp_path, "upgrade", "0016_account_status_roles")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute(
+        "INSERT INTO users (id, username, display_name, password_hash, role, is_active, failed_logins, status)"
+        " VALUES (1, 'boss', 'B', 'x', 'owner', 1, 0, 'active')"
+    )
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    token_hash = hashlib.sha256(b"existing-token").hexdigest()
+    db.execute(
+        "INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at) VALUES (?, 1, ?, ?)",
+        (token_hash, datetime.now(UTC).isoformat(), expires),
+    )
+    db.commit()
+    db.close()
+
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT auth_version FROM users").fetchall() == [(0,)]
+    assert db.execute("SELECT auth_version FROM auth_sessions").fetchall() == [(0,)]
+    db.close()
+
+    class Req:
+        cookies = {COOKIE_NAME: "existing-token"}
+
+    Session = sessionmaker(create_engine(f"sqlite:///{(tmp_path / 'moajwo.db').as_posix()}"))
+    with Session() as session:
+        assert current_user(Req(), session).username == "boss"  # 전환 후에도 기존 로그인 유지
+        try:
+            Req.cookies = {COOKIE_NAME: "unknown-token"}
+            current_user(Req(), session)
+            raise AssertionError("없는 토큰이 통과함")
+        except HTTPException as exc:
+            assert exc.status_code == 401
+
+    _alembic(tmp_path, "downgrade", "0016_account_status_roles")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert "auth_version" not in [r[1] for r in db.execute("PRAGMA table_info(users)")]
+    assert "auth_version" not in [r[1] for r in db.execute("PRAGMA table_info(auth_sessions)")]
+    assert db.execute("SELECT count(*) FROM auth_sessions").fetchone()[0] == 1
+    db.close()
