@@ -124,9 +124,20 @@ function MappingCommon() {
             </label>
           ))}
         </div>
-        <button type="button" className="mapping-run" disabled={picked.size === 0 || loading} onClick={open}>
-          {loading ? '모으는 중…' : `공통 검토 열기 (${picked.size}개 파일)`}
-        </button>
+        <div className="admin-actions">
+          <button type="button" className="mapping-run" disabled={picked.size === 0 || loading} onClick={open}>
+            {loading ? '모으는 중…' : `공통 검토 열기 (${picked.size}개 파일)`}
+          </button>
+          {/* 선택값만 넘긴다 — 분석 화면에서 대상 확인·실행을 따로 눌러야 계산한다 */}
+          <button
+            type="button"
+            className="mapping-confirm"
+            disabled={picked.size === 0}
+            onClick={() => navigate(`/analysis?files=${[...picked].join(',')}`)}
+          >
+            선택한 파일로 분석
+          </button>
+        </div>
       </fieldset>
       {error && (
         <p className="upload-error" role="alert">

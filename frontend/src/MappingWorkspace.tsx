@@ -14,6 +14,7 @@ import {
   type StoredFile,
   type StoredMapping,
 } from './api'
+import { ANALYSIS_FIELDS } from './analysisFields'
 import BatchConfirm from './BatchConfirm'
 import FieldPicker from './FieldPicker'
 import {
@@ -358,6 +359,19 @@ function MappingWorkspace() {
           <button type="button" className="mapping-confirm" onClick={() => setDraft(null)} disabled={busy !== null}>
             선택 취소
           </button>
+        )}
+        {/* 사용자가 확정한 수량 항목만. 선택값만 넘기고 계산·저장은 분석 화면에서 따로 한다 */}
+        {selectedCol.status === 'confirmed' && selectedCol.field_key && ANALYSIS_FIELDS.has(selectedCol.field_key) && (
+          <a
+            className="mapping-confirm mw-link"
+            href={`/analysis?field=${selectedCol.field_key}&files=${fileId}`}
+            onClick={(e) => {
+              e.preventDefault()
+              navigate(`/analysis?field=${selectedCol.field_key}&files=${fileId}`)
+            }}
+          >
+            이 항목으로 분석
+          </a>
         )}
       </div>
     </aside>
