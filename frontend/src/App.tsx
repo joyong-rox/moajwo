@@ -15,14 +15,14 @@ import Automations from './Automations'
 import Dashboard from './Dashboard'
 import Dictionary from './Dictionary'
 import Login from './Login'
+import MoajwoAdmin from './MoajwoAdmin'
 import Promotions from './Promotions'
 import ReviewPanel from './ReviewPanel'
 import { navigate, usePath } from './router'
-import { findRoute, ROUTES } from './routes'
+import { ADMIN_BASE, findRoute, isActiveMenu, ROUTES } from './routes'
 import Runs from './Runs'
 import Settings from './Settings'
 import Upload from './Upload'
-import Users from './Users'
 import Validation from './Validation'
 
 type Gate = { kind: 'loading' } | { kind: 'signed-out'; setupRequired: boolean } | { kind: 'signed-in'; me: Me }
@@ -165,12 +165,15 @@ function Workspace() {
             <>
               {route === undefined && <NotFound />}
               {route !== undefined && !allowed && <Forbidden roles={route.roles} />}
-              {allowed && <h1 className="page-title">{route.label}</h1>}
+              {allowed && !path.startsWith(ADMIN_BASE) && path !== '/users' && (
+                <h1 className="page-title">{route.label}</h1>
+              )}
               {allowed && path === '/automations' && <Automations />}
               {allowed && path === '/runs' && <Runs />}
               {allowed && path === '/dictionary' && <Dictionary />}
               {allowed && path === '/promotions' && <Promotions />}
-              {allowed && path === '/users' && <Users />}
+              {allowed && path.startsWith(ADMIN_BASE) && <MoajwoAdmin path={path} />}
+              {allowed && path === '/users' && <Redirect to={`${ADMIN_BASE}/users`} />}
               {allowed && path === '/settings' && <Settings />}
               {allowed && path === '/account' && <Account />}
             </>
@@ -213,7 +216,7 @@ function Sidebar({ path }: { path: string }) {
       </div>
       <nav className="side-nav" aria-label="메뉴">
         {ROUTES.filter((r) => r.inMenu && r.roles.includes(me.role)).map((r) => (
-          <MenuLink key={r.path} to={r.path} label={r.label} active={path === r.path} />
+          <MenuLink key={r.path} to={r.path} label={r.label} active={isActiveMenu(r.path, path)} />
         ))}
         {/* 데이터 연결은 아직 준비 중: 누를 수 없게 두고 뱃지만 단다 */}
         <button type="button" className="side-link is-disabled" disabled aria-disabled="true">
@@ -224,7 +227,7 @@ function Sidebar({ path }: { path: string }) {
       {me.role !== 'owner' && (
         <p className="side-locked">
           <LockIcon />
-          {me.role === 'user' ? '관리 메뉴는 관리자 권한이 있어야 보입니다.' : '일부 메뉴는 소유자 권한이 있어야 보입니다.'}
+          관리 메뉴는 최고 관리자(소유자)만 볼 수 있습니다.
         </p>
       )}
       <div className="side-user">
@@ -249,10 +252,19 @@ function NotFound() {
   )
 }
 
-const ROLE_SHORT: Record<Role, string> = { user: '일반', admin: '관리자', owner: '소유자' }
+const ROLE_SHORT: Record<Role, string> = { user: '일반', owner: '최고 관리자' }
 
 function RoleBadge({ role }: { role: Role }) {
-  return <span className={`role-badge is-${role}`}>{ROLE_SHORT[role]}</span>
+  return <span className={`role-badge is-${role}`}>{ROLE_SHORT[role] ?? role}</span>
+}
+
+/** 예전 주소(/users)는 새 관리자 화면으로 바꿔 연다 (뒤로가기에 남지 않게 replace) */
+function Redirect({ to }: { to: string }) {
+  useEffect(() => {
+    window.history.replaceState(null, '', to)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  }, [to])
+  return null
 }
 
 function LockIcon() {
@@ -266,7 +278,7 @@ function LockIcon() {
 
 function Forbidden({ roles }: { roles: Role[] }) {
   const { me } = useAuth()
-  const need = roles.includes('admin') ? '관리자 또는 소유자' : '소유자'
+  const need = roles.includes('user') ? '로그인한 사용자' : '최고 관리자(소유자)'
   return (
     <section className="page-error" aria-label="권한 없음">
       <h1 className="page-title">
@@ -276,7 +288,7 @@ function Forbidden({ roles }: { roles: Role[] }) {
       <p>
         필요한 권한: <strong>{need}</strong> · 내 권한: <RoleBadge role={me.role} />
       </p>
-      <p>필요하면 관리자에게 권한을 요청하세요.</p>
+      <p>필요하면 최고 관리자에게 문의하세요.</p>
       <MenuLink to="/" label="홈으로" active={false} />
     </section>
   )

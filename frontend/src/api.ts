@@ -566,8 +566,8 @@ export async function runAutomation(
 
 // ---------------------------------------------------------------- 로그인·계정
 
-export type Role = 'user' | 'admin' | 'owner'
-export const ROLE_LABEL: Record<Role, string> = { user: '일반 사용자', admin: '관리자', owner: '소유자' }
+export type Role = 'user' | 'owner'
+export const ROLE_LABEL: Record<Role, string> = { user: '일반 사용자', owner: '최고 관리자(소유자)' }
 export type Me = { id: number; username: string; display_name: string; role: Role; role_label: string }
 
 const jsonBody = (body: unknown): RequestInit => ({
@@ -586,12 +586,25 @@ export async function fetchMe(): Promise<Me | null> {
   return json(res)
 }
 
+/** 승인 대기·반려·이용 중지 계정은 비밀번호가 맞을 때만 403과 함께 상태 안내가 온다 (오류 메시지로 보여준다). */
 export async function login(username: string, password: string): Promise<Me> {
   return json(await apiFetch(`${API_BASE}/auth/login`, { method: 'POST', ...jsonBody({ username, password }) }))
 }
 
 export async function setupOwner(body: { username: string; display_name: string; password: string }): Promise<Me> {
   return json(await apiFetch(`${API_BASE}/auth/setup`, { method: 'POST', ...jsonBody(body) }))
+}
+
+export type SignupResult = { username: string; status: AccountStatus; status_label: string; message: string }
+
+/** 가입 신청 (역할·상태는 서버가 정한다 — 일반 사용자·승인 대기). 세션은 생기지 않는다. */
+export async function signup(body: {
+  username: string
+  display_name: string
+  password: string
+  password_confirm: string
+}): Promise<SignupResult> {
+  return json(await apiFetch(`${API_BASE}/auth/signup`, { method: 'POST', ...jsonBody(body) }))
 }
 
 export async function logout(): Promise<void> {
@@ -606,40 +619,99 @@ export async function changePassword(current_password: string, new_password: str
   if (!res.ok) await json(res)
 }
 
+export type AccountStatus = 'pending' | 'active' | 'rejected' | 'suspended'
+export const ACCOUNT_STATUS_LABEL: Record<AccountStatus, string> = {
+  pending: '승인 대기',
+  active: '이용 중',
+  rejected: '가입 반려',
+  suspended: '이용 중지',
+}
+
 export type UserAccount = {
   id: number
   username: string
   display_name: string
   role: Role
   role_label: string
+  status: AccountStatus
+  status_label: string
+  status_reason: string | null
+  status_changed_at: string | null
   is_active: boolean
   created_at: string
   last_login_at: string | null
+  last_activity_at: string | null
 }
 
-export async function listUsers(): Promise<UserAccount[]> {
-  return json(await apiFetch(`${API_BASE}/users`))
+export async function listUsers(params: { q?: string; status?: AccountStatus } = {}): Promise<UserAccount[]> {
+  const query = new URLSearchParams()
+  if (params.q) query.set('q', params.q)
+  if (params.status) query.set('status', params.status)
+  const qs = query.toString()
+  return json(await apiFetch(`${API_BASE}/users${qs ? `?${qs}` : ''}`))
 }
 
+/** 최고 관리자가 직접 추가하는 계정 — 항상 일반 사용자, 승인 여부(status)를 명시한다. */
 export async function createUser(body: {
   username: string
   display_name: string
-  role: Role
+  status: 'active' | 'pending'
   password: string
 }): Promise<UserAccount> {
   return json(await apiFetch(`${API_BASE}/users`, { method: 'POST', ...jsonBody(body) }))
 }
 
-export async function updateUser(
-  id: number,
-  body: { display_name?: string; role?: Role; is_active?: boolean },
-): Promise<UserAccount> {
-  return json(await apiFetch(`${API_BASE}/users/${id}`, { method: 'PATCH', ...jsonBody(body) }))
+export type StatusAction = 'approve' | 'reject' | 'suspend' | 'resume'
+
+export async function changeUserStatus(id: number, action: StatusAction, reason: string | null): Promise<UserAccount> {
+  return json(await apiFetch(`${API_BASE}/users/${id}/${action}`, { method: 'POST', ...jsonBody({ reason }) }))
 }
 
 export async function resetPassword(id: number, password: string): Promise<void> {
   const res = await apiFetch(`${API_BASE}/users/${id}/password`, { method: 'POST', ...jsonBody({ password }) })
   if (!res.ok) await json(res)
+}
+
+// ---------------------------------------------------------------- 관리 화면 (/moajwoAdmin)
+
+export type PeriodCount = { total: number; inactive_accounts: number; no_owner: number }
+
+export type AdminOverview = {
+  start: string
+  end: string
+  timezone: string
+  generated_at: string
+  users: { status: AccountStatus; label: string; count: number }[]
+  owners: number
+  uploads: PeriodCount
+  runs: PeriodCount & { done: number; failed: number; review: number; running: number }
+}
+
+export async function fetchAdminOverview(start: string, end: string): Promise<AdminOverview> {
+  const qs = new URLSearchParams({ start, end }).toString()
+  return json(await apiFetch(`${API_BASE}/admin/overview?${qs}`))
+}
+
+export type AuditEvent = {
+  id: number
+  created_at: string
+  actor_name: string | null
+  target_id: number | null
+  target_name: string
+  action: string
+  action_label: string
+  before_status: string | null
+  after_status: string | null
+  before_label: string | null
+  after_label: string | null
+  role_change: string | null
+  reason: string | null
+  result: 'ok' | 'denied'
+  result_label: string
+}
+
+export async function fetchAudit(limit = 200): Promise<AuditEvent[]> {
+  return json(await apiFetch(`${API_BASE}/admin/audit?limit=${limit}`))
 }
 
 // ---------------------------------------------------------------- 대시보드·승격·설정

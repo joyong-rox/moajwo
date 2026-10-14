@@ -302,3 +302,122 @@ def test_kept_base_entries_do_not_duplicate_on_reupgrade(tmp_path: Path) -> None
     ).fetchone()[0]
     db.close()
     assert dup == [] and seoul == ("서울특별시(수정)", "upload") and alias == 1
+
+
+def test_0016_converts_existing_accounts_and_downgrade_restores_roles(tmp_path: Path) -> None:
+    """0016: 기존 소유자·활성 사용자는 이용 중, 비활성은 이용 중지(다시 켜지 않음), 관리자는 일반 사용자 + 세션 종료.
+    소유자 여럿·알 수 없는 역할은 바꾸지 않고 확인 필요로 남긴다. 계정 ID·파일 소유 관계는 그대로.
+    downgrade는 관리자 역할을 되돌린다."""
+    _alembic(tmp_path, "upgrade", "0014_direction_gu_sejong")  # 운영처럼: 계정이 있는 상태에서 0015·0016을 올린다
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.executemany(
+        "INSERT INTO users (id, username, display_name, password_hash, role, is_active, failed_logins)"
+        " VALUES (?, ?, ?, 'x', ?, ?, 0)",
+        [
+            (1, "boss", "BOSS", "owner", 1),
+            (2, "worker", "W", "user", 1),
+            (3, "manager", "M", "admin", 1),
+            (4, "old-admin", "OA", "admin", 0),
+            (5, "ops-user-20261012", "검증", "user", 0),
+            (6, "boss2", "B2", "owner", 1),
+            (7, "weird", "?", "auditor", 1),
+        ],
+    )
+    db.executemany(
+        "INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at)"
+        " VALUES (?, ?, '2026-10-12', '2099-01-01')",
+        [("h-boss", 1), ("h-worker", 2), ("h-manager", 3)],
+    )
+    db.execute(
+        "INSERT INTO source_files (original_name, stored_path, sha256, size_bytes, uploaded_by)"
+        " VALUES ('관리자파일.xlsx', 'uploads/x.xlsx', 'abc', 1, 3)"
+    )
+    db.commit()
+    db.close()
+
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    users = {r[0]: r[1:] for r in db.execute("SELECT username, id, role, status, is_active FROM users")}
+    assert users == {
+        "boss": (1, "owner", "active", 1),
+        "worker": (2, "user", "active", 1),  # 재승인 없이 이용 중
+        "manager": (3, "user", "active", 1),  # 관리자 → 일반 사용자 (활성 유지)
+        "old-admin": (4, "user", "suspended", 0),
+        "ops-user-20261012": (5, "user", "suspended", 0),  # 비활성 검증 계정은 다시 켜지 않는다
+        "boss2": (6, "owner", "active", 1),  # 소유자 여럿: 고르거나 강등하지 않음
+        "weird": (7, "auditor", "active", 1),  # 알 수 없는 역할: 바꾸지 않음
+    }
+    assert sorted(r[0] for r in db.execute("SELECT token_hash FROM auth_sessions")) == ["h-boss", "h-worker"]
+    assert db.execute("SELECT uploaded_by FROM source_files").fetchall() == [(3,)]
+    events = db.execute(
+        "SELECT target_name, action, before_role, after_role, result FROM account_events ORDER BY id"
+    ).fetchall()
+    assert ("manager", "role_migrated", "admin", "user", "ok") in events
+    assert ("old-admin", "role_migrated", "admin", "user", "ok") in events
+    assert ("weird", "migration_check", "auditor", "auditor", "denied") in events
+    assert {e[0] for e in events if e[1] == "migration_check" and e[2] == "owner"} == {"boss", "boss2"}
+    assert db.execute("SELECT count(*) FROM app_settings WHERE key = 'owner_setup'").fetchone()[0] == 1
+    db.close()
+
+    _alembic(tmp_path, "downgrade", "0015_owner_setup_marker")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    roles = dict(db.execute("SELECT username, role FROM users").fetchall())
+    assert roles["manager"] == roles["old-admin"] == "admin" and roles["worker"] == "user"
+    cols = [r[1] for r in db.execute("PRAGMA table_info(users)")]
+    assert "status" not in cols
+    assert not db.execute("SELECT name FROM sqlite_master WHERE name = 'account_events'").fetchall()
+    assert dict(db.execute("SELECT username, is_active FROM users").fetchall())["ops-user-20261012"] == 0
+    db.close()
+
+
+def test_0017_keeps_existing_sessions_and_downgrades(tmp_path: Path) -> None:
+    """0017: 기존 사용자·세션은 버전 0으로 맞춰져 지금 로그인이 그대로 유효하다. downgrade는 두 열만 지운다."""
+    import hashlib
+    from datetime import UTC, datetime, timedelta
+
+    from fastapi import HTTPException
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.auth import COOKIE_NAME, current_user
+
+    _alembic(tmp_path, "upgrade", "0016_account_status_roles")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute(
+        "INSERT INTO users (id, username, display_name, password_hash, role, is_active, failed_logins, status)"
+        " VALUES (1, 'boss', 'B', 'x', 'owner', 1, 0, 'active')"
+    )
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    token_hash = hashlib.sha256(b"existing-token").hexdigest()
+    db.execute(
+        "INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at) VALUES (?, 1, ?, ?)",
+        (token_hash, datetime.now(UTC).isoformat(), expires),
+    )
+    db.commit()
+    db.close()
+
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT auth_version FROM users").fetchall() == [(0,)]
+    assert db.execute("SELECT auth_version FROM auth_sessions").fetchall() == [(0,)]
+    db.close()
+
+    class Req:
+        cookies = {COOKIE_NAME: "existing-token"}
+
+    Session = sessionmaker(create_engine(f"sqlite:///{(tmp_path / 'moajwo.db').as_posix()}"))
+    with Session() as session:
+        assert current_user(Req(), session).username == "boss"  # 전환 후에도 기존 로그인 유지
+        try:
+            Req.cookies = {COOKIE_NAME: "unknown-token"}
+            current_user(Req(), session)
+            raise AssertionError("없는 토큰이 통과함")
+        except HTTPException as exc:
+            assert exc.status_code == 401
+
+    _alembic(tmp_path, "downgrade", "0016_account_status_roles")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert "auth_version" not in [r[1] for r in db.execute("PRAGMA table_info(users)")]
+    assert "auth_version" not in [r[1] for r in db.execute("PRAGMA table_info(auth_sessions)")]
+    assert db.execute("SELECT count(*) FROM auth_sessions").fetchone()[0] == 1
+    db.close()

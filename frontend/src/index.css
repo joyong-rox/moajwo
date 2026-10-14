@@ -2454,3 +2454,191 @@ body {
   padding-left: 18px;
 }
 
+
+/* ---- 회원가입·관리자 화면 (/moajwoAdmin) : login-notice·login-switch·login-link·admin-* 새 클래스만 사용 ---- */
+.login-notice {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-bg);
+  color: var(--text);
+}
+
+.login-switch {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.login-link {
+  min-height: 32px;
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.admin-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 12px;
+}
+
+.admin-tabs .admin-filter {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+.admin-badge.is-suspended {
+  border-color: var(--block-border);
+  background: var(--block-bg);
+  color: var(--block-text);
+}
+
+.admin-reason {
+  display: block;
+  margin-top: 2px;
+}
+
+.admin-panel {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+  overflow-wrap: anywhere;
+}
+
+.admin-panel h3 {
+  margin: 0 0 6px;
+}
+
+.admin-panel p {
+  margin: 0 0 8px;
+}
+
+.admin-panel > label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.admin-panel textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+}
+
+.admin-buttons {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.admin-users-table .admin-row-actions {
+  white-space: normal;
+}
+
+.admin-help {
+  margin-top: 16px;
+}
+
+.admin-help summary {
+  min-height: 32px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.admin-help ul {
+  margin: 8px 0;
+  padding-left: 20px;
+}
+
+.admin-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.admin-choice label {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+}
+
+/* 표가 있는 관리 화면은 실행 기록처럼 본문 폭을 넓게 쓴다 */
+.shell-main .admin-wide {
+  box-sizing: border-box;
+  width: min(1120px, calc(100vw - var(--shell-side) - 32px));
+  margin-left: 50%;
+  transform: translateX(-50%);
+}
+
+.admin-buttons button {
+  white-space: nowrap;
+}
+
+@media (min-width: 1101px) {
+  .admin-users-table th,
+  .admin-users-table td {
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+
+  .admin-users-table .admin-row-actions {
+    min-width: 200px;
+  }
+
+  .admin-audit-table td[data-label='사유'],
+  .admin-users-table td[data-label='표시 이름'] {
+    min-width: 120px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
+
+/* 관리 표는 열이 많아 1100px 이하(태블릿·좁은 노트북)에서도 행마다 카드로 보여준다 (실행 기록의 좁은 화면 방식과 같음) */
+@media (max-width: 1100px) {
+  .admin-users-table thead,
+  .admin-audit-table thead {
+    display: none;
+  }
+
+  .admin-users-table tr,
+  .admin-audit-table tr {
+    display: block;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .admin-users-table td,
+  .admin-audit-table td {
+    display: flex;
+    gap: 8px;
+    padding: 2px 0;
+    border-bottom: none;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .admin-users-table td::before,
+  .admin-audit-table td::before {
+    content: attr(data-label);
+    flex: 0 0 96px;
+    color: var(--muted);
+  }
+}

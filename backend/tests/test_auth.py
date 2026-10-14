@@ -70,16 +70,17 @@ def _client(app: Any, username: str | None = None, password: str = "test-passwor
 def accounts(app_real_login) -> dict[str, TestClient]:
     owner = _client(app_real_login, "test-owner")
     made = {"owner": owner}
-    for username, role in [
-        ("admin1", "admin"),
-        ("user1", "user"),
-        ("user2", "user"),
-        ("user3", "user"),
-        ("user4", "user"),
-    ]:
+    # 0016: 역할은 owner(최고 관리자)·user 두 가지.
+    # 예전 admin1이 맡던 '전체 조회·남의 것 변경 불가' 검사는 owner로 옮겼다
+    for username in ["user1", "user2", "user3", "user4"]:
         res = owner.post(
             "/users",
-            json={"username": username, "display_name": username.upper(), "role": role, "password": "pass-" + username},
+            json={
+                "username": username,
+                "display_name": username.upper(),
+                "status": "active",
+                "password": "pass-" + username,
+            },
         )
         assert res.status_code == 201, res.text
         made[username] = _client(app_real_login, username, "pass-" + username)
@@ -125,7 +126,7 @@ def test_login_required_and_session_lifecycle(app_real_login, accounts) -> None:
 
 def test_lockout_after_repeated_failures(app_real_login, accounts) -> None:
     accounts["owner"].post(
-        "/users", json={"username": "locky", "display_name": "L", "role": "user", "password": "pass-locky"}
+        "/users", json={"username": "locky", "display_name": "L", "status": "active", "password": "pass-locky"}
     )
     c = _client(app_real_login)
     for _ in range(5):
@@ -135,30 +136,39 @@ def test_lockout_after_repeated_failures(app_real_login, accounts) -> None:
 
 
 def test_role_gates(accounts) -> None:
-    user, admin, owner = accounts["user1"], accounts["admin1"], accounts["owner"]
-    # 일반 사용자: 사전 관리·승격 심사·사용자 관리·설정 불가
+    user, owner = accounts["user1"], accounts["owner"]
+    # 일반 사용자: 사전 관리·승격 심사·사용자 관리·설정·관리 화면 API 불가
     assert user.post("/glossary/aliases", json={"alias": "행안", "target_code": "1741000"}).status_code == 403
     assert user.get("/admin/promotions").status_code == 403
     assert user.get("/admin/standard-terms").status_code == 403
     assert user.get("/users").status_code == 403
     assert user.get("/settings").status_code == 403
+    assert user.get("/admin/overview").status_code == 403
+    assert user.get("/admin/audit").status_code == 403
     assert user.get("/glossary/resolve", params={"name": "행정안전부"}).status_code == 200  # 검증에 쓰는 조회는 가능
-    # 관리자: 사전·승격·사용자는 가능, 설정과 관리자·소유자 계정 관리는 불가
-    assert admin.get("/admin/promotions").status_code == 200
-    assert admin.get("/users").status_code == 200
-    assert admin.get("/settings").status_code == 403
-    boss = {"username": "boss2", "display_name": "B", "role": "owner", "password": "pass-boss2"}
-    res = admin.post("/users", json=boss)
-    assert res.status_code == 403
+    # 0016: 중간 관리자(admin)·추가 소유자는 만들 수 없다 (예전: 관리자는 403, 소유자는 가능 → 이제 역할 값 자체를 거부)
+    for role in ("admin", "owner"):
+        boss = {
+            "username": f"boss-{role}",
+            "display_name": "B",
+            "role": role,
+            "status": "active",
+            "password": "pass-boss2",
+        }
+        assert owner.post("/users", json=boss).status_code == 422
+    assert not [u for u in owner.get("/users").json() if u["username"].startswith("boss-")]
     owner_id = next(u["id"] for u in owner.get("/users").json() if u["username"] == "test-owner")
-    assert admin.patch(f"/users/{owner_id}", json={"is_active": False}).status_code == 403
-    # 소유자: 설정 가능, 자기 자신 비활성화·마지막 소유자 강등은 불가
+    # 최고 관리자: 설정 가능, 자기 계정의 이용 중지·일반 사용자로 변경은 불가 (역할·활성은 PATCH로 바꿀 수 없음)
     assert owner.get("/settings").status_code == 200
-    assert owner.patch(f"/users/{owner_id}", json={"role": "user"}).status_code == 409
+    assert owner.post(f"/users/{owner_id}/suspend", json={}).status_code == 409
+    assert owner.patch(f"/users/{owner_id}", json={"role": "user"}).status_code == 422
+    assert owner.patch(f"/users/{owner_id}", json={"is_active": False}).status_code == 422
+    me = owner.get("/auth/me").json()
+    assert me["role"] == "owner" and me["role_label"] == "최고 관리자(소유자)"
 
 
 def test_users_see_only_their_own_records(accounts) -> None:
-    u1, u2, admin = accounts["user1"], accounts["user2"], accounts["admin1"]
+    u1, u2, admin = accounts["user1"], accounts["user2"], accounts["owner"]  # 0016: 전체 조회 = 최고 관리자
     fid = _upload(u1, name="u1자료.xlsx")
     assert fid in [f["id"] for f in u1.get("/files").json()]
     assert fid not in [f["id"] for f in u2.get("/files").json()]
@@ -185,7 +195,7 @@ def test_users_see_only_their_own_records(accounts) -> None:
     assert u2.get(f"/runs/{run['id']}").status_code == 404
     assert u2.get(f"/runs/{run['id']}/download").status_code == 404
     assert u2.get(f"/reviews/{review['id']}").status_code == 404
-    # 관리자는 전체 조회(읽기 전용)
+    # 최고 관리자는 전체 조회(읽기 전용)
     assert run["id"] in [r["id"] for r in admin.get("/runs").json()]
     assert admin.get(f"/runs/{run['id']}/download").status_code == 200
     seen = admin.get(f"/reviews/{review['id']}").json()
@@ -193,9 +203,9 @@ def test_users_see_only_their_own_records(accounts) -> None:
 
 
 def test_admin_cannot_modify_result_data(accounts) -> None:
-    u1, admin, owner = accounts["user1"], accounts["admin1"], accounts["owner"]
+    u1, admin = accounts["user1"], accounts["owner"]  # 0016: 예전 관리자·소유자 둘 다 → 최고 관리자
     run = u1.get("/runs").json()[0]
-    for client in (admin, owner):
+    for client in (admin,):
         for method in ("put", "patch", "delete"):
             assert getattr(client, method)(f"/runs/{run['id']}").status_code == 405
         assert client.post(f"/runs/{run['id']}/changes", json={}).status_code == 405
@@ -226,7 +236,7 @@ def _confirm_promo_column(c: TestClient) -> None:
 
 
 def test_promotion_after_three_users_and_admin_approval(accounts) -> None:
-    admin = accounts["admin1"]
+    admin = accounts["owner"]  # 0016: 승격 심사 = 최고 관리자
     _confirm_promo_column(accounts["user1"])
     _confirm_promo_column(accounts["user1"])  # 같은 사용자가 여러 번 승인해도 1명
     _confirm_promo_column(accounts["user2"])
@@ -257,7 +267,7 @@ def test_promotion_after_three_users_and_admin_approval(accounts) -> None:
 
 
 def test_dashboard_counts_and_savings(accounts) -> None:
-    u1, u2, owner, admin = accounts["user1"], accounts["user2"], accounts["owner"], accounts["admin1"]
+    u1, u2, owner = accounts["user1"], accounts["user2"], accounts["owner"]
     mine = u1.get("/dashboard").json()
     assert mine["scope"] == "mine"
     assert mine["month_runs"] == len(u1.get("/runs").json()) >= 1
@@ -266,7 +276,7 @@ def test_dashboard_counts_and_savings(accounts) -> None:
     assert u2.get("/dashboard").json()["month_runs"] == 0
 
     # 소유자가 수동 기준 소요 시간을 정하면 절약 시간 = 기준 - 실제 처리 시간
-    assert admin.put("/settings", json={"manual_baseline_minutes": 30}).status_code == 403
+    assert u2.put("/settings", json={"manual_baseline_minutes": 30}).status_code == 403  # 0016: admin1 → 일반 사용자
     assert owner.put("/settings", json={"manual_baseline_minutes": 30}).json()["manual_baseline_minutes"] == 30
     runs = u1.get("/runs").json()
     done = [r for r in runs if r["status"] == "done"]
@@ -274,7 +284,7 @@ def test_dashboard_counts_and_savings(accounts) -> None:
     mine = u1.get("/dashboard").json()
     assert mine["saved_runs"] == len(done) and mine["runs_without_baseline"] == 0
     assert abs(mine["saved_seconds"] - expected) < 1
-    everyone = admin.get("/dashboard").json()
+    everyone = owner.get("/dashboard").json()
     assert everyone["scope"] == "all" and everyone["month_runs"] >= mine["month_runs"]
 
     # 통합 전 발견한 오류: 합계 불일치(차단)가 있는 자료 → 다시 검사해도 같은 오류는 한 번만
@@ -360,7 +370,7 @@ def _pii_ack(fid: int) -> object:
 
 def test_review_cannot_change_other_users_file(accounts) -> None:
     """교차 검증 ③: 관리자·소유자가 남의 파일로 자기 검토를 만들어 승인해도 원본의 매핑·개인정보 확인은 그대로."""
-    u3, admin, owner = accounts["user3"], accounts["admin1"], accounts["owner"]
+    u3, owner = accounts["user3"], accounts["owner"]  # 0016: 예전 관리자·소유자 둘 다 → 최고 관리자
     column = "교차검증 전용 메모"  # 사전·승격 이름에 없는 열 → 확인 필요 항목
     rows = [
         ["기관명", column, "담당 연락처"],
@@ -369,12 +379,12 @@ def test_review_cannot_change_other_users_file(accounts) -> None:
     ]
     fid = _upload(u3, rows, "u3개인정보.xlsx")
     # 직접 변경은 막혀 있다 (기존 동작)
-    direct = admin.put(
+    direct = owner.put(
         f"/files/{fid}/mapping/decisions",
         json={"decisions": [{"sheet": "현황", "column": column, "field_key": "note"}]},
     )
     assert direct.status_code in (403, 404)
-    for client in (admin, owner):
+    for client in (owner,):
         review = client.post("/reviews", json={"file_ids": [fid]})
         assert review.status_code == 201, review.text  # 조회용 검토는 만들 수 있다
         review = review.json()
@@ -403,7 +413,7 @@ def test_recheck_and_automation_cannot_write_other_users_file(accounts) -> None:
     from app.models import Automation, User
     from app.review import column_rule_key
 
-    u4, admin = accounts["user4"], accounts["admin1"]
+    u4, admin = accounts["user4"], accounts["owner"]  # 0016: admin1 → 최고 관리자
     victim = _upload(u4, name="u4대상.xlsx")
     mine = _upload(admin, name="admin본인.xlsx")
     own = admin.put(  # 관리자 자기 파일의 확정 → 교체 시 남의 파일로 복사되면 안 된다
@@ -417,7 +427,7 @@ def test_recheck_and_automation_cannot_write_other_users_file(accounts) -> None:
     assert _decision_rows(victim) == []
 
     with SessionLocal() as db:
-        admin_id = db.query(User.id).filter(User.username == "admin1").scalar()
+        admin_id = db.query(User.id).filter(User.username == "test-owner").scalar()
         automation = Automation(
             name="우회 확인",
             owner_id=admin_id,
@@ -486,7 +496,7 @@ def test_pii_column_names_masked_in_api_and_ids_keep_decisions(accounts) -> None
 
 def test_review_items_report_read_only_per_file(accounts) -> None:
     """후속 검증 ⑤: 검토 응답이 항목별 변경 가능 여부(can_change)를 알려 준다 — 여러 사람의 파일이 섞인 검토 포함."""
-    u3, admin = accounts["user3"], accounts["admin1"]
+    u3, admin = accounts["user3"], accounts["owner"]  # 0016: admin1 → 최고 관리자
     rows = [["기관명", "후속검증 전용 메모"], ["행정안전부", "정상"], ["기상청", "검토"]]
     other = _upload(u3, rows, "u3후속.xlsx")
     mine = _upload(admin, [["기관명", "관리자 전용 메모"], ["행정안전부", "정상"]], "admin후속.xlsx")
@@ -557,7 +567,7 @@ def test_pii_values_masked_in_validation_review_and_history(accounts, caplog) ->
 def test_result_workbook_pii_policy(accounts) -> None:
     """병합 전 보완 ④: 머리글에만 개인정보가 있어도 탐지·확인 절차에 들어가고, 포함을 거부한 파일은 결과·변경 내역에
     없으며, 승인한 파일의 원문은 결과 엑셀에 들어갈 수 있다(정책). 결과 다운로드·실행 기록은 권한이 있는 사람만."""
-    u4, u2, admin = accounts["user4"], accounts["user2"], accounts["admin1"]
+    u4, u2, admin = accounts["user4"], accounts["user2"], accounts["owner"]  # 0016: admin1 → 최고 관리자
     header_only = _upload(
         u4, [["기관명", "erin@example.com", "집행액"], ["행정안전부", "a", 1], ["기상청", "b", 2]], "머리글만.xlsx"
     )

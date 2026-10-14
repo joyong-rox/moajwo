@@ -26,6 +26,7 @@ def logged_in_owner():
             password_hash=hash_password(TEST_PASSWORD),
             role="owner",
             is_active=True,
+            status="active",  # 0016: 계정 상태 기본값이 승인 대기라 명시 (최초 소유자는 이용 중)
             failed_logins=0,
         )
         db.add(user)

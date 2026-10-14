@@ -12,6 +12,6 @@ export function useAuth(): AuthValue {
   return value
 }
 
-export const MANAGERS: Role[] = ['admin', 'owner']
+export const MANAGERS: Role[] = ['owner'] // 전체 기록 조회·관리 기능 (예전 관리자 역할은 일반 사용자로 바뀜)
 
 export const isManager = (role: Role) => MANAGERS.includes(role)
