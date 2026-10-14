@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 운영 반영 (Git Bash). 사용법: scripts/deploy.sh <승인한 PR HEAD 커밋 SHA>
+# 운영 반영 (Git Bash). 사용법: scripts/deploy.sh <승인한 PR HEAD 커밋 SHA> <반영 전 리비전>
+#   예: scripts/deploy.sh 8be8436… 0017_auth_version   (반영 전 리비전이 다르면 정지하지 않고 멈춘다)
 #
 # 실패하면 그 자리에서 멈춘다. set -e에 맡기지 않고, 판단에 쓰는 모든 조회는 **종료 코드와 필수 결과**를 함께 검사한다.
 # (조회가 실패한 것과, 조회는 성공했는데 결과가 비어 있는 것을 구분한다.)
@@ -7,7 +8,15 @@
 #   2) 미커밋 변경 없음 (backend/frontend의 추적하지 않는 파일 포함 — 빌드에 들어가므로)
 #   3) 이미지 빌드 성공 (실패하면 서비스는 그대로)
 #   4) 서비스 정지 성공 · 실행 중 서비스 0개 · 데이터 볼륨을 쓰는 컨테이너 0개 (각 조회가 성공한 경우에만 '없음'으로 판단)
-#   5) 백업 성공 · 백업 파일 존재·압축 무결성 · DB 무결성 ok · 리비전이 반영 전 리비전과 같음
+#   5) 백업과 검증 — 운영 볼륨 값과 백업 안의 값을 구분해 기록하고 비교한다
+#      a. 정지 상태의 운영 DB(읽기 전용): 리비전 · 모든 테이블의 행 수
+#      b. 볼륨 백업 생성 · gzip 압축 검사 · 목록에 moajwo.db 있음 · sha256 기록
+#      c. 백업에서 DB를 꺼내 별도 임시 위치(운영 볼륨을 마운트하지 않은 one-off 컨테이너의 /tmp)에 두고 읽기 전용으로
+#         무결성(integrity_check) · 리비전 · 모든 테이블의 행 수 확인
+#      d. a와 c 비교: 리비전 = 반영 전 리비전, 테이블 목록·행 수 모두 같음 (비교 대상은 고정하지 않고 원본 DB의 테이블 전체,
+#         문서의 핵심 테이블은 따로 표시)
+#      e. 백업 파일 sha256을 호스트에서 다시 계산해 b의 기록과 같음
+#      하나라도 실패하거나 필요한 결과가 빠지면 전환하지 않는다. 백업 검증 중 운영 DB는 읽기만 한다.
 #   → 4·5가 실패하면, 마이그레이션이 시작되지 않았음(리비전 그대로)을 **확인할 수 있을 때만** 기존 컨테이너를 다시 시작한다.
 #     확인할 수 없으면 재시작하지 않고 현재 상태와 수동 복구 절차를 보고한다.
 #   6) 백업 성공을 확인한 뒤에만 새 이미지로 전환하고, 전환 후 리비전·이미지 조회가 모두 성공해야 '전환 완료'로 보고한다.
@@ -17,11 +26,26 @@
 #   DEPLOY_VOLUME        데이터 볼륨 이름 (기본 moajwo_moajwo-data)
 #   DEPLOY_BACKUP_DIR    백업 폴더 (기본 backups)
 #   DEPLOY_BACKUP_IMAGE  백업 one-off에 쓸 이미지 (기본: 반영 전 backend 이미지)
+#   DEPLOY_TAG_REPO      롤백 태그 이름 앞부분 (기본 moajwo → moajwo-backend:rollback-<시각>). 격리 시험이 운영 이름으로 태그를 만들지 않게
 set -uo pipefail
 export MSYS_NO_PATHCONV=1
 
 APPROVED="${1:-}"
-[ -n "$APPROVED" ] || { echo "사용법: scripts/deploy.sh <승인한 PR HEAD 커밋 SHA>"; exit 2; }
+EXPECT_PREV="${2:-}"
+[ -n "$APPROVED" ] && [ -n "$EXPECT_PREV" ] || { echo "사용법: scripts/deploy.sh <승인한 PR HEAD 커밋 SHA> <반영 전 리비전>"; exit 2; }
+# 문서에서 비교 결과를 따로 보여 줄 핵심 테이블 (이 리비전에 없으면 '없음'으로 기록 — 비교 자체는 원본 DB의 모든 테이블)
+KEY_TABLES="users account_events auth_sessions mapping_decisions source_files"
+# 리비전·행 수(전체 테이블)·(full이면) 무결성·저널 모드를 읽기 전용으로 읽는다. 마지막 줄 'end ok'가 없으면 결과 누락으로 본다.
+CHECK_PY='import sqlite3, sys
+c = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+print("revision", c.execute("select version_num from alembic_version").fetchone()[0])
+if sys.argv[2] == "full":
+    print("integrity", c.execute("pragma integrity_check").fetchone()[0])
+    print("journal", c.execute("pragma journal_mode").fetchone()[0])
+names = [r[0] for r in c.execute("select name from sqlite_master where type = ? and name not like ? order by name", ("table", "sqlite_%"))]
+for n in names:
+    print("rows", n, c.execute("select count(*) from [" + n + "]").fetchone()[0])
+print("end ok")'
 read -r -a COMPOSE_ARGS <<< "${DEPLOY_COMPOSE_ARGS:-}"
 VOLUME="${DEPLOY_VOLUME:-moajwo_moajwo-data}"
 BACKUP_DIR="${DEPLOY_BACKUP_DIR:-backups}"
@@ -139,9 +163,11 @@ OLD_F=$(image_of "$F_CID") || fail "frontend 컨테이너의 이미지 ID를 확
 PREV_LINE=$(current_revision) || fail "반영 전 리비전을 읽을 수 없음"
 PREV=$(printf '%s\n' "$PREV_LINE" | grep -o '^[0-9a-z_]*')
 [ -n "$PREV" ] || fail "반영 전 리비전 형식을 알 수 없음: $PREV_LINE"
+[ "$PREV" = "$EXPECT_PREV" ] || fail "반영 전 리비전이 $PREV 입니다 (예상 $EXPECT_PREV). 원인을 확인하기 전까지 정지·전환하지 않습니다"
 TAG="rollback-$TS"
-docker tag "$OLD_B" "moajwo-backend:$TAG" 2>>"$LOG" && docker tag "$OLD_F" "moajwo-frontend:$TAG" 2>>"$LOG" || fail "롤백 태그를 만들 수 없음"
-log "반영 전 리비전 $PREV · backend ${OLD_B:7:12} · frontend ${OLD_F:7:12} · 롤백 태그 $TAG"
+TAG_REPO="${DEPLOY_TAG_REPO:-moajwo}"
+docker tag "$OLD_B" "$TAG_REPO-backend:$TAG" 2>>"$LOG" && docker tag "$OLD_F" "$TAG_REPO-frontend:$TAG" 2>>"$LOG" || fail "롤백 태그를 만들 수 없음"
+log "반영 전 리비전 $PREV (예상과 같음) · backend ${OLD_B:7:12} · frontend ${OLD_F:7:12} · 롤백 태그 $TAG_REPO-backend·frontend:$TAG"
 
 log "== 3. 새 이미지 빌드 (서비스 중단 없음)"
 dc build >>"$LOG" 2>&1 || fail "이미지 빌드 실패 — 기존 서비스는 그대로 동작 중"
@@ -159,17 +185,85 @@ log "정지 확인 (두 조회 모두 성공 · 실행 중 서비스·볼륨 사
 log "== 5. 백업 (볼륨 전체 한 시점) 과 검증"
 ARCHIVE="moajwo-data-$TS.tgz"
 BACKUP_IMAGE="${DEPLOY_BACKUP_IMAGE:-$OLD_B}"
-docker run --rm --entrypoint sh -v "$VOLUME:/data:ro" -v "$WIN_BACKUP_DIR:/backup" "$BACKUP_IMAGE" -c \
-  "tar czf /backup/$ARCHIVE -C /data . && gzip -t /backup/$ARCHIVE && tar tzf /backup/$ARCHIVE | grep -qx './moajwo.db' && python -c \"import sqlite3,hashlib; c=sqlite3.connect('file:/data/moajwo.db?mode=ro', uri=True); print('revision', c.execute('select version_num from alembic_version').fetchone()[0]); print('integrity', c.execute('pragma integrity_check').fetchone()[0]); print('journal', c.execute('pragma journal_mode').fetchone()[0]); print('sha256', hashlib.sha256(open('/backup/$ARCHIVE','rb').read()).hexdigest())\"" \
-  >"$BACKUP_DIR/moajwo-data-$TS.txt" 2>>"$LOG"
+SRC_TXT="$BACKUP_DIR/moajwo-data-$TS.source.txt"   # a. 운영 볼륨(정지 상태)에서 읽은 값
+BK_TXT="$BACKUP_DIR/moajwo-data-$TS.backup.txt"    # c. 백업에서 꺼낸 DB에서 읽은 값
+SUM_TXT="$BACKUP_DIR/moajwo-data-$TS.txt"          # 요약 (검증 결과·sha256)
+complete() { grep -qx "end ok" "$1" && grep -q '^revision ' "$1" && grep -q '^rows ' "$1"; }
+bk_fail() {  # 백업을 만든 뒤의 검증 실패: 이 백업을 '검증 안 됨'으로 남기고(복원에 쓰지 않게) 중단 처리
+  printf 'archive %s\nverified no\nreason %s\n' "$ARCHIVE" "$*" >"$SUM_TXT"
+  abort_after_stop "$* — 백업 $ARCHIVE 는 검증되지 않았으므로 복원에 쓰지 않습니다"
+}
+
+log "5a. 운영 볼륨(정지 상태, 읽기 전용)의 리비전·행 수"
+docker run --rm --label moajwo.step=source-check --entrypoint python \
+  -v "$VOLUME:/data:ro" "$BACKUP_IMAGE" -c "$CHECK_PY" /data/moajwo.db rows >"$SRC_TXT" 2>>"$LOG"
 RC=$?
-cat "$BACKUP_DIR/moajwo-data-$TS.txt" >>"$LOG" 2>/dev/null
-[ "$RC" -eq 0 ] || abort_after_stop "백업 명령 실패 (종료 코드 $RC)"
-[ -s "$BACKUP_DIR/$ARCHIVE" ] || abort_after_stop "백업 파일이 없거나 비어 있음"
-grep -qx "integrity ok" "$BACKUP_DIR/moajwo-data-$TS.txt" || abort_after_stop "DB 무결성 검사 실패"
-grep -qx "revision $PREV" "$BACKUP_DIR/moajwo-data-$TS.txt" || abort_after_stop "백업의 리비전이 반영 전 리비전($PREV)과 다름"
-SHA_LINE=$(grep '^sha256 ' "$BACKUP_DIR/moajwo-data-$TS.txt") || abort_after_stop "백업 sha256 기록이 없음"
-log "백업 확인: $ARCHIVE ($SHA_LINE)"
+[ "$RC" -eq 0 ] || abort_after_stop "운영 볼륨 DB 조회 실패 (종료 코드 $RC) — 백업·전환하지 않음"
+complete "$SRC_TXT" || abort_after_stop "운영 볼륨 DB 조회 결과가 불완전함 (리비전·행 수·끝 표시 누락)"
+SRC_REV=$(sed -n 's/^revision //p' "$SRC_TXT")
+[ "$SRC_REV" = "$PREV" ] || abort_after_stop "정지 상태 운영 DB의 리비전($SRC_REV)이 반영 전 리비전($PREV)과 다름"
+log "[운영 볼륨] 리비전 $SRC_REV · 테이블 $(grep -c '^rows ' "$SRC_TXT")개"
+
+log "5b. 백업 생성 · 압축 검사 · sha256 기록"
+SHA_REC=$(docker run --rm --label moajwo.step=backup --entrypoint sh -v "$VOLUME:/data:ro" -v "$WIN_BACKUP_DIR:/backup" "$BACKUP_IMAGE" -c \
+  "tar czf /backup/$ARCHIVE -C /data . && gzip -t /backup/$ARCHIVE && tar tzf /backup/$ARCHIVE | grep -qx './moajwo.db' && sha256sum /backup/$ARCHIVE | cut -d' ' -f1" \
+  2>>"$LOG")
+RC=$?
+[ "$RC" -eq 0 ] || bk_fail "백업 생성·압축 검사 실패 (종료 코드 $RC)"
+[ -s "$BACKUP_DIR/$ARCHIVE" ] || bk_fail "백업 파일이 없거나 비어 있음"
+SHA_REC=$(printf '%s\n' "$SHA_REC" | head -1)
+case "$SHA_REC" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) [ "${#SHA_REC}" -eq 64 ] || bk_fail "백업 sha256 기록 형식이 잘못됨" ;;
+  *) bk_fail "백업 sha256 기록이 없음" ;; esac
+log "[백업 파일] $ARCHIVE · 압축 검사 ok · moajwo.db 포함 · sha256 $SHA_REC"
+
+log "5c. 백업에서 DB를 꺼내 별도 임시 위치에서 읽기 전용 검사 (운영 볼륨은 마운트하지 않음)"
+docker run --rm --label moajwo.step=backup-check -e CHECK_PY="$CHECK_PY" -e ARCHIVE="$ARCHIVE" --entrypoint sh \
+  -v "$WIN_BACKUP_DIR:/backup:ro" "$BACKUP_IMAGE" -c \
+  'set -e; d=$(mktemp -d); tar xzf "/backup/$ARCHIVE" -C "$d" --wildcards "./moajwo.db*"; test -s "$d/moajwo.db"; python -c "$CHECK_PY" "$d/moajwo.db" full' \
+  >"$BK_TXT" 2>>"$LOG"
+RC=$?
+[ "$RC" -eq 0 ] || bk_fail "백업에서 DB를 꺼내거나 여는 데 실패 (종료 코드 $RC) — 전환하지 않음"
+complete "$BK_TXT" || bk_fail "백업 DB 검사 결과가 불완전함 (리비전·행 수·끝 표시 누락)"
+BK_INTEGRITY=$(sed -n 's/^integrity //p' "$BK_TXT")
+[ "$BK_INTEGRITY" = "ok" ] || bk_fail "백업 DB 무결성 검사 실패: ${BK_INTEGRITY:-결과 없음}"
+BK_REV=$(sed -n 's/^revision //p' "$BK_TXT")
+log "[백업 DB] 무결성 $BK_INTEGRITY · 리비전 $BK_REV · 저널 $(sed -n 's/^journal //p' "$BK_TXT") · 테이블 $(grep -c '^rows ' "$BK_TXT")개"
+
+log "5d. 운영 볼륨(정지 상태)과 백업 DB 비교 — 원본 DB의 모든 테이블 (핵심: $KEY_TABLES)"
+[ "$BK_REV" = "$SRC_REV" ] || bk_fail "리비전 불일치: 운영 볼륨 $SRC_REV · 백업 $BK_REV"
+MISMATCH=0
+while read -r _ table src_n; do
+  bk_n=$(awk -v t="$table" '$1 == "rows" && $2 == t { print $3 }' "$BK_TXT")
+  case " $KEY_TABLES " in *" $table "*) name="$table (핵심)" ;; *) name="$table" ;; esac
+  if [ "$bk_n" = "$src_n" ]; then
+    log "  [일치] $name: 운영 볼륨 $src_n · 백업 $bk_n"
+  else
+    MISMATCH=1
+    log "  [불일치] $name: 운영 볼륨 $src_n · 백업 ${bk_n:-없음}"
+  fi
+done < <(grep '^rows ' "$SRC_TXT")
+for table in $KEY_TABLES; do
+  grep -q "^rows $table " "$SRC_TXT" || log "  [없음] $table (핵심): 이 리비전의 DB에 없는 테이블 — 비교 대상 아님"
+done
+EXTRA=$(comm -13 <(awk '$1 == "rows" { print $2 }' "$SRC_TXT" | sort) <(awk '$1 == "rows" { print $2 }' "$BK_TXT" | sort))
+[ -z "$EXTRA" ] || { MISMATCH=1; log "  [불일치] 백업에만 있는 테이블: $(echo $EXTRA)"; }
+[ "$MISMATCH" -eq 0 ] || bk_fail "운영 볼륨과 백업 DB의 테이블·행 수가 다름 — 전환하지 않음"
+log "비교 결과: 리비전 같음 ($SRC_REV) · 테이블 $(grep -c '^rows ' "$SRC_TXT")개 행 수 모두 같음"
+
+log "5e. 백업 파일 sha256 재확인 (호스트에서 다시 계산)"
+SHA_NOW=$(sha256sum "$BACKUP_DIR/$ARCHIVE" 2>>"$LOG" | cut -d' ' -f1) && [ -n "$SHA_NOW" ] || bk_fail "백업 sha256을 다시 계산할 수 없음"
+[ "$SHA_NOW" = "$SHA_REC" ] || bk_fail "백업 sha256 불일치 (기록 $SHA_REC · 재계산 $SHA_NOW)"
+{
+  echo "archive $ARCHIVE"
+  echo "verified yes"
+  echo "sha256 $SHA_REC"
+  echo "source_revision $SRC_REV (운영 볼륨, 정지 상태)"
+  echo "backup_revision $BK_REV (백업에서 꺼낸 DB)"
+  echo "backup_integrity $BK_INTEGRITY (백업에서 꺼낸 DB)"
+  echo "compared_tables $(grep -c '^rows ' "$SRC_TXT") (행 수 모두 같음)"
+} >"$SUM_TXT"
+SHA_LINE="sha256 $SHA_REC"
+log "백업 확인: $ARCHIVE ($SHA_LINE) — 운영 볼륨 값 $SRC_TXT · 백업 DB 값 $BK_TXT"
 
 log "== 6. 새 이미지로 전환 (백업 성공 확인 후)"
 ROLLBACK_HINT="docs/DEPLOY.md 4장 (백업 $ARCHIVE, 롤백 태그 $TAG, 반영 전 리비전 $PREV)"
