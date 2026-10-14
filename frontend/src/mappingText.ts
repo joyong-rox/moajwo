@@ -6,6 +6,7 @@ export const STATUS_TEXT: Record<MappingStatus, string> = {
   auto: '자동 제안',
   review: '확인 필요',
   unresolved: '미해결',
+  unanalyzed: '미분석',
 }
 
 export const STATUS_HELP: Record<MappingStatus, string> = {
@@ -13,6 +14,7 @@ export const STATUS_HELP: Record<MappingStatus, string> = {
   auto: '규칙·사전이 제안한 매핑입니다. 아직 확정 전이며, 사전 검토에서 자동 적용 항목으로 보입니다.',
   review: '자동으로 정하지 못해 사람이 확인해야 하는 제안입니다.',
   unresolved: '알맞은 표준 항목을 찾지 못했습니다.',
+  unanalyzed: "아직 '열 매핑 분석'을 하지 않은 열입니다 (저장된 확정값이 있으면 사용자 확정으로 보입니다).",
 }
 
 export const METHOD_LABEL: Record<MappingMethod, string> = {

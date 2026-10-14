@@ -3001,6 +3001,17 @@ body {
   color: var(--warning-text);
 }
 
+.mw-evidence {
+  margin: 4px 0;
+  font-size: 0.85rem;
+}
+
+.mw-evidence ul {
+  margin: 2px 0;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+
 .mw-files {
   display: grid;
   gap: 8px;

@@ -61,8 +61,10 @@ export const PII_LABEL: Record<PiiType, string> = { rrn: '주민등록번호', m
 export type PiiItem = { type: PiiType; sheet: string; row: number; column: string; masked: string }
 export type PiiSummary = { counts: Record<PiiType, number>; items: PiiItem[]; acknowledged: boolean }
 
-export type MappingStatus = 'auto' | 'review' | 'unresolved' | 'confirmed'
-export type MappingMethod = 'exact' | 'standard' | 'learned' | 'exact_part' | 'similarity' | 'pattern' | 'llm' | 'user' | 'none'
+// unanalyzed: 이 사용자의 저장된 분석이 없는 열 (작업 화면에서만, 확정값이 있으면 confirmed)
+export type MappingStatus = 'auto' | 'review' | 'unresolved' | 'confirmed' | 'unanalyzed'
+export type MappingMethod =
+  'exact' | 'standard' | 'learned' | 'exact_part' | 'similarity' | 'pattern' | 'llm' | 'user' | 'none'
 export type EngineStatus = 'ok' | 'unavailable' | 'skipped'
 
 export type MappingCandidate = {
@@ -92,14 +94,17 @@ export type FileMapping = {
   original_name: string
   embedding: EngineStatus
   llm: EngineStatus
-  sheets: { name: string; columns: ColumnMapping[] }[]
+  sheets: { name: string; sheet_id?: string; columns: ColumnMapping[] }[]
   analyzed_at?: string | null
 }
 
 export async function mapFile(fileId: number): Promise<FileMapping> {
   const res = await apiFetch(`${API_BASE}/files/${fileId}/mapping`, { method: 'POST' })
   if (!res.ok) {
-    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
+    const detail = await res.json().then(
+      (j: { detail?: unknown }) => j.detail,
+      () => null,
+    )
     throw new Error(typeof detail === 'string' ? detail : `HTTP ${res.status}`)
   }
   return (await res.json()) as FileMapping
@@ -129,7 +134,10 @@ export async function saveDecisions(fileId: number, decisions: DecisionInput[]):
     body: JSON.stringify({ decisions }),
   })
   if (!res.ok) {
-    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
+    const detail = await res.json().then(
+      (j: { detail?: unknown }) => j.detail,
+      () => null,
+    )
     throw new Error(typeof detail === 'string' ? detail : `HTTP ${res.status}`)
   }
   return (await res.json()) as DecisionsResult
@@ -171,7 +179,10 @@ export function uploadFiles(files: File[], onProgress?: (fraction: number) => vo
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
-    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
+    const detail = await res.json().then(
+      (j: { detail?: unknown }) => j.detail,
+      () => null,
+    )
     const message =
       typeof detail === 'string'
         ? detail
@@ -183,7 +194,13 @@ async function json<T>(res: Response): Promise<T> {
   return (await res.json()) as T
 }
 
-export type StoredFile = { id: number; original_name: string; uploaded_at: string; pii: PiiSummary | null }
+export type StoredFile = {
+  id: number
+  original_name: string
+  display_name: string // 개인정보를 가린 표시용 이름 (식별은 id)
+  uploaded_at: string
+  pii: PiiSummary | null
+}
 
 export async function listFiles(): Promise<StoredFile[]> {
   return json(await apiFetch(`${API_BASE}/files`))
@@ -209,7 +226,13 @@ export type ValidationRun = {
   status: ValidationStatus
   blocks: ValidationIssue[]
   warnings: ValidationIssue[]
-  pii: { file_id: number; file_name: string; counts: Record<PiiType, number>; items: PiiItem[]; acknowledged: boolean }[]
+  pii: {
+    file_id: number
+    file_name: string
+    counts: Record<PiiType, number>
+    items: PiiItem[]
+    acknowledged: boolean
+  }[]
   notes: string[]
   entities: EntityNote[]
   created_at: string
@@ -769,7 +792,9 @@ export async function decidePromotion(
   decision: 'approve' | 'reject',
   note: string | null,
 ): Promise<PromotionCandidate> {
-  return json(await apiFetch(`${API_BASE}/admin/promotions/${id}/${decision}`, { method: 'POST', ...jsonBody({ note }) }))
+  return json(
+    await apiFetch(`${API_BASE}/admin/promotions/${id}/${decision}`, { method: 'POST', ...jsonBody({ note }) }),
+  )
 }
 
 export type StandardTerm = {
@@ -803,7 +828,9 @@ export async function fetchSettings(): Promise<Settings> {
 }
 
 export async function saveBaseline(minutes: number | null): Promise<Settings> {
-  return json(await apiFetch(`${API_BASE}/settings`, { method: 'PUT', ...jsonBody({ manual_baseline_minutes: minutes }) }))
+  return json(
+    await apiFetch(`${API_BASE}/settings`, { method: 'PUT', ...jsonBody({ manual_baseline_minutes: minutes }) }),
+  )
 }
 
 export async function saveAutomationBaseline(id: number, minutes: number | null): Promise<Settings> {
@@ -861,17 +888,22 @@ export async function testLlmSettings(): Promise<{
 
 // ---------------------------------------------------------------- 열 매핑 작업 화면 (미리보기·저장된 분석·공통 검토·일괄 확정)
 
-/** 이 사용자가 마지막으로 실행한 분석 + 지금의 확정값. 분석 기록이 없으면 null (자동으로 분석하지 않는다). */
-export type StoredMapping = FileMapping & { analyzed_at: string; stale: boolean; can_change: boolean }
+/** 작업 화면 매핑: 이 사용자가 마지막으로 실행한 분석(있으면) + 지금의 확정값.
+ * 분석 기록이 없으면 analyzed=false — 확정값만 보이고 나머지 열은 'unanalyzed' (자동으로 분석하지 않는다). */
+export type StoredMapping = {
+  file_id: number
+  original_name: string
+  analyzed: boolean
+  analyzed_at: string | null
+  embedding: EngineStatus | null
+  llm: EngineStatus | null
+  stale: boolean
+  can_change: boolean
+  sheets: { sheet_id: string; name: string; columns: ColumnMapping[] }[]
+}
 
-export async function fetchLatestMapping(fileId: number): Promise<StoredMapping | null> {
-  const res = await apiFetch(`${API_BASE}/files/${fileId}/mapping/latest`)
-  if (res.status === 404) {
-    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
-    if (typeof detail === 'string' && detail.includes('저장된 분석')) return null
-    throw new Error(typeof detail === 'string' ? detail : 'HTTP 404')
-  }
-  return json(res)
+export async function fetchLatestMapping(fileId: number): Promise<StoredMapping> {
+  return json(await apiFetch(`${API_BASE}/files/${fileId}/mapping/latest`))
 }
 
 export type PreviewColumn = { column_id: string; name: string; letter: string }
@@ -879,8 +911,9 @@ export type PreviewRow = { row: number; kind: RowKind; cells: Cell[] }
 export type SheetPreview = {
   file_id: number
   original_name: string
+  sheet_id: string
   sheet: string
-  sheets: string[]
+  sheets: { sheet_id: string; name: string }[]
   basis: string
   header_row: number | null
   header_row_end: number | null
@@ -896,13 +929,13 @@ export type SheetPreview = {
 
 export async function fetchPreview(
   fileId: number,
-  sheet: string | null,
+  sheetId: string | null,
   offset: number,
   limit: number,
   signal?: AbortSignal,
 ): Promise<SheetPreview> {
   const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
-  if (sheet) qs.set('sheet', sheet)
+  if (sheetId) qs.set('sheet_id', sheetId)
   return json(await apiFetch(`${API_BASE}/files/${fileId}/preview?${qs.toString()}`, { signal }))
 }
 
@@ -910,6 +943,7 @@ export type CommonCategory = 'common' | 'divergent' | 'unresolved' | 'only'
 export type CommonMember = {
   file_id: number
   file_name: string
+  sheet_id: string
   sheet: string
   column_id: string
   column: string
@@ -919,10 +953,14 @@ export type CommonMember = {
   field_key: string | null
   field_label: string | null
   qualifier: string | null
+  reason: string | null // 제안 근거 (서버가 가림)
   confirmed: boolean
   value_kind: string
+  quantity: boolean // 수량으로 비교하는 열 (단위·흐름/시점 비교 대상)
   unit: string | null
-  basis: string | null
+  unit_state: 'one' | 'none' | 'ambiguous'
+  unit_note: string | null
+  basis: 'flow' | 'stock' | 'conflict' | null
   can_change: boolean
 }
 export type CommonGroup = {
@@ -933,6 +971,7 @@ export type CommonGroup = {
   field_key: string | null
   field_label: string | null
   reasons: string[]
+  evidence: string[] // 공통 후보에서 실제로 확인한 근거 (확인하지 못한 것은 그렇다고 적음)
   members: CommonMember[]
 }
 export type CommonReview = {
@@ -951,13 +990,16 @@ export async function fetchCommonReview(fileIds: number[]): Promise<CommonReview
   )
 }
 
-export type BatchTarget = { file_id: number; sheet: string; column_id: string; field_key: string | null }
+export type BatchTarget = { file_id: number; sheet_id: string; column_id: string; field_key: string | null }
 export type PlanItem = {
   file_id: number
   file_name: string
+  sheet_id: string
   sheet: string
   column_id: string
   column: string
+  current_status: MappingStatus | 'unknown'
+  suggestion_reason: string | null
   current_confirmed: boolean
   current_field_key: string | null
   current_label: string | null
@@ -1009,9 +1051,10 @@ export async function applyBatch(
     body: JSON.stringify({ items }),
   })
   if (res.status === 409) {
-    const detail = await res
-      .json()
-      .then((j: { detail?: { message?: string; problems?: string[] } }) => j.detail, () => undefined)
+    const detail = await res.json().then(
+      (j: { detail?: { message?: string; problems?: string[] } }) => j.detail,
+      () => undefined,
+    )
     throw new BatchConflictError(detail?.message ?? '적용하지 않았습니다.', detail?.problems ?? [])
   }
   return json(res)

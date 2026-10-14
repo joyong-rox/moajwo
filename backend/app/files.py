@@ -8,6 +8,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
@@ -151,7 +152,8 @@ class ColumnMappingOut(BaseModel):
 
 
 class SheetMappingOut(BaseModel):
-    name: str
+    name: str  # 화면 표시용 시트 이름 (개인정보 형식은 가림)
+    sheet_id: str = ""  # 파일 안의 시트 순번 식별자 (s0, s1 …) — 작업 화면 API는 이 값으로 시트를 받는다
     columns: list[ColumnMappingOut]
 
 
@@ -180,7 +182,7 @@ def map_file_columns(
     decisions = load_decisions(session, file_id)
     embedding_status, llm_status = "skipped", "skipped"
     sheets: list[SheetMappingOut] = []
-    for sheet in parsed.sheets:
+    for sheet_index, sheet in enumerate(parsed.sheets):
         result = engine.map_columns(
             sheet.columns,
             sheet.samples,
@@ -194,7 +196,8 @@ def map_file_columns(
         llm_status = _merge_status(llm_status, result.llm)
         sheets.append(
             SheetMappingOut(
-                name=sheet.name,
+                name=mask_text(sheet.name),
+                sheet_id=f"s{sheet_index}",
                 columns=[
                     {
                         **asdict(c),
@@ -208,7 +211,7 @@ def map_file_columns(
         )
     out = FileMappingOut(
         file_id=record.id,
-        original_name=record.original_name,
+        original_name=mask_text(record.original_name),
         embedding=embedding_status,
         llm=llm_status,
         sheets=sheets,
@@ -226,9 +229,21 @@ def _store_analysis(session: Session, file_id: int, user_id: int, out: FileMappi
     )
     payload = out.model_dump_json(exclude={"analyzed_at"})
     if row is None:
-        session.add(MappingAnalysis(source_file_id=file_id, created_by=user_id, created_at=now, result=payload))
-    else:
-        row.result, row.created_at = payload, now
+        try:
+            session.add(MappingAnalysis(source_file_id=file_id, created_by=user_id, created_at=now, result=payload))
+            session.commit()
+            return utc_to_kst(now).isoformat()
+        except IntegrityError:
+            # 같은 파일·사용자의 최초 분석이 동시에 저장됨: 먼저 저장한 행을 이번 결과로 바꿔 쓴다 (1건 유지)
+            session.rollback()
+            row = session.scalar(
+                select(MappingAnalysis).where(
+                    MappingAnalysis.source_file_id == file_id, MappingAnalysis.created_by == user_id
+                )
+            )
+            if row is None:
+                raise
+    row.result, row.created_at = payload, now
     session.commit()
     return utc_to_kst(now).isoformat()
 
@@ -264,7 +279,8 @@ def load_parsed(session: Session, file_id: int) -> tuple[SourceFile, FileResult]
 
 
 class DecisionIn(BaseModel):
-    sheet: str
+    sheet: str = ""  # 원래 시트 이름 (호환용). 화면·응답의 시트 이름은 개인정보를 가리므로 sheet_id를 권장
+    sheet_id: str | None = None  # 매핑 응답의 sheet_id (s0, s1 …)
     column_id: str | None = None  # 매핑 응답의 column_id (권장)
     column: str | None = None  # 예전 방식: 원래 열 이름 (호환용, 개인정보가 없는 이름일 때)
     field_key: str | None  # None = 해당 없음
@@ -290,18 +306,21 @@ def save_mapping_decisions(
     _, parsed = load_parsed(session, file_id)
     engine = get_engine()
     columns = {s.name: s.columns for s in parsed.sheets}
+    by_id = {f"s{i}": s.name for i, s in enumerate(parsed.sheets)}
     valid_keys = {f.key for f in engine.fields}
     inputs: list[DecisionInput] = []
     for d in body.decisions:
-        names = columns.get(d.sheet, [])
+        sheet = by_id.get(d.sheet_id, "") if d.sheet_id is not None else d.sheet
+        names = columns.get(sheet, [])
         ids = {column_id(i): name for i, name in enumerate(names)}
         raw = ids.get(d.column_id) if d.column_id is not None else (d.column if d.column in names else None)
         if raw is None:
             shown = d.column_id if d.column_id is not None else mask_text(d.column or "")
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 열입니다: {d.sheet} / {shown}")
+            where = d.sheet_id if d.sheet_id is not None else mask_text(d.sheet)
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 열입니다: {where} / {shown}")
         if d.field_key is not None and d.field_key not in valid_keys:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 표준 항목입니다: {d.field_key}")
-        inputs.append(DecisionInput(d.sheet, raw, d.field_key))
+        inputs.append(DecisionInput(sheet, raw, d.field_key))
     result = save_decisions(session, engine, file_id, inputs, user_id=user.id)
     for d in inputs:
         if d.field_key is not None:

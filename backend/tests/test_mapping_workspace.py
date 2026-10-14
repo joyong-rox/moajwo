@@ -96,7 +96,7 @@ def test_preview_letters_duplicates_paging_and_permissions(users) -> None:
     page = u1.get(f"/files/{fid}/preview", params={"offset": 100, "limit": 50}).json()
     assert len(page["rows"]) == 20 and page["rows"][0]["row"] == 102
     assert u1.get(f"/files/{fid}/preview", params={"limit": 1000}).status_code == 422  # 한 번에 최대 200행
-    assert u1.get(f"/files/{fid}/preview", params={"sheet": "없는시트"}).status_code == 404
+    assert u1.get(f"/files/{fid}/preview", params={"sheet_id": "s9"}).status_code == 404  # 시트는 sheet_id로
     assert u2.get(f"/files/{fid}/preview").status_code == 404  # 다른 일반 사용자
     assert boss.get(f"/files/{fid}/preview").status_code == 200  # 최고 관리자는 조회 가능
     # 2단 머리글의 연도 열은 각각 남고, 머리글 행 두 줄이 그대로 내려온다
@@ -132,7 +132,9 @@ def test_preview_masks_headers_cells_and_numeric_rrn(users, caplog) -> None:
 def test_latest_mapping_is_stored_and_merges_decisions(users) -> None:
     u1, boss = users["mw-user1"], users["owner"]
     fid = _upload(u1, "저장분석.xlsx", _xlsx([["기관명", "집행액", "세부 메모"], ["행정안전부", 1, "a"]]))
-    assert u1.get(f"/files/{fid}/mapping/latest").status_code == 404  # 분석 전: 자동으로 분석하지 않음
+    before = u1.get(f"/files/{fid}/mapping/latest").json()  # 분석 전: 자동으로 분석하지 않고 '미분석'으로 보여 줌
+    assert before["analyzed"] is False and {c["status"] for c in before["sheets"][0]["columns"]} == {"unanalyzed"}
+    assert _db("select count(*) from mapping_analyses where source_file_id = ?", fid) == [(0,)]
     first = _analyze(u1, fid)
     assert first["analyzed_at"]
     memo = _col(first, "세부 메모")
@@ -146,8 +148,10 @@ def test_latest_mapping_is_stored_and_merges_decisions(users) -> None:
     assert len(_db("select id from mapping_analyses where source_file_id = ?", fid)) == 1
     _analyze(u1, fid)  # 다시 분석해도 1건 (바꿔 씀)
     assert len(_db("select id from mapping_analyses where source_file_id = ?", fid)) == 1
-    # 최고 관리자: 자기 분석 기록이 없으면 404, 분석하면 조회 전용
-    assert boss.get(f"/files/{fid}/mapping/latest").status_code == 404
+    # 최고 관리자: 자기 분석 기록이 없으면 '미분석'(확정값은 보임), 분석해도 조회 전용
+    boss_view = boss.get(f"/files/{fid}/mapping/latest").json()
+    assert boss_view["analyzed"] is False and boss_view["can_change"] is False
+    assert _col(boss_view, "세부 메모")["status"] == "confirmed"
     _analyze(boss, fid)
     assert boss.get(f"/files/{fid}/mapping/latest").json()["can_change"] is False
 
@@ -220,7 +224,7 @@ def _two_files_with_memo(u: TestClient, tag: str) -> tuple[int, int, str, str]:
 
 
 def _item(fid: int, cid: str, key: str | None, **extra: Any) -> dict[str, Any]:
-    return {"file_id": fid, "sheet": "현황", "column_id": cid, "field_key": key, **extra}
+    return {"file_id": fid, "sheet_id": "s0", "column_id": cid, "field_key": key, **extra}
 
 
 def _decisions(fid: int) -> list[tuple]:
@@ -313,7 +317,7 @@ def test_concurrent_batch_applies_one_wins(users, tmp_path) -> None:
 
     def attempt(key: str) -> None:
         item = mapping_review.ApplyItem(
-            file_id=a, sheet="현황", column_id=ca, field_key=key, expected_confirmed=False, expected_field_key=None
+            file_id=a, sheet_id="s0", column_id=ca, field_key=key, expected_confirmed=False, expected_field_key=None
         )
         body = mapping_review.ApplyIn(items=[item])
         with SessionLocal() as db:

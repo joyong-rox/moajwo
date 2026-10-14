@@ -18,18 +18,24 @@ import { navigate } from './router'
 const CATEGORY: Record<CommonCategory, { label: string; help: string }> = {
   common: {
     label: '공통 매핑 후보',
-    help: '여러 파일에서 이름·표준 항목·구분어·값 형태·단위가 모두 같은 열입니다. 그래도 값과 파일 맥락을 확인한 뒤 확정하세요.',
+    help: "여러 파일에서 열 이름이 같고 확인한 근거(표준 항목·구분어·값 형태, 수량 열은 단위·흐름/시점 표기)가 충돌하지 않는 열입니다. 묶음마다 '확인한 근거'에 실제로 확인한 것과 확인하지 못한 것을 적었으니, 값과 파일 맥락을 보고 확정하세요.",
   },
   divergent: {
     label: '파일별 판단이 다른 항목',
-    help: '같은 이름이지만 매핑·단위·값 형태 등이 다르거나, 이름만으로 같은 대상인지 알 수 없는 열입니다. 파일별로 판단하세요.',
+    help: '같은 이름이지만 매핑·단위·값 형태·흐름/시점 표기가 다르거나, 단위 표기가 불명확하거나 일부 파일에만 있거나, 이름만으로 같은 대상인지 알 수 없는 열입니다. 파일별로 판단하세요.',
   },
   unresolved: { label: '미해결 항목', help: '표준 항목 제안이 없는 열입니다.' },
   only: { label: '특정 파일에만 있는 항목', help: '선택한 파일 중 한 파일에만 있는 이름입니다.' },
 }
 const ORDER: CommonCategory[] = ['common', 'divergent', 'unresolved', 'only']
 
-const memberKey = (m: CommonMember) => `${m.file_id}|${m.sheet}|${m.column_id}`
+const memberKey = (m: CommonMember) => `${m.file_id}|${m.sheet_id}|${m.column_id}`
+
+const BASIS_TEXT: Record<NonNullable<CommonMember['basis']>, string> = {
+  flow: '흐름(월별 실적) 표기',
+  stock: '시점(보유량) 표기',
+  conflict: '흐름·시점 표기가 함께 있음',
+}
 
 /** 여러 파일 공통 항목 검토: 저장된 분석만 모은다 (화면을 열어도 다시 분석·모델 호출 없음) */
 function MappingCommon() {
@@ -114,7 +120,7 @@ function MappingCommon() {
                   })
                 }
               />
-              #{f.id} {f.original_name}
+              #{f.id} {f.display_name}
             </label>
           ))}
         </div>
@@ -238,7 +244,10 @@ function GroupDetail({
   const [chosen, setChosen] = useState<Set<string>>(
     () =>
       new Set(
-        group.category === 'common' ? group.members.filter((m) => m.can_change && !m.confirmed).map(memberKey) : [],
+        // '확인 필요'는 기본으로 고르지 않는다 (열마다 직접 골라야 포함)
+        group.category === 'common'
+          ? group.members.filter((m) => m.can_change && !m.confirmed && m.status === 'auto').map(memberKey)
+          : [],
       ),
   )
   const [target, setTarget] = useState<string>(group.category === 'common' ? (group.field_key ?? '') : '')
@@ -255,6 +264,16 @@ function GroupDetail({
         <span className="upload-tag">{CATEGORY[group.category].label}</span> 파일 {group.files}개 · 열{' '}
         {group.members.length}개
       </p>
+      {group.evidence.length > 0 && (
+        <div className="mw-evidence">
+          <strong>확인한 근거</strong>
+          <ul>
+            {group.evidence.map((e) => (
+              <li key={e}>{e}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {group.reasons.length > 0 && (
         <ul className="mw-problems">
           {group.reasons.map((r) => (
@@ -304,10 +323,10 @@ function GroupDetail({
                         {m.sheet} · {m.column}
                       </span>
                       <a
-                        href={`/mapping?file=${m.file_id}&sheet=${encodeURIComponent(m.sheet)}&col=${m.column_id}`}
+                        href={`/mapping?file=${m.file_id}&sheet=${m.sheet_id}&col=${m.column_id}`}
                         onClick={(e) => {
                           e.preventDefault()
-                          navigate(`/mapping?file=${m.file_id}&sheet=${encodeURIComponent(m.sheet)}&col=${m.column_id}`)
+                          navigate(`/mapping?file=${m.file_id}&sheet=${m.sheet_id}&col=${m.column_id}`)
                         }}
                       >
                         파일 화면에서 보기
@@ -319,6 +338,7 @@ function GroupDetail({
                       {m.field_label ?? (m.confirmed ? '해당 없음' : '미매핑')}{' '}
                       <span className={`upload-tag mapping-${m.status}`}>{STATUS_TEXT[m.status]}</span>
                       {m.qualifier && <span className="upload-tag">{m.qualifier}</span>}
+                      {m.reason && !m.confirmed && <span className="mw-muted mw-block">제안 근거: {m.reason}</span>}
                     </div>
                   </td>
                   <td data-label="값 예시" className="mw-sample-cell">
@@ -327,8 +347,18 @@ function GroupDetail({
                   <td data-label="값 형태 · 단위">
                     <div className="mw-cell">
                       {VALUE_KIND_LABEL[m.value_kind] ?? m.value_kind}
-                      {m.unit && ` · ${m.unit}`}
-                      {m.basis && ` · ${m.basis === '흐름' ? '월별 실적' : '시점 보유량'}`}
+                      {m.quantity && (
+                        <span className="mw-block">
+                          단위{' '}
+                          {m.unit_state === 'one'
+                            ? m.unit
+                            : m.unit_state === 'ambiguous'
+                              ? `불명확 (${m.unit_note ?? ''})`
+                              : '표기 없음'}
+                          {' · '}
+                          {m.basis ? BASIS_TEXT[m.basis] : '흐름/시점 표기 없음'}
+                        </span>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -356,7 +386,7 @@ function GroupDetail({
                 .filter((m) => chosen.has(memberKey(m)))
                 .map((m) => ({
                   file_id: m.file_id,
-                  sheet: m.sheet,
+                  sheet_id: m.sheet_id,
                   column_id: m.column_id,
                   field_key: target === NONE ? null : target,
                 })),
@@ -377,7 +407,8 @@ function GroupDetail({
       {batch && (
         <BatchConfirm
           targets={batch}
-          title={`'${group.name}' 일괄 확정`}
+          title={`'${group.name}' 선택한 열 일괄 확정 확인`}
+          note="이 묶음에서 고른 열만 대상입니다. 확인 표에서 열마다 뺄 수 있고, 기존 사용자 확정은 '기존 확정을 바꿈'을 골라야 바뀝니다."
           onCancel={() => setBatch(null)}
           onDone={(text) => {
             setBatch(null)
