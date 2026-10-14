@@ -2603,6 +2603,17 @@ body {
     min-width: 200px;
   }
 
+  /* 상태 칸의 사유 줄이 열을 넓히지 않게 줄바꿈 (배지는 한 줄) */
+  .admin-users-table td[data-label='상태'] {
+    min-width: 90px;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .admin-users-table .admin-badge {
+    white-space: nowrap;
+  }
+
   .admin-audit-table td[data-label='사유'],
   .admin-users-table td[data-label='표시 이름'] {
     min-width: 120px;
