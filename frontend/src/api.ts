@@ -93,6 +93,7 @@ export type FileMapping = {
   embedding: EngineStatus
   llm: EngineStatus
   sheets: { name: string; columns: ColumnMapping[] }[]
+  analyzed_at?: string | null
 }
 
 export async function mapFile(fileId: number): Promise<FileMapping> {
@@ -104,7 +105,13 @@ export async function mapFile(fileId: number): Promise<FileMapping> {
   return (await res.json()) as FileMapping
 }
 
-export type StandardFieldInfo = { key: string; label: string; description: string }
+export type StandardFieldInfo = {
+  key: string
+  label: string
+  description: string
+  aliases?: string[] // 표준 사전에 적힌 다른 이름 (사전에 있는 것만)
+  modifier?: boolean // 다른 항목의 구분으로 붙는 항목 (관용·자가용 등)
+}
 
 export async function fetchFields(): Promise<StandardFieldInfo[]> {
   const res = await apiFetch(`${API_BASE}/mapping/fields`)
@@ -850,4 +857,162 @@ export async function testLlmSettings(): Promise<{
   message: string
 }> {
   return json(await apiFetch(`${API_BASE}/settings/llm/test`, { method: 'POST' }))
+}
+
+// ---------------------------------------------------------------- 열 매핑 작업 화면 (미리보기·저장된 분석·공통 검토·일괄 확정)
+
+/** 이 사용자가 마지막으로 실행한 분석 + 지금의 확정값. 분석 기록이 없으면 null (자동으로 분석하지 않는다). */
+export type StoredMapping = FileMapping & { analyzed_at: string; stale: boolean; can_change: boolean }
+
+export async function fetchLatestMapping(fileId: number): Promise<StoredMapping | null> {
+  const res = await apiFetch(`${API_BASE}/files/${fileId}/mapping/latest`)
+  if (res.status === 404) {
+    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
+    if (typeof detail === 'string' && detail.includes('저장된 분석')) return null
+    throw new Error(typeof detail === 'string' ? detail : 'HTTP 404')
+  }
+  return json(res)
+}
+
+export type PreviewColumn = { column_id: string; name: string; letter: string }
+export type PreviewRow = { row: number; kind: RowKind; cells: Cell[] }
+export type SheetPreview = {
+  file_id: number
+  original_name: string
+  sheet: string
+  sheets: string[]
+  basis: string
+  header_row: number | null
+  header_row_end: number | null
+  header_rows: Cell[][]
+  columns: PreviewColumn[]
+  rows: PreviewRow[]
+  offset: number
+  limit: number
+  total_rows: number
+  data_rows: number
+  dropped_columns: number
+}
+
+export async function fetchPreview(
+  fileId: number,
+  sheet: string | null,
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<SheetPreview> {
+  const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  if (sheet) qs.set('sheet', sheet)
+  return json(await apiFetch(`${API_BASE}/files/${fileId}/preview?${qs.toString()}`, { signal }))
+}
+
+export type CommonCategory = 'common' | 'divergent' | 'unresolved' | 'only'
+export type CommonMember = {
+  file_id: number
+  file_name: string
+  sheet: string
+  column_id: string
+  column: string
+  samples: Cell[]
+  status: MappingStatus
+  method: MappingMethod
+  field_key: string | null
+  field_label: string | null
+  qualifier: string | null
+  confirmed: boolean
+  value_kind: string
+  unit: string | null
+  basis: string | null
+  can_change: boolean
+}
+export type CommonGroup = {
+  group_id: string
+  category: CommonCategory
+  name: string
+  files: number
+  field_key: string | null
+  field_label: string | null
+  reasons: string[]
+  members: CommonMember[]
+}
+export type CommonReview = {
+  files: { file_id: number; name: string; analyzed_at: string; stale: boolean; can_change: boolean }[]
+  missing: { file_id: number; name: string }[]
+  groups: CommonGroup[]
+}
+
+export async function fetchCommonReview(fileIds: number[]): Promise<CommonReview> {
+  return json(
+    await apiFetch(`${API_BASE}/mapping/common`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
+  )
+}
+
+export type BatchTarget = { file_id: number; sheet: string; column_id: string; field_key: string | null }
+export type PlanItem = {
+  file_id: number
+  file_name: string
+  sheet: string
+  column_id: string
+  column: string
+  current_confirmed: boolean
+  current_field_key: string | null
+  current_label: string | null
+  new_field_key: string | null
+  new_label: string | null
+  action: 'apply' | 'overwrite' | 'unchanged' | 'excluded'
+  reason: string | null
+}
+export type BatchPlan = {
+  selected: number
+  applicable: number
+  overwrite: number
+  unchanged: number
+  excluded: number
+  items: PlanItem[]
+}
+
+export async function previewBatch(items: BatchTarget[]): Promise<BatchPlan> {
+  return json(
+    await apiFetch(`${API_BASE}/mapping/batch/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+    }),
+  )
+}
+
+export type ApplyTarget = BatchTarget & {
+  expected_confirmed: boolean
+  expected_field_key: string | null
+  overwrite: boolean
+}
+
+/** 적용하지 못한 이유 목록을 담은 오류 (409: 확인 뒤 확정값 변경·덮어쓰기 미선택·적용 불가 대상). */
+export class BatchConflictError extends Error {
+  problems: string[]
+  constructor(message: string, problems: string[]) {
+    super(message)
+    this.problems = problems
+  }
+}
+
+export async function applyBatch(
+  items: ApplyTarget[],
+): Promise<{ applied: number; unchanged: number; learned: number; files: number }> {
+  const res = await apiFetch(`${API_BASE}/mapping/batch/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  })
+  if (res.status === 409) {
+    const detail = await res
+      .json()
+      .then((j: { detail?: { message?: string; problems?: string[] } }) => j.detail, () => undefined)
+    throw new BatchConflictError(detail?.message ?? '적용하지 않았습니다.', detail?.problems ?? [])
+  }
+  return json(res)
 }

@@ -15,6 +15,7 @@ from app import (
     files,
     glossary_api,
     integration_api,
+    mapping_review,
     review_api,
     validation_api,
 )
@@ -34,6 +35,7 @@ for router in (
     validation_api.router,
     glossary_api.router,
     review_api.router,
+    mapping_review.router,
     integration_api.router,
     automation_api.router,
     admin_api.router,

@@ -1,11 +1,13 @@
 import json
 import logging
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import PurePath
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
@@ -13,11 +15,12 @@ from app.config import DATA_DIR
 from app.db import get_session
 from app.decisions import DecisionInput, load_decisions, load_learned, save_decisions
 from app.mapping import get_engine
-from app.models import SourceFile
+from app.models import MappingAnalysis, SourceFile
 from app.parsing import SUPPORTED_EXTENSIONS, FileResult, ParseError, parse_file
 from app.pii import mask_text
 from app.promotion import load_standard, record_approval
 from app.storage import MAX_UPLOAD_BYTES, UploadTooLarge, safe_original_name, store_original
+from app.timefmt import utc_to_kst
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +161,7 @@ class FileMappingOut(BaseModel):
     embedding: str
     llm: str
     sheets: list[SheetMappingOut]
+    analyzed_at: str | None = None  # 이 분석을 저장한 시각 (KST)
 
 
 @router.post("/{file_id}/mapping", response_model=FileMappingOut)
@@ -202,13 +206,31 @@ def map_file_columns(
                 ],
             )
         )
-    return FileMappingOut(
+    out = FileMappingOut(
         file_id=record.id,
         original_name=record.original_name,
         embedding=embedding_status,
         llm=llm_status,
         sheets=sheets,
     )
+    out.analyzed_at = _store_analysis(session, record.id, user.id, out)
+    return out
+
+
+def _store_analysis(session: Session, file_id: int, user_id: int, out: FileMappingOut) -> str:
+    """분석 결과(이미 마스킹한 응답)를 파일·사용자마다 1건으로 저장한다 (다시 분석하면 바꿔 씀).
+    여러 파일 공통 검토·작업 화면 다시 열기는 이 기록을 쓰므로 다시 분석하거나 모델을 부르지 않는다."""
+    now = datetime.now(UTC)
+    row = session.scalar(
+        select(MappingAnalysis).where(MappingAnalysis.source_file_id == file_id, MappingAnalysis.created_by == user_id)
+    )
+    payload = out.model_dump_json(exclude={"analyzed_at"})
+    if row is None:
+        session.add(MappingAnalysis(source_file_id=file_id, created_by=user_id, created_at=now, result=payload))
+    else:
+        row.result, row.created_at = payload, now
+    session.commit()
+    return utc_to_kst(now).isoformat()
 
 
 def _merge_status(current: str, new: str) -> str:
@@ -296,8 +318,13 @@ class FieldOut(BaseModel):
     key: str
     label: str
     description: str
+    aliases: list[str] = []  # 표준 사전에 적힌 다른 이름 (사전에 있는 것만)
+    modifier: bool = False  # 다른 항목의 구분으로 붙는 항목인지 (예: 관용·자가용)
 
 
 @mapping_router.get("/fields", response_model=list[FieldOut])
 def list_fields() -> list[FieldOut]:
-    return [FieldOut(key=f.key, label=f.label, description=f.description) for f in get_engine().fields]
+    return [
+        FieldOut(key=f.key, label=f.label, description=f.description, aliases=list(f.aliases), modifier=f.modifier)
+        for f in get_engine().fields
+    ]

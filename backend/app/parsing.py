@@ -60,6 +60,9 @@ class SheetResult:
     pii: PiiReport = field(default_factory=PiiReport)
     header_cells: list[list[Cell]] = field(default_factory=list)  # 헤더 행 원래 셀 (2단 헤더 결합 표시용)
     corrections: list[dict[str, Any]] = field(default_factory=list)  # 파서가 바꾼 값 (열 단위 묶음, 검토 패널용)
+    # 열별 원본 시트의 열 번호(0부터). 병합 복제 열을 버리면 원본 위치와 달라지므로
+    # 미리보기의 열 위치(A, B…) 표시에 쓴다
+    source_columns: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -567,6 +570,7 @@ def analyze_sheet(name: str, raw: list[list[Any]], filled: set[tuple[int, int]] 
     block = detect_header_block(grid)
     columns = _column_names(grid[block[0] : block[1] + 1] if block else [], width)
     drop = set(merged_duplicate_columns(grid, block, columns, filled or set()))
+    source_columns = list(range(width))
     if drop:  # 머리글 가로 병합으로 생긴 복제 열은 버린다 (남는 열 이름은 그대로 — 저장된 매핑 확정과 맞춤)
         keep = [j for j in range(width) if j not in drop]
         grid = [[row[j] for j in keep] for row in grid]
@@ -574,6 +578,7 @@ def analyze_sheet(name: str, raw: list[list[Any]], filled: set[tuple[int, int]] 
         position = {j: i for i, j in enumerate(keep)}
         filled = {(r, position[c]) for r, c in (filled or set()) if c in position}
         columns = [columns[j] for j in keep]
+        source_columns = keep
         width = len(keep)
     header_rows = grid[block[0] : block[1] + 1] if block else []
     body_start = block[1] + 1 if block else 0
@@ -644,6 +649,7 @@ def analyze_sheet(name: str, raw: list[list[Any]], filled: set[tuple[int, int]] 
         pii=pii,
         header_cells=[[mask_cell(c) for c in row] for row in header_rows],
         corrections=corrections,
+        source_columns=source_columns,
     )
 
 

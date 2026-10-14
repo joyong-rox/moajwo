@@ -59,10 +59,13 @@ def save_decisions(
     items: list[DecisionInput],
     learn: bool = True,
     user_id: int | None = None,
+    commit: bool = True,
 ) -> SaveResult:
     """확정 저장. learn=False면 이 파일의 확정만 저장하고 열 이름은 학습하지 않는다.
 
     (검토 패널에서 '다음부터 이 형식 기억하기'를 선택하지 않은 경우)
+    commit=False면 커밋하지 않는다 — 여러 파일을 한 트랜잭션으로 확정하는 일괄 확정에서
+    호출한 쪽이 커밋·되돌림을 맡는다.
     """
     result = SaveResult()
     for item in items:
@@ -86,7 +89,8 @@ def save_decisions(
                 result.learned.append(item.column)
             else:
                 result.not_learned.append({"column": item.column, "reason": reason})
-    session.commit()
+    if commit:
+        session.commit()
     return result
 
 
