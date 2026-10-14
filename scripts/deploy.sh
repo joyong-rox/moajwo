@@ -231,23 +231,30 @@ log "[백업 DB] 무결성 $BK_INTEGRITY · 리비전 $BK_REV · 저널 $(sed -n
 
 log "5d. 운영 볼륨(정지 상태)과 백업 DB 비교 — 원본 DB의 모든 테이블 (핵심: $KEY_TABLES)"
 [ "$BK_REV" = "$SRC_REV" ] || bk_fail "리비전 불일치: 운영 볼륨 $SRC_REV · 백업 $BK_REV"
-MISMATCH=0
-while read -r _ table src_n; do
-  bk_n=$(awk -v t="$table" '$1 == "rows" && $2 == t { print $3 }' "$BK_TXT")
-  case " $KEY_TABLES " in *" $table "*) name="$table (핵심)" ;; *) name="$table" ;; esac
-  if [ "$bk_n" = "$src_n" ]; then
-    log "  [일치] $name: 운영 볼륨 $src_n · 백업 $bk_n"
-  else
-    MISMATCH=1
-    log "  [불일치] $name: 운영 볼륨 $src_n · 백업 ${bk_n:-없음}"
-  fi
-done < <(grep '^rows ' "$SRC_TXT")
-for table in $KEY_TABLES; do
-  grep -q "^rows $table " "$SRC_TXT" || log "  [없음] $table (핵심): 이 리비전의 DB에 없는 테이블 — 비교 대상 아님"
-done
-EXTRA=$(comm -13 <(awk '$1 == "rows" { print $2 }' "$SRC_TXT" | sort) <(awk '$1 == "rows" { print $2 }' "$BK_TXT" | sort))
-[ -z "$EXTRA" ] || { MISMATCH=1; log "  [불일치] 백업에만 있는 테이블: $(echo $EXTRA)"; }
-[ "$MISMATCH" -eq 0 ] || bk_fail "운영 볼륨과 백업 DB의 테이블·행 수가 다름 — 전환하지 않음"
+# 테이블별 비교는 awk 한 번으로 만들어 로그에 한 번에 남긴다 (테이블마다 프로세스를 띄우면 정지 시간이 늘어남)
+CMP=$(awk -v keys=" $KEY_TABLES " '
+  FILENAME == ARGV[1] { if ($1 == "rows") { src[$2] = $3; order[++n] = $2 }; next }
+  $1 == "rows" { bk[$2] = $3 }
+  END {
+    bad = 0
+    for (i = 1; i <= n; i++) {
+      t = order[i]; name = index(keys, " " t " ") ? t " (핵심)" : t
+      if ((t in bk) && bk[t] == src[t]) printf "  [일치] %s: 운영 볼륨 %s · 백업 %s\n", name, src[t], bk[t]
+      else { bad = 1; printf "  [불일치] %s: 운영 볼륨 %s · 백업 %s\n", name, src[t], ((t in bk) ? bk[t] : "없음") }
+    }
+    nk = split(keys, ks, " ")
+    for (i = 1; i <= nk; i++) if (!(ks[i] in src)) printf "  [없음] %s (핵심): 이 리비전의 DB에 없는 테이블 — 비교 대상 아님\n", ks[i]
+    for (t in bk) if (!(t in src)) { bad = 1; printf "  [불일치] 백업에만 있는 테이블: %s\n", t }
+    print (bad ? "result mismatch" : "result match")
+  }' "$SRC_TXT" "$BK_TXT")
+RC=$?
+[ "$RC" -eq 0 ] || bk_fail "운영 볼륨과 백업 DB를 비교할 수 없음 (종료 코드 $RC)"
+printf '%s\n' "$CMP" | grep -v '^result ' | sed "s/^/[$(date +%H:%M:%S)] /" | tee -a "$LOG"
+case "$(printf '%s\n' "$CMP" | tail -1)" in
+  "result match") ;;
+  "result mismatch") bk_fail "운영 볼륨과 백업 DB의 테이블·행 수가 다름 — 전환하지 않음" ;;
+  *) bk_fail "운영 볼륨과 백업 DB의 비교 결과가 없음" ;;
+esac
 log "비교 결과: 리비전 같음 ($SRC_REV) · 테이블 $(grep -c '^rows ' "$SRC_TXT")개 행 수 모두 같음"
 
 log "5e. 백업 파일 sha256 재확인 (호스트에서 다시 계산)"
