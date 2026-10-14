@@ -49,6 +49,7 @@ class PiiOut(BaseModel):
 class FileListItem(BaseModel):
     id: int
     original_name: str
+    display_name: str  # 화면 표시용 (개인정보를 가린 파일 이름). 식별은 id, original_name은 기존 화면 호환용
     uploaded_at: datetime
     pii: PiiOut | None
 
@@ -73,7 +74,14 @@ def list_files(
         select(SourceFile).where(where).order_by(SourceFile.id.desc()).limit(min(max(limit, 1), 500))
     )
     return [
-        FileListItem(id=r.id, original_name=r.original_name, uploaded_at=r.uploaded_at, pii=pii_out(r)) for r in records
+        FileListItem(
+            id=r.id,
+            original_name=r.original_name,
+            display_name=mask_text(r.original_name),
+            uploaded_at=r.uploaded_at,
+            pii=pii_out(r),
+        )
+        for r in records
     ]
 
 

@@ -278,6 +278,23 @@ class User(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class MappingAnalysis(Base):
+    """사용자가 마지막으로 실행한 파일의 열 매핑 분석 결과 (파일·사용자마다 1건, 다시 분석하면 바꿔 씀).
+
+    화면으로 내보낸 결과(열 이름·샘플·근거는 이미 개인정보 마스킹)를 그대로 저장한다. 원본 값은 저장하지 않는다.
+    여러 파일 공통 검토는 이 기록을 모아 보므로, 화면을 열 때 다시 분석하거나 모델을 호출하지 않는다.
+    """
+
+    __tablename__ = "mapping_analyses"
+    __table_args__ = (UniqueConstraint("source_file_id", "created_by"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_file_id: Mapped[int] = mapped_column(ForeignKey("source_files.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    result: Mapped[str] = mapped_column(Text)  # FileMappingOut JSON (마스킹된 값)
+
+
 class AccountEvent(Base):
     """계정 관리 이력: 가입 신청·승인·반려·이용 중지·재개·비밀번호 초기화·계정 추가·역할 전환.
 

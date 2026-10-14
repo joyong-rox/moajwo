@@ -15,6 +15,8 @@ import Automations from './Automations'
 import Dashboard from './Dashboard'
 import Dictionary from './Dictionary'
 import Login from './Login'
+import MappingCommon from './MappingCommon'
+import MappingWorkspace from './MappingWorkspace'
 import MoajwoAdmin from './MoajwoAdmin'
 import Promotions from './Promotions'
 import ReviewPanel from './ReviewPanel'
@@ -170,6 +172,8 @@ function Workspace() {
               )}
               {allowed && path === '/automations' && <Automations />}
               {allowed && path === '/runs' && <Runs />}
+              {allowed && path === '/mapping' && <MappingWorkspace />}
+              {allowed && path === '/mapping/common' && <MappingCommon />}
               {allowed && path === '/dictionary' && <Dictionary />}
               {allowed && path === '/promotions' && <Promotions />}
               {allowed && path.startsWith(ADMIN_BASE) && <MoajwoAdmin path={path} />}

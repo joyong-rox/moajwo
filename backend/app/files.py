@@ -1,11 +1,14 @@
 import json
 import logging
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import PurePath
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
@@ -13,11 +16,12 @@ from app.config import DATA_DIR
 from app.db import get_session
 from app.decisions import DecisionInput, load_decisions, load_learned, save_decisions
 from app.mapping import get_engine
-from app.models import SourceFile
+from app.models import MappingAnalysis, SourceFile
 from app.parsing import SUPPORTED_EXTENSIONS, FileResult, ParseError, parse_file
 from app.pii import mask_text
 from app.promotion import load_standard, record_approval
 from app.storage import MAX_UPLOAD_BYTES, UploadTooLarge, safe_original_name, store_original
+from app.timefmt import utc_to_kst
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +152,8 @@ class ColumnMappingOut(BaseModel):
 
 
 class SheetMappingOut(BaseModel):
-    name: str
+    name: str  # 화면 표시용 시트 이름 (개인정보 형식은 가림)
+    sheet_id: str = ""  # 파일 안의 시트 순번 식별자 (s0, s1 …) — 작업 화면 API는 이 값으로 시트를 받는다
     columns: list[ColumnMappingOut]
 
 
@@ -158,6 +163,7 @@ class FileMappingOut(BaseModel):
     embedding: str
     llm: str
     sheets: list[SheetMappingOut]
+    analyzed_at: str | None = None  # 이 분석을 저장한 시각 (KST)
 
 
 @router.post("/{file_id}/mapping", response_model=FileMappingOut)
@@ -176,7 +182,7 @@ def map_file_columns(
     decisions = load_decisions(session, file_id)
     embedding_status, llm_status = "skipped", "skipped"
     sheets: list[SheetMappingOut] = []
-    for sheet in parsed.sheets:
+    for sheet_index, sheet in enumerate(parsed.sheets):
         result = engine.map_columns(
             sheet.columns,
             sheet.samples,
@@ -190,7 +196,8 @@ def map_file_columns(
         llm_status = _merge_status(llm_status, result.llm)
         sheets.append(
             SheetMappingOut(
-                name=sheet.name,
+                name=mask_text(sheet.name),
+                sheet_id=f"s{sheet_index}",
                 columns=[
                     {
                         **asdict(c),
@@ -202,13 +209,43 @@ def map_file_columns(
                 ],
             )
         )
-    return FileMappingOut(
+    out = FileMappingOut(
         file_id=record.id,
-        original_name=record.original_name,
+        original_name=mask_text(record.original_name),
         embedding=embedding_status,
         llm=llm_status,
         sheets=sheets,
     )
+    out.analyzed_at = _store_analysis(session, record.id, user.id, out)
+    return out
+
+
+def _store_analysis(session: Session, file_id: int, user_id: int, out: FileMappingOut) -> str:
+    """분석 결과(이미 마스킹한 응답)를 파일·사용자마다 1건으로 저장한다 (다시 분석하면 바꿔 씀).
+    여러 파일 공통 검토·작업 화면 다시 열기는 이 기록을 쓰므로 다시 분석하거나 모델을 부르지 않는다."""
+    now = datetime.now(UTC)
+    row = session.scalar(
+        select(MappingAnalysis).where(MappingAnalysis.source_file_id == file_id, MappingAnalysis.created_by == user_id)
+    )
+    payload = out.model_dump_json(exclude={"analyzed_at"})
+    if row is None:
+        try:
+            session.add(MappingAnalysis(source_file_id=file_id, created_by=user_id, created_at=now, result=payload))
+            session.commit()
+            return utc_to_kst(now).isoformat()
+        except IntegrityError:
+            # 같은 파일·사용자의 최초 분석이 동시에 저장됨: 먼저 저장한 행을 이번 결과로 바꿔 쓴다 (1건 유지)
+            session.rollback()
+            row = session.scalar(
+                select(MappingAnalysis).where(
+                    MappingAnalysis.source_file_id == file_id, MappingAnalysis.created_by == user_id
+                )
+            )
+            if row is None:
+                raise
+    row.result, row.created_at = payload, now
+    session.commit()
+    return utc_to_kst(now).isoformat()
 
 
 def _merge_status(current: str, new: str) -> str:
@@ -242,7 +279,8 @@ def load_parsed(session: Session, file_id: int) -> tuple[SourceFile, FileResult]
 
 
 class DecisionIn(BaseModel):
-    sheet: str
+    sheet: str = ""  # 원래 시트 이름 (호환용). 화면·응답의 시트 이름은 개인정보를 가리므로 sheet_id를 권장
+    sheet_id: str | None = None  # 매핑 응답의 sheet_id (s0, s1 …)
     column_id: str | None = None  # 매핑 응답의 column_id (권장)
     column: str | None = None  # 예전 방식: 원래 열 이름 (호환용, 개인정보가 없는 이름일 때)
     field_key: str | None  # None = 해당 없음
@@ -268,18 +306,21 @@ def save_mapping_decisions(
     _, parsed = load_parsed(session, file_id)
     engine = get_engine()
     columns = {s.name: s.columns for s in parsed.sheets}
+    by_id = {f"s{i}": s.name for i, s in enumerate(parsed.sheets)}
     valid_keys = {f.key for f in engine.fields}
     inputs: list[DecisionInput] = []
     for d in body.decisions:
-        names = columns.get(d.sheet, [])
+        sheet = by_id.get(d.sheet_id, "") if d.sheet_id is not None else d.sheet
+        names = columns.get(sheet, [])
         ids = {column_id(i): name for i, name in enumerate(names)}
         raw = ids.get(d.column_id) if d.column_id is not None else (d.column if d.column in names else None)
         if raw is None:
             shown = d.column_id if d.column_id is not None else mask_text(d.column or "")
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 열입니다: {d.sheet} / {shown}")
+            where = d.sheet_id if d.sheet_id is not None else mask_text(d.sheet)
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 열입니다: {where} / {shown}")
         if d.field_key is not None and d.field_key not in valid_keys:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 표준 항목입니다: {d.field_key}")
-        inputs.append(DecisionInput(d.sheet, raw, d.field_key))
+        inputs.append(DecisionInput(sheet, raw, d.field_key))
     result = save_decisions(session, engine, file_id, inputs, user_id=user.id)
     for d in inputs:
         if d.field_key is not None:
@@ -296,8 +337,13 @@ class FieldOut(BaseModel):
     key: str
     label: str
     description: str
+    aliases: list[str] = []  # 표준 사전에 적힌 다른 이름 (사전에 있는 것만)
+    modifier: bool = False  # 다른 항목의 구분으로 붙는 항목인지 (예: 관용·자가용)
 
 
 @mapping_router.get("/fields", response_model=list[FieldOut])
 def list_fields() -> list[FieldOut]:
-    return [FieldOut(key=f.key, label=f.label, description=f.description) for f in get_engine().fields]
+    return [
+        FieldOut(key=f.key, label=f.label, description=f.description, aliases=list(f.aliases), modifier=f.modifier)
+        for f in get_engine().fields
+    ]

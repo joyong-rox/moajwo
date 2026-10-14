@@ -421,3 +421,25 @@ def test_0017_keeps_existing_sessions_and_downgrades(tmp_path: Path) -> None:
     assert "auth_version" not in [r[1] for r in db.execute("PRAGMA table_info(auth_sessions)")]
     assert db.execute("SELECT count(*) FROM auth_sessions").fetchone()[0] == 1
     db.close()
+
+
+def test_0018_mapping_analyses_up_and_down(tmp_path: Path) -> None:
+    """0018: 분석 기록 테이블만 만들고 지운다. 매핑 확정(mapping_decisions)은 건드리지 않는다."""
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT name FROM sqlite_master WHERE name = 'mapping_analyses'").fetchall()
+    db.execute(
+        "INSERT INTO source_files (id, original_name, stored_path, sha256, size_bytes) VALUES (1, 'a', 'x', 's', 1)"
+    )
+    db.execute(
+        "INSERT INTO mapping_decisions (source_file_id, sheet_name, column_name, field_key)"
+        " VALUES (1, '현황', '열', 'note')"
+    )
+    db.execute("INSERT INTO mapping_analyses (source_file_id, created_by, result) VALUES (1, NULL, '{}')")
+    db.commit()
+    db.close()
+    _alembic(tmp_path, "downgrade", "0017_auth_version")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert not db.execute("SELECT name FROM sqlite_master WHERE name = 'mapping_analyses'").fetchall()
+    assert db.execute("SELECT field_key FROM mapping_decisions").fetchall() == [("note",)]
+    db.close()

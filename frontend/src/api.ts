@@ -61,8 +61,10 @@ export const PII_LABEL: Record<PiiType, string> = { rrn: '주민등록번호', m
 export type PiiItem = { type: PiiType; sheet: string; row: number; column: string; masked: string }
 export type PiiSummary = { counts: Record<PiiType, number>; items: PiiItem[]; acknowledged: boolean }
 
-export type MappingStatus = 'auto' | 'review' | 'unresolved' | 'confirmed'
-export type MappingMethod = 'exact' | 'standard' | 'learned' | 'exact_part' | 'similarity' | 'pattern' | 'llm' | 'user' | 'none'
+// unanalyzed: 이 사용자의 저장된 분석이 없는 열 (작업 화면에서만, 확정값이 있으면 confirmed)
+export type MappingStatus = 'auto' | 'review' | 'unresolved' | 'confirmed' | 'unanalyzed'
+export type MappingMethod =
+  'exact' | 'standard' | 'learned' | 'exact_part' | 'similarity' | 'pattern' | 'llm' | 'user' | 'none'
 export type EngineStatus = 'ok' | 'unavailable' | 'skipped'
 
 export type MappingCandidate = {
@@ -92,19 +94,29 @@ export type FileMapping = {
   original_name: string
   embedding: EngineStatus
   llm: EngineStatus
-  sheets: { name: string; columns: ColumnMapping[] }[]
+  sheets: { name: string; sheet_id?: string; columns: ColumnMapping[] }[]
+  analyzed_at?: string | null
 }
 
 export async function mapFile(fileId: number): Promise<FileMapping> {
   const res = await apiFetch(`${API_BASE}/files/${fileId}/mapping`, { method: 'POST' })
   if (!res.ok) {
-    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
+    const detail = await res.json().then(
+      (j: { detail?: unknown }) => j.detail,
+      () => null,
+    )
     throw new Error(typeof detail === 'string' ? detail : `HTTP ${res.status}`)
   }
   return (await res.json()) as FileMapping
 }
 
-export type StandardFieldInfo = { key: string; label: string; description: string }
+export type StandardFieldInfo = {
+  key: string
+  label: string
+  description: string
+  aliases?: string[] // 표준 사전에 적힌 다른 이름 (사전에 있는 것만)
+  modifier?: boolean // 다른 항목의 구분으로 붙는 항목 (관용·자가용 등)
+}
 
 export async function fetchFields(): Promise<StandardFieldInfo[]> {
   const res = await apiFetch(`${API_BASE}/mapping/fields`)
@@ -122,7 +134,10 @@ export async function saveDecisions(fileId: number, decisions: DecisionInput[]):
     body: JSON.stringify({ decisions }),
   })
   if (!res.ok) {
-    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
+    const detail = await res.json().then(
+      (j: { detail?: unknown }) => j.detail,
+      () => null,
+    )
     throw new Error(typeof detail === 'string' ? detail : `HTTP ${res.status}`)
   }
   return (await res.json()) as DecisionsResult
@@ -164,7 +179,10 @@ export function uploadFiles(files: File[], onProgress?: (fraction: number) => vo
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
-    const detail = await res.json().then((j: { detail?: unknown }) => j.detail, () => null)
+    const detail = await res.json().then(
+      (j: { detail?: unknown }) => j.detail,
+      () => null,
+    )
     const message =
       typeof detail === 'string'
         ? detail
@@ -176,7 +194,13 @@ async function json<T>(res: Response): Promise<T> {
   return (await res.json()) as T
 }
 
-export type StoredFile = { id: number; original_name: string; uploaded_at: string; pii: PiiSummary | null }
+export type StoredFile = {
+  id: number
+  original_name: string
+  display_name: string // 개인정보를 가린 표시용 이름 (식별은 id)
+  uploaded_at: string
+  pii: PiiSummary | null
+}
 
 export async function listFiles(): Promise<StoredFile[]> {
   return json(await apiFetch(`${API_BASE}/files`))
@@ -202,7 +226,13 @@ export type ValidationRun = {
   status: ValidationStatus
   blocks: ValidationIssue[]
   warnings: ValidationIssue[]
-  pii: { file_id: number; file_name: string; counts: Record<PiiType, number>; items: PiiItem[]; acknowledged: boolean }[]
+  pii: {
+    file_id: number
+    file_name: string
+    counts: Record<PiiType, number>
+    items: PiiItem[]
+    acknowledged: boolean
+  }[]
   notes: string[]
   entities: EntityNote[]
   created_at: string
@@ -762,7 +792,9 @@ export async function decidePromotion(
   decision: 'approve' | 'reject',
   note: string | null,
 ): Promise<PromotionCandidate> {
-  return json(await apiFetch(`${API_BASE}/admin/promotions/${id}/${decision}`, { method: 'POST', ...jsonBody({ note }) }))
+  return json(
+    await apiFetch(`${API_BASE}/admin/promotions/${id}/${decision}`, { method: 'POST', ...jsonBody({ note }) }),
+  )
 }
 
 export type StandardTerm = {
@@ -796,7 +828,9 @@ export async function fetchSettings(): Promise<Settings> {
 }
 
 export async function saveBaseline(minutes: number | null): Promise<Settings> {
-  return json(await apiFetch(`${API_BASE}/settings`, { method: 'PUT', ...jsonBody({ manual_baseline_minutes: minutes }) }))
+  return json(
+    await apiFetch(`${API_BASE}/settings`, { method: 'PUT', ...jsonBody({ manual_baseline_minutes: minutes }) }),
+  )
 }
 
 export async function saveAutomationBaseline(id: number, minutes: number | null): Promise<Settings> {
@@ -850,4 +884,178 @@ export async function testLlmSettings(): Promise<{
   message: string
 }> {
   return json(await apiFetch(`${API_BASE}/settings/llm/test`, { method: 'POST' }))
+}
+
+// ---------------------------------------------------------------- 열 매핑 작업 화면 (미리보기·저장된 분석·공통 검토·일괄 확정)
+
+/** 작업 화면 매핑: 이 사용자가 마지막으로 실행한 분석(있으면) + 지금의 확정값.
+ * 분석 기록이 없으면 analyzed=false — 확정값만 보이고 나머지 열은 'unanalyzed' (자동으로 분석하지 않는다). */
+export type StoredMapping = {
+  file_id: number
+  original_name: string
+  analyzed: boolean
+  analyzed_at: string | null
+  embedding: EngineStatus | null
+  llm: EngineStatus | null
+  stale: boolean
+  can_change: boolean
+  sheets: { sheet_id: string; name: string; columns: ColumnMapping[] }[]
+}
+
+export async function fetchLatestMapping(fileId: number): Promise<StoredMapping> {
+  return json(await apiFetch(`${API_BASE}/files/${fileId}/mapping/latest`))
+}
+
+export type PreviewColumn = { column_id: string; name: string; letter: string }
+export type PreviewRow = { row: number; kind: RowKind; cells: Cell[] }
+export type SheetPreview = {
+  file_id: number
+  original_name: string
+  sheet_id: string
+  sheet: string
+  sheets: { sheet_id: string; name: string }[]
+  basis: string
+  header_row: number | null
+  header_row_end: number | null
+  header_rows: Cell[][]
+  columns: PreviewColumn[]
+  rows: PreviewRow[]
+  offset: number
+  limit: number
+  total_rows: number
+  data_rows: number
+  dropped_columns: number
+}
+
+export async function fetchPreview(
+  fileId: number,
+  sheetId: string | null,
+  offset: number,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<SheetPreview> {
+  const qs = new URLSearchParams({ offset: String(offset), limit: String(limit) })
+  if (sheetId) qs.set('sheet_id', sheetId)
+  return json(await apiFetch(`${API_BASE}/files/${fileId}/preview?${qs.toString()}`, { signal }))
+}
+
+export type CommonCategory = 'common' | 'divergent' | 'unresolved' | 'only'
+export type CommonMember = {
+  file_id: number
+  file_name: string
+  sheet_id: string
+  sheet: string
+  column_id: string
+  column: string
+  samples: Cell[]
+  status: MappingStatus
+  method: MappingMethod
+  field_key: string | null
+  field_label: string | null
+  qualifier: string | null
+  reason: string | null // 제안 근거 (서버가 가림)
+  confirmed: boolean
+  value_kind: string
+  quantity: boolean // 수량으로 비교하는 열 (단위·흐름/시점 비교 대상)
+  unit: string | null
+  unit_state: 'one' | 'none' | 'ambiguous'
+  unit_note: string | null
+  basis: 'flow' | 'stock' | 'conflict' | null
+  can_change: boolean
+}
+export type CommonGroup = {
+  group_id: string
+  category: CommonCategory
+  name: string
+  files: number
+  field_key: string | null
+  field_label: string | null
+  reasons: string[]
+  evidence: string[] // 공통 후보에서 실제로 확인한 근거 (확인하지 못한 것은 그렇다고 적음)
+  members: CommonMember[]
+}
+export type CommonReview = {
+  files: { file_id: number; name: string; analyzed_at: string; stale: boolean; can_change: boolean }[]
+  missing: { file_id: number; name: string }[]
+  groups: CommonGroup[]
+}
+
+export async function fetchCommonReview(fileIds: number[]): Promise<CommonReview> {
+  return json(
+    await apiFetch(`${API_BASE}/mapping/common`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
+  )
+}
+
+export type BatchTarget = { file_id: number; sheet_id: string; column_id: string; field_key: string | null }
+export type PlanItem = {
+  file_id: number
+  file_name: string
+  sheet_id: string
+  sheet: string
+  column_id: string
+  column: string
+  current_status: MappingStatus | 'unknown'
+  suggestion_reason: string | null
+  current_confirmed: boolean
+  current_field_key: string | null
+  current_label: string | null
+  new_field_key: string | null
+  new_label: string | null
+  action: 'apply' | 'overwrite' | 'unchanged' | 'excluded'
+  reason: string | null
+}
+export type BatchPlan = {
+  selected: number
+  applicable: number
+  overwrite: number
+  unchanged: number
+  excluded: number
+  items: PlanItem[]
+}
+
+export async function previewBatch(items: BatchTarget[]): Promise<BatchPlan> {
+  return json(
+    await apiFetch(`${API_BASE}/mapping/batch/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items }),
+    }),
+  )
+}
+
+export type ApplyTarget = BatchTarget & {
+  expected_confirmed: boolean
+  expected_field_key: string | null
+  overwrite: boolean
+}
+
+/** 적용하지 못한 이유 목록을 담은 오류 (409: 확인 뒤 확정값 변경·덮어쓰기 미선택·적용 불가 대상). */
+export class BatchConflictError extends Error {
+  problems: string[]
+  constructor(message: string, problems: string[]) {
+    super(message)
+    this.problems = problems
+  }
+}
+
+export async function applyBatch(
+  items: ApplyTarget[],
+): Promise<{ applied: number; unchanged: number; learned: number; files: number }> {
+  const res = await apiFetch(`${API_BASE}/mapping/batch/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  })
+  if (res.status === 409) {
+    const detail = await res.json().then(
+      (j: { detail?: { message?: string; problems?: string[] } }) => j.detail,
+      () => undefined,
+    )
+    throw new BatchConflictError(detail?.message ?? '적용하지 않았습니다.', detail?.problems ?? [])
+  }
+  return json(res)
 }
