@@ -3024,6 +3024,8 @@ body {
 .mw-file-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  /* 높이 제한에 걸려도 행이 항목 최소 높이(32px)로 줄지 않게 — 여러 줄 파일명이 다음 항목과 겹치지 않음 */
+  grid-auto-rows: max-content;
   gap: 2px 12px;
   max-height: 240px;
   overflow: auto;
