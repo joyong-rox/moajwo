@@ -440,6 +440,8 @@ def test_repeated_in_one_file_and_once_in_another_is_still_an_overlap(an) -> Non
     a = _file(u, "반복A.xlsx", [["시도", "인구수"], ["서울특별시", 100], ["서울특별시", 100]],
               {"시도": "sido", "인구수": "population"})  # fmt: skip
     b = _file(u, "한번B.xlsx", [["시도", "인구수"], ["서울특별시", 100]], {"시도": "sido", "인구수": "population"})
+    plain = _preview(u, _body([a, b]))  # 반복 확인 전에도 다른 자료와의 중복을 함께 보여 준다
+    assert any("같은 대상" in p for p in plain["problems"]) and plain["targets"][0]["status"] == "needs_input"
     targets = [{"file_id": a, "sheet_id": "s0", "rows_are_records": True}, {"file_id": b}]
     body = {"field_key": "population", "targets": targets}
     pv = _preview(u, body)

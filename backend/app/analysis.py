@@ -934,7 +934,8 @@ def _repeated(ev: Evaluation) -> None:
 def _overlaps(ev: Evaluation) -> None:
     """같은 대상이 다른 자료에도 있으면 중복 의심. 반복 행을 서로 다른 기록으로 확인한 시트도 대상 키로 똑같이 비교한다
     (행이 반복된다고 비교를 느슨하게 하지 않음). 자동으로 고르지 않고 실행을 막는다."""
-    keyed = [(t, _by_key(t)) for t in ev.ok]
+    # 반복 행 확인을 기다리는 시트도 비교한다 (확인 뒤에야 다른 자료와의 중복이 드러나지 않게 한 번에 보여 줌)
+    keyed = [(t, _by_key(t)) for t in ev.targets if t.status == "ok" or (t.status == "needs_input" and t.repeated)]
     for i, (a, ka) in enumerate(keyed):
         for b, kb in keyed[i + 1 :]:
             common = [k for k in ka if k in kb]
