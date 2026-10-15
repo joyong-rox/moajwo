@@ -1077,6 +1077,7 @@ export type AnalysisTargetIn = {
   column_id?: string | null
   unit?: string | null
   period?: string | null
+  rows_are_records?: boolean // 같은 대상의 행이 반복될 때 '서로 다른 기록'이라고 확인함
 }
 export type AnalysisBin = {
   label?: string | null
@@ -1101,6 +1102,15 @@ export type AnalysisRequest = {
   filters: AnalysisFilters
   aggregates: AggKey[]
   bins: { on: AggKey; ranges: AnalysisBin[] } | null
+  region_level?: RegionLevel | null
+}
+export type RegionLevel = 'lower' | 'upper'
+export type AnalysisRepeated = {
+  keys: number
+  rows: number
+  same_value: number
+  different_value: number
+  samples: { period: string | null; target: string; rows: number[]; values: (number | string | null)[] }[]
 }
 export type AnalysisTarget = {
   index: number
@@ -1121,6 +1131,8 @@ export type AnalysisTarget = {
   reasons: string[]
   candidates: { column_id: string; column: string; variant: string }[]
   data_rows: number
+  rows_are_records: boolean
+  repeated: AnalysisRepeated | null
 }
 export type AnalysisOverlap = {
   a: { file_id: number; file_name: string; sheet: string | null }
@@ -1150,6 +1162,18 @@ export type AnalysisPreview = {
   periods: string[]
   filter_values: Record<string, string[]>
   available_groups: string[]
+  region_levels: {
+    choice: RegionLevel | null
+    mismatch: number
+    conflicts: {
+      period: string | null
+      upper: { target: string; file_id: number; row: number; value: number | string | null; rows: number }
+      lower_count: number
+      lower_sum: number | null
+      lower_missing: number
+    }[]
+  }
+  base_dates: Record<string, string>
   rows: { candidate: number; excluded: Record<string, number> }
   reason_labels: Record<string, string>
   fingerprint: string
@@ -1166,6 +1190,7 @@ export type AnalysisGroup = {
   problem_rows: number
   files: number
   bin?: string
+  bin_index?: number | null
 }
 export type AnalysisRunDetail = {
   id: number
@@ -1186,6 +1211,9 @@ export type AnalysisRunDetail = {
     reason_labels: Record<string, string>
     warnings: string[]
     policy: string
+    region_level?: RegionLevel | null
+    base_dates?: Record<string, string>
+    records?: string[]
   }
   inputs: (AnalysisTarget & { sha256: string })[]
   result: {
@@ -1193,8 +1221,10 @@ export type AnalysisRunDetail = {
     group_labels: string[]
     period_split: boolean
     aggregates: AggKey[]
-    bins: { label: string; groups: number }[] | null
+    bins: { index: number | null; label: string; groups: number }[] | null
     partial: boolean
+    region_level?: RegionLevel | null
+    level_mismatch?: number
     rows_included: number
     rows_excluded: number
     problem_rows: number

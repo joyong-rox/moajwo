@@ -9,13 +9,20 @@
   같은 항목이라도 열 이름의 연도·구분 단어(2단 머리글의 각 부분, 괄호 안 사전 단어)가 다르면 따로 계산한다.
 - 단위: 확인된 같은 단위끼리만 계산한다 (자동 환산 없음). 표에 단위가 없으면 사용자가 그 시트의 단위를 확인해
   적어야 쓴다.
-- 기간: 행(연도·월·기준일 열) 또는 시트(파일명·시트명·제목)에서 기간을 확인하고, 기간이 여럿이면 기간별로 나눈다.
-  시점 값(인구·등록대수 등)을 월별로 더해 연간 값으로 만들지 않는다. 기간을 못 찾으면 사용자가 적어야 쓴다.
-- 집계 대상: 지역·기관·구분 값으로 한 행이 무엇인지 확인한다. 합계·소계 행, '계·합계·전체' 행, 같은 분석의 하위 지역과
-  함께 있는 상위 지역 행은 중복을 막으려고 빼고 사유를 남긴다.
+- 기간: 행(연도·월·기준일 열) 또는 시트(시트명·제목, 없으면 파일명)에서 기간을 확인하고,
+  기간이 여럿이면 기간별로 나눈다.
+  시점 값(인구·등록대수 등)을 월별로 더해 연간 값으로 만들지 않고, 같은 달이라도 기준일이 다르면 함께 계산하지 않는다.
+  연도·월·기준일 열끼리 맞지 않으면 실행하지 않는다. 기간을 못 찾으면 사용자가 적어야 쓴다.
+- 집계 대상: 지역·기관·구분 값으로 한 행이 무엇인지 확인한다. 지역은 매핑 구조(시도·시군구·행정구역 열)와 관계없이
+  행정구역 코드로 비교한다. 합계·소계 행, '계·합계·전체' 행은 빼고 사유를 남긴다.
+- 상위·하위 지역: 같은 기간·같은 구분(기관·차종 등) 안에서만 비교한다. 하위 지역 합계가 상위 지역 값과 같으면 상위 행을
+  중복으로 빼고, 다르거나 확인할 수 없으면(하위 지역 일부만 있음 등) 사용자가 집계 수준(하위만/상위만)을 고르게 한다.
 - 중복: 같은 내용의 파일이나 같은 대상(기간·지역·기관·구분)이 다른 자료에도 있으면 실행하지 않고 사용자가 고르게 한다.
+  한 시트 안에서 같은 대상이 반복되면 중복된 통계인지 서로 다른 기록인지 알 수 없으므로, 사용자가 '서로 다른 기록'이라고
+  확인하기 전에는 계산하지 않는다 (임의로 합치거나 지우지 않음).
 - 결측: 빈칸·비공개 표기·숫자가 아닌 값·가린 개인정보는 0으로 바꾸지 않고 사유와 함께 뺀다 (뺀 값이 있으면 '부분 집계').
 - 평균 = 유효한 숫자의 합 ÷ 그 개수 (파일별 평균을 다시 평균하지 않음). 유효한 숫자가 없으면 '계산할 값 없음'.
+- 사용자가 적은 글자(구간 이름·필터 값·단위·구분)는 저장·표시·다운로드 전에 기존 개인정보 마스킹(mask_text)으로 가린다.
 """
 
 import hashlib
@@ -44,7 +51,7 @@ from app.parsing import is_missing
 from app.pii import mask_text
 from app.validation import STOCK_FIELDS, _month_of, _text_periods, _year_of
 
-POLICY = "analysis-policy-1"
+POLICY = "analysis-policy-2"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
 MAX_TARGETS = 20  # 한 번에 고를 수 있는 파일·시트
 MAX_ROWS = 300_000  # 고른 시트의 데이터 행 합계 상한
 MAX_GROUPS = 5_000
@@ -98,13 +105,19 @@ REASONS: dict[str, tuple[str, bool]] = {
     "not_number": ("숫자가 아닌 값 (글자로 저장된 숫자 포함)", True),
     "pii": ("개인정보 형식이라 가린 값", True),
     "period_unknown": ("기간을 확인할 수 없는 행", True),
+    "period_conflict": ("기간 열(연도·월·기준일)이 서로 맞지 않는 행 (기간을 추정하지 않음)", True),
     "no_identity": ("지역·기관·구분 값이 비어 무엇인지 알 수 없는 행", True),
     "subtotal": ("합계·소계 행 (상세 행과 중복 방지)", False),
     "total_like": ("'계·합계·전체'로 적힌 행 (확인 필요 — 중복 방지로 제외)", False),
-    "upper_region": ("같은 분석의 하위 지역과 함께 있는 상위 지역 행 (중복 방지)", False),
+    "upper_region": ("같은 기간·같은 구분의 하위 지역 행과 함께 있는 상위 지역 행 (중복 방지)", False),
+    "lower_region": ("집계 수준 '상위 지역만'을 골라 뺀 하위 지역 행 (중복 방지)", False),
     "filtered": ("고른 지역·기관·기간 조건 밖", False),
     "value_range": ("숫자 범위 조건 밖", False),
 }
+# 어디에 속하는지 알 수 없어 중복·상위 지역 판단에도 쓰지 않는 행
+UNPLACED = frozenset({"period_unknown", "period_conflict", "no_identity"})
+OTHER_IDENTITY = tuple(k for k in IDENTITY_FIELDS if k not in REGION_FIELDS)
+_DAY = re.compile(r"((?:19|20)\d{2})\D{0,3}(\d{1,2})\D{0,3}(\d{1,2})")
 
 
 @lru_cache(maxsize=1)
@@ -132,6 +145,8 @@ class TargetIn(BaseModel):
     column_id: str | None = Field(default=None, pattern=r"^c\d{1,4}$")  # 같은 구분의 열이 여러 개일 때만
     unit: str | None = Field(default=None, min_length=1, max_length=20)  # 표에 단위가 없을 때 사용자가 확인한 단위
     period: str | None = Field(default=None, pattern=r"^(19|20)\d{2}(-(0[1-9]|1[0-2]))?$")  # 기간을 못 찾을 때만
+    # 같은 대상의 행이 반복될 때, 사용자가 '서로 다른 기록(거래·발생 건)'이라고 확인했으면 모두 더한다
+    rows_are_records: bool = False
 
 
 class BinIn(BaseModel):
@@ -172,6 +187,8 @@ class AnalysisIn(BaseModel):
     filters: FiltersIn = Field(default_factory=FiltersIn)
     aggregates: list[Literal["sum", "mean", "min", "max", "count"]] = Field(default_factory=lambda: list(AGGREGATES))
     bins: BinsIn | None = None
+    # 상위·하위 지역 행이 함께 있고 하위 합계가 상위 값과 다를 때 사용자가 고른 집계 수준 (None = 고르지 않음)
+    region_level: Literal["lower", "upper"] | None = None
 
 
 class RunIn(AnalysisIn):
@@ -188,6 +205,14 @@ def bin_label(b: BinIn) -> str:
     lo = None if b.min is None else f"{_num(b.min)} {'이상' if b.min_inclusive else '초과'}"
     hi = None if b.max is None else f"{_num(b.max)} {'이하' if b.max_inclusive else '미만'}"
     return " ".join(x for x in (lo, hi) if x) or "전체"
+
+
+def bin_labels(bins: BinsIn) -> list[str]:
+    """구간마다 보여 줄 이름. 가린 뒤 같아졌거나 같은 이름을 여러 번 적었으면(또는 '미분류' 등과 같으면)
+    번호를 붙여 구분한다. 계산·건수는 구간 번호로 세므로 이름이 같아도 서로 합쳐지지 않는다."""
+    names = [bin_label(b) for b in bins.ranges]
+    reserved = {UNCLASSIFIED, NO_VALUE}
+    return [f"{n} ({i + 1}번 구간)" if names.count(n) > 1 or n in reserved else n for i, n in enumerate(names)]
 
 
 def _num(v: float) -> str:
@@ -235,12 +260,36 @@ def _overlap(a: BinIn, b: BinIn) -> bool:
     return lo < hi or (lo == hi and lo_in and hi_in)
 
 
+def _shown(text: str) -> str:
+    """오류 메시지에 되돌려 보여 주는 사용자 입력 (개인정보 형식은 가리고 길이를 줄인다)."""
+    return mask_text(text)[:60]
+
+
+def normalize_request(req: AnalysisIn) -> None:
+    """사용자가 적은 글자를 저장·표시·비교 전에 가린다 (기존 마스킹 정책과 같은 mask_text).
+    표의 값(지역·기관 등)은 이미 가린 보기에서 읽으므로, 필터 값도 같은 규칙으로 가려야 서로 맞춰 볼 수 있다."""
+    if req.variant is not None:
+        req.variant = mask_text(req.variant)
+    if req.unit is not None:
+        req.unit = mask_text(req.unit.strip())
+    for t in req.targets:
+        if t.unit is not None:
+            t.unit = mask_text(t.unit.strip())
+    req.filters.dims = {k: [mask_text(dim_value(v)) for v in vals] for k, vals in req.filters.dims.items()}
+    if req.bins is not None:
+        for b in req.bins.ranges:
+            if b.label is not None:
+                b.label = mask_text(b.label.strip()) or None
+
+
 def validate_request(req: AnalysisIn) -> None:
+    normalize_request(req)
     if req.field_key not in MEASURE_FIELDS:
         raise _bad("분석할 수 있는 항목이 아닙니다 (1차는 더해서 의미가 있는 수량 항목만 — 비율·증감률은 후속 기능).")
     if any(k not in GROUP_FIELDS for k in req.group_by):
         raise _bad(
-            "그룹 기준으로 쓸 수 없는 항목입니다: " + ", ".join(k for k in req.group_by if k not in GROUP_FIELDS)
+            "그룹 기준으로 쓸 수 없는 항목입니다: "
+            + ", ".join(_shown(k) for k in req.group_by if k not in GROUP_FIELDS)
         )
     if len(set(req.group_by)) != len(req.group_by):
         raise _bad("같은 그룹 기준을 두 번 골랐습니다.")
@@ -248,7 +297,7 @@ def validate_request(req: AnalysisIn) -> None:
         raise _bad("계산 방식을 하나 이상, 겹치지 않게 고르세요.")
     for key, values in req.filters.dims.items():
         if key not in IDENTITY_FIELDS:
-            raise _bad(f"필터에 쓸 수 없는 항목입니다: {key}")
+            raise _bad(f"필터에 쓸 수 없는 항목입니다: {_shown(key)}")
         if len(values) > MAX_FILTER_VALUES:
             raise _bad(f"필터 값은 {MAX_FILTER_VALUES}개까지 고를 수 있습니다.")
     f = req.filters
@@ -321,14 +370,26 @@ def variant_of(column: str) -> str:
     return mask_text(" · ".join(dict.fromkeys(w for w in words if w)))
 
 
-def _period_from_cell(value: object) -> str | None:
+def _cell_time(value: object) -> tuple[str, str, str | None] | None:
+    """기간 칸 → (정밀도 'year'·'month'·'day', 기간 'YYYY' 또는 'YYYY-MM', 날짜 'YYYY-MM-DD' 또는 None).
+
+    분석은 같은 달 안의 기준일까지 비교해야 해서, 공용 parse_date_value(월까지만 돌려줌)를 바꾸지 않고
+    여기서 날짜를 더 읽는다.
+    """
     if isinstance(value, datetime | date):
-        return f"{value.year}-{value.month:02d}"
+        return "day", f"{value.year}-{value.month:02d}", f"{value.year}-{value.month:02d}-{value.day:02d}"
     if isinstance(value, str):
         parsed = parse_date_value(value)
-        return parsed[1] if parsed else None
+        if parsed is None:
+            return None
+        kind, period = parsed
+        if kind != "date":
+            return kind, period, None
+        m = _DAY.search(unicodedata.normalize("NFKC", value))
+        return "day", period, f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}" if m else None
     if isinstance(value, int) and not isinstance(value, bool):
-        return _year_of(value)
+        year = _year_of(value)
+        return ("year", year, None) if year else None
     return None
 
 
@@ -341,25 +402,32 @@ def sheet_periods(file_name: str, sheet: SheetView) -> list[tuple[str, str]]:
     return found
 
 
-def region_level(dims: dict[str, str]) -> tuple[str, str | None] | None:
-    """지역 단위 → ('nation'|'sido'|'sigungu', 상위 시도 코드). 정식 명칭을 못 찾으면 None (판단하지 않음)."""
-    sido, sigungu, region = dims.get("sido", ""), dims.get("sigungu", ""), dims.get("region", "")
-    if "sigungu" in dims:
-        parent = infer_region_codes(compact(sido)) if sido else None
-        if compact(sigungu) and compact(sigungu) not in TOTAL_LIKE:
-            own = infer_region_codes(compact(f"{sido}{sigungu}")) if sido else infer_region_codes(compact(sigungu))
-            code = (own or parent or (None, None))[0]
-            return "sigungu", code
-        if sido and parent:
-            return "sido", parent[0]
+def region_key(dims: dict[str, str]) -> tuple[str, str] | None:
+    """행의 지역 → 비교 키. 시도·시군구 열로 나눠 적었든 '행정구역' 한 열에 적었든 같은 지역이면 같은 키
+    (행정구역 정식 명칭이면 시도 2자리·시군구 5자리 코드, 아니면 공백을 뺀 글자). 지역 값이 없으면 None."""
+    names = [dims[k] for k in ("sido", "sigungu", "region") if compact(dims.get(k))]
+    if not names:
+        code = compact(dims.get("region_code"))
+        return ("code", code) if code else None
+    text = compact("".join(names))
+    if text in NATION:
+        return ("nation", "")
+    codes = infer_region_codes(text)
+    if codes is None and len(names) > 1:  # '서울특별시' + '서울특별시 종로구'처럼 겹쳐 적은 경우
+        codes = infer_region_codes(compact(names[-1]))
+    return ("code", codes[0] + (codes[1] or "")) if codes else ("name", text)
+
+
+def region_level(key: tuple[str, str] | None) -> tuple[str, str | None] | None:
+    """지역 키 → ('nation'|'sido'|'sigungu', 상위 시도 코드). 코드로 확인할 수 없으면 None (판단하지 않음)."""
+    if key is None:
         return None
-    value = region or sido
-    if compact(value) in NATION:
+    kind, value = key
+    if kind == "nation":
         return "nation", None
-    codes = infer_region_codes(compact(value)) if value else None
-    if codes is None:
-        return None
-    return ("sido", codes[0]) if codes[1] is None else ("sigungu", codes[0])
+    if kind == "code" and value.isdigit() and len(value) in (2, 5):
+        return ("sido", value) if len(value) == 2 else ("sigungu", value[:2])
+    return None
 
 
 # ---------------------------------------------------------------- 대상 평가
@@ -375,6 +443,7 @@ class RowRec:
     shown: str | None = None
     reason: str | None = None
     level: tuple[str, str | None] | None = None
+    day: str | None = None  # 기준일 (날짜까지 적힌 경우)
 
 
 @dataclass
@@ -400,6 +469,8 @@ class TargetEval:
     decisions: dict[str, str | None] = field(default_factory=dict)
     data_rows: int = 0
     rows: list[RowRec] = field(default_factory=list)
+    records: bool = False  # 사용자가 '반복 행은 서로 다른 기록'이라고 확인함
+    repeated: dict[str, Any] | None = None  # 같은 대상의 행이 반복된 정도 (화면에 보여 줌)
 
     def out(self) -> dict[str, Any]:
         return {
@@ -421,6 +492,8 @@ class TargetEval:
             "reasons": self.reasons,
             "candidates": self.candidates,
             "data_rows": self.data_rows,
+            "rows_are_records": self.records,
+            "repeated": self.repeated,
         }
 
 
@@ -438,6 +511,9 @@ class Evaluation:
     periods: list[str] = field(default_factory=list)
     filter_values: dict[str, list[str]] = field(default_factory=dict)
     available_groups: list[str] = field(default_factory=list)
+    level_conflicts: list[dict[str, Any]] = field(default_factory=list)  # 하위 합계 ≠ 상위 값 (예시 일부)
+    level_mismatch: int = 0  # 하위 합계가 상위 값과 다르거나 확인할 수 없는 상위 지역 수
+    base_dates: dict[str, str] = field(default_factory=dict)  # 기간 → 기준일 (시점 값, 날짜가 적힌 경우)
     fingerprint: str = ""
 
     @property
@@ -450,7 +526,13 @@ def _sheet_targets(db: Session, user: CurrentUser, req: AnalysisIn) -> list[Targ
     seen: set[tuple[int, int]] = set()
     total_rows = 0
     for t in req.targets:
-        record = get_file_for(db, user, t.file_id)
+        record = get_file_for(db, user, t.file_id)  # 볼 수 없는 파일은 없는 것처럼 404
+        if record.uploaded_by != user.id:
+            # 최고 관리자는 남의 파일·결과를 조회만 한다 — 남의 자료로 새 분석 결과를 만들지 않음 (저장 전에 막음)
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "다른 사용자의 파일로는 분석을 만들 수 없습니다 (다른 사용자의 기존 분석 결과는 조회만 가능).",
+            )
         view = file_view(db, record)
         decisions = load_decisions(db, record.id)
         name = mask_text(record.original_name)
@@ -530,15 +612,25 @@ def _resolve_sheet(ev: TargetEval, t: TargetIn, sv: SheetView, file_name: str, r
     if not any(k in ev.dims for k in IDENTITY_FIELDS) and not ev.period_columns:
         ev.status = "excluded"
         ev.reasons.append("지역·기관·구분·기간 열이 확정되지 않아 한 행이 무엇을 나타내는지 확인할 수 없음")
-    # 기간: 행의 연도·월·기준일 열이 있으면 행마다, 없으면 파일명·시트명·제목
+    # 기간: 행의 연도·월·기준일 열이 있으면 행마다, 없으면 시트명·제목, 그것도 없으면 파일명.
+    # 파일명의 날짜는 발행·작성 시점일 수 있어 통계 기준 시점(제목 등)과 같은 뜻으로 비교하지 않고, 쓴 근거를 남긴다.
     if not ev.period_columns or ("month" in ev.dims and "year" not in ev.dims and "base_date" not in ev.dims):
         found = sheet_periods(file_name, sv)
-        distinct = sorted({p for p, _ in found})
+        inner = [(p, s) for p, s in found if s != "파일명"]
+        use = inner or found
+        distinct = sorted({p for p, _ in use})
         if len(distinct) > 1:
             ev.status = "excluded"
-            ev.reasons.append(f"파일명·시트명·제목의 기간이 서로 다름 ({', '.join(distinct)}) — 추정하지 않음")
+            where = "시트명·제목" if inner else "파일명"
+            ev.reasons.append(f"{where}의 기간이 서로 다름 ({', '.join(distinct)}) — 추정하지 않음")
         elif distinct:
-            ev.period, ev.period_source = distinct[0], next(s for p, s in found if p == distinct[0])
+            ev.period, ev.period_source = distinct[0], next(s for p, s in use if p == distinct[0])
+            period = ev.period
+            other = sorted(
+                {p for p, s in found if s == "파일명" and not (p.startswith(period) or period.startswith(p))}
+            )
+            if inner and other:
+                ev.period_source += f" (파일명의 {', '.join(other)}은 발행·작성 시점일 수 있어 쓰지 않음)"
             if t.period is not None and t.period != ev.period:
                 ev.status = "needs_input" if ev.status == "ok" else ev.status
                 ev.reasons.append(f"적은 기간({t.period})이 {ev.period_source}의 기간({ev.period})과 다름")
@@ -574,21 +666,43 @@ def _resolve_units(ev: TargetEval, t: TargetIn, sv: SheetView) -> None:
         ev.reasons.append("단위를 확인할 수 없음 — 표에 '단위: …'가 없어 이 시트의 단위를 적어야 함")
 
 
-def _row_period(ev: TargetEval, cells: list[Any]) -> str | None:
+def _row_period(ev: TargetEval, cells: list[Any]) -> tuple[str | None, str | None, str | None]:
+    """행의 기간 → (기간, 기준일, 충돌 설명). 연도·월·기준일 열이 서로 맞지 않으면 기간을 정하지 않고 충돌을 돌려준다
+    (어느 열이 맞는지 추정하지 않음)."""
     d = ev.dims
     if not any(k in d for k in PERIOD_FIELDS):
-        return ev.period  # 행 기간 열이 없으면 시트 전체의 기간 (파일명·시트명·제목 또는 사용자 확인)
-    if "base_date" in d and (p := _period_from_cell(cells[d["base_date"]])):
-        return p
-    year = _year_of(cells[d["year"]]) if "year" in d else None
+        return ev.period, None, None  # 행 기간 열이 없으면 시트 전체의 기간 (시트명·제목·파일명 또는 사용자 확인)
+    seen: list[tuple[str, str, str, str | None]] = []  # (열, 정밀도, 기간, 날짜)
+    if "base_date" in d and (x := _cell_time(cells[d["base_date"]])):
+        seen.append(("기준일", *x))
+    if "year" in d and (y := _year_of(cells[d["year"]])):
+        seen.append(("연도", "year", y, None))
+    month_no = None
     if "month" in d:
         v = cells[d["month"]]
-        if isinstance(v, str) and (full := parse_date_value(v)) and full[0] != "year":
-            return full[1]
-        month = _month_of(v)
-        base_year = year or (ev.period[:4] if ev.period else None)  # 월 열만 있으면 연도는 시트 기간에서
-        return f"{base_year}-{month:02d}" if month is not None and base_year else None
-    return year
+        x = _cell_time(v) if isinstance(v, str | datetime | date) else None
+        if x and x[0] != "year":
+            seen.append(("월", *x))
+        elif (month_no := _month_of(v)) is not None:
+            seen.append(("월", "month_no", f"{month_no}월", None))
+    years = {p[:4] for _, kind, p, _ in seen if kind != "month_no"}
+    months = {p for _, kind, p, _ in seen if kind in ("month", "day")}
+    days = {day for *_, day in seen if day}
+    clash = len(years) > 1 or len(months) > 1 or len(days) > 1
+    if month_no is not None and any(int(p[5:7]) != month_no for p in months):
+        clash = True
+    if clash:
+        return None, None, " · ".join(f"{col} {day or p}" for col, _, p, day in seen)
+    if months:
+        return next(iter(months)), next(iter(days), None), None
+    if "month" in d:
+        if month_no is None:
+            return None, None, None
+        base_year = next(iter(years), None) or (
+            ev.period[:4] if ev.period else None
+        )  # 월 숫자만 있으면 연도는 시트 기간
+        return (f"{base_year}-{month_no:02d}" if base_year else None), None, None
+    return next(iter(years), None), None, None
 
 
 def evaluate(db: Session, user: CurrentUser, req: AnalysisIn) -> Evaluation:
@@ -607,6 +721,7 @@ def evaluate(db: Session, user: CurrentUser, req: AnalysisIn) -> Evaluation:
         shown = ", ".join(v or "구분 없음" for v in all_variants)
         ev.problems.append(f"같은 항목이지만 열 이름의 구분이 다른 열이 있습니다 ({shown}) — 분석할 구분을 고르세요")
     for t, tin in _pairs(targets, req):
+        t.records = bool(tin and tin.rows_are_records)
         if t.status == "excluded":
             continue
         cands = [c for c in t.candidates if ev.variant is None or c["variant"] == ev.variant]
@@ -685,6 +800,7 @@ def _read_rows(ev: Evaluation) -> None:
     wanted = {k: {dim_value(v) for v in vals} for k, vals in f.dims.items() if vals}
     values: dict[str, set[str]] = defaultdict(set)
     periods: set[str] = set()
+    clashes: dict[int, list[tuple[int, str]]] = defaultdict(list)
     for t in ev.ok:
         sv: SheetView = t._view  # type: ignore[attr-defined]
         col = int(t.column_id[1:]) if t.column_id else None
@@ -692,13 +808,18 @@ def _read_rows(ev: Evaluation) -> None:
             if kind not in ("data", "subtotal"):
                 continue
             dims = {k: dim_value(cells[j]) for k, j in t.dims.items() if k in IDENTITY_FIELDS}
-            rec = RowRec(t.index, row_no, _row_period(t, cells), dims)
+            period, day, clash = _row_period(t, cells)
+            rec = RowRec(t.index, row_no, period, dims, day=day)
             t.rows.append(rec)
             if kind == "subtotal":
                 rec.reason = "subtotal"
                 continue
             if any(compact(v) in TOTAL_LIKE for v in dims.values()):
                 rec.reason = "total_like"
+                continue
+            if clash:
+                rec.reason = "period_conflict"
+                clashes[t.index].append((row_no, clash))
                 continue
             if rec.period is None:
                 rec.reason = "period_unknown"
@@ -718,12 +839,21 @@ def _read_rows(ev: Evaluation) -> None:
             ):
                 rec.reason = "filtered"
                 continue
-            rec.level = region_level(dims) if any(k in dims for k in REGION_FIELDS) else None
+            rec.level = region_level(region_key(dims)) if any(k in dims for k in REGION_FIELDS) else None
             rec.value, rec.reason, rec.shown = classify_value(cells[col]) if col is not None else (None, "blank", None)
     ev.periods = sorted(periods)
     ev.filter_values = {k: sorted(v) for k, v in values.items()}
-    _upper_regions(ev)
+    for t in ev.ok:
+        if found := clashes.get(t.index):
+            row, text = found[0]
+            ev.problems.append(
+                f"#{t.file_id} {t.sheet}: 기간 열(연도·월·기준일)이 서로 맞지 않는 행 {len(found)}개 "
+                f"(예: {row}행 {text}) — 어느 기간인지 추정하지 않습니다. 매핑이나 자료를 확인하세요"
+            )
+    _repeated(ev)  # 순서: 한 시트 안의 반복 → 자료 사이의 중복 → 상위·하위 지역 (중복을 먼저 드러낸다)
     _overlaps(ev)
+    _region_levels(ev)
+    _base_dates(ev)
     for t in ev.ok:
         for r in t.rows:
             if r.reason is None and r.value is not None:
@@ -735,59 +865,93 @@ def _read_rows(ev: Evaluation) -> None:
 
 def _candidate(r: RowRec) -> bool:
     """중복·상위 지역 판단에 쓰는 행: 구조·조건으로 빠지지 않은 행 (값의 결측 여부와 관계없이)."""
-    return r.reason is None or REASONS[r.reason][1] and r.reason not in ("period_unknown", "no_identity")
+    return r.reason is None or (REASONS[r.reason][1] and r.reason not in UNPLACED)
 
 
-def _upper_regions(ev: Evaluation) -> None:
-    rows = [r for t in ev.ok for r in t.rows if _candidate(r) and r.level is not None]
-    with_children = {r.level[1] for r in rows if r.level and r.level[0] == "sigungu" and r.level[1]}
-    lower = any(r.level and r.level[0] in ("sido", "sigungu") for r in rows)
-    excluded = 0
-    for r in rows:
-        if r.level and ((r.level[0] == "sido" and r.level[1] in with_children) or (r.level[0] == "nation" and lower)):
-            r.reason, r.value, r.shown = "upper_region", None, None
-            excluded += 1
-    if excluded:
-        ev.warnings.append(
-            f"하위 지역과 함께 있는 상위 지역(시도·전국) 행 {excluded}개를 중복 방지로 뺐습니다 — "
-            "제외 목록에서 확인하세요"
+def other_key(r: RowRec) -> tuple[tuple[str, str], ...]:
+    """지역 말고 행이 무엇인지 정하는 값 (기관·부서·차종·용도·연료). 확정한 항목 이름과 값으로 비교한다."""
+    return tuple((k, compact(r.dims[k])) for k in OTHER_IDENTITY if k in r.dims)
+
+
+def target_key(r: RowRec) -> tuple[Any, ...]:
+    """같은 대상인지 비교하는 키: 기간 + 지역(매핑 구조와 관계없는 행정구역 키) + 그 밖의 구분.
+    한 시트 안의 반복과 자료 사이의 중복을 같은 키로 본다."""
+    region = region_key(r.dims) if any(k in r.dims for k in REGION_FIELDS) else None
+    return (r.period, region, other_key(r))
+
+
+def _target_text(r: RowRec) -> str:
+    return " · ".join(v for v in r.dims.values() if v) or "(구분 없음)"
+
+
+def _value_of(r: RowRec) -> float | str | None:
+    return r.value if r.value is not None else r.shown
+
+
+def _by_key(t: TargetEval) -> dict[tuple[Any, ...], list[RowRec]]:
+    by: dict[tuple[Any, ...], list[RowRec]] = defaultdict(list)
+    for r in t.rows:
+        if _candidate(r):
+            by[target_key(r)].append(r)
+    return by
+
+
+def _repeated(ev: Evaluation) -> None:
+    """한 시트 안에서 같은 대상(기간·지역·기관·구분)의 행이 반복되면, 중복된 통계 행인지
+    서로 다른 기록(거래·발생 건)인지 표만으로는 알 수 없다.
+    사용자가 '서로 다른 기록'이라고 확인하기 전에는 계산하지 않는다 (임의로 합치거나 지우지 않음)."""
+    for t in ev.ok:
+        rep = [rows for rows in _by_key(t).values() if len(rows) > 1]
+        if not rep:
+            continue
+        same = sum(1 for rows in rep if len({(x.value, x.shown) for x in rows}) == 1)
+        t.repeated = {
+            "keys": len(rep),
+            "rows": sum(len(rows) for rows in rep),
+            "same_value": same,
+            "different_value": len(rep) - same,
+            "samples": [
+                {
+                    "period": rows[0].period,
+                    "target": _target_text(rows[0]),
+                    "rows": [x.row for x in rows[:5]],
+                    "values": [_value_of(x) for x in rows[:5]],
+                }
+                for rows in rep[:5]
+            ],
+        }
+        if t.records:
+            continue  # 사용자가 서로 다른 기록이라고 확인함 → 모두 더한다 (확인 사실은 결과 조건에 남김)
+        t.status = "needs_input"
+        t.reasons.append(
+            f"같은 대상(기간·지역·기관·구분)의 행이 반복됩니다 — {len(rep)}개 대상 {t.repeated['rows']}행 "
+            f"(값 같음 {same}, 다름 {len(rep) - same}). "
+            "중복된 통계인지 서로 다른 기록인지 알 수 없어 계산하지 않습니다 — "
+            "서로 다른 기록이면 '반복 행 모두 더함'을 고르고, 아니면 자료나 구분 열 매핑을 확인하세요"
         )
 
 
-def _row_key(r: RowRec) -> tuple[Any, ...]:
-    parts = []
-    for k in IDENTITY_FIELDS:
-        if k in r.dims:
-            v = r.dims[k]
-            parts.append((k, compact(v)))
-    return (r.period, tuple(parts))
-
-
 def _overlaps(ev: Evaluation) -> None:
-    """같은 대상이 다른 자료에도 있으면 중복 의심. 한 시트 안에서 대상이 겹치지 않는 표는 대상(기간·지역·기관·구분)으로,
-    대상이 반복되는 목록형 표는 행 전체(대상+값)가 같은지로 본다. 자동으로 고르지 않고 실행을 막는다."""
-    sigs: list[tuple[TargetEval, dict[Any, RowRec]]] = []
-    for t in ev.ok:
-        rows = [r for r in t.rows if _candidate(r)]
-        keys = Counter(_row_key(r) for r in rows)
-        unique = all(n == 1 for n in keys.values())
-        sig = {(_row_key(r) if unique else (_row_key(r), r.value, r.shown)): r for r in rows}
-        sigs.append((t, sig))
-    for i, (a, sa) in enumerate(sigs):
-        for b, sb in sigs[i + 1 :]:
-            common = [k for k in sa if k in sb]
+    """같은 대상이 다른 자료에도 있으면 중복 의심. 반복 행을 서로 다른 기록으로 확인한 시트도 대상 키로 똑같이 비교한다
+    (행이 반복된다고 비교를 느슨하게 하지 않음). 자동으로 고르지 않고 실행을 막는다."""
+    keyed = [(t, _by_key(t)) for t in ev.ok]
+    for i, (a, ka) in enumerate(keyed):
+        for b, kb in keyed[i + 1 :]:
+            common = [k for k in ka if k in kb]
             if not common:
                 continue
-            same = sum(1 for k in common if sa[k].value == sb[k].value)
+            same = sum(
+                1 for k in common if sorted(map(str, map(_value_of, ka[k]))) == sorted(map(str, map(_value_of, kb[k])))
+            )
             samples = []
             for k in common[:5]:
-                ra, rb = sa[k], sb[k]
+                ra, rb = ka[k][0], kb[k][0]
                 samples.append(
                     {
                         "period": ra.period,
-                        "target": " · ".join(v for v in ra.dims.values() if v),
-                        "a": {"row": ra.row, "value": ra.value if ra.value is not None else ra.shown},
-                        "b": {"row": rb.row, "value": rb.value if rb.value is not None else rb.shown},
+                        "target": _target_text(ra),
+                        "a": {"row": ra.row, "value": _value_of(ra), "rows": len(ka[k])},
+                        "b": {"row": rb.row, "value": _value_of(rb), "rows": len(kb[k])},
                     }
                 )
             ev.overlaps.append(
@@ -807,9 +971,131 @@ def _overlaps(ev: Evaluation) -> None:
             )
 
 
+def _region_levels(ev: Evaluation) -> None:
+    """상위·하위 지역 행의 중복 방지. 같은 기간·같은 구분(기관·차종 등) 안에서만 비교한다.
+
+    - 하위 지역 합계가 상위 지역 값과 같으면 상위 행을 중복으로 뺀다 (하위 지역이 모두 있다고 확인됨).
+    - 다르거나 값이 빠져 확인할 수 없으면(하위 지역 일부만 있음 등) 사용자가 집계 수준을 고른다:
+      'lower' = 상위 행을 빼고 있는 하위 지역만, 'upper' = 하위 행을 빼고 상위 지역만. 고르지 않으면 실행하지 않는다.
+    """
+    choice = ev.req.region_level
+    ctx: dict[tuple[Any, ...], list[RowRec]] = defaultdict(list)
+    for t in ev.ok:
+        for r in t.rows:
+            if _candidate(r) and r.level is not None:
+                ctx[(r.period, other_key(r))].append(r)
+    auto = mismatch = dropped = 0
+    for (period, _), rows in sorted(ctx.items(), key=lambda kv: str(kv[0])):
+        sidos = [r for r in rows if r.level and r.level[0] == "sido"]
+        sigs = [r for r in rows if r.level and r.level[0] == "sigungu"]
+        nations = [r for r in rows if r.level and r.level[0] == "nation"]
+        sido_codes = {r.level[1] for r in sidos if r.level}
+        pairs: list[tuple[list[RowRec], list[RowRec], list[RowRec]]] = []  # (상위, 합계를 비교할 하위, 뺄 하위)
+        for code in sorted(c for c in sido_codes if c):
+            lows = [r for r in sigs if r.level and r.level[1] == code]
+            if lows:
+                pairs.append(([r for r in sidos if r.level and r.level[1] == code], lows, lows))
+        if nations and (sidos or sigs):
+            orphans = [r for r in sigs if r.level and r.level[1] not in sido_codes]
+            pairs.append((nations, sidos + orphans, sidos + sigs))
+        # 모든 쌍을 먼저 판정한 뒤 뺀다 (시도 행을 먼저 빼면 같은 기간의 '전국' 비교에서 그 값이 사라지므로)
+        judged = [
+            (
+                ups,
+                lows,
+                below,
+                len(ups) == 1
+                and ups[0].value is not None
+                and all(x.value is not None for x in lows)
+                and math.isclose(math.fsum(x.value or 0.0 for x in lows), ups[0].value, rel_tol=1e-9, abs_tol=1e-9),
+            )
+            for ups, lows, below in pairs
+        ]
+        for ups, lows, below, match in judged:
+            if not match:
+                mismatch += 1
+                if len(ev.level_conflicts) < 20:
+                    up = ups[0]
+                    valid = [x.value for x in lows if x.value is not None]
+                    ev.level_conflicts.append(
+                        {
+                            "period": period,
+                            "upper": {
+                                "target": _target_text(up),
+                                "file_id": ev.targets[up.t].file_id,
+                                "row": up.row,
+                                "value": _value_of(up),
+                                "rows": len(ups),
+                            },
+                            "lower_count": len(lows),
+                            "lower_sum": math.fsum(valid) if valid else None,
+                            "lower_missing": len(lows) - len(valid),
+                        }
+                    )
+            if choice == "upper":
+                for x in below:
+                    if x.reason != "upper_region":
+                        x.reason, x.value, x.shown = "lower_region", None, None
+                        dropped += 1
+            elif choice == "lower" or match:
+                for x in ups:
+                    if x.reason != "upper_region":
+                        x.reason, x.value, x.shown = "upper_region", None, None
+                        dropped += 1
+                        if match and choice is None:
+                            auto += 1
+    ev.level_mismatch = mismatch
+    if mismatch and choice is None:
+        ev.problems.append(
+            "상위·하위 지역 행이 함께 있는데 하위 지역 합계가 상위 지역 값과 다르거나 확인할 수 없는 곳이 "
+            f"{mismatch}곳 있습니다 (하위 지역이 일부만 있거나 값이 빠졌을 수 있음) — "
+            "집계 수준을 고르세요: 하위 지역만 / 상위 지역만"
+        )
+    elif choice == "lower" and dropped:
+        note = (
+            f" — 하위 지역 합계가 상위 지역 값과 다른 곳 {mismatch}곳은 있는 하위 지역만의 합입니다" if mismatch else ""
+        )
+        ev.warnings.append(f"집계 수준 '하위 지역만': 상위 지역 행 {dropped}개를 뺐습니다{note}")
+    elif choice == "upper" and dropped:
+        ev.warnings.append(f"집계 수준 '상위 지역만': 상위 지역과 함께 있는 하위 지역 행 {dropped}개를 뺐습니다")
+    elif auto:
+        ev.warnings.append(
+            f"하위 지역 합계가 상위 지역 값과 같은 상위 지역(시도·전국) 행 {auto}개를 중복 방지로 뺐습니다 "
+            "(같은 기간·같은 구분 안에서 비교) — 제외 목록에서 확인하세요"
+        )
+
+
+def _base_dates(ev: Evaluation) -> None:
+    """시점 값(인구·보유량 등)은 같은 달이라도 기준일이 다르면 함께 계산하지 않는다 (일 단위 분석은 지원하지 않음)."""
+    if ev.req.field_key not in STOCK_FIELDS:
+        return
+    days: dict[str, set[str]] = defaultdict(set)
+    undated: set[str] = set()
+    for t in ev.ok:
+        for r in t.rows:
+            if _candidate(r) and r.period:
+                (days[r.period].add(r.day) if r.day else undated.add(r.period))
+    for period, found in sorted(days.items()):
+        if len(found) > 1:
+            ev.problems.append(
+                f"같은 기간 {period}에 기준일이 서로 다른 자료가 있습니다 ({', '.join(sorted(found)[:5])}) — "
+                "시점 값은 기준일이 같을 때만 함께 계산합니다 (일 단위 분석은 지원하지 않음). "
+                "기준일이 같은 자료만 고르세요"
+            )
+        else:
+            ev.base_dates[period] = next(iter(found))
+            if period in undated:
+                ev.warnings.append(
+                    f"기간 {period}: 기준일({ev.base_dates[period]})이 적힌 자료와 날짜 없이 월만 적힌 자료가 "
+                    "함께 있습니다 — 같은 기준일인지 확인하세요"
+                )
+
+
 def fingerprint(ev: Evaluation) -> str:
-    """미리보기 뒤 파일·매핑이 바뀌었는지 확인하는 값 (파일 내용 해시 + 그 시트의 확정 매핑 전체 + 판정 규칙)."""
-    payload = [POLICY] + [
+    """미리보기 뒤 조건·파일·매핑이 바뀌었는지 확인하는 값
+    (요청 조건 전체 + 파일 내용 해시 + 그 시트의 확정 매핑 전체 + 판정 규칙)."""
+    request = ev.req.model_dump(include=set(AnalysisIn.model_fields))
+    payload = [POLICY, request] + [
         [t.file_id, t.sha256, t.sheet_id, sorted((k, v) for k, v in t.decisions.items())] for t in ev.targets
     ]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, default=str).encode()).hexdigest()
@@ -833,6 +1119,12 @@ def preview_out(ev: Evaluation) -> dict[str, Any]:
         "periods": ev.periods,
         "filter_values": ev.filter_values,
         "available_groups": ev.available_groups,
+        "region_levels": {
+            "choice": ev.req.region_level,
+            "mismatch": ev.level_mismatch,
+            "conflicts": ev.level_conflicts,
+        },
+        "base_dates": ev.base_dates,
         "rows": {"candidate": sum(1 for r in rows if r.reason is None), "excluded": dict(reasons)},
         "reason_labels": {k: v[0] for k, v in REASONS.items()},
         "fingerprint": ev.fingerprint,
@@ -867,6 +1159,7 @@ def compute(ev: Evaluation) -> dict[str, Any]:
         group_fields = ["period", *group_fields]
     targets = {t.index: t for t in ev.ok}
     groups: dict[tuple[str, ...], dict[str, Any]] = {}
+    labels = bin_labels(req.bins) if req.bins is not None else []
 
     def key_of(r: RowRec) -> tuple[str, ...]:
         return tuple((r.period or "") if k == "period" else (r.dims.get(k) or "(값 없음)") for k in group_fields)
@@ -882,7 +1175,7 @@ def compute(ev: Evaluation) -> dict[str, Any]:
                 g["files"].add(t.file_id)
             else:
                 excluded.append(r)
-                if REASONS[r.reason][1] and r.reason not in ("period_unknown", "no_identity"):
+                if REASONS[r.reason][1] and r.reason not in UNPLACED:
                     g = groups.setdefault(key_of(r), {"values": [], "problem": 0, "files": set()})
                     g["problem"] += 1
                     g["files"].add(t.file_id)
@@ -906,18 +1199,21 @@ def compute(ev: Evaluation) -> dict[str, Any]:
         row["min"] = min(vals) if n else None
         row["max"] = max(vals) if n else None
         if req.bins is not None:
+            # 구간은 번호로 정한다 (보여 주는 이름이 같아도 다른 구간끼리 합치지 않음)
             x = row[req.bins.on]
-            row["bin"] = (
-                NO_VALUE
-                if x is None
-                else next((bin_label(b) for b in req.bins.ranges if _contains(b, x)), UNCLASSIFIED)
-            )
+            index = None if x is None else next((i for i, b in enumerate(req.bins.ranges) if _contains(b, x)), None)
+            row["bin_index"] = index
+            row["bin"] = NO_VALUE if x is None else (labels[index] if index is not None else UNCLASSIFIED)
         out_groups.append(row)
     bin_counts = None
     if req.bins is not None:
-        labels = [bin_label(b) for b in req.bins.ranges] + [UNCLASSIFIED, NO_VALUE]
-        c = Counter(g["bin"] for g in out_groups)
-        bin_counts = [{"label": lab, "groups": c.get(lab, 0)} for lab in labels]
+        # 값이 없는 그룹은 "none", 어느 구간에도 들지 않으면 None, 그 밖에는 구간 번호
+        c = Counter("none" if g[req.bins.on] is None else g["bin_index"] for g in out_groups)
+        bin_counts = [{"index": i, "label": lab, "groups": c.get(i, 0)} for i, lab in enumerate(labels)]
+        bin_counts += [
+            {"index": None, "label": UNCLASSIFIED, "groups": c.get(None, 0)},
+            {"index": None, "label": NO_VALUE, "groups": c.get("none", 0)},
+        ]
     reason_counts = Counter(r.reason for r in excluded)
     problem_rows = sum(n for k, n in reason_counts.items() if REASONS[k][1])
 
@@ -938,6 +1234,8 @@ def compute(ev: Evaluation) -> dict[str, Any]:
         "groups": out_groups,
         "bins": bin_counts,
         "partial": problem_rows > 0,
+        "region_level": req.region_level,
+        "level_mismatch": ev.level_mismatch if req.region_level else 0,
         "rows_included": len(included),
         "rows_excluded": len(excluded),
         "problem_rows": problem_rows,
@@ -969,8 +1267,13 @@ def conditions(ev: Evaluation) -> dict[str, Any]:
         else {
             "on": req.bins.on,
             "on_label": AGG_LABEL[req.bins.on],
-            "ranges": [{**b.model_dump(), "label": bin_label(b)} for b in req.bins.ranges],
+            "ranges": [
+                {**b.model_dump(), "label": lab} for b, lab in zip(req.bins.ranges, bin_labels(req.bins), strict=True)
+            ],
         },
+        "region_level": req.region_level,
+        "base_dates": ev.base_dates,
+        "records": [f"#{t.file_id} {t.sheet}" for t in ev.ok if t.records and t.repeated],
         "mean_denominator": "그룹마다 유효한 숫자의 개수 (빈칸·비공개·숫자가 아닌 값은 분모에 넣지 않음)",
         "reason_labels": {k: v[0] for k, v in REASONS.items()},
         "warnings": ev.warnings,

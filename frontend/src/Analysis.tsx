@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   analysisDownloadUrl,
   AnalysisProblemError,
@@ -21,6 +21,7 @@ import {
   type AnalysisSource,
   type AnalysisTarget,
   type AnalysisTargetIn,
+  type RegionLevel,
 } from './api'
 import { loadFields } from './mappingText'
 import { navigate } from './router'
@@ -62,7 +63,12 @@ function fmt(v: number | null | undefined): string {
   return v === null || v === undefined ? NO_VALUE : v.toLocaleString('ko-KR', { maximumFractionDigits: 4 })
 }
 
-type TargetSetting = { include: boolean; unit: string; period: string; column: string }
+type TargetSetting = { include: boolean; unit: string; period: string; column: string; records: boolean }
+const NEW_SETTING: TargetSetting = { include: true, unit: '', period: '', column: '', records: false }
+const LEVEL_LABEL: Record<RegionLevel, string> = {
+  lower: '하위 지역만 (상위 지역 행을 빼고 있는 하위 지역만 더함)',
+  upper: '상위 지역만 (상위 지역과 함께 있는 하위 지역 행을 뺌)',
+}
 type BinDraft = { label: string; min: string; max: string; minIn: boolean; maxIn: boolean }
 const targetKey = (t: { file_id: number; sheet_id: string | null }) => `${t.file_id}:${t.sheet_id ?? ''}`
 const toNum = (s: string) => (s.trim() === '' ? null : Number(s))
@@ -112,7 +118,12 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
     { label: '', min: '', max: '', minIn: true, maxIn: false },
     { label: '', min: '', max: '', minIn: true, maxIn: false },
   ])
-  const [dirty, setDirty] = useState(false)
+  const [regionLevel, setRegionLevel] = useState<RegionLevel | null>(null)
+  // 대상 확인을 보낸 조건과 그 요청 본문. 지금 조건과 같을 때만 실행할 수 있고, 실행은 이 본문 그대로 보낸다
+  const [checked, setChecked] = useState<{ key: string; body: AnalysisRequest } | null>(null)
+  const [stale, setStale] = useState(false)
+  const seq = useRef(0)
+  const keyRef = useRef('')
   const [busy, setBusy] = useState<'preview' | 'run' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [problems, setProblems] = useState<string[]>([])
@@ -137,10 +148,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
     }
   }, [field])
 
-  function changed() {
-    setDirty(true)
-  }
-
   function pickField(key: string) {
     setField(key)
     setSources(null)
@@ -148,6 +155,8 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
     setSettings({})
     setVariant(null)
     setUnit(null)
+    setRegionLevel(null)
+    setChecked(null)
     setGroupBy([])
     setDimFilters({})
     setError(null)
@@ -179,6 +188,7 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
               column_id: s?.column || null,
               unit: s?.unit.trim() || null,
               period: s?.period.trim() || null,
+              rows_are_records: s?.records ?? false,
             }
           })
       : [...chosen].map((file_id) => ({ file_id }))
@@ -208,27 +218,67 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
             })),
           }
         : null,
+      region_level: regionLevel,
     }
   }
 
+  // 지금 화면의 조건 (대상 확인 응답이 이 조건에 대한 것인지 비교하는 데 쓴다)
+  const conditionKey = JSON.stringify({
+    field,
+    files: [...chosen].sort((a, b) => a - b),
+    settings: Object.entries(settings)
+      .filter(([, v]) => JSON.stringify(v) !== JSON.stringify(NEW_SETTING))
+      .sort(([a], [b]) => a.localeCompare(b)),
+    variant,
+    unit,
+    regionLevel,
+    groupBy,
+    dims: Object.entries(dimFilters)
+      .filter(([, v]) => v.length > 0)
+      .sort(([a], [b]) => a.localeCompare(b)),
+    periodFrom,
+    periodTo,
+    valueMin,
+    valueMax,
+    aggs,
+    bins: useBins ? { binOn, bins } : null,
+  })
+  useEffect(() => {
+    keyRef.current = conditionKey
+  }, [conditionKey])
+  const dirty = preview !== null && checked?.key !== conditionKey
+
   async function check() {
     if (busy || !field || binError) return
+    const body = request()
+    const key = conditionKey
+    const mine = ++seq.current
     setBusy('preview')
     setError(null)
     setProblems([])
+    setStale(false)
     try {
-      const res = await previewAnalysis(request())
+      const res = await previewAnalysis(body)
+      // 응답을 기다리는 동안 항목·파일·조건이 바뀌었으면 이전 조건의 응답이므로 버린다 (현재 선택을 덮어쓰지 않음)
+      if (mine !== seq.current || key !== keyRef.current) {
+        setStale(true)
+        return
+      }
       setPreview(res)
+      setChecked({ key, body })
       setSettings((prev) => {
         const next: Record<string, TargetSetting> = {}
         for (const t of res.targets) {
           const k = targetKey(t)
-          next[k] = prev[k] ?? { include: true, unit: '', period: '', column: '' }
+          next[k] = prev[k] ?? NEW_SETTING
         }
         return next
       })
-      setDirty(false)
     } catch (err) {
+      if (mine !== seq.current || key !== keyRef.current) {
+        setStale(true)
+        return
+      }
       setError(err instanceof Error ? err.message : String(err))
       if (err instanceof AnalysisProblemError) setProblems(err.problems)
     } finally {
@@ -237,18 +287,18 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
   }
 
   async function run() {
-    if (!preview || busy || !canRun) return
+    if (!preview || !checked || busy || !canRun) return
     setBusy('run')
     setError(null)
     setProblems([])
     try {
-      const { id } = await runAnalysis(request(), preview.fingerprint)
+      const { id } = await runAnalysis(checked.body, preview.fingerprint)
       navigate(`/analysis?id=${id}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       if (err instanceof AnalysisProblemError) {
         setProblems(err.problems)
-        setDirty(true)
+        setChecked(null)
       }
     } finally {
       setBusy(null)
@@ -259,7 +309,7 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
   const waiting = included.filter((t) => t.status === 'needs_input')
   const canRun = Boolean(
     preview &&
-    !dirty &&
+    checked?.key === conditionKey &&
     !binError &&
     preview.problems.length === 0 &&
     waiting.length === 0 &&
@@ -270,7 +320,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
 
   function setTarget(t: AnalysisTarget, patch: Partial<TargetSetting>) {
     setSettings((prev) => ({ ...prev, [targetKey(t)]: { ...prev[targetKey(t)], ...patch } }))
-    changed()
   }
 
   return (
@@ -347,6 +396,12 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
         </div>
       </fieldset>
 
+      {stale && (
+        <p className="mapping-warn" role="status">
+          대상 확인 중에 항목·파일·조건이 바뀌어 이전 조건의 확인 결과를 쓰지 않았습니다 — 지금 조건으로 '다시 확인'을
+          누르세요.
+        </p>
+      )}
       {error && (
         <div className="upload-error" role="alert">
           <p>{error}</p>
@@ -397,10 +452,37 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                       checked={variant === v}
                       onChange={() => {
                         setVariant(v)
-                        changed()
                       }}
                     />{' '}
                     {v || '구분 없음'}
+                  </label>
+                ))}
+              </div>
+            )}
+            {(preview.region_levels.conflicts.length > 0 || regionLevel !== null) && (
+              <div role="radiogroup" aria-label="지역 집계 수준" className="an-choice">
+                <strong>
+                  지역 집계 수준 — 하위 지역 합계가 상위 지역 값과 다르거나 확인할 수 없습니다 (하위 지역 일부만 있을 수
+                  있음). 같은 기간·같은 구분 안에서 어느 수준으로 더할지 고르세요.
+                </strong>
+                <ul className="an-level-conflicts">
+                  {preview.region_levels.conflicts.map((x, i) => (
+                    <li key={i}>
+                      {x.period ?? '-'} {x.upper.target}: 상위 값 {String(x.upper.value ?? '(빈칸)')} (#{x.upper.file_id}{' '}
+                      {x.upper.row}행) · 하위 지역 {x.lower_count}곳 합계 {x.lower_sum === null ? '확인 불가' : fmt(x.lower_sum)}
+                      {x.lower_missing > 0 ? ` (값 없는 하위 지역 ${x.lower_missing}곳)` : ''}
+                    </li>
+                  ))}
+                </ul>
+                {(['lower', 'upper'] as const).map((lv) => (
+                  <label key={lv}>
+                    <input
+                      type="radio"
+                      name="region-level"
+                      checked={regionLevel === lv}
+                      onChange={() => setRegionLevel(lv)}
+                    />{' '}
+                    {LEVEL_LABEL[lv]}
                   </label>
                 ))}
               </div>
@@ -416,7 +498,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                       checked={unit === u}
                       onChange={() => {
                         setUnit(u)
-                        changed()
                       }}
                     />{' '}
                     {u}
@@ -460,7 +541,7 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                 </thead>
                 <tbody>
                   {preview.targets.map((t) => {
-                    const s = settings[targetKey(t)] ?? { include: true, unit: '', period: '', column: '' }
+                    const s = settings[targetKey(t)] ?? NEW_SETTING
                     const needUnit = t.reasons.some((r) => r.startsWith('단위를 확인할 수 없음'))
                     const needPeriod = t.reasons.some((r) => r.startsWith('기간을 확인할 수 없음'))
                     const needColumn = t.reasons.some((r) => r.includes('분석할 열을 고르세요'))
@@ -527,6 +608,27 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                           )}
                         </td>
                         <td data-label="상태 · 사유">
+                          {t.repeated && (
+                            <div className="an-repeated">
+                              <span className="mw-block">
+                                같은 대상이 반복된 행: {t.repeated.keys}개 대상 {t.repeated.rows}행 (값 같음{' '}
+                                {t.repeated.same_value}, 다름 {t.repeated.different_value})
+                              </span>
+                              {t.repeated.samples.map((x, i) => (
+                                <span key={i} className="mw-muted mw-block">
+                                  {x.period ?? '-'} {x.target}: {x.rows.join('·')}행 — {x.values.map((v) => String(v ?? '(빈칸)')).join(' / ')}
+                                </span>
+                              ))}
+                              <label>
+                                <input
+                                  type="checkbox"
+                                  checked={s.records}
+                                  onChange={(e) => setTarget(t, { records: e.target.checked })}
+                                />{' '}
+                                반복 행은 서로 다른 기록(거래·발생 건) — 모두 더함
+                              </label>
+                            </div>
+                          )}
                           <span className={`upload-tag an-status-${t.status}`}>{STATUS_LABEL[t.status]}</span>
                           {t.reasons.map((r) => (
                             <span key={r} className="mw-muted mw-block">
@@ -554,7 +656,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                     disabled={!groupBy.includes(k) && groupBy.length >= 3}
                     onChange={(e) => {
                       setGroupBy((prev) => (e.target.checked ? [...prev, k] : prev.filter((x) => x !== k)))
-                      changed()
                     }}
                   />{' '}
                   {labels[k] ?? k}
@@ -577,7 +678,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                             const cur = prev[k] ?? []
                             return { ...prev, [k]: e.target.checked ? [...cur, v] : cur.filter((x) => x !== v) }
                           })
-                          changed()
                         }}
                       />{' '}
                       {v}
@@ -593,7 +693,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                   value={periodFrom}
                   onChange={(e) => {
                     setPeriodFrom(e.target.value)
-                    changed()
                   }}
                 >
                   <option value="">처음</option>
@@ -608,7 +707,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                   value={periodTo}
                   onChange={(e) => {
                     setPeriodTo(e.target.value)
-                    changed()
                   }}
                 >
                   <option value="">끝</option>
@@ -625,7 +723,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                   value={valueMin}
                   onChange={(e) => {
                     setValueMin(e.target.value)
-                    changed()
                   }}
                 />
               </label>
@@ -637,7 +734,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                   value={valueMax}
                   onChange={(e) => {
                     setValueMax(e.target.value)
-                    changed()
                   }}
                 />
               </label>
@@ -655,7 +751,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                           ? AGGS.filter((x) => x === a || prev.includes(x))
                           : prev.filter((x) => x !== a),
                       )
-                      changed()
                     }}
                   />{' '}
                   {AGG_LABEL[a]}
@@ -668,7 +763,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                 checked={useBins}
                 onChange={(e) => {
                   setUseBins(e.target.checked)
-                  changed()
                 }}
               />{' '}
               구간 분류 (결과 열의 값을 구간으로 나눔, 겹치는 구간은 받지 않음)
@@ -681,7 +775,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                     value={binOn}
                     onChange={(e) => {
                       setBinOn(e.target.value as AggKey)
-                      changed()
                     }}
                   >
                     {aggs.map((a) => (
@@ -699,7 +792,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                       value={b.label}
                       onChange={(e) => {
                         setBins((prev) => prev.map((x, j) => (j === i ? { ...x, label: e.target.value } : x)))
-                        changed()
                       }}
                     />
                     <input
@@ -710,7 +802,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                       value={b.min}
                       onChange={(e) => {
                         setBins((prev) => prev.map((x, j) => (j === i ? { ...x, min: e.target.value } : x)))
-                        changed()
                       }}
                     />
                     <label>
@@ -719,7 +810,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                         checked={b.minIn}
                         onChange={(e) => {
                           setBins((prev) => prev.map((x, j) => (j === i ? { ...x, minIn: e.target.checked } : x)))
-                          changed()
                         }}
                       />{' '}
                       이상(포함)
@@ -732,7 +822,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                       value={b.max}
                       onChange={(e) => {
                         setBins((prev) => prev.map((x, j) => (j === i ? { ...x, max: e.target.value } : x)))
-                        changed()
                       }}
                     />
                     <label>
@@ -741,7 +830,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                         checked={b.maxIn}
                         onChange={(e) => {
                           setBins((prev) => prev.map((x, j) => (j === i ? { ...x, maxIn: e.target.checked } : x)))
-                          changed()
                         }}
                       />{' '}
                       이하(포함)
@@ -752,7 +840,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                       disabled={bins.length <= 1}
                       onClick={() => {
                         setBins((prev) => prev.filter((_, j) => j !== i))
-                        changed()
                       }}
                     >
                       빼기
@@ -765,7 +852,6 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                   disabled={bins.length >= 20}
                   onClick={() => {
                     setBins((prev) => [...prev, { label: '', min: '', max: '', minIn: true, maxIn: false }])
-                    changed()
                   }}
                 >
                   구간 더하기
@@ -934,8 +1020,8 @@ function AnalysisResult({ id }: { id: number }) {
     <section className="an" aria-label="분석 결과">
       <h2>
         분석 결과 #{detail.id}{' '}
-        <span className={`upload-tag ${r.partial ? 'an-status-needs_input' : 'an-status-ok'}`}>
-          {r.partial ? '부분 집계' : '전체 집계'}
+        <span className={`upload-tag ${r.partial || r.level_mismatch ? 'an-status-needs_input' : 'an-status-ok'}`}>
+          {r.partial ? '부분 집계' : r.level_mismatch ? '선택한 지역 수준 집계' : '전체 집계'}
         </span>
       </h2>
       <p className="mw-muted">
@@ -985,6 +1071,29 @@ function AnalysisResult({ id }: { id: number }) {
                 )
                 .join(' · ')}
             </dd>
+          </>
+        )}
+        <dt>지역 집계 수준</dt>
+        <dd>
+          {c.region_level
+            ? `${LEVEL_LABEL[c.region_level]} — 사용자 선택`
+            : '자동 — 하위 지역 합계가 상위 지역 값과 같을 때만 상위 행을 중복으로 뺌'}
+          {r.level_mismatch ? ` · 하위 지역 합계가 상위 지역 값과 다른 곳 ${r.level_mismatch}곳` : ''}
+        </dd>
+        {c.base_dates && Object.keys(c.base_dates).length > 0 && (
+          <>
+            <dt>기준일</dt>
+            <dd>
+              {Object.entries(c.base_dates)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join(', ')}
+            </dd>
+          </>
+        )}
+        {c.records && c.records.length > 0 && (
+          <>
+            <dt>반복 행</dt>
+            <dd>서로 다른 기록으로 확인해 모두 더함 — {c.records.join(', ')}</dd>
           </>
         )}
         <dt>포함 · 제외</dt>

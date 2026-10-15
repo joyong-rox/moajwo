@@ -362,3 +362,200 @@ def test_input_limits_and_bin_overlaps_are_rejected(an, monkeypatch) -> None:
     monkeypatch.setattr(analysis, "MAX_ROWS", 2)
     res = u.post("/analysis/preview", json=_body([fid]))
     assert res.status_code == 413 and "행이" in res.json()["detail"]
+
+
+# ---------------------------------------------------------------- 보완: 상위·하위 지역의 비교 범위
+
+
+def _ok_run(c: TestClient, body: dict) -> int:
+    return c.post("/analysis/run", json={**body, "expected_fingerprint": _preview(c, body)["fingerprint"]}).status_code
+
+
+def test_upper_region_is_kept_when_sub_regions_are_in_another_period(an) -> None:
+    u = an["an-user1"]
+    a = _file(u, "8월_서울전체.xlsx", [["시도", "인구수"], ["서울특별시", 100]],
+              {"시도": "sido", "인구수": "population"}, title="인구 현황 2026년 8월 (단위: 명)")  # fmt: skip
+    b = _file(u, "9월_종로구.xlsx", [["시도", "시군구", "인구수"], ["서울특별시", "종로구", 40]],
+              {"시도": "sido", "시군구": "sigungu", "인구수": "population"},
+              title="인구 현황 2026년 9월 (단위: 명)")  # fmt: skip
+    r = _run(u, _body([a, b]))
+    got = {tuple(g["keys"]): (g["sum"], g["count"]) for g in r["groups"]}
+    assert got == {("2026-08",): (100, 1), ("2026-09",): (40, 1)}
+    assert "upper_region" not in r["detail"]["result"]["reason_counts"]
+
+
+def test_upper_and_lower_with_different_vehicle_types_are_not_compared(an) -> None:
+    u = an["an-user1"]
+    rows = [
+        ["시도", "시군구", "차종", "등록대수"],
+        ["서울특별시", None, "승용", 100],
+        ["서울특별시", "종로구", "화물", 40],
+    ]
+    mapping = {"시도": "sido", "시군구": "sigungu", "차종": "vehicle_type", "등록대수": "vehicles_total"}
+    fid = _file(u, "차종별.xlsx", rows, mapping, title="자동차 등록 현황 2026년 9월 (단위: 대)")
+    r = _run(u, {**_body([fid], group_by=["vehicle_type"]), "field_key": "vehicles_total"})
+    assert {g["keys"][0]: g["sum"] for g in r["groups"]} == {"승용": 100, "화물": 40}
+    assert "upper_region" not in r["detail"]["result"]["reason_counts"]
+
+
+def test_partial_sub_regions_need_an_aggregation_level_choice(an) -> None:
+    u = an["an-user1"]
+    rows = [["시도", "시군구", "인구수"], ["서울특별시", None, 100], ["서울특별시", "종로구", 40]]
+    fid = _file(u, "일부하위.xlsx", rows, {"시도": "sido", "시군구": "sigungu", "인구수": "population"})
+    pv = _preview(u, _body([fid]))
+    assert any("집계 수준" in p for p in pv["problems"]) and pv["region_levels"]["conflicts"]
+    assert _ok_run(u, _body([fid])) == 409  # 상위 행을 자동으로 빼고 '전체 집계'처럼 만들지 않음
+    low = _run(u, _body([fid], region_level="lower"))
+    res = low["detail"]["result"]
+    assert low["groups"][0]["sum"] == 40 and res["level_mismatch"] == 1 and res["reason_counts"] == {"upper_region": 1}
+    assert any("하위 지역 합계" in w for w in low["detail"]["conditions"]["warnings"])
+    up = _run(u, _body([fid], region_level="upper"))
+    assert up["groups"][0]["sum"] == 100 and up["detail"]["result"]["reason_counts"] == {"lower_region": 1}
+    # 하위 합계가 상위 값과 같으면 상위 행만 중복으로 뺀다 (기존 사례 유지 — 한 열에 시도·시군구를 함께 적은 표도 같게)
+    whole = [["행정구역", "인구수"], ["서울특별시", 100], ["서울특별시 종로구", 40], ["서울특별시 중구", 60]]
+    fid2 = _file(u, "한열구조.xlsx", whole, {"행정구역": "region", "인구수": "population"})
+    r = _run(u, _body([fid2]))
+    assert r["groups"][0]["sum"] == 100 and r["detail"]["result"]["reason_counts"] == {"upper_region": 1}
+
+
+# ---------------------------------------------------------------- 보완: 반복 행·표현 차이에 따른 중복
+
+
+def test_repeated_rows_in_one_file_need_confirmation(an) -> None:
+    u = an["an-user1"]
+    rows = [["시도", "인구수"], ["서울특별시", 100], ["서울특별시", 100], ["부산광역시", 50], ["부산광역시", 70]]
+    fid = _file(u, "반복행.xlsx", rows, {"시도": "sido", "인구수": "population"})
+    pv = _preview(u, _body([fid]))
+    (t,) = pv["targets"]
+    assert t["status"] == "needs_input" and any("반복" in x for x in t["reasons"])
+    assert t["repeated"]["keys"] == 2 and t["repeated"]["same_value"] == 1 and t["repeated"]["different_value"] == 1
+    assert _ok_run(u, _body([fid])) == 409  # 반복 행을 임의로 합치거나 지우지 않는다
+    body = {"field_key": "population", "targets": [{"file_id": fid, "sheet_id": "s0", "rows_are_records": True}]}
+    r = _run(u, body)  # 사용자가 '서로 다른 기록'이라고 확인한 뒤에만 모두 더한다
+    assert r["groups"][0]["sum"] == 320 and r["groups"][0]["count"] == 4
+
+
+def test_repeated_in_one_file_and_once_in_another_is_still_an_overlap(an) -> None:
+    u = an["an-user1"]
+    a = _file(u, "반복A.xlsx", [["시도", "인구수"], ["서울특별시", 100], ["서울특별시", 100]],
+              {"시도": "sido", "인구수": "population"})  # fmt: skip
+    b = _file(u, "한번B.xlsx", [["시도", "인구수"], ["서울특별시", 100]], {"시도": "sido", "인구수": "population"})
+    targets = [{"file_id": a, "sheet_id": "s0", "rows_are_records": True}, {"file_id": b}]
+    body = {"field_key": "population", "targets": targets}
+    pv = _preview(u, body)
+    (ov,) = pv["overlaps"]
+    assert ov["count"] == 1 and any("같은 대상" in p for p in pv["problems"])
+    assert _ok_run(u, body) == 409
+
+
+def test_same_region_in_different_mapping_structures_is_an_overlap(an) -> None:
+    u = an["an-user1"]
+    a = _file(u, "구조_시도.xlsx", [["시도", "시군구", "인구수"], ["서울특별시", None, 100],
+                                   ["서울특별시", "종로구", 40]],
+              {"시도": "sido", "시군구": "sigungu", "인구수": "population"})  # fmt: skip
+    b = _file(u, "구조_지역.xlsx", [["지역", "인구수"], ["서울특별시", 120], ["서울특별시 종로구", 40]],
+              {"지역": "region", "인구수": "population"})  # fmt: skip
+    pv = _preview(u, _body([a, b], region_level="lower"))
+    (ov,) = pv["overlaps"]
+    assert ov["count"] == 2 and ov["same_value"] == 1 and ov["different_value"] == 1
+    assert _ok_run(u, _body([a, b], region_level="lower")) == 409
+
+
+# ---------------------------------------------------------------- 보완: 기간 정보 충돌
+
+
+def test_conflicting_period_columns_block_the_run(an) -> None:
+    u = an["an-user1"]
+    a = _file(u, "연도월충돌.xlsx", [["연도", "월", "시도", "인구수"], [2025, "2026-09", "서울특별시", 100]],
+              {"연도": "year", "월": "month", "시도": "sido", "인구수": "population"})  # fmt: skip
+    pv = _preview(u, _body([a]))
+    assert any("기간 열" in p and "2025" in p and "2026-09" in p for p in pv["problems"])
+    assert _ok_run(u, _body([a])) == 409
+    b = _file(u, "기준일연도충돌.xlsx", [["기준일", "연도", "시도", "인구수"], ["2026-09-30", 2025, "서울특별시", 100]],
+              {"기준일": "base_date", "연도": "year", "시도": "sido", "인구수": "population"})  # fmt: skip
+    assert any("기간 열" in p for p in _preview(u, _body([b]))["problems"])
+
+
+def test_file_name_date_is_not_compared_as_the_statistics_date(an) -> None:
+    u = an["an-user1"]
+    fid = _file(u, "인구현황_2026년10월발행.xlsx", THREE, {"시도": "sido", "인구수": "population"})
+    (t,) = _preview(u, _body([fid]))["targets"]
+    assert t["status"] == "ok" and t["period"] == "2026-09"
+    assert "제목" in t["period_source"] and "파일명" in t["period_source"]
+
+
+def test_stock_values_with_different_base_dates_in_one_month_are_not_summed(an) -> None:
+    u = an["an-user1"]
+    a = _file(u, "기준일15.xlsx", [["기준일", "시도", "인구수"], ["2026-09-15", "서울특별시", 100]],
+              {"기준일": "base_date", "시도": "sido", "인구수": "population"})  # fmt: skip
+    b = _file(u, "기준일30.xlsx", [["기준일", "시도", "인구수"], ["2026-09-30", "부산광역시", 50]],
+              {"기준일": "base_date", "시도": "sido", "인구수": "population"})  # fmt: skip
+    pv = _preview(u, _body([a, b]))
+    assert any("기준일" in p and "2026-09-15" in p and "2026-09-30" in p for p in pv["problems"])
+    assert _ok_run(u, _body([a, b])) == 409
+    flow = [["일자", "기관명", "집행액"], ["2026-09-01", "기관A", 10], ["2026-09-15", "기관B", 5]]
+    c = _file(u, "집행.xlsx", flow, {"일자": "base_date", "기관명": "org_name", "집행액": "expenditure"},
+              title="집행 실적 (단위: 원)")  # fmt: skip
+    r = _run(u, {**_body([c]), "field_key": "expenditure"})  # 발생 실적은 같은 달끼리 더해도 된다
+    assert r["groups"][0]["sum"] == 15 and r["detail"]["conditions"]["periods"] == ["2026-09"]
+
+
+# ---------------------------------------------------------------- 보완: 새 입력·출력 경로의 개인정보 마스킹
+
+
+def test_user_inputs_are_masked_in_results_conditions_and_excel(an) -> None:
+    u = an["an-user1"]
+    fid = _file(u, "마스킹.xlsx", THREE, {"시도": "sido", "인구수": "population"})
+    raw = ["aa@example.com", "ab@example.com", "010-1234-5678", "hong@example.com"]
+    ranges = [
+        {"label": raw[0], "max": 20000},
+        {"label": raw[1], "min": 20000, "max": 30000},
+        {"label": "같은이름", "min": 30000, "max": 40000},
+        {"label": "같은이름", "min": 40000},
+    ]
+    filters = {"dims": {"sido": ["서울특별시", "부산광역시", "대구광역시", raw[2]]}}
+    r = _run(u, _body([fid], group_by=["sido"], bins={"on": "sum", "ranges": ranges}, filters=filters))
+    counts = r["detail"]["result"]["bins"]
+    assert [b["groups"] for b in counts[:4]] == [1, 1, 1, 0]  # 가린 이름·같은 이름이 같아도 구간끼리 합치지 않음
+    shown = [b["label"] for b in counts[:4]]
+    assert len(set(shown)) == 4 and all("a***@example.com" in s for s in shown[:2])
+    stored = _db("select summary || conditions || inputs || result from analysis_runs where id = ?", r["id"])[0][0]
+    xlsx = openpyxl.load_workbook(io.BytesIO(u.get(f"/analysis/runs/{r['id']}/download").content))
+    cells = [str(v) for ws in xlsx for row in ws.iter_rows(values_only=True) for v in row if v is not None]
+    for text in raw[:3]:
+        assert text not in stored and text not in str(r) and not any(text in c for c in cells)
+    by = {row[0]: row for row in xlsx["결과"].iter_rows(min_row=2, values_only=True)}
+    assert by["대구광역시"][1] == 30000 and isinstance(by["대구광역시"][2], int | float)  # 숫자는 숫자 그대로
+    nounit = _file(u, "단위없음.xlsx", THREE[:2], {"시도": "sido", "인구수": "population"}, title=None)
+    target = {"file_id": nounit, "sheet_id": "s0", "unit": raw[3], "period": "2026-09"}
+    r2 = _run(u, {"field_key": "population", "unit": raw[3], "targets": [target]})
+    stored2 = _db("select conditions || inputs || summary from analysis_runs where id = ?", r2["id"])[0][0]
+    assert raw[3] not in stored2 and "h***@example.com" in stored2
+    bad_bins = {"on": "sum", "ranges": [{"label": raw[3], "min": 0, "max": 10}, {"label": raw[0], "min": 5}]}
+    for bad in ({"group_by": [raw[3]]}, {"filters": {"dims": {raw[3]: ["x"]}}}, {"bins": bad_bins}):
+        res = u.post("/analysis/preview", json=_body([fid], **bad))
+        assert res.status_code == 422 and raw[3] not in res.text and raw[0] not in res.text, res.text
+
+
+# ---------------------------------------------------------------- 보완: 최고 관리자는 남의 자료로 새 결과를 만들지 않음
+
+
+def test_manager_cannot_save_new_results_from_other_users_files(an) -> None:
+    u1, owner_c = an["an-user1"], an["owner"]
+    fid = _file(u1, "남의파일.xlsx", THREE, {"시도": "sido", "인구수": "population"})
+    mine = _run(u1, _body([fid]))
+    before = _db("select count(*) from analysis_runs")[0][0]
+    assert owner_c.post("/analysis/preview", json=_body([fid])).status_code == 403
+    res = owner_c.post("/analysis/run", json={**_body([fid]), "expected_fingerprint": mine["preview"]["fingerprint"]})
+    assert res.status_code == 403 and _db("select count(*) from analysis_runs")[0][0] == before
+    assert owner_c.get(f"/analysis/runs/{mine['id']}").json()["read_only"] is True  # 기존 결과 조회는 그대로
+    assert owner_c.get(f"/analysis/runs/{mine['id']}/download").status_code == 200
+
+
+def test_run_with_conditions_changed_after_preview_is_rejected(an) -> None:
+    u = an["an-user1"]
+    fid = _file(u, "조건변경.xlsx", THREE, {"시도": "sido", "인구수": "population"})
+    pv = _preview(u, _body([fid]))
+    changed = _body([fid], group_by=["sido"])
+    res = u.post("/analysis/run", json={**changed, "expected_fingerprint": pv["fingerprint"]})
+    assert res.status_code == 409 and "바뀌었습니다" in res.json()["detail"]["message"]

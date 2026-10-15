@@ -3,10 +3,11 @@
 - 고르기 목록은 DB의 확정 매핑만 읽는다 (파일을 다시 파싱하지 않음).
   화면을 열어도 분석·매핑·학습·모델 호출이 일어나지 않는다.
 - 대상 확인과 실행은 같은 판정(analysis.evaluate)을 쓰고,
-  실행은 확인 때의 입력 지문(파일 해시+확정 매핑)이 그대로일 때만 한다.
+  실행은 확인 때의 입력 지문(요청 조건+파일 해시+확정 매핑)이 그대로일 때만 한다.
 - 파싱·계산은 쓰기 트랜잭션 밖에서 하고, 결과 저장만 짧게 쓴다.
   결과 페이지·Excel은 저장한 결과로 만든다 (다시 계산하지 않음).
-- 권한: 본인 파일·본인 결과만 (최고 관리자는 남의 파일·결과를 조회만). 요청마다 서버가 확인한다.
+- 권한: 분석은 본인 파일로만 만든다 (최고 관리자도 남의 파일로 새 결과를 만들지 않음 — 403).
+  결과는 본인 것만, 최고 관리자는 남의 결과를 조회·다운로드만 한다. 요청마다 서버가 확인한다.
 """
 
 import io
@@ -120,7 +121,7 @@ def analysis_run(body: RunIn, db: Annotated[Session, Depends(get_session)], user
     if ev.fingerprint != body.expected_fingerprint:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
-            {"message": "대상 확인 뒤 파일이나 매핑이 바뀌었습니다 — 다시 확인하세요.", "problems": []},
+            {"message": "대상 확인 뒤 조건·파일·매핑이 바뀌었습니다 — 다시 확인하세요.", "problems": []},
         )
     result = compute(ev)
     cond = conditions(ev)
@@ -253,6 +254,21 @@ def _numtext(v: float | None) -> str:
     return f"{int(v):,}" if float(v).is_integer() else f"{v:,}"
 
 
+LEVEL_TEXT = {
+    None: "자동 — 하위 지역 합계가 상위 지역 값과 같을 때만 상위 행을 중복으로 뺌",
+    "lower": "하위 지역만 (상위 지역 행 제외 — 사용자 선택)",
+    "upper": "상위 지역만 (하위 지역 행 제외 — 사용자 선택)",
+}
+
+
+def _state_text(res: dict[str, Any]) -> str:
+    if res["partial"]:
+        return "부분 집계 (자료 문제로 뺀 값이 있음)"
+    if res.get("level_mismatch"):
+        return "선택한 지역 수준 집계 (하위 지역 합계가 상위 지역 값과 다른 곳 있음 — 조건의 주의 참고)"
+    return "전체 집계 (자료 문제로 뺀 값 없음)"
+
+
 def workbook_bytes(run: AnalysisRun) -> bytes:
     cond, inp, res = json.loads(run.conditions), json.loads(run.inputs), json.loads(run.result)
     wb = Workbook()
@@ -284,10 +300,7 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
         ["분석 항목", cond["field_label"]],
         ["열 이름의 구분", cond["variant"] or "구분 없음"],
         ["단위", cond["unit"] or "확인 안 됨"],
-        [
-            "결과 상태",
-            "부분 집계 (자료 문제로 뺀 값이 있음)" if res["partial"] else "전체 집계 (자료 문제로 뺀 값 없음)",
-        ],
+        ["결과 상태", _state_text(res)],
         ["포함 행 / 뺀 행", f"{res['rows_included']} / {res['rows_excluded']} (자료 문제 {res['problem_rows']})"],
         ["기간", ", ".join(cond["periods"]) or "없음"],
         ["기간별로 나눔", "예 (기간이 여러 개라 기간끼리 더하지 않음)" if res["period_split"] else "아니오"],
@@ -303,7 +316,12 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
         ["계산 방식", ", ".join(AGG_LABEL[a] for a in aggs)],
         ["평균의 분모", cond["mean_denominator"]],
         ["값이 없을 때", f"'{NO_VALUE}' (0으로 쓰지 않음)"],
+        ["지역 집계 수준", LEVEL_TEXT[cond.get("region_level")]],
     ]
+    if cond.get("base_dates"):
+        lines.append(["기준일", ", ".join(f"{p}: {d}" for p, d in sorted(cond["base_dates"].items()))])
+    if cond.get("records"):
+        lines.append(["반복 행", "서로 다른 기록으로 확인해 모두 더함 — " + ", ".join(cond["records"])])
     if cond["bins"]:
         b = cond["bins"]
         lines.append(["구간 분류 적용 열", b["on_label"]])
