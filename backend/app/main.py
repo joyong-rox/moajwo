@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app import (
     admin_api,
     admin_console,
+    analysis_api,
     auth_api,
     automation_api,
     dashboard,
@@ -36,6 +37,7 @@ for router in (
     glossary_api.router,
     review_api.router,
     mapping_review.router,
+    analysis_api.router,
     integration_api.router,
     automation_api.router,
     admin_api.router,

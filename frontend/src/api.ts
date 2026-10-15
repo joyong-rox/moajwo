@@ -1059,3 +1059,270 @@ export async function applyBatch(
   }
   return json(res)
 }
+
+// ---------------------------------------------------------------- 데이터 분석 (확정된 열로 합계·평균 등)
+
+export type AggKey = 'sum' | 'mean' | 'min' | 'max' | 'count'
+export type AnalysisField = { key: string; label: string; files: number; sheets: number }
+export type AnalysisSource = {
+  file_id: number
+  file_name: string
+  uploaded_at: string | null
+  sheets: string[]
+  columns: number
+}
+export type AnalysisTargetIn = {
+  file_id: number
+  sheet_id?: string | null
+  column_id?: string | null
+  unit?: string | null
+  period?: string | null
+  rows_are_records?: boolean // 같은 대상의 행이 반복될 때 '서로 다른 기록'이라고 확인함
+}
+export type AnalysisBin = {
+  label?: string | null
+  min: number | null
+  max: number | null
+  min_inclusive: boolean
+  max_inclusive: boolean
+}
+export type AnalysisFilters = {
+  dims: Record<string, string[]>
+  period_from: string | null
+  period_to: string | null
+  value_min: number | null
+  value_max: number | null
+}
+export type AnalysisRequest = {
+  field_key: string
+  variant?: string | null
+  unit?: string | null
+  targets: AnalysisTargetIn[]
+  group_by: string[]
+  filters: AnalysisFilters
+  aggregates: AggKey[]
+  bins: { on: AggKey; ranges: AnalysisBin[] } | null
+  region_level?: RegionLevel | null
+}
+export type RegionLevel = 'lower' | 'upper'
+export type AnalysisRepeated = {
+  keys: number
+  rows: number
+  same_value: number
+  different_value: number
+  samples: { period: string | null; target: string; rows: number[]; values: (number | string | null)[] }[]
+}
+export type AnalysisTarget = {
+  index: number
+  file_id: number
+  file_name: string
+  sheet_id: string | null
+  sheet: string | null
+  column_id: string | null
+  column: string | null
+  variant: string | null
+  unit: string | null
+  unit_source: string | null
+  period: string | null
+  period_source: string | null
+  period_columns: string[]
+  dims: string[]
+  status: 'ok' | 'excluded' | 'needs_input'
+  reasons: string[]
+  candidates: { column_id: string; column: string; variant: string }[]
+  data_rows: number
+  rows_are_records: boolean
+  repeated: AnalysisRepeated | null
+}
+export type AnalysisOverlap = {
+  a: { file_id: number; file_name: string; sheet: string | null }
+  b: { file_id: number; file_name: string; sheet: string | null }
+  count: number
+  same_value: number
+  different_value: number
+  samples: {
+    period: string | null
+    target: string
+    a: { row: number; value: number | string | null }
+    b: { row: number; value: number | string | null }
+  }[]
+}
+export type AnalysisPreview = {
+  field_key: string
+  field_label: string
+  stock: boolean
+  variant: string | null
+  variants: string[]
+  unit: string | null
+  units: string[]
+  targets: AnalysisTarget[]
+  problems: string[]
+  warnings: string[]
+  overlaps: AnalysisOverlap[]
+  periods: string[]
+  filter_values: Record<string, string[]>
+  available_groups: string[]
+  region_levels: {
+    choice: RegionLevel | null
+    mismatch: number
+    conflicts: {
+      period: string | null
+      upper: { target: string; file_id: number; row: number; value: number | string | null; rows: number }
+      lower_count: number
+      lower_sum: number | null
+      lower_missing: number
+      difference: number | null // 상위 값 − 하위 합계 (확인할 수 없으면 null)
+    }[]
+  }
+  base_dates: Record<string, string>
+  rows: { candidate: number; excluded: Record<string, number> }
+  reason_labels: Record<string, string>
+  fingerprint: string
+  limits: { targets: number; rows: number; groups: number; kept_rows: number }
+}
+export type AnalysisGroup = {
+  keys: string[]
+  count: number
+  sum: number | null
+  mean: number | null
+  min: number | null
+  max: number | null
+  partial: boolean
+  problem_rows: number
+  files: number
+  bin?: string
+  bin_index?: number | null
+}
+export type AnalysisRunDetail = {
+  id: number
+  created_at: string
+  created_by: string | null
+  read_only: boolean
+  conditions: {
+    field_label: string
+    unit: string | null
+    variant: string | null
+    periods: string[]
+    stock: boolean
+    group_by: string[]
+    filters: AnalysisFilters
+    aggregates: AggKey[]
+    bins: { on: AggKey; on_label: string; ranges: (AnalysisBin & { label: string })[] } | null
+    mean_denominator: string
+    reason_labels: Record<string, string>
+    warnings: string[]
+    policy: string
+    region_level?: RegionLevel | null
+    level_conflicts?: AnalysisPreview['region_levels']['conflicts']
+    base_dates?: Record<string, string>
+    records?: string[]
+  }
+  inputs: (AnalysisTarget & { sha256: string })[]
+  result: {
+    group_fields: string[]
+    group_labels: string[]
+    period_split: boolean
+    aggregates: AggKey[]
+    bins: { index: number | null; label: string; groups: number }[] | null
+    partial: boolean
+    region_level?: RegionLevel | null
+    level_mismatch?: number
+    rows_included: number
+    rows_excluded: number
+    problem_rows: number
+    reason_counts: Record<string, number>
+    excluded_targets: AnalysisTarget[]
+    detail_total: number
+    excluded_total: number
+    groups_total: number
+  }
+}
+export type AnalysisRowRef = {
+  file_id: number
+  file_name: string
+  sheet: string | null
+  row: number
+  period: string | null
+}
+export type AnalysisPage<T> = { total: number; offset: number; items: T[]; all?: number }
+
+/** 409(실행 막힘)·422(조건 오류) 응답의 사유 목록을 함께 전한다 */
+export class AnalysisProblemError extends Error {
+  problems: string[]
+  constructor(message: string, problems: string[]) {
+    super(message)
+    this.problems = problems
+  }
+}
+
+async function analysisJson<T>(res: Response): Promise<T> {
+  if (res.status === 409) {
+    const detail = await res.json().then(
+      (j: { detail?: { message?: string; problems?: string[] } | string }) => j.detail,
+      () => undefined,
+    )
+    if (detail && typeof detail === 'object') {
+      throw new AnalysisProblemError(detail.message ?? '실행할 수 없습니다.', detail.problems ?? [])
+    }
+    throw new AnalysisProblemError(typeof detail === 'string' ? detail : '실행할 수 없습니다.', [])
+  }
+  return json(res)
+}
+
+export async function fetchAnalysisFields(): Promise<AnalysisField[]> {
+  return json(await apiFetch(`${API_BASE}/analysis/fields`))
+}
+
+export async function fetchAnalysisSources(fieldKey: string): Promise<AnalysisSource[]> {
+  return json(await apiFetch(`${API_BASE}/analysis/sources?field_key=${encodeURIComponent(fieldKey)}`))
+}
+
+export async function previewAnalysis(body: AnalysisRequest): Promise<AnalysisPreview> {
+  const res = await apiFetch(`${API_BASE}/analysis/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return analysisJson(res)
+}
+
+export async function runAnalysis(body: AnalysisRequest, fingerprint: string): Promise<{ id: number }> {
+  const res = await apiFetch(`${API_BASE}/analysis/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, expected_fingerprint: fingerprint }),
+  })
+  return analysisJson(res)
+}
+
+export async function fetchAnalysisRun(id: number): Promise<AnalysisRunDetail> {
+  return json(await apiFetch(`${API_BASE}/analysis/runs/${id}`))
+}
+
+export async function fetchAnalysisPage<T>(
+  id: number,
+  kind: 'groups' | 'excluded' | 'detail',
+  offset: number,
+  limit: number,
+): Promise<AnalysisPage<T>> {
+  return json(await apiFetch(`${API_BASE}/analysis/runs/${id}/${kind}?offset=${offset}&limit=${limit}`))
+}
+
+export function analysisDownloadUrl(id: number): string {
+  return `${API_BASE}/analysis/runs/${id}/download`
+}
+
+export type AnalysisRunSummary = {
+  id: number
+  created_at: string
+  field_label: string
+  unit: string | null
+  partial: boolean
+  groups: number
+  rows_included: number
+  files: number
+}
+
+export async function fetchAnalysisRuns(): Promise<AnalysisRunSummary[]> {
+  return json(await apiFetch(`${API_BASE}/analysis/runs`))
+}

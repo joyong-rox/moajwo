@@ -443,3 +443,35 @@ def test_0018_mapping_analyses_up_and_down(tmp_path: Path) -> None:
     assert not db.execute("SELECT name FROM sqlite_master WHERE name = 'mapping_analyses'").fetchall()
     assert db.execute("SELECT field_key FROM mapping_decisions").fetchall() == [("note",)]
     db.close()
+
+
+def test_0019_analysis_runs_up_down_and_up_again(tmp_path: Path) -> None:
+    """0019: 분석 결과 테이블만 만들고 지운다. 매핑 확정·분석 기록(0018)·업로드 정보는 그대로, 다시 올리면 빈 테이블."""
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute(
+        "INSERT INTO source_files (id, original_name, stored_path, sha256, size_bytes) VALUES (1, 'a', 'x', 's', 1)"
+    )
+    db.execute(
+        "INSERT INTO mapping_decisions (source_file_id, sheet_name, column_name, field_key)"
+        " VALUES (1, '현황', '인구수', 'population')"
+    )
+    db.execute("INSERT INTO mapping_analyses (source_file_id, created_by, result) VALUES (1, NULL, '{}')")
+    db.execute(
+        "INSERT INTO analysis_runs (created_by, field_key, summary, conditions, inputs, result)"
+        " VALUES (NULL, 'population', '{}', '{}', '[]', '{}')"
+    )
+    db.commit()
+    db.close()
+    _alembic(tmp_path, "downgrade", "0018_mapping_analyses")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert not db.execute("SELECT name FROM sqlite_master WHERE name = 'analysis_runs'").fetchall()
+    assert db.execute("SELECT field_key FROM mapping_decisions").fetchall() == [("population",)]
+    assert db.execute("SELECT count(*) FROM mapping_analyses").fetchone()[0] == 1
+    assert db.execute("SELECT sha256 FROM source_files").fetchall() == [("s",)]
+    db.close()
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT count(*) FROM analysis_runs").fetchone()[0] == 0
+    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0019_analysis_runs"
+    db.close()

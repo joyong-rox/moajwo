@@ -19,6 +19,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/runs', label: '실행 기록', roles: ALL, inMenu: true },
   { path: '/mapping', label: '열 매핑', roles: ALL, inMenu: true },
   { path: '/mapping/common', label: '공통 항목 검토', roles: ALL, inMenu: false },
+  { path: '/analysis', label: '데이터 분석', roles: ALL, inMenu: true },
   { path: '/dictionary', label: '사전 관리', roles: OWNER, inMenu: true },
   { path: '/promotions', label: '승격 심사', roles: OWNER, inMenu: true },
   { path: ADMIN_BASE, label: '관리자', roles: OWNER, inMenu: true },

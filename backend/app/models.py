@@ -393,3 +393,24 @@ class AppSetting(Base):
     value: Mapped[str] = mapped_column(Text)
     updated_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AnalysisRun(Base):
+    """확정된 열로 실행한 데이터 분석 결과 (1차). 실행한 사람이 보고, 최고 관리자는 조회만 한다.
+
+    계산 조건·사용한 파일 해시·시트·열·그 시트의 확정 매핑·제외 정책·결과를 함께 저장한다. 결과 화면·페이지·Excel은
+    이 저장값으로 만들므로, 나중에 매핑이 바뀌어도 과거 결과가 조용히 바뀌지 않는다.
+    통합 실행(runs)·절약 시간 통계와 별개다.
+    """
+
+    __tablename__ = "analysis_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    field_key: Mapped[str] = mapped_column(String(64))
+    partial: Mapped[bool] = mapped_column(default=False)  # 자료 문제(빈칸·비공개 등)로 뺀 값이 있음
+    summary: Mapped[str] = mapped_column(Text)  # 목록용 JSON
+    conditions: Mapped[str] = mapped_column(Text)  # 계산 조건 JSON
+    inputs: Mapped[str] = mapped_column(Text)  # 사용한 파일·시트·열·확정 매핑·sha256 JSON (이름은 가림)
+    result: Mapped[str] = mapped_column(Text)  # 결과 JSON (그룹 결과·제외 사유·근거 행 목록)
