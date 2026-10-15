@@ -63,6 +63,15 @@ function fmt(v: number | null | undefined): string {
   return v === null || v === undefined ? NO_VALUE : v.toLocaleString('ko-KR', { maximumFractionDigits: 4 })
 }
 
+/** 상위·하위 비교 표시용: 반올림하지 않는다 (작은 차이가 0으로 보이지 않게) */
+function exactText(v: number | null): string {
+  return v === null ? '확인 불가' : v.toLocaleString('ko-KR', { maximumFractionDigits: 20 })
+}
+
+function showValue(v: number | string | null): string {
+  return typeof v === 'number' ? exactText(v) : String(v ?? '(빈칸)')
+}
+
 type TargetSetting = { include: boolean; unit: string; period: string; column: string; records: boolean }
 const NEW_SETTING: TargetSetting = { include: true, unit: '', period: '', column: '', records: false }
 const LEVEL_LABEL: Record<RegionLevel, string> = {
@@ -468,10 +477,10 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                 <ul className="an-level-conflicts">
                   {preview.region_levels.conflicts.map((x, i) => (
                     <li key={i}>
-                      {x.period ?? '-'} {x.upper.target}: 상위 값 {String(x.upper.value ?? '(빈칸)')} (#{x.upper.file_id}{' '}
-                      {x.upper.row}행) · 하위 지역 {x.lower_count}곳 합계 {x.lower_sum === null ? '확인 불가' : fmt(x.lower_sum)}
+                      {x.period ?? '-'} {x.upper.target}: 상위 값 {showValue(x.upper.value)} (#{x.upper.file_id}{' '}
+                      {x.upper.row}행) · 하위 지역 {x.lower_count}곳 합계 {exactText(x.lower_sum)}
                       {x.lower_missing > 0 ? ` (값 없는 하위 지역 ${x.lower_missing}곳)` : ''} · 차이{' '}
-                      {x.difference === null ? '확인 불가' : fmt(x.difference)}
+                      {exactText(x.difference)}
                     </li>
                   ))}
                 </ul>
@@ -1084,10 +1093,10 @@ function AnalysisResult({ id }: { id: number }) {
             <ul className="an-level-conflicts">
               {c.level_conflicts.map((x, i) => (
                 <li key={i}>
-                  {x.period ?? '-'} {x.upper.target}: 상위 값 {String(x.upper.value ?? '(빈칸)')} · 하위 지역{' '}
-                  {x.lower_count}곳 합계 {x.lower_sum === null ? '확인 불가' : fmt(x.lower_sum)}
+                  {x.period ?? '-'} {x.upper.target}: 상위 값 {showValue(x.upper.value)} · 하위 지역{' '}
+                  {x.lower_count}곳 합계 {exactText(x.lower_sum)}
                   {x.lower_missing > 0 ? ` (값 없는 하위 지역 ${x.lower_missing}곳)` : ''} · 차이{' '}
-                  {x.difference === null ? '확인 불가' : fmt(x.difference)}
+                  {exactText(x.difference)}
                 </li>
               ))}
             </ul>
