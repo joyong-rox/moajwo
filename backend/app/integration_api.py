@@ -17,6 +17,7 @@ from app.db import get_session
 from app.integration import KST, IntegrationError, integrate
 from app.models import Automation, IntegrationRun, ReviewSession, RunChange, User
 from app.pii import mask_nested, mask_text
+from app.timefmt import stored_kst, utc_to_kst
 
 router = APIRouter(tags=["integration"])
 
@@ -95,9 +96,9 @@ def run_out(run: IntegrationRun, automation_name: str | None = None, user_name: 
         warning_count=run.warning_count,
         summary=_masked_summary(json.loads(run.summary or "{}")),
         error=run.error,
-        created_at=run.created_at,
-        started_at=run.started_at,
-        finished_at=run.finished_at,
+        created_at=utc_to_kst(run.created_at),  # DB 기본값(UTC)
+        started_at=stored_kst(run.started_at),  # datetime.now(KST)로 저장
+        finished_at=stored_kst(run.finished_at),
         duration_ms=duration,
     )
 

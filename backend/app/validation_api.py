@@ -18,6 +18,7 @@ from app.mapping import get_engine
 from app.models import SourceFile, ValidationRun
 from app.pii import has_pii, mask_nested, mask_rrn_number, mask_text
 from app.promotion import load_standard
+from app.timefmt import utc_to_kst
 from app.validation import (
     BLOCK_LABEL,
     ENTITY_FIELDS,
@@ -78,7 +79,7 @@ def list_files(
             id=r.id,
             original_name=r.original_name,
             display_name=mask_text(r.original_name),
-            uploaded_at=r.uploaded_at,
+            uploaded_at=utc_to_kst(r.uploaded_at),  # DB 기본값(UTC) → KST
             pii=pii_out(r),
         )
         for r in records
