@@ -15,8 +15,11 @@
   연도·월·기준일 열끼리 맞지 않으면 실행하지 않는다. 기간을 못 찾으면 사용자가 적어야 쓴다.
 - 집계 대상: 지역·기관·구분 값으로 한 행이 무엇인지 확인한다. 지역은 매핑 구조(시도·시군구·행정구역 열)와 관계없이
   행정구역 코드로 비교한다. 합계·소계 행, '계·합계·전체' 행은 빼고 사유를 남긴다.
-- 상위·하위 지역: 같은 기간·같은 구분(기관·차종 등) 안에서만 비교한다. 하위 지역 합계가 상위 지역 값과 같으면 상위 행을
-  중복으로 빼고, 다르거나 확인할 수 없으면(하위 지역 일부만 있음 등) 사용자가 집계 수준(하위만/상위만)을 고르게 한다.
+- 상위·하위 지역: 같은 기간·같은 구분(기관·차종 등) 안에서만 비교한다. 하위 지역 합계가 상위 지역 값과 정확히 같으면
+  상위 행을 중복으로 빼고(허용 오차 없음 — exact_number), 다르거나 확인할 수 없으면(하위 지역 일부만 있음 등) 사용자가
+  집계 수준(하위만/상위만)을 고르게 한다. 시점 값은 기준일이 다른 행끼리 상위·하위로 판정하지 않는다.
+- 기준일 검사는 사용자가 조건으로 뺀 행만 빼고, 시스템이 자동으로 뺀 행(상위·하위 지역, 합계 행 등)까지 근거로 본다
+  (자동 제외 때문에 기준일 충돌이 가려지지 않게).
 - 중복: 같은 내용의 파일이나 같은 대상(기간·지역·기관·구분)이 다른 자료에도 있으면 실행하지 않고 사용자가 고르게 한다.
   한 시트 안에서 같은 대상이 반복되면 중복된 통계인지 서로 다른 기록인지 알 수 없으므로, 사용자가 '서로 다른 기록'이라고
   확인하기 전에는 계산하지 않는다 (임의로 합치거나 지우지 않음).
@@ -25,6 +28,7 @@
 - 사용자가 적은 글자(구간 이름·필터 값·단위·구분)는 저장·표시·다운로드 전에 기존 개인정보 마스킹(mask_text)으로 가린다.
 """
 
+import decimal
 import hashlib
 import json
 import math
@@ -33,6 +37,7 @@ import unicodedata
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -51,7 +56,7 @@ from app.parsing import is_missing
 from app.pii import mask_text
 from app.validation import STOCK_FIELDS, _month_of, _text_periods, _year_of
 
-POLICY = "analysis-policy-2"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
+POLICY = "analysis-policy-3"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
 MAX_TARGETS = 20  # 한 번에 고를 수 있는 파일·시트
 MAX_ROWS = 300_000  # 고른 시트의 데이터 행 합계 상한
 MAX_GROUPS = 5_000
@@ -348,6 +353,31 @@ def classify_value(value: object) -> tuple[float | None, str | None, str | None]
     return None, "not_number", mask_text(text[:40])
 
 
+def exact_number(value: object) -> Decimal | None:
+    """상위·하위 합계 일치 판정용 정확한 수 (계산 결과에는 쓰지 않고 원본 값도 바꾸지 않는다).
+
+    - 정수 칸(인원·대수·건수·금액 등)은 정수 그대로 — 1원·1명 차이도 다름으로 본다.
+    - 소수 칸은 원본에 적힌 자릿수(그 값을 그대로 되살리는 가장 짧은 십진 표기)로 읽는다. 그래서 이진 부동소수의
+      표현 오차(0.1 + 0.2 = 0.30000000000000004)는 생기지 않고,
+      적힌 자릿수 안의 실제 차이(0.3 vs 0.31)는 그대로 다름이다.
+    - 값 크기에 비례하는 허용 오차나 반올림은 쓰지 않는다.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float) and math.isfinite(value):
+        return Decimal(repr(value))
+    return None
+
+
+def _plain(d: Decimal | None) -> int | float | None:
+    """정확한 값을 화면·저장용 숫자로 (정수면 정수, 아니면 소수)."""
+    if d is None:
+        return None
+    return int(d) if d == d.to_integral_value() else float(d)
+
+
 def column_unit(column: str) -> str | None:
     found = [m.group(1) for m in _COLUMN_UNIT.finditer(unicodedata.normalize("NFKC", column))]
     found = [u for u in found if normalize(u) not in _dictionary_words()]
@@ -444,6 +474,7 @@ class RowRec:
     reason: str | None = None
     level: tuple[str, str | None] | None = None
     day: str | None = None  # 기준일 (날짜까지 적힌 경우)
+    exact: Decimal | None = None  # 상위·하위 일치 판정용 정확한 값 (exact_number)
 
 
 @dataclass
@@ -841,6 +872,8 @@ def _read_rows(ev: Evaluation) -> None:
                 continue
             rec.level = region_level(region_key(dims)) if any(k in dims for k in REGION_FIELDS) else None
             rec.value, rec.reason, rec.shown = classify_value(cells[col]) if col is not None else (None, "blank", None)
+            if rec.value is not None and col is not None:
+                rec.exact = exact_number(cells[col])
     ev.periods = sorted(periods)
     ev.filter_values = {k: sorted(v) for k, v in values.items()}
     for t in ev.ok:
@@ -850,10 +883,10 @@ def _read_rows(ev: Evaluation) -> None:
                 f"#{t.file_id} {t.sheet}: 기간 열(연도·월·기준일)이 서로 맞지 않는 행 {len(found)}개 "
                 f"(예: {row}행 {text}) — 어느 기간인지 추정하지 않습니다. 매핑이나 자료를 확인하세요"
             )
-    _repeated(ev)  # 순서: 한 시트 안의 반복 → 자료 사이의 중복 → 상위·하위 지역 (중복을 먼저 드러낸다)
+    _repeated(ev)  # 순서: 한 시트 안의 반복 → 자료 사이의 중복 → 기준일 → 상위·하위 지역 (중복·충돌을 먼저 드러낸다)
     _overlaps(ev)
+    _base_dates(ev)  # 범위(_date_scope)가 자동 제외와 무관해 순서에 기대지 않지만, 근거를 먼저 확인한다
     _region_levels(ev)
-    _base_dates(ev)
     for t in ev.ok:
         for r in t.rows:
             if r.reason is None and r.value is not None:
@@ -980,6 +1013,7 @@ def _region_levels(ev: Evaluation) -> None:
       'lower' = 상위 행을 빼고 있는 하위 지역만, 'upper' = 하위 행을 빼고 상위 지역만. 고르지 않으면 실행하지 않는다.
     """
     choice = ev.req.region_level
+    stock = ev.req.field_key in STOCK_FIELDS
     ctx: dict[tuple[Any, ...], list[RowRec]] = defaultdict(list)
     for t in ev.ok:
         for r in t.rows:
@@ -1000,24 +1034,18 @@ def _region_levels(ev: Evaluation) -> None:
             orphans = [r for r in sigs if r.level and r.level[1] not in sido_codes]
             pairs.append((nations, sidos + orphans, sidos + sigs))
         # 모든 쌍을 먼저 판정한 뒤 뺀다 (시도 행을 먼저 빼면 같은 기간의 '전국' 비교에서 그 값이 사라지므로)
-        judged = [
-            (
-                ups,
-                lows,
-                below,
-                len(ups) == 1
-                and ups[0].value is not None
-                and all(x.value is not None for x in lows)
-                and math.isclose(math.fsum(x.value or 0.0 for x in lows), ups[0].value, rel_tol=1e-9, abs_tol=1e-9),
-            )
-            for ups, lows, below in pairs
-        ]
-        for ups, lows, below, match in judged:
+        judged = [(ups, lows, below, *_level_match(ups, lows, stock)) for ups, lows, below in pairs]
+        for ups, lows, below, match, dated_apart, lower_sum in judged:
+            if dated_apart:
+                # 기준일이 다른 시점 값은 상위·하위 중복으로 판정하지 않는다
+                # (뺄 행을 정하지 않음 — _base_dates가 실행을 막음)
+                continue
             if not match:
                 mismatch += 1
                 if len(ev.level_conflicts) < 20:
                     up = ups[0]
-                    valid = [x.value for x in lows if x.value is not None]
+                    missing = sum(1 for x in lows if x.exact is None)
+                    exact_diff = len(ups) == 1 and up.exact is not None and lower_sum is not None and not missing
                     ev.level_conflicts.append(
                         {
                             "period": period,
@@ -1025,23 +1053,25 @@ def _region_levels(ev: Evaluation) -> None:
                                 "target": _target_text(up),
                                 "file_id": ev.targets[up.t].file_id,
                                 "row": up.row,
-                                "value": _value_of(up),
+                                "value": _plain(up.exact) if up.exact is not None else _value_of(up),
                                 "rows": len(ups),
                             },
                             "lower_count": len(lows),
-                            "lower_sum": math.fsum(valid) if valid else None,
-                            "lower_missing": len(lows) - len(valid),
+                            "lower_sum": _plain(lower_sum),
+                            "lower_missing": missing,
+                            # 상위 값 − 하위 합계 (값이 빠졌거나 상위 행이 여럿이면 계산하지 않음)
+                            "difference": _plain(up.exact - lower_sum) if exact_diff else None,  # type: ignore[operator]
                         }
                     )
             if choice == "upper":
                 for x in below:
                     if x.reason != "upper_region":
-                        x.reason, x.value, x.shown = "lower_region", None, None
+                        x.reason, x.value, x.shown, x.exact = "lower_region", None, None, None
                         dropped += 1
             elif choice == "lower" or match:
                 for x in ups:
                     if x.reason != "upper_region":
-                        x.reason, x.value, x.shown = "upper_region", None, None
+                        x.reason, x.value, x.shown, x.exact = "upper_region", None, None, None
                         dropped += 1
                         if match and choice is None:
                             auto += 1
@@ -1066,16 +1096,51 @@ def _region_levels(ev: Evaluation) -> None:
         )
 
 
+def _level_match(ups: list[RowRec], lows: list[RowRec], stock: bool) -> tuple[bool, bool, Decimal | None]:
+    """상위·하위 쌍 판정 → (정확히 일치, 기준일이 서로 다름, 하위 합계).
+
+    일치는 정확한 값(exact_number)의 합이 상위 값과 같을 때만이다 (허용 오차 없음). 상위 행이 여럿이거나 값이 하나라도
+    빠졌으면 확인할 수 없으므로 일치가 아니다. 시점 값에서 쌍 안의 기준일이 둘 이상이면 비교하지 않는다.
+    """
+    dated_apart = stock and len({x.day for x in (*ups, *lows) if x.day}) > 1
+    valid = [x.exact for x in lows if x.exact is not None]
+    with decimal.localcontext() as dc:
+        dc.prec = 80  # 원 단위 큰 금액·긴 소수도 반올림 없이 더한다
+        lower_sum = sum(valid, Decimal(0)) if valid else None
+        match = (
+            not dated_apart
+            and len(ups) == 1
+            and ups[0].exact is not None
+            and len(valid) == len(lows)
+            and lower_sum == ups[0].exact
+        )
+    return match, dated_apart, lower_sum
+
+
+def _user_filtered(r: RowRec, f: FiltersIn) -> bool:
+    """사용자가 조건(지역·기관·기간 필터, 숫자 범위)으로 직접 뺀 행. 시스템이 자동으로 뺀 행과 구분한다."""
+    if r.reason in ("filtered", "value_range"):
+        return True
+    return r.value is not None and (
+        (f.value_min is not None and r.value < f.value_min) or (f.value_max is not None and r.value > f.value_max)
+    )
+
+
+def _date_scope(ev: Evaluation) -> list[RowRec]:
+    """기준일 검사에 쓰는 행: 고른 자료에서 어디에 속하는지 알 수 있는 행 전부 중 사용자가 조건으로 뺀 행만 제외한다.
+    상위·하위 지역 자동 제외, 합계·소계 행, 결측 등 시스템이 뺀 행도 넣는다 — 자동 제외가 충돌의 근거를 지우지 않게."""
+    f = ev.req.filters
+    return [r for t in ev.ok for r in t.rows if r.period and r.reason not in UNPLACED and not _user_filtered(r, f)]
+
+
 def _base_dates(ev: Evaluation) -> None:
     """시점 값(인구·보유량 등)은 같은 달이라도 기준일이 다르면 함께 계산하지 않는다 (일 단위 분석은 지원하지 않음)."""
     if ev.req.field_key not in STOCK_FIELDS:
         return
     days: dict[str, set[str]] = defaultdict(set)
     undated: set[str] = set()
-    for t in ev.ok:
-        for r in t.rows:
-            if _candidate(r) and r.period:
-                (days[r.period].add(r.day) if r.day else undated.add(r.period))
+    for r in _date_scope(ev):
+        (days[r.period].add(r.day) if r.day else undated.add(r.period))
     for period, found in sorted(days.items()):
         if len(found) > 1:
             ev.problems.append(
@@ -1273,6 +1338,7 @@ def conditions(ev: Evaluation) -> dict[str, Any]:
             ],
         },
         "region_level": req.region_level,
+        "level_conflicts": ev.level_conflicts,  # 하위 합계가 상위 값과 다르거나 확인할 수 없는 곳 (차이 포함)
         "base_dates": ev.base_dates,
         "records": [f"#{t.file_id} {t.sheet}" for t in ev.ok if t.records and t.repeated],
         "mean_denominator": "그룹마다 유효한 숫자의 개수 (빈칸·비공개·숫자가 아닌 값은 분모에 넣지 않음)",

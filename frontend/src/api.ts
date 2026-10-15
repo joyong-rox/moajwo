@@ -1171,6 +1171,7 @@ export type AnalysisPreview = {
       lower_count: number
       lower_sum: number | null
       lower_missing: number
+      difference: number | null // 상위 값 − 하위 합계 (확인할 수 없으면 null)
     }[]
   }
   base_dates: Record<string, string>
@@ -1212,6 +1213,7 @@ export type AnalysisRunDetail = {
     warnings: string[]
     policy: string
     region_level?: RegionLevel | null
+    level_conflicts?: AnalysisPreview['region_levels']['conflicts']
     base_dates?: Record<string, string>
     records?: string[]
   }

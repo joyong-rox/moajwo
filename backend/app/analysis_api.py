@@ -261,6 +261,22 @@ LEVEL_TEXT = {
 }
 
 
+def _amount(v: Any) -> str:
+    if v is None:
+        return "확인 불가"
+    return _numtext(v) if isinstance(v, int | float) else str(v)
+
+
+def level_conflict_text(x: dict[str, Any]) -> str:
+    up = x["upper"]
+    missing = f" (값 없는 하위 지역 {x['lower_missing']}곳)" if x.get("lower_missing") else ""
+    return (
+        f"{x.get('period') or '-'} {up['target']}: 상위 값 {_amount(up['value'])} (#{up['file_id']} {up['row']}행) · "
+        f"하위 지역 {x['lower_count']}곳 합계 {_amount(x.get('lower_sum'))}{missing} · "
+        f"차이 {_amount(x.get('difference'))}"
+    )
+
+
 def _state_text(res: dict[str, Any]) -> str:
     if res["partial"]:
         return "부분 집계 (자료 문제로 뺀 값이 있음)"
@@ -318,6 +334,8 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
         ["값이 없을 때", f"'{NO_VALUE}' (0으로 쓰지 않음)"],
         ["지역 집계 수준", LEVEL_TEXT[cond.get("region_level")]],
     ]
+    for x in cond.get("level_conflicts") or []:  # 하위 합계가 상위 값과 다르거나 확인할 수 없는 곳 (선택의 근거)
+        lines.append(["지역 수준 차이", level_conflict_text(x)])
     if cond.get("base_dates"):
         lines.append(["기준일", ", ".join(f"{p}: {d}" for p, d in sorted(cond["base_dates"].items()))])
     if cond.get("records"):

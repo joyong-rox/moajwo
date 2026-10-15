@@ -470,7 +470,8 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                     <li key={i}>
                       {x.period ?? '-'} {x.upper.target}: 상위 값 {String(x.upper.value ?? '(빈칸)')} (#{x.upper.file_id}{' '}
                       {x.upper.row}행) · 하위 지역 {x.lower_count}곳 합계 {x.lower_sum === null ? '확인 불가' : fmt(x.lower_sum)}
-                      {x.lower_missing > 0 ? ` (값 없는 하위 지역 ${x.lower_missing}곳)` : ''}
+                      {x.lower_missing > 0 ? ` (값 없는 하위 지역 ${x.lower_missing}곳)` : ''} · 차이{' '}
+                      {x.difference === null ? '확인 불가' : fmt(x.difference)}
                     </li>
                   ))}
                 </ul>
@@ -1079,6 +1080,18 @@ function AnalysisResult({ id }: { id: number }) {
             ? `${LEVEL_LABEL[c.region_level]} — 사용자 선택`
             : '자동 — 하위 지역 합계가 상위 지역 값과 같을 때만 상위 행을 중복으로 뺌'}
           {r.level_mismatch ? ` · 하위 지역 합계가 상위 지역 값과 다른 곳 ${r.level_mismatch}곳` : ''}
+          {c.region_level && c.level_conflicts && c.level_conflicts.length > 0 && (
+            <ul className="an-level-conflicts">
+              {c.level_conflicts.map((x, i) => (
+                <li key={i}>
+                  {x.period ?? '-'} {x.upper.target}: 상위 값 {String(x.upper.value ?? '(빈칸)')} · 하위 지역{' '}
+                  {x.lower_count}곳 합계 {x.lower_sum === null ? '확인 불가' : fmt(x.lower_sum)}
+                  {x.lower_missing > 0 ? ` (값 없는 하위 지역 ${x.lower_missing}곳)` : ''} · 차이{' '}
+                  {x.difference === null ? '확인 불가' : fmt(x.difference)}
+                </li>
+              ))}
+            </ul>
+          )}
         </dd>
         {c.base_dates && Object.keys(c.base_dates).length > 0 && (
           <>

@@ -561,3 +561,120 @@ def test_run_with_conditions_changed_after_preview_is_rejected(an) -> None:
     changed = _body([fid], group_by=["sido"])
     res = u.post("/analysis/run", json={**changed, "expected_fingerprint": pv["fingerprint"]})
     assert res.status_code == 409 and "바뀌었습니다" in res.json()["detail"]["message"]
+
+
+# ---------------------------------------------------------------- 보완 2: 기준일 충돌 vs 상위·하위 자동 제외
+
+
+CODE_DATE = {"지역코드": "region_code", "기준일": "base_date", "인구": "population"}
+NO_PERIOD = "주민등록 인구 현황 (단위: 명)"
+
+
+def test_auto_upper_removal_does_not_hide_a_base_date_conflict(an) -> None:
+    u = an["an-user1"]
+    rows = [
+        ["지역코드", "기준일", "인구"],
+        [11, "2026-09-15", 100],
+        [11110, "2026-09-30", 40],
+        [11140, "2026-09-30", 60],
+    ]
+    fid = _file(u, "기준일충돌_상하위.xlsx", rows, CODE_DATE, title=NO_PERIOD)
+    before = _db("select count(*) from analysis_runs")[0][0]
+    pv = _preview(u, _body([fid]))
+    assert any("기준일" in p and "2026-09-15" in p and "2026-09-30" in p for p in pv["problems"])
+    assert not pv["region_levels"]["conflicts"]  # 기준일이 다른 행끼리는 상위·하위 판정을 하지 않음
+    assert _ok_run(u, _body([fid])) == 409
+    assert _ok_run(u, _body([fid], region_level="lower")) == 409  # 집계 수준을 골라도 기준일 충돌은 그대로
+    assert _db("select count(*) from analysis_runs")[0][0] == before  # 막힌 요청은 저장하지 않음
+    # 사용자가 필터로 직접 뺀 행은 근거에서 빠진다 (시스템 자동 제외와 구분)
+    r = _run(u, _body([fid], filters={"dims": {"region_code": ["11110", "11140"]}}))
+    assert r["groups"][0]["sum"] == 100 and r["detail"]["conditions"]["base_dates"] == {"2026-09": "2026-09-30"}
+
+
+def test_same_base_date_and_other_months_keep_the_existing_upper_lower_rules(an) -> None:
+    u = an["an-user1"]
+    same = [
+        ["지역코드", "기준일", "인구"],
+        [11, "2026-09-30", 100],
+        [11110, "2026-09-30", 40],
+        [11140, "2026-09-30", 60],
+    ]
+    r = _run(u, _body([_file(u, "같은기준일.xlsx", same, CODE_DATE, title=NO_PERIOD)]))
+    assert r["groups"][0]["sum"] == 100 and r["detail"]["result"]["reason_counts"] == {"upper_region": 1}
+    months = [
+        ["지역코드", "기준일", "인구"],
+        [11, "2026-08-31", 100],
+        [11110, "2026-09-30", 40],
+        [11140, "2026-09-30", 60],
+    ]
+    r = _run(u, _body([_file(u, "다른월.xlsx", months, CODE_DATE, title=NO_PERIOD)]))
+    assert {tuple(g["keys"]): g["sum"] for g in r["groups"]} == {("2026-08",): 100, ("2026-09",): 100}
+    flow = [["시도", "시군구", "일자", "집행액"], ["서울특별시", None, "2026-09-01", 100],
+            ["서울특별시", "종로구", "2026-09-15", 40], ["서울특별시", "중구", "2026-09-20", 60]]  # fmt: skip
+    mapping = {"시도": "sido", "시군구": "sigungu", "일자": "base_date", "집행액": "expenditure"}
+    fid = _file(u, "집행_날짜다름.xlsx", flow, mapping, title="집행 실적 (단위: 원)")
+    r = _run(u, {**_body([fid]), "field_key": "expenditure"})  # 발생 실적은 같은 달 안에서 비교·합산 (기존 동작)
+    assert r["groups"][0]["sum"] == 100 and r["detail"]["result"]["reason_counts"] == {"upper_region": 1}
+
+
+# ---------------------------------------------------------------- 보완 2: 상위·하위 합계는 정확히 같을 때만 일치
+
+
+BUDGET = {"시도": "sido", "시군구": "sigungu", "예산": "budget"}
+
+
+def _budget(u: TestClient, name: str, up: Any, a: Any, b: Any) -> int:
+    rows = [
+        ["시도", "시군구", "예산"],
+        ["서울특별시", None, up],
+        ["서울특별시", "종로구", a],
+        ["서울특별시", "중구", b],
+    ]
+    return _file(u, name, rows, BUDGET, title="예산 현황 2026년 (단위: 원)")
+
+
+def _budget_body(fid: int, **kw: Any) -> dict[str, Any]:
+    return {**_body([fid], **kw), "field_key": "budget"}
+
+
+def test_large_integer_totals_must_match_exactly(an) -> None:
+    u = an["an-user1"]
+    fid = _budget(u, "예산_500원차이.xlsx", 1_000_000_000_000, 600_000_000_000, 399_999_999_500)
+    pv = _preview(u, _budget_body(fid))
+    (conf,) = pv["region_levels"]["conflicts"]
+    assert (
+        conf["lower_sum"] == 999_999_999_500
+        and conf["difference"] == 500
+        and any("집계 수준" in p for p in pv["problems"])
+    )
+    assert _ok_run(u, _budget_body(fid)) == 409
+    r = _run(u, _budget_body(fid, region_level="lower"))
+    assert r["groups"][0]["sum"] == 999_999_999_500 and r["detail"]["result"]["level_mismatch"] == 1
+    assert r["detail"]["conditions"]["level_conflicts"][0]["difference"] == 500
+    wb = openpyxl.load_workbook(io.BytesIO(u.get(f"/analysis/runs/{r['id']}/download").content))
+    assert next(wb["결과"].iter_rows(min_row=2, values_only=True))[0] == 999_999_999_500  # 화면·저장과 같은 숫자
+    cond = {row[0]: row[1] for row in wb["조건"].iter_rows(values_only=True) if row[0]}
+    assert "차이 500" in cond["지역 수준 차이"] and cond["지역 집계 수준"].startswith("하위 지역만")
+    assert cond["결과 상태"].startswith("선택한 지역 수준 집계")
+    one = _budget(u, "예산_1원차이.xlsx", 1_000_000_000_000, 600_000_000_000, 399_999_999_999)
+    assert _preview(u, _budget_body(one))["region_levels"]["conflicts"][0]["difference"] == 1
+    assert _ok_run(u, _budget_body(one)) == 409
+    exact = _budget(u, "예산_완전일치.xlsx", 1_000_000_000_000, 600_000_000_000, 400_000_000_000)
+    r = _run(u, _budget_body(exact))
+    assert r["groups"][0]["sum"] == 1_000_000_000_000 and r["detail"]["result"]["reason_counts"] == {"upper_region": 1}
+
+
+def test_zero_negative_missing_and_decimal_totals(an) -> None:
+    u = an["an-user1"]
+    r = _run(u, _budget_body(_budget(u, "예산_0음수.xlsx", 0, 50, -50)))
+    assert r["groups"][0]["sum"] == 0 and r["detail"]["result"]["reason_counts"] == {"upper_region": 1}
+    missing = _budget(u, "예산_결측.xlsx", 100, 60, "-")
+    (conf,) = _preview(u, _budget_body(missing))["region_levels"]["conflicts"]
+    assert conf["lower_missing"] == 1 and conf["difference"] is None  # 결측은 0으로 보지 않고 '확인 불가'
+    assert _ok_run(u, _budget_body(missing)) == 409
+    # 적힌 자릿수로 비교: 이진 부동소수 표현 오차(0.1 + 0.2)는 일치, 실제 차이(0.1 + 0.21)는 불일치
+    r = _run(u, _budget_body(_budget(u, "예산_소수표현.xlsx", 0.3, 0.1, 0.2)))
+    assert r["detail"]["result"]["reason_counts"] == {"upper_region": 1}
+    off = _budget(u, "예산_소수차이.xlsx", 0.3, 0.1, 0.21)
+    assert _preview(u, _budget_body(off))["region_levels"]["conflicts"][0]["difference"] == -0.01
+    assert _ok_run(u, _budget_body(off)) == 409
