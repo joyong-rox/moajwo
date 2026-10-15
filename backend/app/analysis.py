@@ -21,6 +21,9 @@
 - 기준일 검사는 사용자가 조건으로 뺀 행만 빼고, 시스템이 자동으로 뺀 행(상위·하위 지역, 합계 행 등)까지 근거로 본다
   (자동 제외 때문에 기준일 충돌이 가려지지 않게). 사용자 조건(지역·기관·기간·숫자 범위)은 시스템 제외 사유와 따로
   모든 행에 적용한다 — 합계·소계 행도 사용자가 조건으로 뺐으면 기준일 근거에서 빠진다.
+- 대상 범위: 사용자 조건(지역·기관·구분·기간·숫자 범위)이 먼저 정한 행 안에서만 모든 판정을 한다.
+  반복·중복·상위·하위 판정(_candidate)과 계산은 사용자 조건 안의 행만, 기준일 검사(_date_scope)는 그중 시스템이
+  뺀 행(합계·소계·상위 지역 등)까지 본다. 그래서 같은 행을 남기는 숫자 필터와 지역 필터는 같은 판정·결과를 낸다.
 - 중복: 같은 내용의 파일이나 같은 대상(기간·지역·기관·구분)이 다른 자료에도 있으면 실행하지 않고 사용자가 고르게 한다.
   한 시트 안에서 같은 대상이 반복되면 중복된 통계인지 서로 다른 기록인지 알 수 없으므로, 사용자가 '서로 다른 기록'이라고
   확인하기 전에는 계산하지 않는다 (임의로 합치거나 지우지 않음).
@@ -57,7 +60,7 @@ from app.parsing import is_missing
 from app.pii import mask_text
 from app.validation import STOCK_FIELDS, _month_of, _text_periods, _year_of
 
-POLICY = "analysis-policy-4"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
+POLICY = "analysis-policy-5"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
 MAX_TARGETS = 20  # 한 번에 고를 수 있는 파일·시트
 MAX_ROWS = 300_000  # 고른 시트의 데이터 행 합계 상한
 MAX_GROUPS = 5_000
@@ -548,6 +551,7 @@ class Evaluation:
     available_groups: list[str] = field(default_factory=list)
     level_conflicts: list[dict[str, Any]] = field(default_factory=list)  # 하위 합계 ≠ 상위 값 (예시 일부)
     level_mismatch: int = 0  # 하위 합계가 상위 값과 다르거나 확인할 수 없는 상위 지역 수
+    date_conflict: bool = False  # 시점 값의 기준일 충돌로 실행을 막음 (_base_dates)
     base_dates: dict[str, str] = field(default_factory=dict)  # 기간 → 기준일 (시점 값, 날짜가 적힌 경우)
     fingerprint: str = ""
 
@@ -897,6 +901,10 @@ def _read_rows(ev: Evaluation) -> None:
             rec.value, rec.reason, rec.shown = measured
             if rec.value is not None and col is not None:
                 rec.exact = exact_number(cells[col])
+            if rec.reason is None and rec.user_out:
+                # 숫자 범위도 지역·기간 필터와 같은 시점에 적용한다 — 이후 반복·중복·상위·하위 판정과 계산이
+                # 같은 행 범위를 쓰게 (뒤늦게 적용하면 사용자가 뺀 행이 비교를 바꾸고, 비교 뒤에 빠진다)
+                rec.reason = "value_range"
     ev.periods = sorted(periods)
     ev.filter_values = {k: sorted(v) for k, v in values.items()}
     for t in ev.ok:
@@ -910,17 +918,13 @@ def _read_rows(ev: Evaluation) -> None:
     _overlaps(ev)
     _base_dates(ev)  # 범위(_date_scope)가 자동 제외와 무관해 순서에 기대지 않지만, 근거를 먼저 확인한다
     _region_levels(ev)
-    for t in ev.ok:
-        for r in t.rows:
-            if r.reason is None and r.value is not None:
-                if (f.value_min is not None and r.value < f.value_min) or (
-                    f.value_max is not None and r.value > f.value_max
-                ):
-                    r.reason = "value_range"
 
 
 def _candidate(r: RowRec) -> bool:
-    """중복·상위 지역 판단에 쓰는 행: 구조·조건으로 빠지지 않은 행 (값의 결측 여부와 관계없이)."""
+    """반복·중복·상위·하위 판단에 쓰는 행: 사용자 조건 안에서 구조·조건으로 빠지지 않은 행
+    (값의 결측 여부와 관계없이 — 결측은 0으로 보지 않고 '확인할 수 없음'으로 판정에 남는다)."""
+    if r.user_out:
+        return False
     return r.reason is None or (REASONS[r.reason][1] and r.reason not in UNPLACED)
 
 
@@ -1042,7 +1046,7 @@ def _region_levels(ev: Evaluation) -> None:
         for r in t.rows:
             if _candidate(r) and r.level is not None:
                 ctx[(r.period, other_key(r))].append(r)
-    auto = mismatch = dropped = 0
+    auto = mismatch = dropped = skipped = 0
     for (period, _), rows in sorted(ctx.items(), key=lambda kv: str(kv[0])):
         sidos = [r for r in rows if r.level and r.level[0] == "sido"]
         sigs = [r for r in rows if r.level and r.level[0] == "sigungu"]
@@ -1060,8 +1064,10 @@ def _region_levels(ev: Evaluation) -> None:
         judged = [(ups, lows, below, *_level_match(ups, lows, stock)) for ups, lows, below in pairs]
         for ups, lows, below, match, dated_apart, lower_sum in judged:
             if dated_apart:
-                # 기준일이 다른 시점 값은 상위·하위 중복으로 판정하지 않는다
-                # (뺄 행을 정하지 않음 — _base_dates가 실행을 막음)
+                # 기준일이 다른 시점 값은 상위·하위 중복으로 판정하지 않는다 (뺄 행을 정하지 않음).
+                # 판정 대상(_candidate)은 기준일 검사 범위(_date_scope) 안이므로 _base_dates가 실행을 막는다
+                # (아래에서 한 번 더 확인)
+                skipped += 1
                 continue
             if not match:
                 mismatch += 1
@@ -1099,6 +1105,12 @@ def _region_levels(ev: Evaluation) -> None:
                         if match and choice is None:
                             auto += 1
     ev.level_mismatch = mismatch
+    if skipped and not ev.date_conflict:
+        # 비교를 건너뛴 상위·하위 행이 함께 합계에 들어가지 않도록, 막을 근거가 없으면 여기서 막는다 (안전장치)
+        ev.problems.append(
+            f"기준일이 다른 상위·하위 지역 행 {skipped}곳은 중복 여부를 판정할 수 없습니다 — "
+            "기준일이 같은 자료만 고르세요"
+        )
     if mismatch and choice is None:
         ev.problems.append(
             "상위·하위 지역 행이 함께 있는데 하위 지역 합계가 상위 지역 값과 다르거나 확인할 수 없는 곳이 "
@@ -1163,6 +1175,7 @@ def _base_dates(ev: Evaluation) -> None:
         (days[r.period].add(r.day) if r.day else undated.add(r.period))
     for period, found in sorted(days.items()):
         if len(found) > 1:
+            ev.date_conflict = True
             ev.problems.append(
                 f"같은 기간 {period}에 기준일이 서로 다른 자료가 있습니다 ({', '.join(sorted(found)[:5])}) — "
                 "시점 값은 기준일이 같을 때만 함께 계산합니다 (일 단위 분석은 지원하지 않음). "

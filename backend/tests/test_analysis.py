@@ -734,3 +734,62 @@ def test_period_filter_keeps_out_of_range_totals_out_of_the_base_dates(an) -> No
     sheet = {row[0]: row[1] for row in wb["조건"].iter_rows(values_only=True) if row[0]}
     assert sheet["기준일"] == "2026-09: 2026-09-30" and sheet["필터 — 기간"] == "2026-09 ~ 끝"
     assert next(wb["결과"].iter_rows(min_row=2, values_only=True))[0] == 100  # 화면·저장·Excel 같은 합계
+
+
+# ---------------------------------------------------------------- 보완 4: 사용자 조건이 정한 행 범위를 모든 판정에 같게
+
+
+SAME_ROWS = {"숫자 최솟값 50": {"value_min": 50}, "지역코드 11·11140": {"dims": {"region_code": ["11", "11140"]}}}
+
+
+def _levels(u: TestClient, fid: int, cond: dict) -> dict[str | None, Any]:
+    """집계 수준 선택 안 함 / 상위만 / 하위만 → (상태, 합계, 차이)."""
+    out: dict[str | None, Any] = {}
+    before = _db("select count(*) from analysis_runs")[0][0]
+    pv = _preview(u, _body([fid], filters=cond))
+    out[None] = (_ok_run(u, _body([fid], filters=cond)), [c["difference"] for c in pv["region_levels"]["conflicts"]])
+    assert _db("select count(*) from analysis_runs")[0][0] == before  # 막힌 실행은 저장하지 않음
+    for level in ("upper", "lower"):
+        r = _run(u, _body([fid], filters=cond, region_level=level))
+        out[level] = (r["groups"][0]["sum"], r["detail"]["conditions"]["base_dates"], r)
+    return out
+
+
+def test_numeric_and_region_filters_that_keep_the_same_rows_give_the_same_result(an) -> None:
+    u = an["an-user1"]
+    data = {
+        "A": [[11, "2026-09-30", 100], [11110, "2026-09-15", 40], [11140, "2026-09-30", 60]],  # 뺀 행만 기준일이 다름
+        "B": [[11, "2026-09-30", 100], [11110, "2026-09-30", 40], [11140, "2026-09-30", 60]],  # 기준일이 모두 같음
+    }
+    for name, rows in data.items():
+        fid = _file(u, f"필터범위_{name}.xlsx", [["지역코드", "기준일", "인구"], *rows], CODE_DATE, title=NO_PERIOD)
+        results = {}
+        for label, cond in SAME_ROWS.items():
+            got = _levels(u, fid, cond)
+            # 남은 상위 100·하위 60끼리 비교: 차이 40 → 선택 전에는 막고, 상위만 100 / 하위만 60
+            assert got[None] == (409, [40]), (name, label, got[None])
+            assert got["upper"][:2] == (100, {"2026-09": "2026-09-30"}), (name, label)
+            assert got["lower"][:2] == (60, {"2026-09": "2026-09-30"}), (name, label)
+            low = got["lower"][2]
+            assert low["detail"]["conditions"]["level_conflicts"][0]["difference"] == 40
+            wb = openpyxl.load_workbook(io.BytesIO(u.get(f"/analysis/runs/{low['id']}/download").content))
+            sheet = {row[0]: row[1] for row in wb["조건"].iter_rows(values_only=True) if row[0]}
+            assert next(wb["결과"].iter_rows(min_row=2, values_only=True))[0] == 60
+            assert "차이 40" in sheet["지역 수준 차이"] and sheet["지역 집계 수준"].startswith("하위 지역만")
+            assert sheet["기준일"] == "2026-09: 2026-09-30"
+            results[label] = {k: v[:2] for k, v in got.items()}
+        assert results["숫자 최솟값 50"] == results["지역코드 11·11140"]  # 같은 행을 남기면 같은 판정·결과
+        if name == "A":
+            for cond in ({}, {"dims": {"region_code": ["11", "11110"]}}):  # 9/15 행을 포함하면 기준일 충돌로 막음
+                pv = _preview(u, _body([fid], filters=cond))
+                assert any("기준일" in p and "2026-09-15" in p for p in pv["problems"]), cond
+                assert _ok_run(u, _body([fid], filters=cond, region_level="lower")) == 409
+
+
+def test_subtotal_rows_inside_the_user_conditions_keep_their_base_date(an) -> None:
+    u = an["an-user1"]
+    rows, mapping = _total_rows()["subtotal"]  # 소계 행 100 (9/15) · 40 · 60 (9/30)
+    fid = _file(u, "소계_조건안.xlsx", rows, mapping, title=NO_PERIOD)
+    pv = _preview(u, _body([fid], filters={"value_min": 50}))  # 소계 행(100)은 사용자 조건 안 → 기준일 근거로 남음
+    assert any("기준일" in p and "2026-09-15" in p for p in pv["problems"])
+    assert _ok_run(u, _body([fid], filters={"value_min": 50})) == 409
