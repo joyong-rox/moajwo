@@ -12,7 +12,7 @@
 
 import io
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Annotated, Any
 from urllib.parse import quote
 
@@ -41,6 +41,7 @@ from app.auth import CurrentUserDep, ensure_view
 from app.db import get_session
 from app.models import AnalysisRun, MappingDecision, SourceFile, User
 from app.pii import mask_text
+from app.timefmt import utc_to_kst
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 PAGE_MAX = 200
@@ -97,7 +98,10 @@ def analysis_sources(
     out: dict[int, SourceOut] = {}
     for fid, name, uploaded_at, sheet in rows:
         s = out.setdefault(
-            fid, SourceOut(file_id=fid, file_name=mask_text(name), uploaded_at=uploaded_at, sheets=[], columns=0)
+            fid,
+            SourceOut(
+                file_id=fid, file_name=mask_text(name), uploaded_at=utc_to_kst(uploaded_at), sheets=[], columns=0
+            ),
         )
         s.columns += 1
         if mask_text(sheet) not in s.sheets:
@@ -164,7 +168,7 @@ def analysis_runs(db: Annotated[Session, Depends(get_session)], user: CurrentUse
     runs = db.scalars(
         select(AnalysisRun).where(AnalysisRun.created_by == user.id).order_by(AnalysisRun.id.desc()).limit(100)
     )
-    return [{"id": r.id, "created_at": r.created_at, **json.loads(r.summary)} for r in runs]
+    return [{"id": r.id, "created_at": utc_to_kst(r.created_at), **json.loads(r.summary)} for r in runs]
 
 
 @router.get("/runs/{run_id}")
@@ -175,7 +179,7 @@ def analysis_detail(run_id: int, db: Annotated[Session, Depends(get_session)], u
     meta = {k: v for k, v in res.items() if k not in ("groups", "detail", "excluded")}
     return {
         "id": run.id,
-        "created_at": run.created_at,
+        "created_at": utc_to_kst(run.created_at),  # DB 기본값(UTC) → KST
         "created_by": owner.display_name if owner else None,
         "read_only": run.created_by != user.id,
         "conditions": json.loads(run.conditions),
@@ -312,7 +316,7 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
     lines: list[list[Any]] = [
         ["항목", "값"],
         ["분석 번호", run.id],
-        ["생성 시각 (UTC)", run.created_at.astimezone(UTC).isoformat() if run.created_at else ""],
+        ["생성 시각 (KST)", utc_to_kst(run.created_at).strftime("%Y-%m-%d %H:%M:%S") if run.created_at else ""],
         ["분석 항목", cond["field_label"]],
         ["열 이름의 구분", cond["variant"] or "구분 없음"],
         ["단위", cond["unit"] or "확인 안 됨"],

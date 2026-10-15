@@ -3,6 +3,7 @@
 import hashlib
 import io
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import openpyxl
@@ -793,3 +794,24 @@ def test_subtotal_rows_inside_the_user_conditions_keep_their_base_date(an) -> No
     pv = _preview(u, _body([fid], filters={"value_min": 50}))  # 소계 행(100)은 사용자 조건 안 → 기준일 근거로 남음
     assert any("기준일" in p and "2026-09-15" in p for p in pv["problems"])
     assert _ok_run(u, _body([fid], filters={"value_min": 50})) == 409
+
+
+# ---------------------------------------------------------------- 시각 표시: 화면·Excel 모두 한국 시간
+
+
+def test_analysis_times_are_shown_in_kst(an) -> None:
+    u = an["an-user1"]
+    fid = _file(u, "시각표시.xlsx", THREE, {"시도": "sido", "인구수": "population"})
+    r = _run(u, _body([fid]))
+    stored = _db("select created_at from analysis_runs where id = ?", r["id"])[0][0]
+    kst = datetime.fromisoformat(stored).replace(tzinfo=UTC) + timedelta(hours=9)
+    detail = r["detail"]["created_at"]
+    assert detail.endswith("+09:00") and detail[:19] == kst.strftime("%Y-%m-%dT%H:%M:%S")
+    listed = next(x for x in u.get("/analysis/runs").json() if x["id"] == r["id"])["created_at"]
+    assert listed == detail
+    sources = u.get("/analysis/sources", params={"field_key": "population"}).json()
+    source = next(x for x in sources if x["file_id"] == fid)
+    assert source["uploaded_at"].endswith("+09:00")
+    wb = openpyxl.load_workbook(io.BytesIO(u.get(f"/analysis/runs/{r['id']}/download").content))
+    cond = {row[0]: row[1] for row in wb["조건"].iter_rows(values_only=True) if row[0]}
+    assert cond["생성 시각 (KST)"] == kst.strftime("%Y-%m-%d %H:%M:%S") and "생성 시각 (UTC)" not in cond

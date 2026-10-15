@@ -1,5 +1,6 @@
 import io
 import sqlite3
+from datetime import UTC, datetime
 from typing import Any
 
 import openpyxl
@@ -230,3 +231,25 @@ def test_automation_keeps_include_unmapped_choice(client: TestClient) -> None:
     else:
         assert out["summary"]["include_unmapped"] is True
         assert set(unmapped) <= set(out["summary"]["columns"])
+
+
+def test_screen_times_carry_kst_offset(client: TestClient) -> None:
+    """화면에 보내는 시각에는 +09:00을 붙인다. 저장 기준이 달라도 같은 순간을 같은 한국 시간으로 보여 주게."""
+    fid = _upload(client, "시각.xlsx", SEPT)
+    _, run = _manual_run(client, fid)
+    automation = client.post(f"/runs/{run['id']}/automation", json={"name": "시각 확인"}).json()
+    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+        started, created = con.execute("select started_at, created_at from runs where id = ?", (run["id"],)).fetchone()
+        uploaded = con.execute("select uploaded_at from source_files where id = ?", (fid,)).fetchone()[0]
+        updated = con.execute("select updated_at from automations where id = ?", (automation["id"],)).fetchone()[0]
+    listed = next(r for r in client.get("/runs").json() if r["id"] == run["id"])
+    # datetime.now(KST)로 저장한 실행 시작 시각: 그 벽시계 그대로 +09:00 (9시간을 더하지 않음)
+    assert listed["started_at"].endswith("+09:00") and listed["started_at"][:19] == started.replace(" ", "T")[:19]
+    # DB 기본값(UTC)으로 저장한 시각: 같은 순간을 KST로
+    assert listed["created_at"].endswith("+09:00")
+    assert datetime.fromisoformat(listed["created_at"]) == datetime.fromisoformat(created).replace(tzinfo=UTC)
+    up = next(f for f in client.get("/files").json() if f["id"] == fid)["uploaded_at"]
+    assert up.endswith("+09:00") and datetime.fromisoformat(up) == datetime.fromisoformat(uploaded).replace(tzinfo=UTC)
+    got = client.get(f"/automations/{automation['id']}").json()
+    assert got["updated_at"].endswith("+09:00") and got["updated_at"][:19] == updated.replace(" ", "T")[:19]
+    assert got["created_at"].endswith("+09:00")

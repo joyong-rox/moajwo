@@ -19,6 +19,7 @@ from app.integration_api import RunOut, runs_out
 from app.models import Automation, IntegrationRun, SourceFile, User
 from app.pii import mask_text
 from app.review import session_items, summarize
+from app.timefmt import stored_kst, utc_to_kst
 
 router = APIRouter(tags=["automation"])
 
@@ -64,8 +65,8 @@ def automation_out(db: Session, a: Automation) -> AutomationOut:
         },  # 사용자 데이터에서 온 이름 키도 가림
         validation=json.loads(a.validation),
         output_format=_masked_format(json.loads(a.output_format)),
-        created_at=a.created_at,
-        updated_at=a.updated_at,
+        created_at=utc_to_kst(a.created_at),  # DB 기본값(UTC)
+        updated_at=stored_kst(a.updated_at),  # datetime.now(KST)로 저장
         run_count=count,
         last_run=runs_out(db, [last])[0] if last is not None else None,
     )
