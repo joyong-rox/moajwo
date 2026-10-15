@@ -678,3 +678,59 @@ def test_zero_negative_missing_and_decimal_totals(an) -> None:
     off = _budget(u, "예산_소수차이.xlsx", 0.3, 0.1, 0.21)
     assert _preview(u, _budget_body(off))["region_levels"]["conflicts"][0]["difference"] == -0.01
     assert _ok_run(u, _budget_body(off)) == 409
+
+
+# ---------------------------------------------------------------- 보완 3: 합계·소계 행에도 사용자 조건을 적용
+
+
+def _total_rows(first_date: str = "2026-09-15") -> dict[str, tuple[list[list], dict[str, str | None]]]:
+    """첫 행이 파서의 소계 행('소계' 라벨, 매핑 안 한 열)인 표와, 분석의 합계 성격 행('전체' 구분 값)인 표."""
+    body = [[11, first_date, 100], [11110, "2026-09-30", 40], [11140, "2026-09-30", 60]]
+    return {
+        "subtotal": (
+            [
+                ["구분", "지역코드", "기준일", "인구"],
+                *[[label, *r] for label, r in zip(["소계", "일반", "일반"], body, strict=True)],
+            ],
+            CODE_DATE,
+        ),
+        "total_like": (
+            [
+                ["구분", "지역코드", "기준일", "인구"],
+                *[[label, *r] for label, r in zip(["전체", "일반", "일반"], body, strict=True)],
+            ],
+            {**CODE_DATE, "구분": "department"},
+        ),
+    }
+
+
+def test_user_filters_also_apply_to_total_and_subtotal_rows(an) -> None:
+    u = an["an-user1"]
+    for kind, (rows, mapping) in _total_rows().items():
+        fid = _file(u, f"합계행_{kind}.xlsx", rows, mapping, title=NO_PERIOD)
+        for cond in ({"dims": {"region_code": ["11110", "11140"]}}, {"value_max": 60}):
+            r = _run(u, _body([fid], filters=cond))  # 사용자가 뺀 첫 행은 기준일 근거에서도 빠진다
+            assert r["groups"][0]["sum"] == 100 and r["detail"]["conditions"]["base_dates"] == {"2026-09": "2026-09-30"}
+            excluded = u.get(f"/analysis/runs/{r['id']}/excluded", params={"limit": 200}).json()["items"]
+            assert [x["reason"] for x in excluded if x["row"] == 3] == [kind], (
+                excluded
+            )  # 시스템 제외 사유·출처는 그대로
+        before = _db("select count(*) from analysis_runs")[0][0]
+        for cond in ({}, {"dims": {"region_code": ["11", "11110"]}}):  # 필터 없음·충돌 행 포함: 기존 차단 유지
+            pv = _preview(u, _body([fid], filters=cond))
+            assert any("기준일" in p and "2026-09-15" in p for p in pv["problems"]), (kind, cond)
+            assert _ok_run(u, _body([fid], filters=cond)) == 409
+        assert _db("select count(*) from analysis_runs")[0][0] == before  # 막힌 실행은 저장하지 않음
+
+
+def test_period_filter_keeps_out_of_range_totals_out_of_the_base_dates(an) -> None:
+    u = an["an-user1"]
+    rows, mapping = _total_rows(first_date="2026-08-31")["subtotal"]
+    fid = _file(u, "합계행_8월.xlsx", rows, mapping, title=NO_PERIOD)
+    r = _run(u, _body([fid], filters={"period_from": "2026-09"}))
+    cond = r["detail"]["conditions"]
+    assert r["groups"][0]["sum"] == 100 and cond["base_dates"] == {"2026-09": "2026-09-30"}  # 8월 소계 행은 근거 아님
+    wb = openpyxl.load_workbook(io.BytesIO(u.get(f"/analysis/runs/{r['id']}/download").content))
+    sheet = {row[0]: row[1] for row in wb["조건"].iter_rows(values_only=True) if row[0]}
+    assert sheet["기준일"] == "2026-09: 2026-09-30" and sheet["필터 — 기간"] == "2026-09 ~ 끝"
+    assert next(wb["결과"].iter_rows(min_row=2, values_only=True))[0] == 100  # 화면·저장·Excel 같은 합계

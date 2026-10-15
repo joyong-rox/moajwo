@@ -19,7 +19,8 @@
   상위 행을 중복으로 빼고(허용 오차 없음 — exact_number), 다르거나 확인할 수 없으면(하위 지역 일부만 있음 등) 사용자가
   집계 수준(하위만/상위만)을 고르게 한다. 시점 값은 기준일이 다른 행끼리 상위·하위로 판정하지 않는다.
 - 기준일 검사는 사용자가 조건으로 뺀 행만 빼고, 시스템이 자동으로 뺀 행(상위·하위 지역, 합계 행 등)까지 근거로 본다
-  (자동 제외 때문에 기준일 충돌이 가려지지 않게).
+  (자동 제외 때문에 기준일 충돌이 가려지지 않게). 사용자 조건(지역·기관·기간·숫자 범위)은 시스템 제외 사유와 따로
+  모든 행에 적용한다 — 합계·소계 행도 사용자가 조건으로 뺐으면 기준일 근거에서 빠진다.
 - 중복: 같은 내용의 파일이나 같은 대상(기간·지역·기관·구분)이 다른 자료에도 있으면 실행하지 않고 사용자가 고르게 한다.
   한 시트 안에서 같은 대상이 반복되면 중복된 통계인지 서로 다른 기록인지 알 수 없으므로, 사용자가 '서로 다른 기록'이라고
   확인하기 전에는 계산하지 않는다 (임의로 합치거나 지우지 않음).
@@ -56,7 +57,7 @@ from app.parsing import is_missing
 from app.pii import mask_text
 from app.validation import STOCK_FIELDS, _month_of, _text_periods, _year_of
 
-POLICY = "analysis-policy-3"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
+POLICY = "analysis-policy-4"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
 MAX_TARGETS = 20  # 한 번에 고를 수 있는 파일·시트
 MAX_ROWS = 300_000  # 고른 시트의 데이터 행 합계 상한
 MAX_GROUPS = 5_000
@@ -475,6 +476,9 @@ class RowRec:
     level: tuple[str, str | None] | None = None
     day: str | None = None  # 기준일 (날짜까지 적힌 경우)
     exact: Decimal | None = None  # 상위·하위 일치 판정용 정확한 값 (exact_number)
+    # 사용자 조건(지역·기관·구분 필터, 기간, 숫자 범위) 밖인가. 시스템 제외 사유(reason)와 따로 정한다 —
+    # 합계·소계 행처럼 시스템이 뺀 행에도 같은 조건을 적용해, 사용자가 뺀 행은 기준일 근거에서도 빠지게 한다.
+    user_out: bool = False
 
 
 @dataclass
@@ -825,6 +829,23 @@ def _pairs(targets: list[TargetEval], req: AnalysisIn) -> list[tuple[TargetEval,
     return out
 
 
+def _outside_conditions(
+    dims: dict[str, str], period: str | None, number: float | None, wanted: dict[str, set[str]], f: FiltersIn
+) -> bool:
+    """사용자 조건 밖인가 (행의 시스템 제외 사유와 관계없이 같은 규칙).
+    기간·숫자를 알 수 없으면 그 조건으로는 빼지 않는다
+    (결측·비공개 값을 0으로 보고 숫자 범위를 판단하지 않음)."""
+    if any(dims.get(k, "") not in vals for k, vals in wanted.items()):
+        return True
+    if period and (
+        (f.period_from and period < f.period_from) or (f.period_to and period[: len(f.period_to)] > f.period_to)
+    ):
+        return True
+    return number is not None and (
+        (f.value_min is not None and number < f.value_min) or (f.value_max is not None and number > f.value_max)
+    )
+
+
 def _read_rows(ev: Evaluation) -> None:
     req = ev.req
     f = req.filters
@@ -842,6 +863,8 @@ def _read_rows(ev: Evaluation) -> None:
             period, day, clash = _row_period(t, cells)
             rec = RowRec(t.index, row_no, period, dims, day=day)
             t.rows.append(rec)
+            measured = classify_value(cells[col]) if col is not None else (None, "blank", None)
+            rec.user_out = _outside_conditions(dims, period, measured[0], wanted, f)
             if kind == "subtotal":
                 rec.reason = "subtotal"
                 continue
@@ -871,7 +894,7 @@ def _read_rows(ev: Evaluation) -> None:
                 rec.reason = "filtered"
                 continue
             rec.level = region_level(region_key(dims)) if any(k in dims for k in REGION_FIELDS) else None
-            rec.value, rec.reason, rec.shown = classify_value(cells[col]) if col is not None else (None, "blank", None)
+            rec.value, rec.reason, rec.shown = measured
             if rec.value is not None and col is not None:
                 rec.exact = exact_number(cells[col])
     ev.periods = sorted(periods)
@@ -1117,20 +1140,17 @@ def _level_match(ups: list[RowRec], lows: list[RowRec], stock: bool) -> tuple[bo
     return match, dated_apart, lower_sum
 
 
-def _user_filtered(r: RowRec, f: FiltersIn) -> bool:
-    """사용자가 조건(지역·기관·기간 필터, 숫자 범위)으로 직접 뺀 행. 시스템이 자동으로 뺀 행과 구분한다."""
-    if r.reason in ("filtered", "value_range"):
-        return True
-    return r.value is not None and (
-        (f.value_min is not None and r.value < f.value_min) or (f.value_max is not None and r.value > f.value_max)
-    )
+def _user_filtered(r: RowRec) -> bool:
+    """사용자가 조건(지역·기관·기간 필터, 숫자 범위)으로 직접 뺀 행. 시스템이 자동으로 뺀 행(합계·소계·상위 지역 등)과
+    구분하되, 그런 행도 사용자 조건 밖이면 여기에 든다 (user_out은 행을 읽을 때 사유와 따로 정함)."""
+    return r.user_out or r.reason in ("filtered", "value_range")
 
 
 def _date_scope(ev: Evaluation) -> list[RowRec]:
     """기준일 검사에 쓰는 행: 고른 자료에서 어디에 속하는지 알 수 있는 행 전부 중 사용자가 조건으로 뺀 행만 제외한다.
-    상위·하위 지역 자동 제외, 합계·소계 행, 결측 등 시스템이 뺀 행도 넣는다 — 자동 제외가 충돌의 근거를 지우지 않게."""
-    f = ev.req.filters
-    return [r for t in ev.ok for r in t.rows if r.period and r.reason not in UNPLACED and not _user_filtered(r, f)]
+    상위·하위 지역 자동 제외, 합계·소계 행, 결측 등 시스템이 뺀 행도 사용자 조건 안이면 넣는다
+    — 자동 제외가 충돌의 근거를 지우지 않게."""
+    return [r for t in ev.ok for r in t.rows if r.period and r.reason not in UNPLACED and not _user_filtered(r)]
 
 
 def _base_dates(ev: Evaluation) -> None:
