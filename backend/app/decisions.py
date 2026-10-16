@@ -51,7 +51,7 @@ def load_org_codes(session: Session) -> KnownOrgCodes:
     for code, codes in session.execute(select(GlossaryEntry.code, GlossaryEntry.previous_codes)):
         entry.add(code)
         previous.update(c.strip() for c in (codes or "").split(",") if c.strip())
-    return KnownOrgCodes(frozenset(entry), frozenset(previous - entry))
+    return KnownOrgCodes(frozenset(entry), frozenset(previous))
 
 
 def load_decisions(session: Session, file_id: int) -> dict[str, dict[str, str | None]]:

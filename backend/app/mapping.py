@@ -83,7 +83,9 @@ class ColumnMapping:
     qualifier: str | None = None  # 열 이름에서 떼어낸 연도 등 (예: '인구_2025' → '2025')
     reason: str | None = None
     candidates: list[Candidate] = field(default_factory=list)
-    org_note: str | None = None  # 기관코드 제안·후보 검사로 바꾼 내용 (없으면 None) — reason 끝에도 붙는다
+    org_note: str | None = (
+        None  # 기관코드 제안·후보 검사 결과 (기각·보류 사유 또는 수용 근거, 없으면 None) — reason에도 있음
+    )
 
 
 @dataclass
@@ -320,6 +322,9 @@ OTHER_ID_WORDS = (
 # 다른 식별자 단어가 이 단어를 가로지르면(일부만 겹치면) 그 자리의 단어로 보지 않는다
 # ('발급기관'의 '발급기', '등기기관'의 '기기'). 단어가 들어 있다는 이유만으로 허용하지는 않는다.
 ORG_WORDS = ("기관",)
+# '기관' 뒤 글자가 이것으로 시작하면 '앞 단어의 기 + 관리…'로도 읽힌다 ('발급기관리코드' = '발급기' + '관리코드'?).
+# 원래 이름에 경계가 없고 '기관' 앞에 같은 토막의 글자가 있으면 모호하다고 보고 '기관'으로 인정하지 않는다.
+_ORG_AMBIGUOUS_NEXT = ("관리",)
 # 검사하지 않는 판정: 사용자 확정·표준 사전·전사 표준·학습 별칭·날짜 패턴 (기존 우선순위 유지)
 ORG_CHECK_EXEMPT = ("user", "exact", "exact_part", "standard", "learned", "pattern")
 OrgVerdict = Literal["accept", "reject", "insufficient"]
@@ -329,7 +334,8 @@ OrgVerdict = Literal["accept", "reject", "insufficient"]
 class KnownOrgCodes:
     """용어사전에서 확인되는 코드. 사전에 있다는 사실만 근거로 적고, 현재 유효한 코드인지는 판단하지 않는다.
 
-    entry: 항목 코드 (현행·과거 항목 모두 — 존속 기간은 보지 않음), previous: 개편 전 코드로만 적힌 코드
+    entry: 항목 코드 (현행·과거 항목 모두 — 존속 기간은 보지 않음)
+    previous: 다른 항목의 개편 전 코드(previous_codes)로 적힌 코드 (그 자체로 과거 항목 코드이기도 할 수 있음)
     """
 
     entry: frozenset[str] = frozenset()
@@ -344,20 +350,40 @@ def _occurrences(text: str, word: str) -> list[int]:
     return out
 
 
+def _token_starts(column: str, name: str) -> set[int]:
+    """원래 이름의 공백·구분자·괄호 경계를 정규화한 이름(name)의 위치로 옮긴 것 (각 토막이 시작하는 위치).
+    정규화 결과와 글자 수가 맞지 않으면(드문 문자) 경계 정보 없이 처음 위치만 돌려준다."""
+    text = unicodedata.normalize("NFKC", column)
+    tokens = [t.lower() for t in _SEPARATORS.split(_PAREN.sub(" ", text)) if t]
+    if "".join(tokens) != name:
+        return {0}
+    starts, pos = set(), 0
+    for t in tokens:
+        starts.add(pos)
+        pos += len(t)
+    return starts
+
+
 def other_id_word(column: str) -> str | None:
     """열 이름(정규화)에서 다른 식별자를 뜻하는 단어. 단어가 진짜 '기관' 단어를 가로지르면 그 자리는 세지 않는다.
 
-    '기관'이 진짜 단어인지: 그 '기관'의 뒤쪽 글자에서 시작해 밖으로 이어지는 다른 식별자 단어가 있으면
-    '기관'이 아니라 두 단어의 경계다 ('기기관리번호' = '기기' + '관리번호').
+    '기관'이 진짜 단어가 아닌 경우 (이때는 가로지르는 다른 식별자 단어를 그대로 센다):
+    - 원래 이름의 경계(공백·구분자·괄호)를 가로지름 ('발급기 관리코드' → '발급기' + '관리코드')
+    - 그 '기관'의 뒤쪽 글자에서 시작해 밖으로 이어지는 다른 식별자 단어가 있음 ('기기관리번호' = '기기' + '관리번호')
+    - 경계 없이 붙어 있어 '앞 단어의 기 + 관리…'로도 읽힘 ('발급기관리코드' — 모호하면 '기관'으로 보지 않음)
     """
     name = normalize(column)
+    starts = _token_starts(column, name)
     hits = [(w, i, i + len(w)) for w in OTHER_ID_WORDS for i in _occurrences(name, w)]
-    org_spans = [
-        (k, k + len(o))
-        for o in ORG_WORDS
-        for k in _occurrences(name, o)
-        if not any(k < i < k + len(o) < j for _, i, j in hits)
-    ]
+
+    def genuine(k: int, e: int) -> bool:
+        if any(k < s < e for s in starts):
+            return False
+        if any(k < i < e < j for _, i, j in hits):
+            return False
+        return k in starts or not name[k + 1 :].startswith(_ORG_AMBIGUOUS_NEXT)
+
+    org_spans = [(k, k + len(o)) for o in ORG_WORDS for k in _occurrences(name, o) if genuine(k, k + len(o))]
 
     def cuts(i: int, j: int) -> bool:
         return any(k < j and i < e and not (i <= k and e <= j) for k, e in org_spans)
@@ -390,11 +416,15 @@ def org_code_evidence(column: str, samples: list[Cell], known: KnownOrgCodes | N
             texts.append(None)  # 소수·날짜 등은 코드 형식이 아님
     valid = [t for t in texts if t is not None and ORG_CODE_FORMAT.match(t)]
     entry = [t for t in valid if known is not None and t in known.entry]
-    previous = [t for t in valid if known is not None and t not in known.entry and t in known.previous]
-    in_glossary = f"항목 코드 {len(entry)}개·개편 전 코드 {len(previous)}개"
+    previous = [t for t in valid if known is not None and t in known.previous]
+    both = [t for t in entry if t in previous]
+    found = len(entry) + len(previous) - len(both)  # 용어사전 어디엔가 있는 값
+    in_glossary = f"항목 코드 {len(entry)}개·개편 전 코드 {len(previous)}개" + (
+        f"(둘 다인 값 {len(both)}개)" if both else ""
+    )
     lengths = sorted({len(t) for t in texts if t is not None})
     if other is not None:
-        if texts and len(valid) == len(texts) and known is not None and len(entry) + len(previous) == len(valid):
+        if texts and len(valid) == len(texts) and known is not None and found == len(valid):
             return (
                 "insufficient",
                 f"열 이름은 다른 식별자('{other}')인데 값은 모두 용어사전에 있는 코드({in_glossary}) — 근거 충돌",
@@ -600,8 +630,9 @@ class MappingEngine:
             return
         verdict, evidence = org_code_evidence(name.raw, result.samples, org_codes)
         if verdict == "accept":
-            if applied:
-                result.reason = f"{(result.reason or '').rstrip()} [근거: {evidence}]".lstrip()
+            if applied:  # 근거는 분석 사유와 검토 사유에 같은 문장으로 남긴다
+                result.org_note = f"[근거: {evidence}]"
+                result.reason = f"{(result.reason or '').rstrip()} {result.org_note}".lstrip()
             return
         if verdict == "reject":
             # 기각한 항목은 추천 후보에서도 빼서 기본 선택·추천으로 다시 채택되지 않게 한다

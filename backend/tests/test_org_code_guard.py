@@ -107,6 +107,9 @@ KIOSK_SAMPLES = [
         ("초기메뉴번호", "메뉴"),
         ("전기기기번호", "기기"),
         ("기관 일련번호", "일련번호"),
+        ("관리기관 코드", None),
+        ("기관 관리코드", None),  # '기관' + '관리코드' — 장비 단어 없음
+        ("발급기관 관리번호", "관리번호"),
     ],
 )
 def test_other_id_word_reads_column_name_context(column: str, word: str | None) -> None:
@@ -127,6 +130,45 @@ def test_issuer_and_registrar_org_names_are_accepted(column: str, values: list[s
     assert verdict == "accept" and text in reason, reason
 
 
+# ================================================================ 새 결함 3: 경계가 공백 제거로 사라져 '기관'으로 오인
+
+
+@pytest.mark.parametrize(
+    ("column", "word"),
+    [
+        ("발급기 관리코드", "발급기"),  # 공백 제거 → '발급기관리코드' — 경계를 가로지른 '기관'은 기관 단어가 아님
+        ("기기 관리코드", "기기"),
+        ("발급기_관리코드", "발급기"),
+        ("발급기-관리코드", "발급기"),
+        ("발급기(구)관리코드", "발급기"),  # 괄호도 경계
+        ("발급기관리코드", "발급기"),  # 경계 없이 붙어 '발급기 + 관리코드'로도 읽힘 → 모호하면 '기관'으로 보지 않음
+        ("기기관리코드", "기기"),
+    ],
+)
+def test_device_word_across_boundary_is_not_read_as_org(column: str, word: str) -> None:
+    assert other_id_word(column) == word
+
+
+@pytest.mark.parametrize("column", ["발급기 관리코드", "기기 관리코드"])
+@pytest.mark.parametrize("embed", [_FAR, near_embed, None], ids=["LLM", "임베딩 유사도", "문자열만"])
+def test_device_admin_code_columns_on_llm_and_similarity_paths(column: str, embed: Any) -> None:
+    """사전 근거가 없으면 기각(후보에서도 제외), 값이 모두 사전 코드면 이름과 충돌 → 미해결(후보는 참고용)."""
+    use_llm = embed is _FAR
+    unknown = _map([column], [["B551011", "B552015"]], embed=embed, use_llm=use_llm, org_codes=KNOWN)[column]
+    assert (unknown.status, unknown.field_key) == ("unresolved", None), unknown.reason
+    assert "org_code" not in _candidate_keys(unknown)
+    if unknown.org_note is not None:  # 기관코드가 제안·후보에 올랐던 경우 (문자열만 쓰면 후보에 없을 수 있음)
+        assert "다른 식별자" in unknown.reason
+    assert use_llm is False or unknown.org_note is not None  # LLM 경로는 항상 기관코드를 제안받았다
+    known = _map([column], [["1741000", "1360000"]], embed=embed, use_llm=use_llm, org_codes=KNOWN)[column]
+    assert (known.status, known.field_key) == ("unresolved", None), known.reason
+    if (
+        known.org_note is not None
+    ):  # 기관코드가 적용 항목이었다면 근거 부족 사유 (후보로만 있었으면 참고용, 선택 상태 아님)
+        assert "근거 부족" in known.reason and "충돌" in known.reason and "org_code" in _candidate_keys(known)
+    assert use_llm is False or known.org_note is not None
+
+
 def test_issuer_and_registrar_llm_proposals_stay_review() -> None:
     m = _map(
         ["발급기관식별부호", "등기기관식별부호"], [["1741000", "1360000"], ["B551011", "B552015"]], org_codes=KNOWN
@@ -135,13 +177,18 @@ def test_issuer_and_registrar_llm_proposals_stay_review() -> None:
         col = m[column]
         assert (col.status, col.field_key, col.method, col.score) == ("review", "org_code", "llm", 0.99), column
         assert hits in col.reason and "현재 유효한 코드인지는 판단하지 않음" in col.reason
-        assert col.org_note is None
+        assert col.org_note.startswith("[근거: ") and col.org_note in col.reason
 
 
 def test_previous_codes_are_reported_apart_from_entry_codes() -> None:
     known = KnownOrgCodes(frozenset({"1053000"}), frozenset({"1051000"}))
     verdict, reason = org_code_evidence("소관기관식별부호", ["1053000", "1051000"], known)
     assert verdict == "accept" and "항목 코드 1개·개편 전 코드 1개" in reason
+    # 개편 전 코드가 과거 항목 코드로도 있으면 둘 다 센다 (재정경제부 1053000 ← 기획재정부 1051000)
+    both = KnownOrgCodes(frozenset({"1053000", "1051000"}), frozenset({"1051000"}))
+    verdict, reason = org_code_evidence("소관기관식별부호", ["1053000", "1051000"], both)
+    assert verdict == "accept" and "항목 코드 2개·개편 전 코드 1개(둘 다인 값 1개)" in reason
+    assert "현재 유효한 코드인지는 판단하지 않음" in reason
 
 
 # ================================================================ 새 결함 2: 유사도·대체 경로에 검사가 없었음
@@ -212,6 +259,7 @@ def test_similarity_proposal_with_good_codes_keeps_existing_policy() -> None:
         col = m[column]
         assert (col.status, col.field_key, col.method) == ("review", "org_code", "similarity"), column
         assert col.reason.startswith("유사도 중간 (사용자 확인 필요) [근거: 값 2개 모두 7자리 코드 형식"), col.reason
+        assert col.org_note == col.reason[col.reason.index("[근거: ") :]  # 검토 사유에 붙일 같은 근거
     assert m["수요처코드"].samples == ["0012345", "0098765"]  # 선행 0 그대로
 
 
@@ -427,8 +475,9 @@ def api(monkeypatch: pytest.MonkeyPatch):
 
     Base.metadata.create_all(engine)
     llm = AlwaysOrgLlm()
+    llm.embed = _FAR  # 시험에서 near_embed로 바꾸면 유사도 수용 경로
     for module in (files, review, integration, validation_api):
-        monkeypatch.setattr(module, "get_engine", lambda: _engine(llm))
+        monkeypatch.setattr(module, "get_engine", lambda: _engine(llm, llm.embed))
     # 시험 DB는 다른 시험과 함께 쓰므로, 다른 시험이 쓰지 않는 코드로 넣고 넣은 행만 지운다
     with SessionLocal() as db:
         entries = [
@@ -502,6 +551,98 @@ def test_new_file_analysis_then_review_issuer_and_registrar(api, swap: bool) -> 
     col, item = cols["기관관리번호"], items["기관관리번호"]
     assert (col["status"], col["field_key"], item["payload"]["field_key"]) == ("unresolved", None, None)
     assert "충돌" in col["reason"] and _org_part(item["reason"]) == _org_part(col["reason"])
+
+
+@pytest.mark.parametrize("embed", [_FAR, near_embed], ids=["LLM 경로", "유사도 경로"])
+def test_new_file_analysis_then_review_device_admin_code(api, embed: Any) -> None:
+    """확정·학습 없는 새 파일의 장비 식별자 열.
+
+    사전에 없는 값은 기각, 모두 사전 코드면 근거 충돌로 미해결 (LLM·유사도 경로 같음).
+    """
+    c, llm = api
+    llm.embed = embed
+    header = ["발급기 관리코드", "기기 관리코드"]
+    unknown = _upload_rows(c, "장비식별_없음.csv", [header, *[[v, v] for v in API_UNKNOWN]])
+    known = _upload_rows(c, "장비식별_사전.csv", [header, *[[v, v] for v in API_KNOWN]])
+    for fid, expect in ((unknown, "다른 식별자"), (known, "충돌")):
+        cols = _columns(c, fid)
+        _, items = _review_mapping_items(c, fid)
+        for column in header:
+            col, item = cols[column], items[column]
+            assert (col["status"], col["field_key"]) == ("unresolved", None), (column, col["reason"])
+            assert (item["category"], item["payload"]["field_key"]) == ("pending", None)
+            assert expect in col["reason"] and _org_part(item["reason"]) == _org_part(col["reason"]) != ""
+            if expect == "다른 식별자":
+                assert "org_code" not in [x["key"] for x in col["candidates"] + item["payload"]["candidates"]]
+
+
+def test_similarity_accepted_evidence_is_shown_in_analysis_and_review(api) -> None:
+    """유사도로 수용한 기관코드의 근거가 분석과 검토에 같이 보인다.
+
+    근거: 값 수·형식·항목 코드·개편 전 코드·현재 유효 여부는 판단하지 않음.
+    """
+    c, llm = api
+    llm.embed = near_embed
+    rows = [["기관식별부호", "수요처코드"], ["Z990001", "B551011"], ["Z990002", "B552015"]]
+    fid = _upload_rows(c, "유사도수용근거.csv", rows)
+    cols = _columns(c, fid, use_llm=False)
+    _, items = _review_mapping_items(c, fid)
+    want = {
+        "기관식별부호": "[근거: 값 2개 모두 7자리 코드 형식, 용어사전에서 확인: 항목 코드 1개·개편 전 코드 1개 "
+        "(현재 유효한 코드인지는 판단하지 않음)]",
+        "수요처코드": "[근거: 값 2개 모두 7자리 코드 형식, 용어사전에서 확인: 항목 코드 0개·개편 전 코드 0개 "
+        "(현재 유효한 코드인지는 판단하지 않음)]",
+    }
+    for column, evidence in want.items():
+        col, item = cols[column], items[column]
+        assert (col["status"], col["field_key"], col["method"]) == ("review", "org_code", "similarity"), column
+        assert (item["category"], item["payload"]["field_key"]) == ("pending", "org_code")
+        assert item["payload"]["score"] == col["score"]  # 표시 보완이 상태·점수를 바꾸지 않음
+        assert col["reason"].endswith(evidence) and item["reason"].endswith(evidence), (col["reason"], item["reason"])
+        assert item["reason"].startswith("유사도 ") and item["reason_source"] == "rule"
+    assert not llm.columns  # 유사도로 정해진 열은 LLM으로 가지 않는다
+
+
+def test_approval_evidence_is_recorded_once_per_user_column_field(api) -> None:
+    """승격 근거는 (사용자, 열 이름, 항목) 조합마다 한 번만 기록된다.
+
+    처음 승인 1건, 같은 조합 다시 승인 0건, 다른 조합 그대로.
+    """
+    from app.db import SessionLocal
+    from app.models import MappingApproval
+
+    c, _ = api
+    column = "시험조달기관식별부호"
+
+    def rows() -> dict[tuple[str, str], list[int]]:
+        with SessionLocal() as db:
+            out: dict[tuple[str, str], list[int]] = {}
+            for a in db.query(MappingApproval).order_by(MappingApproval.id):
+                out.setdefault((a.normalized, a.field_key), []).append(a.id)
+            return out
+
+    def approve(name: str) -> None:
+        fid = _upload_rows(
+            c,
+            name,
+            [[column, "관리번호"], ["Z990001", "32200002018000000000123"], ["Z990003", "32200002019000000000456"]],
+        )
+        _columns(c, fid)
+        rid, items = _review_mapping_items(c, fid)
+        item = items[column]
+        assert item["payload"]["field_key"] == "org_code"  # 정상 제안을 그대로 승인
+        res = c.post(f"/reviews/{rid}/items/{item['id']}/decision", json={"decision": "approved", "choice": "org_code"})
+        assert res.status_code == 200, res.text
+
+    before = rows()
+    key = (normalize(column), "org_code")
+    assert key not in before
+    approve("승격근거1.csv")
+    first = rows()
+    assert len(first[key]) == 1
+    assert {k: v for k, v in first.items() if k != key} == before  # 다른 조합은 그대로
+    approve("승격근거2.csv")
+    assert rows() == first  # 같은 조합 다시 승인 → 추가 0건
 
 
 @pytest.mark.parametrize("use_llm", [False, True], ids=["use_llm=false", "use_llm=true"])
