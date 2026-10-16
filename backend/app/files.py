@@ -16,7 +16,7 @@ from app.config import DATA_DIR
 from app.db import get_session
 from app.decisions import DecisionInput, load_decisions, load_learned, save_decisions
 from app.mapping import get_engine
-from app.models import MappingAnalysis, SourceFile
+from app.models import GlossaryEntry, MappingAnalysis, SourceFile
 from app.parsing import SUPPORTED_EXTENSIONS, FileResult, ParseError, parse_file
 from app.pii import mask_text
 from app.promotion import load_standard, record_approval
@@ -180,6 +180,7 @@ def map_file_columns(
     learned = load_learned(session, user.id)
     standard = load_standard(session)
     decisions = load_decisions(session, file_id)
+    org_codes = known_org_codes(session)
     embedding_status, llm_status = "skipped", "skipped"
     sheets: list[SheetMappingOut] = []
     for sheet_index, sheet in enumerate(parsed.sheets):
@@ -190,6 +191,7 @@ def map_file_columns(
             learned=learned,
             decisions=decisions.get(sheet.name),
             standard=standard,
+            org_codes=org_codes,
         )
         # 여러 시트 중 하나라도 실패하면 실패로, 하나라도 성공하면 성공으로 보고한다.
         embedding_status = _merge_status(embedding_status, result.embedding)
@@ -218,6 +220,15 @@ def map_file_columns(
     )
     out.analyzed_at = _store_analysis(session, record.id, user.id, out)
     return out
+
+
+def known_org_codes(session: Session) -> frozenset[str]:
+    """용어사전에서 확인되는 기관코드 (현행·과거 항목 코드와 개편 전 코드). LLM의 기관코드 제안 검사 근거로만 쓴다."""
+    codes: set[str] = set()
+    for code, previous in session.execute(select(GlossaryEntry.code, GlossaryEntry.previous_codes)):
+        codes.add(code)
+        codes.update(c.strip() for c in (previous or "").split(",") if c.strip())
+    return frozenset(codes)
 
 
 def _store_analysis(session: Session, file_id: int, user_id: int, out: FileMappingOut) -> str:

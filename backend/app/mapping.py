@@ -305,6 +305,63 @@ def looks_like_region_code(column: str, samples: list[Cell]) -> bool:
     return match_region_codes(column, samples) is not None
 
 
+# ---------------------------------------------------------------- LLM의 기관코드 제안 검사
+
+# 기관코드는 숫자·영문 대문자 7자리 (용어사전 code와 같은 형식). 값을 자르거나 0을 붙여 맞추지 않는다.
+ORG_CODE_FORMAT = re.compile(r"^[0-9A-Z]{7}$")
+# 기관코드가 아닌 다른 식별자를 뜻하는 열 이름 단어 (정규화한 이름에 들어 있으면 기관코드 제안을 쓰지 않음)
+OTHER_ID_WORDS = (
+    "관리번호", "일련번호", "순번", "발급기", "기기", "단말", "메뉴", "분류번호", "접수번호", "신청번호",
+    "문서번호", "주문번호", "사업자", "등록번호", "차량번호", "카드번호", "계좌", "전화", "우편",
+    "고객번호", "회원번호",
+)  # fmt: skip
+OrgVerdict = Literal["accept", "reject", "insufficient"]
+
+
+def org_code_evidence(column: str, samples: list[Cell], known: frozenset[str] | None = None) -> tuple[OrgVerdict, str]:
+    """LLM이 '기관코드'를 제안한 열의 근거 → (판정, 이유). 모델의 확신도와 관계없이 서버가 판정한다.
+
+    - reject: 열 이름이 다른 식별자(관리번호·발급기·메뉴 등)를 뜻하거나, 값이 하나도 7자리 코드 형식이 아님
+    - insufficient: 값 표본 부족(2개 미만), 형식이 섞임, 이름과 값의 근거가 서로 충돌 → 판단하지 못함
+    - accept: 다른 식별자 근거가 없고 값이 모두 7자리 코드 형식 → LLM 제안을 사용자 확인 대상으로 둔다
+      (7자리라는 사실만으로 확정하지 않고, 용어사전에 없다는 이유만으로 무효로 보지 않는다)
+    known: 용어사전에 있는 기관코드 (현행·과거 항목 코드와 개편 전 코드). 주어지면 근거로 함께 적는다.
+    """
+    name = normalize(column)
+    other = next((w for w in OTHER_ID_WORDS if w in name), None)
+    texts: list[str | None] = []
+    for s in samples:
+        if s is None or (isinstance(s, str) and not s.strip()):
+            continue  # 빈 값은 근거로 세지 않는다
+        if isinstance(s, str):
+            texts.append(s.strip())
+        elif isinstance(s, int) and not isinstance(s, bool):
+            texts.append(str(s))  # 숫자 셀은 적힌 자릿수 그대로 (사라진 선행 0을 채우지 않음)
+        else:
+            texts.append(None)  # 소수·날짜 등은 코드 형식이 아님
+    valid = [t for t in texts if t is not None and ORG_CODE_FORMAT.match(t)]
+    hits = [t for t in valid if known is not None and t in known]
+    lengths = sorted({len(t) for t in texts if t is not None})
+    if other is not None:
+        if texts and len(valid) == len(texts) and known is not None and len(hits) == len(valid):
+            return (
+                "insufficient",
+                f"열 이름은 다른 식별자('{other}')인데 값은 모두 용어사전 기관코드 — 근거가 서로 충돌",
+            )
+        return "reject", f"열 이름이 기관코드가 아닌 다른 식별자('{other}')를 뜻함"
+    if len(texts) < 2:
+        return "insufficient", "값이 2개 미만이라 기관코드 형식을 확인할 수 없음"
+    if not valid:
+        shown = ", ".join(f"{n}자리" for n in lengths) or "코드가 아닌 값"
+        return "reject", f"값이 기관코드 형식(숫자·영문 대문자 7자리)이 아님 ({shown})"
+    if len(valid) < len(texts):
+        return "insufficient", f"값의 형식이 섞여 있음 (7자리 코드 형식 {len(valid)}/{len(texts)}개)"
+    note = f"값 {len(valid)}개 모두 7자리 코드 형식"
+    if known is not None:
+        note += f", 용어사전에서 확인된 기관코드 {len(hits)}개"
+    return "accept", note
+
+
 # Qwen이 답변 중간에 중국어 등으로 넘어가는 경우가 있어, 한자·가나가 나오면 그 앞까지만 쓴다.
 _FOREIGN_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
@@ -476,7 +533,7 @@ class MappingEngine:
             self._apply(result, top.key, "review", "similarity", top.score, reason)
 
     # -- 3단계
-    def _ask_llm(self, name: ColumnName, result: ColumnMapping) -> None:
+    def _ask_llm(self, name: ColumnName, result: ColumnMapping, org_codes: frozenset[str] | None = None) -> None:
         assert self._llm_fn is not None
         answer = self._llm_fn(_LLM_SYSTEM, _llm_prompt(self.fields, name, result.samples), _llm_schema(self.fields))
         key = answer.get("key")
@@ -485,6 +542,20 @@ class MappingEngine:
             confidence = min(max(float(answer.get("confidence", 0)), 0.0), 1.0)
         except (TypeError, ValueError):
             confidence = 0.0
+        if key == "org_code":
+            # 기관코드는 확신도가 높아도 서버가 열 이름·값 형식·용어사전으로 다시 판정한다
+            verdict, evidence = org_code_evidence(name.raw, result.samples, org_codes)
+            if verdict != "accept":
+                result.method = "llm"
+                result.score = None
+                if verdict == "reject":
+                    # 기각한 항목은 후보 표시에서도 빼서 기본 선택·추천으로 다시 채택되지 않게 한다
+                    result.candidates = [c for c in result.candidates if c.key != "org_code"]
+                    result.reason = f"LLM 제안 '기관코드'를 쓰지 않음: {evidence} (판단하지 못함 — 직접 고르세요)"
+                else:
+                    result.reason = f"LLM 제안 '기관코드'의 근거 부족: {evidence} (판단하지 못함 — 직접 고르세요)"
+                return
+            reason = f"{reason} [근거: {evidence}]" if reason else f"근거: {evidence}"
         if key in self._by_key:
             # LLM 결과는 자동 적용하지 않고 항상 사용자 확인 대상으로 둔다.
             self._apply(result, key, "review", "llm", round(confidence, 4), f"LLM 제안: {reason}")
@@ -504,9 +575,11 @@ class MappingEngine:
         learned: dict[str, str] | None = None,
         decisions: dict[str, str | None] | None = None,
         standard: dict[str, str] | None = None,
+        org_codes: frozenset[str] | None = None,
     ) -> MappingResult:
         """learned: 정규화된 열 이름 → field key (이 사용자의 학습 별칭). decisions: 열 이름 → 확정된 field key
-        (None=해당 없음). standard: 전사 표준 사전 (승격된 열 이름 → field key)."""
+        (None=해당 없음). standard: 전사 표준 사전 (승격된 열 이름 → field key).
+        org_codes: 용어사전의 기관코드 (LLM의 기관코드 제안을 검사할 때 근거로 적는다, 없으면 생략)."""
         learned = learned or {}
         standard = standard or {}
         decisions = decisions or {}
@@ -562,7 +635,7 @@ class MappingEngine:
                     result.reason = f"LLM 요청 상한({MAX_LLM_COLUMNS}열) 초과로 건너뜀"
                     continue
                 try:
-                    self._ask_llm(name, result)
+                    self._ask_llm(name, result, org_codes)
                 except ollama.OllamaError as exc:
                     logger.warning("llm unavailable: %s", exc)
                     llm_status = "unavailable"
