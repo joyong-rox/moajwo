@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, CurrentUserDep, ensure_view
 from app.db import get_session
-from app.decisions import load_decisions, load_learned
+from app.decisions import load_decisions, load_learned, load_org_codes
 from app.files import get_file_for, load_parsed
 from app.glossary_api import get_glossary
 from app.mapping import get_engine
@@ -170,6 +170,7 @@ def _file_input(
     record, parsed = load_parsed(session, file_id)
     engine = get_engine()
     decisions = load_decisions(session, file_id)
+    org_codes = load_org_codes(session)
     sheets = []
     for sheet in parsed.sheets:
         result = engine.map_columns(
@@ -179,6 +180,7 @@ def _file_input(
             learned=learned,
             decisions=decisions.get(sheet.name),
             standard=standard,
+            org_codes=org_codes,
         )
         columns = [
             MappedColumn(i, c.column, c.field_key, c.qualifier)

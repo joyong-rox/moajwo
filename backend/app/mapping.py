@@ -83,6 +83,7 @@ class ColumnMapping:
     qualifier: str | None = None  # 열 이름에서 떼어낸 연도 등 (예: '인구_2025' → '2025')
     reason: str | None = None
     candidates: list[Candidate] = field(default_factory=list)
+    org_note: str | None = None  # 기관코드 제안·후보 검사로 바꾼 내용 (없으면 None) — reason 끝에도 붙는다
 
 
 @dataclass
@@ -305,8 +306,9 @@ def looks_like_region_code(column: str, samples: list[Cell]) -> bool:
     return match_region_codes(column, samples) is not None
 
 
-# ---------------------------------------------------------------- LLM의 기관코드 제안 검사
+# ---------------------------------------------------------------- 기관코드 제안·후보 검사
 
+ORG_KEY = "org_code"
 # 기관코드는 숫자·영문 대문자 7자리 (용어사전 code와 같은 형식). 값을 자르거나 0을 붙여 맞추지 않는다.
 ORG_CODE_FORMAT = re.compile(r"^[0-9A-Z]{7}$")
 # 기관코드가 아닌 다른 식별자를 뜻하는 열 이름 단어 (정규화한 이름에 들어 있으면 기관코드 제안을 쓰지 않음)
@@ -315,20 +317,67 @@ OTHER_ID_WORDS = (
     "문서번호", "주문번호", "사업자", "등록번호", "차량번호", "카드번호", "계좌", "전화", "우편",
     "고객번호", "회원번호",
 )  # fmt: skip
+# 다른 식별자 단어가 이 단어를 가로지르면(일부만 겹치면) 그 자리의 단어로 보지 않는다
+# ('발급기관'의 '발급기', '등기기관'의 '기기'). 단어가 들어 있다는 이유만으로 허용하지는 않는다.
+ORG_WORDS = ("기관",)
+# 검사하지 않는 판정: 사용자 확정·표준 사전·전사 표준·학습 별칭·날짜 패턴 (기존 우선순위 유지)
+ORG_CHECK_EXEMPT = ("user", "exact", "exact_part", "standard", "learned", "pattern")
 OrgVerdict = Literal["accept", "reject", "insufficient"]
 
 
-def org_code_evidence(column: str, samples: list[Cell], known: frozenset[str] | None = None) -> tuple[OrgVerdict, str]:
-    """LLM이 '기관코드'를 제안한 열의 근거 → (판정, 이유). 모델의 확신도와 관계없이 서버가 판정한다.
+@dataclass(frozen=True)
+class KnownOrgCodes:
+    """용어사전에서 확인되는 코드. 사전에 있다는 사실만 근거로 적고, 현재 유효한 코드인지는 판단하지 않는다.
+
+    entry: 항목 코드 (현행·과거 항목 모두 — 존속 기간은 보지 않음), previous: 개편 전 코드로만 적힌 코드
+    """
+
+    entry: frozenset[str] = frozenset()
+    previous: frozenset[str] = frozenset()
+
+
+def _occurrences(text: str, word: str) -> list[int]:
+    out, start = [], text.find(word)
+    while start != -1:
+        out.append(start)
+        start = text.find(word, start + 1)
+    return out
+
+
+def other_id_word(column: str) -> str | None:
+    """열 이름(정규화)에서 다른 식별자를 뜻하는 단어. 단어가 진짜 '기관' 단어를 가로지르면 그 자리는 세지 않는다.
+
+    '기관'이 진짜 단어인지: 그 '기관'의 뒤쪽 글자에서 시작해 밖으로 이어지는 다른 식별자 단어가 있으면
+    '기관'이 아니라 두 단어의 경계다 ('기기관리번호' = '기기' + '관리번호').
+    """
+    name = normalize(column)
+    hits = [(w, i, i + len(w)) for w in OTHER_ID_WORDS for i in _occurrences(name, w)]
+    org_spans = [
+        (k, k + len(o))
+        for o in ORG_WORDS
+        for k in _occurrences(name, o)
+        if not any(k < i < k + len(o) < j for _, i, j in hits)
+    ]
+
+    def cuts(i: int, j: int) -> bool:
+        return any(k < j and i < e and not (i <= k and e <= j) for k, e in org_spans)
+
+    for w in OTHER_ID_WORDS:  # 목록 순서대로 (사유에 적는 단어가 일정하도록)
+        if any(not cuts(i, j) for ww, i, j in hits if ww == w):
+            return w
+    return None
+
+
+def org_code_evidence(column: str, samples: list[Cell], known: KnownOrgCodes | None = None) -> tuple[OrgVerdict, str]:
+    """'기관코드'를 제안·추천한 열의 근거 → (판정, 이유). 제안한 경로(유사도·LLM)와 확신도에 관계없이 같은 판정.
 
     - reject: 열 이름이 다른 식별자(관리번호·발급기·메뉴 등)를 뜻하거나, 값이 하나도 7자리 코드 형식이 아님
     - insufficient: 값 표본 부족(2개 미만), 형식이 섞임, 이름과 값의 근거가 서로 충돌 → 판단하지 못함
-    - accept: 다른 식별자 근거가 없고 값이 모두 7자리 코드 형식 → LLM 제안을 사용자 확인 대상으로 둔다
+    - accept: 다른 식별자 근거가 없고 값이 모두 7자리 코드 형식 → 기존 경로의 제안 정책대로 둔다
       (7자리라는 사실만으로 확정하지 않고, 용어사전에 없다는 이유만으로 무효로 보지 않는다)
-    known: 용어사전에 있는 기관코드 (현행·과거 항목 코드와 개편 전 코드). 주어지면 근거로 함께 적는다.
+    known: 용어사전에서 확인되는 코드. 주어지면 근거로 함께 적는다.
     """
-    name = normalize(column)
-    other = next((w for w in OTHER_ID_WORDS if w in name), None)
+    other = other_id_word(column)
     texts: list[str | None] = []
     for s in samples:
         if s is None or (isinstance(s, str) and not s.strip()):
@@ -340,13 +389,15 @@ def org_code_evidence(column: str, samples: list[Cell], known: frozenset[str] | 
         else:
             texts.append(None)  # 소수·날짜 등은 코드 형식이 아님
     valid = [t for t in texts if t is not None and ORG_CODE_FORMAT.match(t)]
-    hits = [t for t in valid if known is not None and t in known]
+    entry = [t for t in valid if known is not None and t in known.entry]
+    previous = [t for t in valid if known is not None and t not in known.entry and t in known.previous]
+    in_glossary = f"항목 코드 {len(entry)}개·개편 전 코드 {len(previous)}개"
     lengths = sorted({len(t) for t in texts if t is not None})
     if other is not None:
-        if texts and len(valid) == len(texts) and known is not None and len(hits) == len(valid):
+        if texts and len(valid) == len(texts) and known is not None and len(entry) + len(previous) == len(valid):
             return (
                 "insufficient",
-                f"열 이름은 다른 식별자('{other}')인데 값은 모두 용어사전 기관코드 — 근거가 서로 충돌",
+                f"열 이름은 다른 식별자('{other}')인데 값은 모두 용어사전에 있는 코드({in_glossary}) — 근거 충돌",
             )
         return "reject", f"열 이름이 기관코드가 아닌 다른 식별자('{other}')를 뜻함"
     if len(texts) < 2:
@@ -358,7 +409,7 @@ def org_code_evidence(column: str, samples: list[Cell], known: frozenset[str] | 
         return "insufficient", f"값의 형식이 섞여 있음 (7자리 코드 형식 {len(valid)}/{len(texts)}개)"
     note = f"값 {len(valid)}개 모두 7자리 코드 형식"
     if known is not None:
-        note += f", 용어사전에서 확인된 기관코드 {len(hits)}개"
+        note += f", 용어사전에서 확인: {in_glossary} (현재 유효한 코드인지는 판단하지 않음)"
     return "accept", note
 
 
@@ -533,7 +584,39 @@ class MappingEngine:
             self._apply(result, top.key, "review", "similarity", top.score, reason)
 
     # -- 3단계
-    def _ask_llm(self, name: ColumnName, result: ColumnMapping, org_codes: frozenset[str] | None = None) -> None:
+    # -- 기관코드 제안·후보 검사 (유사도 직후와 LLM 응답 때 같은 판정)
+    def _check_org_code(
+        self, name: ColumnName, result: ColumnMapping, org_codes: KnownOrgCodes | None, source: str
+    ) -> None:
+        """확정·사전·학습·날짜로 정해지지 않은 열에서 '기관코드'가 적용 항목이거나 추천 후보이면 근거를 검사한다.
+
+        reject: 적용 항목과 추천 후보에서 뺀다. insufficient: 적용 항목에서만 빼 미해결로 둔다 (후보는 참고용).
+        accept: 기존 경로의 제안 정책 그대로 (자동/확인 필요 상태를 바꾸지 않음), 적용 항목이면 근거를 덧붙인다.
+        """
+        if result.method in ORG_CHECK_EXEMPT:
+            return
+        applied = result.field_key == ORG_KEY
+        if not applied and all(c.key != ORG_KEY for c in result.candidates):
+            return
+        verdict, evidence = org_code_evidence(name.raw, result.samples, org_codes)
+        if verdict == "accept":
+            if applied:
+                result.reason = f"{(result.reason or '').rstrip()} [근거: {evidence}]".lstrip()
+            return
+        if verdict == "reject":
+            # 기각한 항목은 추천 후보에서도 빼서 기본 선택·추천으로 다시 채택되지 않게 한다
+            result.candidates = [c for c in result.candidates if c.key != ORG_KEY]
+        if applied:
+            result.status, result.field_key, result.field_label, result.score = "unresolved", None, None, None
+            if result.method == "similarity":
+                result.method = "none"
+            what = "를 쓰지 않음" if verdict == "reject" else "의 근거 부족"
+            result.org_note = f"{source} 제안 '기관코드'{what}: {evidence} (판단하지 못함 — 직접 고르세요)"
+            result.reason = result.org_note
+        elif verdict == "reject":
+            result.org_note = f"추천 후보에서 '기관코드'를 뺌: {evidence}"
+
+    def _ask_llm(self, name: ColumnName, result: ColumnMapping, org_codes: KnownOrgCodes | None = None) -> None:
         assert self._llm_fn is not None
         answer = self._llm_fn(_LLM_SYSTEM, _llm_prompt(self.fields, name, result.samples), _llm_schema(self.fields))
         key = answer.get("key")
@@ -542,23 +625,12 @@ class MappingEngine:
             confidence = min(max(float(answer.get("confidence", 0)), 0.0), 1.0)
         except (TypeError, ValueError):
             confidence = 0.0
-        if key == "org_code":
-            # 기관코드는 확신도가 높아도 서버가 열 이름·값 형식·용어사전으로 다시 판정한다
-            verdict, evidence = org_code_evidence(name.raw, result.samples, org_codes)
-            if verdict != "accept":
-                result.method = "llm"
-                result.score = None
-                if verdict == "reject":
-                    # 기각한 항목은 후보 표시에서도 빼서 기본 선택·추천으로 다시 채택되지 않게 한다
-                    result.candidates = [c for c in result.candidates if c.key != "org_code"]
-                    result.reason = f"LLM 제안 '기관코드'를 쓰지 않음: {evidence} (판단하지 못함 — 직접 고르세요)"
-                else:
-                    result.reason = f"LLM 제안 '기관코드'의 근거 부족: {evidence} (판단하지 못함 — 직접 고르세요)"
-                return
-            reason = f"{reason} [근거: {evidence}]" if reason else f"근거: {evidence}"
         if key in self._by_key:
             # LLM 결과는 자동 적용하지 않고 항상 사용자 확인 대상으로 둔다.
             self._apply(result, key, "review", "llm", round(confidence, 4), f"LLM 제안: {reason}")
+            if key == ORG_KEY:
+                # 기관코드는 확신도가 높아도 서버가 열 이름·값 형식·용어사전으로 다시 판정한다
+                self._check_org_code(name, result, org_codes, "LLM")
         else:
             result.method = "llm"
             result.reason = f"LLM도 맞는 항목을 찾지 못함: {reason}" if reason else "LLM도 맞는 항목을 찾지 못함"
@@ -575,11 +647,11 @@ class MappingEngine:
         learned: dict[str, str] | None = None,
         decisions: dict[str, str | None] | None = None,
         standard: dict[str, str] | None = None,
-        org_codes: frozenset[str] | None = None,
+        org_codes: KnownOrgCodes | None = None,
     ) -> MappingResult:
         """learned: 정규화된 열 이름 → field key (이 사용자의 학습 별칭). decisions: 열 이름 → 확정된 field key
         (None=해당 없음). standard: 전사 표준 사전 (승격된 열 이름 → field key).
-        org_codes: 용어사전의 기관코드 (LLM의 기관코드 제안을 검사할 때 근거로 적는다, 없으면 생략)."""
+        org_codes: 용어사전에서 확인되는 코드 (기관코드 제안·후보 검사 때 근거로 적는다, 없으면 생략)."""
         learned = learned or {}
         standard = standard or {}
         decisions = decisions or {}
@@ -610,6 +682,8 @@ class MappingEngine:
         for i, (name, result) in enumerate(zip(names, results, strict=True)):
             self._similarity(name, sims[i] if sims is not None else None, result)
         self._guard_context(names, results, columns)
+        for name, result in zip(names, results, strict=True):
+            self._check_org_code(name, result, org_codes, "유사도")
 
         for result in results:
             if result.status != "unresolved":
@@ -643,6 +717,11 @@ class MappingEngine:
                         rest.reason = "LLM을 사용할 수 없어 미해결로 남김"
                     break
 
+        # 기관코드 검사로 바꾼 내용은 이후 단계의 사유에도 남긴다 (행정구역코드 패턴으로 정해진 열은 그 사유만)
+        for result in results:
+            note = result.org_note
+            if note and result.method != "pattern" and note not in (result.reason or ""):
+                result.reason = f"{result.reason} · {note}" if result.reason else note
         return MappingResult(results, embedding_status, llm_status)
 
 

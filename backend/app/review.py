@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import MANAGERS
-from app.decisions import DecisionInput, learn_column, load_decisions, load_learned, save_decisions
+from app.decisions import DecisionInput, learn_column, load_decisions, load_learned, load_org_codes, save_decisions
 from app.files import load_parsed
 from app.glossary import normalize_name
 from app.glossary_api import get_glossary
@@ -91,7 +91,17 @@ def _rows(rows: list[int], total: int) -> str:
 
 
 def mapping_reason(m: ColumnMapping) -> tuple[str, str]:
-    """(근거 문장, 출처). LLM 판정만 LLM 문장을 쓰고, 나머지는 템플릿."""
+    """(근거 문장, 출처). LLM 판정만 LLM 문장을 쓰고, 나머지는 템플릿.
+    기관코드 제안·후보 검사로 바꾼 내용(org_note)은 파일 분석 화면과 같은 문장으로 덧붙인다."""
+    if m.method == "llm" and m.field_key is None and m.org_note and m.reason == m.org_note:
+        return m.org_note, "rule"  # 서버가 LLM의 기관코드 제안을 기각·보류한 사유 (LLM 문장이 아님)
+    text, source = _mapping_reason(m)
+    if m.org_note and m.method not in ("llm", "pattern"):  # LLM 사유에는 이미 붙어 있음
+        text = f"{text} {m.org_note}"
+    return text, source
+
+
+def _mapping_reason(m: ColumnMapping) -> tuple[str, str]:
     label = m.field_label or ""
     top = m.candidates[0] if m.candidates else None
     second = m.candidates[1] if len(m.candidates) > 1 else None
@@ -208,6 +218,7 @@ def _load(
 ) -> _Loaded:
     record, parsed = load_parsed(db, file_id)
     decisions = load_decisions(db, file_id)
+    org_codes = load_org_codes(db)
     mappings = {
         sheet.name: engine.map_columns(
             sheet.columns,
@@ -216,6 +227,7 @@ def _load(
             learned=learned,
             decisions=decisions.get(sheet.name),
             standard=standard,
+            org_codes=org_codes,
         ).columns
         for sheet in parsed.sheets
     }

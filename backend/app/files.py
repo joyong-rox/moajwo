@@ -14,9 +14,9 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
 from app.config import DATA_DIR
 from app.db import get_session
-from app.decisions import DecisionInput, load_decisions, load_learned, save_decisions
+from app.decisions import DecisionInput, load_decisions, load_learned, load_org_codes, save_decisions
 from app.mapping import get_engine
-from app.models import GlossaryEntry, MappingAnalysis, SourceFile
+from app.models import MappingAnalysis, SourceFile
 from app.parsing import SUPPORTED_EXTENSIONS, FileResult, ParseError, parse_file
 from app.pii import mask_text
 from app.promotion import load_standard, record_approval
@@ -180,7 +180,7 @@ def map_file_columns(
     learned = load_learned(session, user.id)
     standard = load_standard(session)
     decisions = load_decisions(session, file_id)
-    org_codes = known_org_codes(session)
+    org_codes = load_org_codes(session)
     embedding_status, llm_status = "skipped", "skipped"
     sheets: list[SheetMappingOut] = []
     for sheet_index, sheet in enumerate(parsed.sheets):
@@ -220,15 +220,6 @@ def map_file_columns(
     )
     out.analyzed_at = _store_analysis(session, record.id, user.id, out)
     return out
-
-
-def known_org_codes(session: Session) -> frozenset[str]:
-    """용어사전에서 확인되는 기관코드 (현행·과거 항목 코드와 개편 전 코드). LLM의 기관코드 제안 검사 근거로만 쓴다."""
-    codes: set[str] = set()
-    for code, previous in session.execute(select(GlossaryEntry.code, GlossaryEntry.previous_codes)):
-        codes.add(code)
-        codes.update(c.strip() for c in (previous or "").split(",") if c.strip())
-    return frozenset(codes)
 
 
 def _store_analysis(session: Session, file_id: int, user_id: int, out: FileMappingOut) -> str:
