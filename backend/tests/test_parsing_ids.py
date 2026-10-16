@@ -83,6 +83,56 @@ def test_one_long_digit_string_keeps_the_whole_column_text(tmp_path: Path) -> No
     assert _columns(_csv(tmp_path, rows))["식별부호"] == ["1234567890123456", "17"]
 
 
+# ================================================================ 회귀 (PR #9 첫 수정): 긴 값 하나로 수량 열이 글자로
+
+TOTAL_ONLY = [["구분", "집행액"], ["합계", "1000000000000000"], ["사업A", "100"], ["사업B", "200"]]
+TOTAL_ONLY_COMMA = [["구분", "집행액"], ["합계", "1,000,000,000,000,000"], ["사업A", "100"], ["사업B", "200"]]
+DETAIL_LONG = [["구분", "집행액"], ["합계", "1000000000000010"], ["사업A", "1000000000000000"], ["사업B", "12.5"],
+               ["사업C", "-2.5"], ["사업D", "0"], ["사업E", "-"]]  # fmt: skip
+
+
+def _xlsx_text(tmp_path: Path, rows: list[list], name: str, text_cols: tuple[int, ...] = (1,)) -> Path:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for r in rows:
+        ws.append(r)
+    for row in ws.iter_rows(min_row=2):
+        for c in text_cols:
+            row[c].data_type = "s"  # 글자 셀
+    path = tmp_path / name
+    wb.save(path)
+    return path
+
+
+@pytest.mark.parametrize("rows", [TOTAL_ONLY, TOTAL_ONLY_COMMA], ids=["쉼표 없음", "쉼표 있음"])
+@pytest.mark.parametrize("kind", ["csv", "xlsx"])
+def test_long_value_only_in_total_row_keeps_amounts_numeric(tmp_path: Path, rows: list[list], kind: str) -> None:
+    path = _csv(tmp_path, rows) if kind == "csv" else _xlsx_text(tmp_path, rows, "t.xlsx")
+    assert _columns(path)["집행액"] == [1000000000000000, 100, 200]  # 쉼표 유무와 관계없이 같은 값·자료형
+
+
+def test_long_value_in_detail_rows_of_amount_column_stays_numeric(tmp_path: Path) -> None:
+    cols = _columns(_csv(tmp_path, DETAIL_LONG))
+    assert cols["집행액"] == [1000000000000010, 1000000000000000, 12.5, -2.5, 0, "-"]  # 작은 값·소수·음수·0·결측
+
+
+def test_neutral_name_with_long_total_only_stays_numeric(tmp_path: Path) -> None:
+    rows = [["구분", "값"], ["합계", "1000000000000000"], ["사업A", "100"], ["사업B", "200"]]
+    assert _columns(_csv(tmp_path, rows))["값"] == [1000000000000000, 100, 200]  # 합계 행의 큰 값은 식별자 근거 아님
+
+
+def test_identifier_long_value_in_detail_row_still_text(tmp_path: Path) -> None:
+    rows = [["구분", "고유식별부호"], ["합계", LONG[0]], ["가", LONG[1]], ["나", "17"]]
+    assert _columns(_csv(tmp_path, rows))["고유식별부호"] == LONG[:2] + ["17"]
+
+
+def test_numeric_cells_and_text_cells_in_amount_column(tmp_path: Path) -> None:
+    """원본이 숫자 셀이면 그대로 숫자, 글자 셀이면 숫자로 읽되 정수 자릿수를 바꾸지 않는다 (같은 값)."""
+    numeric = _xlsx_text(tmp_path, [["구분", "집행액"], ["합계", 1000000000000000], ["사업A", 100]], "n.xlsx", ())
+    text = _xlsx_text(tmp_path, [["구분", "집행액"], ["합계", "1000000000000000"], ["사업A", "100"]], "s.xlsx")
+    assert _columns(numeric)["집행액"] == _columns(text)["집행액"] == [1000000000000000, 100]
+
+
 # ================================================================ 보존: 이미 정상인 사례와 수량의 기존 의미
 
 
@@ -186,3 +236,80 @@ def test_api_preview_mapping_and_integrated_excel_keep_identifiers(api, tmp_path
         assert all(cell.data_type == "s" for cell in out), column  # 글자 셀 (Excel 숫자 15자리 제한을 받지 않음)
     qty = [row[header.index("수량")] for row in body]
     assert [cell.value for cell in qty] == [1234, 56.7, "-"] and qty[0].data_type == "n"
+
+
+# ================================================================ API: 금액 열 — 검증·분석·통합 (회귀)
+
+TITLE = "2026년 9월 기관별 집행 현황 (단위: 원)"
+# 확정하는 열 이름은 표준 사전과 같은 이름만 쓴다 (학습 별칭이 생기지 않게 — 시험 DB는 다른 시험과 공유)
+AMOUNT_BAD = [["기관명", "집행액"], ["합계", "1000000000000000"], ["행정안전부", "100"], ["기상청", "200"]]
+AMOUNT_BAD_COMMA = [["기관명", "집행액"], ["합계", "1,000,000,000,000,000"], ["행정안전부", "100"], ["기상청", "200"]]
+AMOUNT_OK = [["기관명", "집행액"], ["합계", "1000000000000010"], ["행정안전부", "1000000000000000"], ["기상청", "12.5"],
+             ["인사혁신처", "-2.5"], ["조달청", "0"], ["통계청", "-"]]  # fmt: skip
+
+
+def _amount_flow(c: TestClient, tmp_path: Path, rows: list[list], kind: str, name: str) -> dict:
+    data = [[TITLE], *rows]
+    path = _csv(tmp_path, data, f"{name}.csv") if kind == "csv" else _xlsx_text(tmp_path, data, f"{name}.xlsx")
+    ctype = "text/csv" if kind == "csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    fid = c.post("/files", files=[("files", (path.name, path.read_bytes(), ctype))]).json()[0]["id"]
+    pv = c.get(f"/files/{fid}/preview").json()
+    ids = {col["name"]: col["column_id"] for col in pv["columns"]}
+    decisions = [{"sheet_id": pv["sheet_id"], "column_id": ids["집행액"], "field_key": "expenditure"},
+                 {"sheet_id": pv["sheet_id"], "column_id": ids["기관명"], "field_key": "org_name"}]  # fmt: skip
+    assert c.put(f"/files/{fid}/mapping/decisions", json={"decisions": decisions}).status_code == 200
+    validation = c.post("/validation", json={"file_ids": [fid]}).json()
+    body = {"field_key": "expenditure", "targets": [{"file_id": fid}]}
+    fingerprint = c.post("/analysis/preview", json=body).json()["fingerprint"]
+    run = c.post("/analysis/run", json={**body, "expected_fingerprint": fingerprint})
+    assert run.status_code == 201, run.text
+    group = c.get(f"/analysis/runs/{run.json()['id']}/groups").json()["items"][0]
+    excluded = c.get(f"/analysis/runs/{run.json()['id']}/excluded").json()["items"]
+    review = c.post("/reviews", json={"file_ids": [fid]}).json()
+    j = [col["name"] for col in pv["columns"]].index("집행액")
+    return {
+        "fid": fid,
+        "parsed": [r["cells"][j] for r in pv["rows"]],
+        "blocks": [b["code"] for b in validation["blocks"]],
+        "sum": group["sum"],
+        "count": group["count"],
+        "excluded": sorted(e["reason"] for e in excluded),
+        "review": review,
+    }
+
+
+@pytest.mark.parametrize("rows", [AMOUNT_BAD, AMOUNT_BAD_COMMA], ids=["쉼표 없음", "쉼표 있음"])
+@pytest.mark.parametrize("kind", ["csv", "xlsx"])
+def test_api_total_mismatch_is_blocked_with_or_without_commas(api, tmp_path: Path, rows: list[list], kind: str):
+    c = api
+    r = _amount_flow(c, tmp_path, rows, kind, f"합계오류_{kind}_{len(rows[1][1])}")
+    assert r["parsed"] == [1000000000000000, 100, 200]
+    assert r["blocks"] == ["sum_mismatch"]  # 합계 1,000,000,000,000,000 ≠ 100 + 200
+    assert (r["sum"], r["count"], r["excluded"]) == (300, 2, ["subtotal"])  # 100·200이 계산에 들어감
+    review = r["review"]
+    assert review["counts"]["block"] == 1 and review["can_complete"] is False
+    assert c.post(f"/reviews/{review['id']}/integrate", json={}).status_code == 409  # 통합 차단
+
+
+def test_api_amount_column_with_long_detail_value_integrates_as_numbers(api, tmp_path: Path) -> None:
+    c = api
+    r = _amount_flow(c, tmp_path, AMOUNT_OK, "csv", "정상긴금액")
+    assert r["parsed"] == [1000000000000010, 1000000000000000, 12.5, -2.5, 0, "-"]
+    assert r["blocks"] == []  # 합계 = 1,000,000,000,000,000 + 12.5 − 2.5 + 0
+    assert (r["sum"], r["count"]) == (1000000000000010, 4) and r["excluded"] == ["missing_marker", "subtotal"]
+    review = r["review"]
+    rid = review["id"]
+    for item in review["items"]:
+        if item["category"] == "pending":
+            body = {"decision": "rejected"} if item["kind"] == "entity" else {"decision": "approved"}
+            assert c.post(f"/reviews/{rid}/items/{item['id']}/decision", json=body).status_code == 200
+    assert c.post(f"/reviews/{rid}/complete").status_code == 200
+    run = c.post(f"/reviews/{rid}/integrate", json={"include_unmapped": True})
+    assert run.status_code == 201, run.text
+    ws = openpyxl.load_workbook(io.BytesIO(c.get(f"/runs/{run.json()['id']}/download").content)).worksheets[0]
+    grid = list(ws.iter_rows())
+    hi = next(k for k, row in enumerate(grid) if any(cell.value == "집행액" for cell in row))
+    k = [cell.value for cell in grid[hi]].index("집행액")
+    cells = [row[k] for row in grid[hi + 1 :] if row[k].value is not None]
+    assert [cell.value for cell in cells] == [1000000000000000, 12.5, -2.5, 0, "-"]
+    assert [cell.data_type for cell in cells] == ["n", "n", "n", "n", "s"]  # 수량은 숫자 셀, 결측 표기만 글자
