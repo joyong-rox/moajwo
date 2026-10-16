@@ -192,21 +192,35 @@ def test_decisions_api_finds_pii_sheet_by_sheet_id(fx) -> None:
 # ---------------------------------------------------------------- 3·4. 확인 화면 정보, 분석 없는 파일
 
 
-def test_batch_plan_shows_status_and_reason(fx) -> None:
+def test_batch_plan_shows_status_and_reason(fx, monkeypatch) -> None:
+    """확인 화면(일괄 확정 미리보기)에 열마다 지금 상태와 제안 근거가 그대로 보인다.
+
+    예전 자료 '관리번호'(523·525)는 문자열 유사도만으로 '기관코드 · 확인 필요'가 되는 보고된 오제안이었는데,
+    기관코드 제안 검사로 이제 기각된다. '확인 필요' 표시는 정상적으로 확인 필요가 되는 '집행 실적액'으로 보고,
+    '관리번호'는 '미해결'과 기각 사유가 그대로 보이는지 본다. 분석은 문자열 유사도만 쓰도록 고정한다
+    (기본 엔진은 로컬 Ollama 임베딩이 켜져 있는지에 따라 결과가 달라질 수 있음).
+    """
+    from app import files
+    from app.mapping import MappingEngine, load_dictionary
+
+    monkeypatch.setattr(files, "get_engine", lambda: MappingEngine(load_dictionary(), None, None))
     u = fx["mf-user1"]
-    fid = _upload(u, "상태표시.xlsx", _xlsx([["기관명", "관리번호"], ["행정안전부", "523"], ["기상청", "525"]]))
+    fid = _upload(u, "상태표시.xlsx", _xlsx([["기관명", "집행 실적액", "관리번호"],
+                                             ["행정안전부", 100, "523"], ["기상청", 200, "525"]]))  # fmt: skip
     mapping = _analyze(u, fid)
     sheet = u.get(f"/files/{fid}/mapping/latest").json()["sheets"][0]
     cols = {c["column"]: c for c in sheet["columns"]}
+    names = ("기관명", "집행 실적액", "관리번호")
     items = [{"file_id": fid, "sheet_id": sheet["sheet_id"], "column_id": cols[n]["column_id"],
-              "field_key": cols[n]["field_key"] or "note"} for n in ("기관명", "관리번호")]  # fmt: skip
+              "field_key": cols[n]["field_key"] or "note"} for n in names]  # fmt: skip
     plan = u.post("/mapping/batch/preview", json={"items": items}).json()["items"]
     by = {p["column"]: p for p in plan}
     assert by["기관명"]["current_status"] == "auto"
-    # 관리번호: 문자열 유사도만으로는 '기관코드 · 확인 필요'(보고된 오제안) — 확인 화면에 상태가 그대로 보인다
-    assert by["관리번호"]["current_status"] == cols["관리번호"]["status"] == "review"
-    assert by["관리번호"]["suggestion_reason"]
-    assert mapping["sheets"][0]["columns"][1]["status"] == "review"
+    assert by["집행 실적액"]["current_status"] == cols["집행 실적액"]["status"] == "review"
+    assert by["집행 실적액"]["suggestion_reason"]
+    assert by["관리번호"]["current_status"] == cols["관리번호"]["status"] == "unresolved"
+    assert "기관코드" in by["관리번호"]["suggestion_reason"]
+    assert [c["status"] for c in mapping["sheets"][0]["columns"]] == ["auto", "review", "unresolved"]
 
 
 def test_latest_without_analysis_shows_saved_decisions_without_writing(fx) -> None:

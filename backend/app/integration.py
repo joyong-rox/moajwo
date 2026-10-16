@@ -27,7 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import DATA_DIR
-from app.decisions import load_decisions, load_learned
+from app.decisions import load_decisions, load_learned, load_org_codes
 from app.files import load_parsed
 from app.glossary import EntityRef, Resolution, entity_ref, normalize_name
 from app.glossary_api import get_glossary
@@ -255,6 +255,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
         if fid in excluded:
             record, _ = load_parsed(db, fid)
             built.files.append({"id": fid, "name": record.original_name, "excluded": True, "sheets": []})
+    org_codes = load_org_codes(db)
     for fid in file_ids:
         record, parsed = load_parsed(db, fid)
         decisions = load_decisions(db, fid)
@@ -267,6 +268,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                 learned=learned,
                 decisions=decisions.get(sheet.name),
                 standard=standard,
+                org_codes=org_codes,
             ).columns
             columns, dropped = _columns(sheet.columns, mappings, include_unmapped, standard_labels)
             for c in columns:

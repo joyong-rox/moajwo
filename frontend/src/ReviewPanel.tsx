@@ -472,7 +472,8 @@ function ItemRow({ item, disabled, busy, onDecide, onOpenReason, fields = [] }: 
   // 후보에 없는 표준 항목 (열 매핑만)
   const others =
     item.kind === 'mapping' ? fields.filter((f) => !choices.some((c) => c.value === f.key)).map((f) => ({ value: f.key, label: f.label })) : []
-  const initial = item.choice ?? (item.kind === 'mapping' ? item.payload.field_key ?? choices[0]?.value : choices[0]?.value) ?? ''
+  // 열 매핑은 기존 선택·제안 항목이 없으면 첫 후보를 고르지 않고 '표준 항목 선택'으로 시작한다 (직접 골라야 승인)
+  const initial = item.choice ?? (item.kind === 'mapping' ? item.payload.field_key : choices[0]?.value) ?? ''
   const [choice, setChoice] = useState(initial)
   const stop = (e: MouseEvent) => {
     // 요약 줄 안의 버튼·선택 상자를 눌러도 펼치기/접기가 되지 않게 한다

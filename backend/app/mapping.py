@@ -83,6 +83,9 @@ class ColumnMapping:
     qualifier: str | None = None  # 열 이름에서 떼어낸 연도 등 (예: '인구_2025' → '2025')
     reason: str | None = None
     candidates: list[Candidate] = field(default_factory=list)
+    org_note: str | None = (
+        None  # 기관코드 제안·후보 검사 결과 (기각·보류 사유 또는 수용 근거, 없으면 None) — reason에도 있음
+    )
 
 
 @dataclass
@@ -305,6 +308,141 @@ def looks_like_region_code(column: str, samples: list[Cell]) -> bool:
     return match_region_codes(column, samples) is not None
 
 
+# ---------------------------------------------------------------- 기관코드 제안·후보 검사
+
+ORG_KEY = "org_code"
+# 기관코드는 숫자·영문 대문자 7자리 (용어사전 code와 같은 형식). 값을 자르거나 0을 붙여 맞추지 않는다.
+ORG_CODE_FORMAT = re.compile(r"^[0-9A-Z]{7}$")
+# 기관코드가 아닌 다른 식별자를 뜻하는 열 이름 단어 (정규화한 이름에 들어 있으면 기관코드 제안을 쓰지 않음)
+OTHER_ID_WORDS = (
+    "관리번호", "일련번호", "순번", "발급기", "기기", "단말", "메뉴", "분류번호", "접수번호", "신청번호",
+    "문서번호", "주문번호", "사업자", "등록번호", "차량번호", "카드번호", "계좌", "전화", "우편",
+    "고객번호", "회원번호",
+)  # fmt: skip
+# 다른 식별자 단어가 이 단어를 가로지르면(일부만 겹치면) 그 자리의 단어로 보지 않는다
+# ('발급기관'의 '발급기', '등기기관'의 '기기'). 단어가 들어 있다는 이유만으로 허용하지는 않는다.
+ORG_WORDS = ("기관",)
+# '기관' 뒤 글자가 이것으로 시작하면 '앞 단어의 기 + 관리…'로도 읽힌다 ('발급기관리코드' = '발급기' + '관리코드'?).
+# 원래 이름에 경계가 없고 '기관' 앞에 같은 토막의 글자가 있으면 모호하다고 보고 '기관'으로 인정하지 않는다.
+_ORG_AMBIGUOUS_NEXT = ("관리",)
+# 검사하지 않는 판정: 사용자 확정·표준 사전·전사 표준·학습 별칭·날짜 패턴 (기존 우선순위 유지)
+ORG_CHECK_EXEMPT = ("user", "exact", "exact_part", "standard", "learned", "pattern")
+OrgVerdict = Literal["accept", "reject", "insufficient"]
+
+
+@dataclass(frozen=True)
+class KnownOrgCodes:
+    """용어사전에서 확인되는 코드. 사전에 있다는 사실만 근거로 적고, 현재 유효한 코드인지는 판단하지 않는다.
+
+    entry: 항목 코드 (현행·과거 항목 모두 — 존속 기간은 보지 않음)
+    previous: 다른 항목의 개편 전 코드(previous_codes)로 적힌 코드 (그 자체로 과거 항목 코드이기도 할 수 있음)
+    """
+
+    entry: frozenset[str] = frozenset()
+    previous: frozenset[str] = frozenset()
+
+
+def _occurrences(text: str, word: str) -> list[int]:
+    out, start = [], text.find(word)
+    while start != -1:
+        out.append(start)
+        start = text.find(word, start + 1)
+    return out
+
+
+def _token_starts(column: str, name: str) -> set[int]:
+    """원래 이름의 공백·구분자·괄호 경계를 정규화한 이름(name)의 위치로 옮긴 것 (각 토막이 시작하는 위치).
+    정규화 결과와 글자 수가 맞지 않으면(드문 문자) 경계 정보 없이 처음 위치만 돌려준다."""
+    text = unicodedata.normalize("NFKC", column)
+    tokens = [t.lower() for t in _SEPARATORS.split(_PAREN.sub(" ", text)) if t]
+    if "".join(tokens) != name:
+        return {0}
+    starts, pos = set(), 0
+    for t in tokens:
+        starts.add(pos)
+        pos += len(t)
+    return starts
+
+
+def other_id_word(column: str) -> str | None:
+    """열 이름(정규화)에서 다른 식별자를 뜻하는 단어. 단어가 진짜 '기관' 단어를 가로지르면 그 자리는 세지 않는다.
+
+    '기관'이 진짜 단어가 아닌 경우 (이때는 가로지르는 다른 식별자 단어를 그대로 센다):
+    - 원래 이름의 경계(공백·구분자·괄호)를 가로지름 ('발급기 관리코드' → '발급기' + '관리코드')
+    - 그 '기관'의 뒤쪽 글자에서 시작해 밖으로 이어지는 다른 식별자 단어가 있음 ('기기관리번호' = '기기' + '관리번호')
+    - 경계 없이 붙어 있어 '앞 단어의 기 + 관리…'로도 읽힘 ('발급기관리코드' — 모호하면 '기관'으로 보지 않음)
+    """
+    name = normalize(column)
+    starts = _token_starts(column, name)
+    hits = [(w, i, i + len(w)) for w in OTHER_ID_WORDS for i in _occurrences(name, w)]
+
+    def genuine(k: int, e: int) -> bool:
+        if any(k < s < e for s in starts):
+            return False
+        if any(k < i < e < j for _, i, j in hits):
+            return False
+        return k in starts or not name[k + 1 :].startswith(_ORG_AMBIGUOUS_NEXT)
+
+    org_spans = [(k, k + len(o)) for o in ORG_WORDS for k in _occurrences(name, o) if genuine(k, k + len(o))]
+
+    def cuts(i: int, j: int) -> bool:
+        return any(k < j and i < e and not (i <= k and e <= j) for k, e in org_spans)
+
+    for w in OTHER_ID_WORDS:  # 목록 순서대로 (사유에 적는 단어가 일정하도록)
+        if any(not cuts(i, j) for ww, i, j in hits if ww == w):
+            return w
+    return None
+
+
+def org_code_evidence(column: str, samples: list[Cell], known: KnownOrgCodes | None = None) -> tuple[OrgVerdict, str]:
+    """'기관코드'를 제안·추천한 열의 근거 → (판정, 이유). 제안한 경로(유사도·LLM)와 확신도에 관계없이 같은 판정.
+
+    - reject: 열 이름이 다른 식별자(관리번호·발급기·메뉴 등)를 뜻하거나, 값이 하나도 7자리 코드 형식이 아님
+    - insufficient: 값 표본 부족(2개 미만), 형식이 섞임, 이름과 값의 근거가 서로 충돌 → 판단하지 못함
+    - accept: 다른 식별자 근거가 없고 값이 모두 7자리 코드 형식 → 기존 경로의 제안 정책대로 둔다
+      (7자리라는 사실만으로 확정하지 않고, 용어사전에 없다는 이유만으로 무효로 보지 않는다)
+    known: 용어사전에서 확인되는 코드. 주어지면 근거로 함께 적는다.
+    """
+    other = other_id_word(column)
+    texts: list[str | None] = []
+    for s in samples:
+        if s is None or (isinstance(s, str) and not s.strip()):
+            continue  # 빈 값은 근거로 세지 않는다
+        if isinstance(s, str):
+            texts.append(s.strip())
+        elif isinstance(s, int) and not isinstance(s, bool):
+            texts.append(str(s))  # 숫자 셀은 적힌 자릿수 그대로 (사라진 선행 0을 채우지 않음)
+        else:
+            texts.append(None)  # 소수·날짜 등은 코드 형식이 아님
+    valid = [t for t in texts if t is not None and ORG_CODE_FORMAT.match(t)]
+    entry = [t for t in valid if known is not None and t in known.entry]
+    previous = [t for t in valid if known is not None and t in known.previous]
+    both = [t for t in entry if t in previous]
+    found = len(entry) + len(previous) - len(both)  # 용어사전 어디엔가 있는 값
+    in_glossary = f"항목 코드 {len(entry)}개·개편 전 코드 {len(previous)}개" + (
+        f"(둘 다인 값 {len(both)}개)" if both else ""
+    )
+    lengths = sorted({len(t) for t in texts if t is not None})
+    if other is not None:
+        if texts and len(valid) == len(texts) and known is not None and found == len(valid):
+            return (
+                "insufficient",
+                f"열 이름은 다른 식별자('{other}')인데 값은 모두 용어사전에 있는 코드({in_glossary}) — 근거 충돌",
+            )
+        return "reject", f"열 이름이 기관코드가 아닌 다른 식별자('{other}')를 뜻함"
+    if len(texts) < 2:
+        return "insufficient", "값이 2개 미만이라 기관코드 형식을 확인할 수 없음"
+    if not valid:
+        shown = ", ".join(f"{n}자리" for n in lengths) or "코드가 아닌 값"
+        return "reject", f"값이 기관코드 형식(숫자·영문 대문자 7자리)이 아님 ({shown})"
+    if len(valid) < len(texts):
+        return "insufficient", f"값의 형식이 섞여 있음 (7자리 코드 형식 {len(valid)}/{len(texts)}개)"
+    note = f"값 {len(valid)}개 모두 7자리 코드 형식"
+    if known is not None:
+        note += f", 용어사전에서 확인: {in_glossary} (현재 유효한 코드인지는 판단하지 않음)"
+    return "accept", note
+
+
 # Qwen이 답변 중간에 중국어 등으로 넘어가는 경우가 있어, 한자·가나가 나오면 그 앞까지만 쓴다.
 _FOREIGN_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
@@ -476,7 +614,40 @@ class MappingEngine:
             self._apply(result, top.key, "review", "similarity", top.score, reason)
 
     # -- 3단계
-    def _ask_llm(self, name: ColumnName, result: ColumnMapping) -> None:
+    # -- 기관코드 제안·후보 검사 (유사도 직후와 LLM 응답 때 같은 판정)
+    def _check_org_code(
+        self, name: ColumnName, result: ColumnMapping, org_codes: KnownOrgCodes | None, source: str
+    ) -> None:
+        """확정·사전·학습·날짜로 정해지지 않은 열에서 '기관코드'가 적용 항목이거나 추천 후보이면 근거를 검사한다.
+
+        reject: 적용 항목과 추천 후보에서 뺀다. insufficient: 적용 항목에서만 빼 미해결로 둔다 (후보는 참고용).
+        accept: 기존 경로의 제안 정책 그대로 (자동/확인 필요 상태를 바꾸지 않음), 적용 항목이면 근거를 덧붙인다.
+        """
+        if result.method in ORG_CHECK_EXEMPT:
+            return
+        applied = result.field_key == ORG_KEY
+        if not applied and all(c.key != ORG_KEY for c in result.candidates):
+            return
+        verdict, evidence = org_code_evidence(name.raw, result.samples, org_codes)
+        if verdict == "accept":
+            if applied:  # 근거는 분석 사유와 검토 사유에 같은 문장으로 남긴다
+                result.org_note = f"[근거: {evidence}]"
+                result.reason = f"{(result.reason or '').rstrip()} {result.org_note}".lstrip()
+            return
+        if verdict == "reject":
+            # 기각한 항목은 추천 후보에서도 빼서 기본 선택·추천으로 다시 채택되지 않게 한다
+            result.candidates = [c for c in result.candidates if c.key != ORG_KEY]
+        if applied:
+            result.status, result.field_key, result.field_label, result.score = "unresolved", None, None, None
+            if result.method == "similarity":
+                result.method = "none"
+            what = "를 쓰지 않음" if verdict == "reject" else "의 근거 부족"
+            result.org_note = f"{source} 제안 '기관코드'{what}: {evidence} (판단하지 못함 — 직접 고르세요)"
+            result.reason = result.org_note
+        elif verdict == "reject":
+            result.org_note = f"추천 후보에서 '기관코드'를 뺌: {evidence}"
+
+    def _ask_llm(self, name: ColumnName, result: ColumnMapping, org_codes: KnownOrgCodes | None = None) -> None:
         assert self._llm_fn is not None
         answer = self._llm_fn(_LLM_SYSTEM, _llm_prompt(self.fields, name, result.samples), _llm_schema(self.fields))
         key = answer.get("key")
@@ -488,6 +659,9 @@ class MappingEngine:
         if key in self._by_key:
             # LLM 결과는 자동 적용하지 않고 항상 사용자 확인 대상으로 둔다.
             self._apply(result, key, "review", "llm", round(confidence, 4), f"LLM 제안: {reason}")
+            if key == ORG_KEY:
+                # 기관코드는 확신도가 높아도 서버가 열 이름·값 형식·용어사전으로 다시 판정한다
+                self._check_org_code(name, result, org_codes, "LLM")
         else:
             result.method = "llm"
             result.reason = f"LLM도 맞는 항목을 찾지 못함: {reason}" if reason else "LLM도 맞는 항목을 찾지 못함"
@@ -504,9 +678,11 @@ class MappingEngine:
         learned: dict[str, str] | None = None,
         decisions: dict[str, str | None] | None = None,
         standard: dict[str, str] | None = None,
+        org_codes: KnownOrgCodes | None = None,
     ) -> MappingResult:
         """learned: 정규화된 열 이름 → field key (이 사용자의 학습 별칭). decisions: 열 이름 → 확정된 field key
-        (None=해당 없음). standard: 전사 표준 사전 (승격된 열 이름 → field key)."""
+        (None=해당 없음). standard: 전사 표준 사전 (승격된 열 이름 → field key).
+        org_codes: 용어사전에서 확인되는 코드 (기관코드 제안·후보 검사 때 근거로 적는다, 없으면 생략)."""
         learned = learned or {}
         standard = standard or {}
         decisions = decisions or {}
@@ -537,6 +713,8 @@ class MappingEngine:
         for i, (name, result) in enumerate(zip(names, results, strict=True)):
             self._similarity(name, sims[i] if sims is not None else None, result)
         self._guard_context(names, results, columns)
+        for name, result in zip(names, results, strict=True):
+            self._check_org_code(name, result, org_codes, "유사도")
 
         for result in results:
             if result.status != "unresolved":
@@ -562,7 +740,7 @@ class MappingEngine:
                     result.reason = f"LLM 요청 상한({MAX_LLM_COLUMNS}열) 초과로 건너뜀"
                     continue
                 try:
-                    self._ask_llm(name, result)
+                    self._ask_llm(name, result, org_codes)
                 except ollama.OllamaError as exc:
                     logger.warning("llm unavailable: %s", exc)
                     llm_status = "unavailable"
@@ -570,6 +748,11 @@ class MappingEngine:
                         rest.reason = "LLM을 사용할 수 없어 미해결로 남김"
                     break
 
+        # 기관코드 검사로 바꾼 내용은 이후 단계의 사유에도 남긴다 (행정구역코드 패턴으로 정해진 열은 그 사유만)
+        for result in results:
+            note = result.org_note
+            if note and result.method != "pattern" and note not in (result.reason or ""):
+                result.reason = f"{result.reason} · {note}" if result.reason else note
         return MappingResult(results, embedding_status, llm_status)
 
 

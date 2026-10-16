@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
 from app.config import DATA_DIR
 from app.db import get_session
-from app.decisions import DecisionInput, load_decisions, load_learned, save_decisions
+from app.decisions import DecisionInput, load_decisions, load_learned, load_org_codes, save_decisions
 from app.mapping import get_engine
 from app.models import MappingAnalysis, SourceFile
 from app.parsing import SUPPORTED_EXTENSIONS, FileResult, ParseError, parse_file
@@ -180,6 +180,7 @@ def map_file_columns(
     learned = load_learned(session, user.id)
     standard = load_standard(session)
     decisions = load_decisions(session, file_id)
+    org_codes = load_org_codes(session)
     embedding_status, llm_status = "skipped", "skipped"
     sheets: list[SheetMappingOut] = []
     for sheet_index, sheet in enumerate(parsed.sheets):
@@ -190,6 +191,7 @@ def map_file_columns(
             learned=learned,
             decisions=decisions.get(sheet.name),
             standard=standard,
+            org_codes=org_codes,
         )
         # 여러 시트 중 하나라도 실패하면 실패로, 하나라도 성공하면 성공으로 보고한다.
         embedding_status = _merge_status(embedding_status, result.embedding)

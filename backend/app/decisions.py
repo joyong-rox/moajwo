@@ -9,8 +9,8 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.mapping import MappingEngine, split_column_name
-from app.models import LearnedAlias, MappingDecision
+from app.mapping import KnownOrgCodes, MappingEngine, split_column_name
+from app.models import GlossaryEntry, LearnedAlias, MappingDecision
 from app.pii import mask_text
 
 _GENERATED_PREFIX = "열"
@@ -41,6 +41,17 @@ def load_learned(session: Session, user_id: int | None = None) -> dict[str, str]
     for normalized, key, _owner in sorted(rows, key=lambda r: r[2] is not None):
         out[normalized] = key
     return out
+
+
+def load_org_codes(session: Session) -> KnownOrgCodes:
+    """용어사전에서 확인되는 코드 (항목 코드 + 개편 전 코드). 기관코드 제안·후보 검사의 근거로만 쓴다.
+    파일 분석·검토·검증·통합이 모두 이것을 써서 같은 사전 상태면 같은 판정이 나오게 한다 (유효기간은 보지 않음)."""
+    entry: set[str] = set()
+    previous: set[str] = set()
+    for code, codes in session.execute(select(GlossaryEntry.code, GlossaryEntry.previous_codes)):
+        entry.add(code)
+        previous.update(c.strip() for c in (codes or "").split(",") if c.strip())
+    return KnownOrgCodes(frozenset(entry), frozenset(previous))
 
 
 def load_decisions(session: Session, file_id: int) -> dict[str, dict[str, str | None]]:
