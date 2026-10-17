@@ -35,7 +35,7 @@ const KIND_LABEL: Record<string, string> = {
   blank_value: '공백 값',
   unit_estimate: '단위 추정',
   header_missing: '헤더 확인 필요',
-  quantity_not_number: '수량으로 읽을 수 없는 값',
+  quantity_not_number: '수량으로 계산하지 못한 값',
 }
 
 const GROUPS: { category: ReviewCategory; title: string; hint: string }[] = [

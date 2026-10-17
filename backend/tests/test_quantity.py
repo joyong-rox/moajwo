@@ -70,8 +70,12 @@ def test_confirmed_quantity_sum_is_checked(tmp_path: Path) -> None:
     assert result.status == "blocked" and [b.code for b in result.blocks] == ["sum_mismatch"]
     message = result.blocks[0].message
     assert "1,000,000,000,000,300" in message and "차이 999,999,999,999,700" in message
-    unconfirmed = _validate(sheet, frozenset())  # 확정하지 않으면 원문(글자) 그대로 — 계산하지 않음
-    assert unconfirmed.status == "passed" and not unconfirmed.blocks
+    # 확정하지 않고 자동 적용만 된 수량 열: 원문(글자) 그대로 두되, 합계 검사를 못 했음을 경고로 알림 (조용히 통과 아님)
+    unconfirmed = _validate(sheet, frozenset())
+    assert unconfirmed.status == "passed_with_warnings" and not unconfirmed.blocks
+    (warning,) = unconfirmed.warnings
+    assert warning.code == "quantity_not_number" and "자동 적용" in warning.message and "확정하세요" in warning.message
+    assert warning.actual == 4  # 합계 행 포함, 숫자로 읽을 수 있는데 글자로 보존된 값
 
 
 def test_unreadable_value_in_confirmed_quantity_is_reported(tmp_path: Path) -> None:

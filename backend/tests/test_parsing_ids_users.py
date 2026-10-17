@@ -227,8 +227,8 @@ def test_reread_follows_latest_confirmation_without_changing_cached_original(pu)
     """같은 파일을 다시 올리지 않고 확정만 바꾼다: 확정 없음(원문 보존) → 수량 확정 → 다른 항목 → '해당 없음'."""
     c = pu
     raw = ["1000000000000300", "1000000000000000", "100", "200"]
-    bad_data, ctype = _file([["구분", "식별부호"], *BAD], "csv")
-    ok_data, _ = _file([["구분", "식별부호"], *CORRECT], "csv")
+    bad_data, ctype = _file([["구분", "계약식별부호"], *BAD], "csv")
+    ok_data, _ = _file([["구분", "계약식별부호"], *CORRECT], "csv")
     bad, ok = _upload(c, "재읽기_합계오류.csv", bad_data, ctype), _upload(c, "재읽기_정상.csv", ok_data, ctype)
     for fid in (bad, ok):
         _confirm(c, fid, {"구분": "department"})
@@ -238,10 +238,10 @@ def test_reread_follows_latest_confirmation_without_changing_cached_original(pu)
 
     # 1) 확정 없음 — 식별자 원문 보존: 계산하지 않음 (통합하려면 검토에서 이 열을 직접 결정해야 하므로 3)·4)에서 확인)
     assert _validate_status(c, bad) == ("passed", [])
-    assert _preview_cells(c, ok, "식별부호") == raw
+    assert _preview_cells(c, ok, "계약식별부호") == raw
     # 2) 수량 항목으로 확정 — 같은 파일을 다시 읽어 계산용 값으로 검사·분석·통합
     for fid in (bad, ok):
-        _confirm(c, fid, {"식별부호": "expenditure"})
+        _confirm(c, fid, {"계약식별부호": "expenditure"})
     assert _validate_status(c, bad) == ("blocked", ["sum_mismatch"])
     body = {"field_key": "expenditure", "targets": [{"file_id": ok}]}
     run = c.post(
@@ -251,15 +251,37 @@ def test_reread_follows_latest_confirmation_without_changing_cached_original(pu)
     group = c.get(f"/analysis/runs/{run.json()['id']}/groups").json()["items"][0]
     assert (group["sum"], group["count"]) == (1000000000000300, 3)
     assert integrated("집행액") == [(1000000000000000, "n"), (100, "n"), (200, "n")]
-    assert _preview_cells(c, ok, "식별부호") == raw  # 분석이 미리보기 캐시를 읽은 뒤에도 원문 그대로
+    assert _preview_cells(c, ok, "계약식별부호") == raw  # 분석이 미리보기 캐시를 읽은 뒤에도 원문 그대로
     # 3) 다른 항목(비고)으로 변경 — 수량 해석을 하지 않고, 원문 자릿수가 그대로 남음
     for fid in (bad, ok):
-        _confirm(c, fid, {"식별부호": "note"})
+        _confirm(c, fid, {"계약식별부호": "note"})
     assert _validate_status(c, bad) == ("passed", [])
     assert integrated("비고") == [(v, "s") for v in raw[1:]]
     # 4) '해당 없음'으로 확정 — 마찬가지로 원문 그대로
     for fid in (bad, ok):
-        _confirm(c, fid, {"식별부호": None})
+        _confirm(c, fid, {"계약식별부호": None})
     assert _validate_status(c, bad) == ("passed", [])
-    assert integrated("식별부호") == [(v, "s") for v in raw[1:]]
-    assert _preview_cells(c, ok, "식별부호") == raw and _preview_cells(c, bad, "식별부호")[0] == "2000000000000000"
+    assert integrated("계약식별부호") == [(v, "s") for v in raw[1:]]
+    assert (
+        _preview_cells(c, ok, "계약식별부호") == raw and _preview_cells(c, bad, "계약식별부호")[0] == "2000000000000000"
+    )
+
+
+def test_learned_alias_auto_quantity_keeps_original_and_warns(pu) -> None:
+    """학습된 이름(자동 적용)만으로는 원문을 숫자로 바꾸지 않는다 — 대신 계산하지 못했음을 알린다."""
+    c = pu
+    data, ctype = _file([["구분", "협약식별부호"], *BAD], "csv")
+    first = _upload(c, "학습_첫파일.csv", data, ctype)
+    _confirm(c, first, {"구분": "department", "협약식별부호": "expenditure"})  # 학습 별칭이 생김
+    second = _upload(c, "학습_둘째파일.csv", data, ctype)  # 같은 이름, 이 파일에서는 확정하지 않음
+    cols = {col["column"]: col for col in c.post(f"/files/{second}/mapping").json()["sheets"][0]["columns"]}
+    assert (cols["협약식별부호"]["status"], cols["협약식별부호"]["method"]) == ("auto", "learned")
+    body = c.post("/validation", json={"file_ids": [second]}).json()
+    assert body["status"] == "passed_with_warnings" and body["blocks"] == []  # 검사를 건너뛴 채 '통과'로 두지 않음
+    (warning,) = [w for w in body["warnings"] if w["code"] == "quantity_not_number"]
+    assert "자동 적용" in warning["message"] and warning["label"] == "수량으로 계산하지 못한 값"
+    review = c.post("/reviews", json={"file_ids": [second]}).json()
+    assert "quantity_not_number" in [i["kind"] for i in review["items"] if i["category"] == "warning"]
+    assert _preview_cells(c, second, "협약식별부호")[1] == "1000000000000000"  # 원문 그대로
+    first_body = c.post("/validation", json={"file_ids": [first]}).json()
+    assert [b["code"] for b in first_body["blocks"]] == ["sum_mismatch"]  # 확정한 파일은 계산용 값으로 검사
