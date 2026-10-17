@@ -479,6 +479,8 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
             numbers = [p for p in parts if _is_number(p)]
             if not numbers:
                 continue
+            # 글자로 남아 합계에 넣지 않은 하위 값 (결측 표기 제외) — 실제 불일치와 일부를 읽지 못한 경우를 문구로 구분
+            unread = sum(1 for p in parts if isinstance(p, str) and p.strip() and not is_missing(p))
             computed = math.fsum(numbers)
             # 표시 단위 반올림 허용: 하위 행 수 × 마지막 자리의 절반
             unit = 10 ** -max([_decimals(total), *(_decimals(n) for n in numbers)])
@@ -488,7 +490,8 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
                     BlockIssue(
                         "sum_mismatch",
                         f"'{label}' 행의 '{columns[j]}' 값 {_fmt(total)}이(가) 하위 {len(numbers)}행 합계 "
-                        f"{_fmt(computed)}와(과) 다릅니다 (차이 {_fmt(total - computed)}).",
+                        f"{_fmt(computed)}와(과) 다릅니다 (차이 {_fmt(total - computed)})."
+                        + (f" 글자로 남아 합계에 넣지 않은 하위 값 {unread}개가 있습니다." if unread else ""),
                         file.file_id,
                         file.file_name,
                         sheet.sheet.name,

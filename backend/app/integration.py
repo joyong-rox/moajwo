@@ -34,9 +34,10 @@ from app.glossary_api import get_glossary
 from app.mapping import ColumnMapping, get_engine
 from app.models import Automation, IntegrationRun, ReviewSession, RunChange
 from app.parsing import Cell, is_missing
+from app.pii import mask_text
 from app.promotion import load_standard
-from app.quantity import confirmed_quantity_indexes, quantity_sheet
-from app.review import mapping_reason, session_items, summarize
+from app.quantity import QUANTITY_FIELDS, confirmed_quantity_indexes, quantity_sheet, text_value_columns
+from app.review import VERIFIED_KEY, decision_changes, mapping_reason, session_items, summarize
 from app.validation import EntityResolver
 
 logger = logging.getLogger(__name__)
@@ -257,9 +258,34 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
             record, _ = load_parsed(db, fid)
             built.files.append({"id": fid, "name": record.original_name, "excluded": True, "sheets": []})
     org_codes = load_org_codes(db)
+    # 확정은 한 번만 읽어 검사 결과가 유효한 확정 상태와 비교하고, 출력에도 그대로 쓴다
+    # (비교한 뒤 다른 요청이 확정을 바꿔도 이 실행은 비교한 확정으로 만든다 — 바뀐 확정은 다음 통합 요청에서 거절됨)
+    snapshot = {fid: load_decisions(db, fid) for fid in file_ids}
+    verified = params.get(VERIFIED_KEY)  # None: 이 기록을 남기기 전 버전에서 만든 검토
+    if verified is not None and (changed := decision_changes(db, verified, snapshot)):
+        shown = "; ".join(changed[:3]) + (f" 외 {len(changed) - 3}건" if len(changed) > 3 else "")
+        raise IntegrationError(
+            f"검사한 뒤 열 매핑 확정이 바뀌어 이 검토 결과로 통합할 수 없습니다 — 검토에서 다시 검사하세요 ({shown})."
+        )
     for fid in file_ids:
         record, parsed = load_parsed(db, fid)
-        decisions = load_decisions(db, fid)
+        decisions = snapshot[fid]
+        if verified is None:
+            # 이전 버전 검토는 확정한 수량 열의 숫자 글자를 계산용 값으로 검사하지 않았다 — 그 결과로 통합하지 않는다
+            unchecked = [
+                f"'{c}'"
+                for sheet in parsed.sheets
+                for c in text_value_columns(sheet, numeric_only=True)
+                if decisions.get(sheet.name, {}).get(c) in QUANTITY_FIELDS
+            ]
+            if unchecked:
+                raise IntegrationError(
+                    mask_text(
+                        f"{record.original_name}: 확정한 수량 열({', '.join(unchecked[:3])})의 숫자 글자를 "
+                        "계산용 값으로 검사하기 전 버전에서 만든 검토라 이 결과로 통합할 수 없습니다 — "
+                        "검토에서 다시 검사하세요."
+                    )
+                )
         info: dict[str, Any] = {"id": fid, "name": record.original_name, "excluded": False, "sheets": []}
         for sheet in parsed.sheets:
             mappings = engine.map_columns(

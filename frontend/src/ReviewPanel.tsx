@@ -262,6 +262,11 @@ function ReviewPanel({
                 piiIncluded={review.items.some(
                   (i) => i.kind === 'pii' && !review.files.some((f) => f.id === i.file_id && f.excluded),
                 )}
+                blocked={
+                  review.needs_recheck
+                    ? "검사한 뒤 열 매핑 확정이 바뀌어 이 검토로는 새 결과를 만들 수 없습니다 — '다시 검사 (결정 이어받기)'로 지금 확정을 검사하세요."
+                    : null
+                }
               />
             )}
             <details className="review-replace">
@@ -305,7 +310,11 @@ function ScoreHeader({ review }: { review: Review }) {
       review.items.filter((i) => i.category === 'pending' && i.can_change === false).map((i) => i.file_name ?? `#${i.file_id}`),
     ),
   ]
-  const level = review.counts.block ? 'is-block' : review.counts.pending_open ? 'is-pending' : 'is-ok'
+  const level = review.counts.block
+    ? 'is-block'
+    : review.counts.pending_open || review.needs_recheck
+      ? 'is-pending'
+      : 'is-ok'
   return (
     <div className={`review-score ${level}`}>
       <div className="review-score-value" aria-label={`데이터 품질 점수 ${review.score}점`}>
@@ -329,6 +338,16 @@ function ScoreHeader({ review }: { review: Review }) {
           </p>
         )}
         <p className="review-summary">{review.summary}</p>
+        {review.needs_recheck && (review.recheck_reasons?.length ?? 0) > 0 && (
+          <details className="review-recheck">
+            <summary>검사한 뒤 바뀐 열 매핑 확정 {review.recheck_reasons?.length}건</summary>
+            <ul>
+              {review.recheck_reasons?.map((reason) => (
+                <li key={reason}>{reason}</li>
+              ))}
+            </ul>
+          </details>
+        )}
         <p className="review-counts">
           <span className="review-chip is-block">차단 {review.counts.block}</span>
           <span className="review-chip is-pending">

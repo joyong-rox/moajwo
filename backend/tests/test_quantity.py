@@ -7,7 +7,8 @@ from pathlib import Path
 
 from app.mapping import ColumnMapping
 from app.parsing import parse_file
-from app.quantity import QUANTITY_FIELDS, confirmed_quantity_indexes, quantity_sheet, quantity_value
+from app.quantity import QUANTITY_FIELDS, confirmed_quantity_indexes, quantity_sheet, quantity_value, text_value_columns
+from app.review import _changes_check
 from app.validation import FileInput, MappedColumn, SheetInput, ValidationParams, validate
 
 LONG = "1000000000000000"
@@ -87,3 +88,26 @@ def test_unreadable_value_in_confirmed_quantity_is_reported(tmp_path: Path) -> N
     (warning,) = [w for w in result.warnings if w.code == "quantity_not_number"]
     assert warning.actual == 1 and "약 300" in warning.message and "합계 검사·계산에서 빠집니다" in warning.message
     assert "'-'" not in warning.message  # 결측 표기는 기존 규칙대로 (경고 대상 아님)
+
+
+def test_text_value_columns_are_the_columns_whose_checks_depend_on_quantity_confirmation(tmp_path: Path) -> None:
+    sheet = _sheet(
+        tmp_path,
+        [["구분", "식별부호", "건수", "메모값", "결측"], ["합계", "2000000000000000", "3", "약 300", "-"],
+         ["사업A", LONG, "1", "100", "x"], ["사업B", "100", "2", "200", ""]],
+    )  # fmt: skip
+    assert text_value_columns(sheet) == ["구분", "식별부호", "메모값"]  # 글자 값이 남은 열 (결측·비공개·빈 칸 제외)
+    assert text_value_columns(sheet, numeric_only=True) == ["식별부호"]  # 숫자로 읽을 수 있는 글자가 있는 열
+
+
+def test_review_approval_changes_checks_only_for_quantity_on_text_or_a_different_applied_mapping() -> None:
+    """검토에서 승인할 때 다시 검사가 필요한지 (review._changes_check)."""
+    assert _changes_check({"text_values": True, "applied": None}, "expenditure") is True  # 글자 값이 계산용 값이 됨
+    assert _changes_check({"text_values": False, "applied": None}, "expenditure") is False  # 값이 모두 숫자
+    assert _changes_check({"text_values": True, "applied": None}, "note") is False  # 수량이 아닌 항목
+    assert _changes_check({"text_values": True, "applied": None}, None) is False  # '해당 없음' (검사 때도 미매핑)
+    # 검사에 쓴 자동 매핑(자동화에 없는 새 열의 확인)과 다른 항목은 합계 검사 대상 등이 바뀔 수 있다
+    assert _changes_check({"text_values": False, "applied": "ratio"}, "count") is True
+    assert _changes_check({"text_values": False, "applied": "ratio"}, None) is True
+    assert _changes_check({"text_values": False, "applied": "ratio"}, "ratio") is False
+    assert _changes_check({}, "expenditure") is False  # 근거가 없는 이전 버전 항목 (그 검토는 확정 기록도 없음)

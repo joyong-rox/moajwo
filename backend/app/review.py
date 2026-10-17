@@ -20,12 +20,12 @@ from app.decisions import DecisionInput, learn_column, load_decisions, load_lear
 from app.files import load_parsed
 from app.glossary import normalize_name
 from app.glossary_api import get_glossary
-from app.mapping import ColumnMapping, MappingEngine, get_engine, normalize, split_column_name
+from app.mapping import ColumnMapping, MappingEngine, get_engine, load_dictionary, normalize, split_column_name
 from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile, User
 from app.parsing import FileResult, SheetResult
-from app.pii import PII_LABEL, has_pii
+from app.pii import PII_LABEL, has_pii, mask_text
 from app.promotion import load_standard, record_approval
-from app.quantity import confirmed_quantity_indexes, quantity_sheet
+from app.quantity import QUANTITY_FIELDS, confirmed_quantity_indexes, quantity_sheet, text_value_columns
 from app.validation import (
     EntityResolver,
     FileInput,
@@ -202,11 +202,20 @@ def _apply_column_rules(db: Session, engine: MappingEngine, file_id: int, rules:
 # ---------------------------------------------------------------- 세션 만들기
 
 
+# 이 검토의 검사 결과가 유효한 확정 상태 (파일 id → 시트 → 열 → 항목, params에 함께 저장 — 화면의 조건 표시에는
+# 내보내지 않고 다시 검사할 때 새로 만든다): 검사할 때의 열 매핑 확정 + 검토에서 검사 결과를 바꾸지 않는 매핑 승인.
+# 지금 확정과 다르면 이 검사 결과로 완료·통합하지 않는다 (recheck_reasons, integration.build).
+VERIFIED_KEY = "verified_decisions"
+INTERNAL_PARAMS = (VERIFIED_KEY,)
+Decisions = dict[str, dict[str, str | None]]  # 한 파일의 열 매핑 확정: 시트 → 열 → 항목 (None = 해당 없음)
+
+
 @dataclass
 class _Loaded:
     record: SourceFile
     parsed: FileResult
     mappings: dict[str, list[ColumnMapping]]  # 시트 → 열 매핑
+    decisions: Decisions  # 이 검사에 쓴 확정
 
 
 def _load(
@@ -232,7 +241,7 @@ def _load(
         ).columns
         for sheet in parsed.sheets
     }
-    return _Loaded(record, parsed, mappings)
+    return _Loaded(record, parsed, mappings, decisions)
 
 
 def _file_input(loaded: _Loaded) -> FileInput:
@@ -272,6 +281,7 @@ def create_session(
     자동화에 없는 새 열만 확인 필요로 남긴다.
     user_id: 검토를 만든 사용자 (그 사용자의 학습 별칭을 쓰고, 승인·완료는 이 사용자만 한다)
     """
+    params = {k: v for k, v in params.items() if k not in INTERNAL_PARAMS}  # 다시 검사면 새로 계산한다
     engine = get_engine()
     rules = AutomationRules.of(automation) if automation is not None else None
     if rules is not None:
@@ -298,10 +308,11 @@ def create_session(
     if inferred:
         params["name_period"] = name_period
     run = save_run(db, json.dumps(params, ensure_ascii=False), result, user_id)
+    verified = {str(t.record.id): t.decisions for t in targets}  # 이 검사에 쓴 확정
 
     session = ReviewSession(
         status="in_review",
-        params=json.dumps(params, ensure_ascii=False),
+        params=json.dumps({**params, VERIFIED_KEY: verified}, ensure_ascii=False),
         file_ids=json.dumps([t.record.id for t in targets]),
         excluded_file_ids="[]",
         validation_run_id=run.id,
@@ -409,6 +420,7 @@ def _pii_items(targets: list[_Loaded]) -> list[ReviewItem]:
 def _mapping_items(loaded: _Loaded, rules: AutomationRules | None = None) -> list[ReviewItem]:
     items = []
     for sheet in loaded.parsed.sheets:
+        texts = set(text_value_columns(sheet))
         for m in loaded.mappings[sheet.name]:
             reason, source = mapping_reason(m)
             in_rules = rules is not None and column_rule_key(m.column) in rules.columns
@@ -421,6 +433,9 @@ def _mapping_items(loaded: _Loaded, rules: AutomationRules | None = None) -> lis
                 "candidates": [{"key": c.key, "label": c.label, "score": c.score} for c in m.candidates],
                 "method": m.method,
                 "score": m.score,
+                # 검토에서 승인할 때 검사 결과가 달라지는지 판단하는 근거 (_changes_check)
+                "applied": m.field_key if m.status in ("auto", "confirmed") else None,  # 검사에 쓴 매핑
+                "text_values": m.column in texts,  # 글자 값이 있는 열
             }
             common = {
                 "file_id": loaded.record.id,
@@ -613,9 +628,50 @@ class Summary:
     auto: int
     warnings: int
     can_complete: bool
+    needs_recheck: bool = False  # 검사한 뒤 확정이 바뀌어 이 검사 결과로 완료·통합할 수 없음 (다시 검사 필요)
 
 
-def summarize(session: ReviewSession, items: list[ReviewItem]) -> Summary:
+def recheck_reasons(db: Session, session: ReviewSession) -> list[str]:
+    """이 검토의 검사 결과로 완료·통합할 수 없는 이유 — 검사 결과가 유효한 확정 상태와 지금 확정이 다른 열.
+
+    파일은 읽지 않는다 (확정값만 조회). 제외한 파일은 통합하지 않으므로 보지 않는다.
+    이 기록이 없는 이전 버전 검토는 빈 목록 — 통합할 때 수량 해석이 달라지는지 따로 확인한다 (integration.build).
+    """
+    if session.status == "superseded":
+        return []
+    verified = json.loads(session.params).get(VERIFIED_KEY)
+    if verified is None:
+        return []
+    excluded = set(json.loads(session.excluded_file_ids))
+    fids = [f for f in json.loads(session.file_ids) if f not in excluded]
+    return decision_changes(db, verified, {f: load_decisions(db, f) for f in fids})
+
+
+def decision_changes(db: Session, verified: dict[str, Decisions], current: dict[int, Decisions]) -> list[str]:
+    """검사 결과가 유효한 확정 상태(verified: 파일 id 글자 → 확정)와 지금 확정(current)이 다른 열 — '이전 → 지금'."""
+    labels = {f.key: f.label for f in load_dictionary()}
+
+    def shown(decided: dict[str, str | None], column: str) -> str:
+        if column not in decided:
+            return "확정 없음"
+        key = decided[column]
+        return labels.get(key, key) if key else "해당 없음"
+
+    out = []
+    for fid, now in current.items():
+        before = verified.get(str(fid), {})
+        record = db.get(SourceFile, fid)
+        where = f"{record.original_name} " if record is not None else ""
+        for sheet in sorted(set(before) | set(now)):
+            old, new = before.get(sheet, {}), now.get(sheet, {})
+            for column in sorted(set(old) | set(new)):
+                if (column in old, old.get(column)) != (column in new, new.get(column)):
+                    out.append(mask_text(f"{where}'{column}' 열: {shown(old, column)} → {shown(new, column)}"))
+    return out
+
+
+def summarize(session: ReviewSession, items: list[ReviewItem], recheck: list[str] | None = None) -> Summary:
+    """recheck: recheck_reasons() 결과 — 있으면 완료할 수 없고 (통합도 막힘) 다시 검사하라고 안내한다."""
     excluded = set(json.loads(session.excluded_file_ids))
     active = [i for i in items if i.file_id is None or i.file_id not in excluded or i.kind == "pii"]
     blocks = sum(1 for i in active if i.category == "block")
@@ -629,8 +685,17 @@ def summarize(session: ReviewSession, items: list[ReviewItem]) -> Summary:
     if blocks:
         score = min(score, BLOCKED_SCORE_CAP)
     score = max(0, score)
+    stale = bool(recheck) and session.status != "superseded"
     if session.status == "superseded":
         text = "다시 검사로 대체된 이전 검토입니다. 최신 검토에서 계속하세요."
+    elif stale:
+        assert recheck is not None
+        shown = "; ".join(recheck[:3]) + (f" 외 {len(recheck) - 3}건" if len(recheck) > 3 else "")
+        target = "통합" if session.status == "ready" else "완료·통합"
+        text = (
+            f"다시 검사 필요 — 검사한 뒤 열 매핑 확정이 바뀌어 이 검사 결과로 {target}할 수 없습니다 ({shown}). "
+            "다시 검사하면 지금 확정으로 검사합니다."
+        )
     elif session.status == "ready":
         text = f"검토 완료 — 통합 준비가 끝났습니다 (자동 보정 {auto}건 적용 예정)."
     elif blocks:
@@ -639,7 +704,8 @@ def summarize(session: ReviewSession, items: list[ReviewItem]) -> Summary:
         text = f"확인 필요 {open_}건이 남았습니다 — 승인 또는 거부하면 통합할 수 있습니다."
     else:
         text = f"통합 가능 — 자동 보정 {auto}건이 적용됩니다" + (f" (경고 {warnings}건 확인)" if warnings else "") + "."
-    return Summary(score, text, blocks, len(pending), open_, auto, warnings, blocks == 0 and open_ == 0)
+    can_complete = blocks == 0 and open_ == 0 and not stale
+    return Summary(score, text, blocks, len(pending), open_, auto, warnings, can_complete, stale)
 
 
 def session_items(db: Session, session: ReviewSession) -> list[ReviewItem]:
@@ -660,7 +726,7 @@ def decide(db: Session, session: ReviewSession, item: ReviewItem, decision: str,
     payload = json.loads(item.payload)
     now = datetime.now(UTC)
     if item.kind == "mapping":
-        _decide_mapping(db, item, payload, decision, choice, session.created_by)
+        _decide_mapping(db, session, item, payload, decision, choice)
     elif item.kind == "entity":
         codes = [c["code"] for c in payload.get("candidates", [])]
         if decision == "approved":
@@ -682,7 +748,7 @@ def decide(db: Session, session: ReviewSession, item: ReviewItem, decision: str,
 
 
 def _decide_mapping(
-    db: Session, item: ReviewItem, payload: dict[str, Any], decision: str, choice: str | None, user_id: int | None
+    db: Session, session: ReviewSession, item: ReviewItem, payload: dict[str, Any], decision: str, choice: str | None
 ) -> None:
     engine = get_engine()
     labels = {f.key: f.label for f in engine.fields}
@@ -695,9 +761,30 @@ def _decide_mapping(
     assert item.file_id is not None and item.sheet is not None and item.column is not None
     save_decisions(db, engine, item.file_id, [DecisionInput(item.sheet, item.column, key)], learn=False)
     if key is not None:
-        record_approval(db, engine, user_id, item.column, key)  # 전사 표준 사전 승격 집계
+        record_approval(db, engine, session.created_by, item.column, key)  # 전사 표준 사전 승격 집계
     item.choice = key
     item.after = labels[key] if key else "(해당 없음)"
+    if not _changes_check(payload, key):
+        _mark_verified(session, item, key)
+
+
+def _changes_check(payload: dict[str, Any], key: str | None) -> bool:
+    """검토에서 이 열을 key로 확정하면 검사 결과가 달라지는지 — 달라지면 다시 검사해야 완료·통합할 수 있다."""
+    if key in QUANTITY_FIELDS and payload.get("text_values"):
+        return True  # 글자 값이 계산용 값이나 '수량으로 계산하지 못한 값' 경고가 된다 (합계 검사가 달라짐)
+    applied = payload.get("applied")
+    return applied is not None and key != applied  # 검사에 쓴 자동 매핑과 다른 항목 (합계 검사 대상 등이 바뀜)
+
+
+def _mark_verified(session: ReviewSession, item: ReviewItem, key: str | None) -> None:
+    """검사 결과를 바꾸지 않는 승인은 '검사 결과가 유효한 확정 상태'에 더한다 (기록이 없는 이전 버전 검토 제외)."""
+    params = json.loads(session.params)
+    verified = params.get(VERIFIED_KEY)
+    if verified is None:
+        return
+    assert item.sheet is not None and item.column is not None
+    verified.setdefault(str(item.file_id), {}).setdefault(item.sheet, {})[item.column] = key
+    session.params = json.dumps(params, ensure_ascii=False)
 
 
 def _decide_pii(db: Session, session: ReviewSession, item: ReviewItem, decision: str, now: datetime) -> None:
@@ -722,7 +809,7 @@ def complete(db: Session, session: ReviewSession, learn_names: bool = True) -> d
     if session.status != "in_review":
         raise ReviewError("이미 검토가 끝난 세션입니다.")
     items = session_items(db, session)
-    summary = summarize(session, items)
+    summary = summarize(session, items, recheck_reasons(db, session))
     if not summary.can_complete:
         raise ReviewError(summary.summary)
     learned = {"columns": 0, "names": 0, "names_skipped": 0}

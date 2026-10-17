@@ -408,6 +408,8 @@ export type Review = {
   created_by_name: string | null
   can_edit: boolean
   include_unmapped_default: boolean
+  needs_recheck?: boolean // 검사한 뒤 열 매핑 확정이 바뀌어 이 검사 결과로 완료·통합할 수 없음 (다시 검사 필요)
+  recheck_reasons?: string[] // 바뀐 열 ('이전 → 지금')
 }
 export type ReviewChangeItem = {
   category: ReviewCategory

@@ -16,6 +16,7 @@ from app.integration import include_unmapped_default
 from app.models import Automation, ReviewItem, ReviewSession, SourceFile, User
 from app.pii import mask_nested, mask_rrn_number, mask_text
 from app.review import (
+    INTERNAL_PARAMS,
     ReviewError,
     ReviewPermissionError,
     can_change_file,
@@ -25,6 +26,7 @@ from app.review import (
     decide,
     history,
     recheck,
+    recheck_reasons,
     session_items,
     summarize,
 )
@@ -86,6 +88,8 @@ class ReviewOut(BaseModel):
     created_by_name: str | None = None
     can_edit: bool = True  # 이 검토를 만든 사람만 승인·완료·다시 검사할 수 있다 (다른 사람은 조회만)
     include_unmapped_default: bool = False  # 통합할 때 '표준 항목이 없는 열 포함'의 기본값 (자동화 설정)
+    needs_recheck: bool = False  # 검사한 뒤 열 매핑 확정이 바뀌어 이 검사 결과로 완료·통합할 수 없음 (다시 검사 필요)
+    recheck_reasons: list[str] = []  # 바뀐 열 ('이전 → 지금', 가림)
 
 
 def _masked(text: str | None) -> str | None:
@@ -97,7 +101,8 @@ def review_out(
     db: Session, session: ReviewSession, learned: dict[str, int] | None = None, user: CurrentUser | None = None
 ) -> ReviewOut:
     items = session_items(db, session)
-    s = summarize(session, items)
+    reasons = recheck_reasons(db, session)
+    s = summarize(session, items, reasons)
     automation = db.get(Automation, session.automation_id) if session.automation_id is not None else None
     creator = db.get(User, session.created_by) if session.created_by is not None else None
     excluded = set(json.loads(session.excluded_file_ids))
@@ -158,7 +163,8 @@ def review_out(
             )
             for i in items
         ],
-        params=mask_nested(json.loads(session.params)),  # 입력 조건(필수 기관 등)의 개인정보 형식도 가린다
+        # 입력 조건(필수 기관 등)의 개인정보 형식도 가린다 (검사 결과가 유효한 확정 상태는 내부 기록이라 내보내지 않음)
+        params=mask_nested({k: v for k, v in json.loads(session.params).items() if k not in INTERNAL_PARAMS}),
         validation_run_id=session.validation_run_id,
         created_at=session.created_at,
         completed_at=session.completed_at,
@@ -172,6 +178,8 @@ def review_out(
         created_by=session.created_by,
         created_by_name=creator.display_name if creator is not None else None,
         include_unmapped_default=include_unmapped_default(db, session),
+        needs_recheck=s.needs_recheck,
+        recheck_reasons=reasons if s.needs_recheck else [],
         can_edit=user is None or session.created_by == user.id or (session.created_by is None and user.is_manager),
     )
 
