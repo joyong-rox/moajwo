@@ -16,11 +16,13 @@ function IntegrationResult({
   defaultIncludeUnmapped = false,
   piiIncluded = false,
   blocked = null,
+  onFailed,
 }: {
   reviewId: number
   defaultIncludeUnmapped?: boolean
   piiIncluded?: boolean // 개인정보 포함을 승인해 통합에 들어가는 파일이 있음
   blocked?: string | null // 새 결과를 만들 수 없는 이유 (이전 결과 목록은 그대로 보여준다)
+  onFailed?: () => void // 통합이 거절되면 (예: 다른 화면에서 확정이 바뀜) 검토 상태를 다시 불러온다
 }) {
   const [runs, setRuns] = useState<IntegrationRun[]>([])
   // 표준 항목이 없는 열(검토에서 '해당 없음')도 원래 이름으로 결과에 넣을지 (자동화로 저장하면 이 선택도 저장)
@@ -46,6 +48,7 @@ function IntegrationResult({
       setRuns((prev) => [created, ...prev])
     } catch (err) {
       setError(`통합 실패: ${err instanceof Error ? err.message : String(err)}`)
+      onFailed?.()
       listRuns(reviewId)
         .then(setRuns)
         .catch(() => undefined)
