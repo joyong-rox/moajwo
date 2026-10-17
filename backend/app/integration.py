@@ -35,6 +35,7 @@ from app.mapping import ColumnMapping, get_engine
 from app.models import Automation, IntegrationRun, ReviewSession, RunChange
 from app.parsing import Cell, is_missing
 from app.promotion import load_standard
+from app.quantity import confirmed_quantity_indexes, quantity_sheet
 from app.review import mapping_reason, session_items, summarize
 from app.validation import EntityResolver
 
@@ -270,6 +271,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                 standard=standard,
                 org_codes=org_codes,
             ).columns
+            sheet = quantity_sheet(sheet, confirmed_quantity_indexes(mappings))  # 확정한 수량 열은 계산용 값
             columns, dropped = _columns(sheet.columns, mappings, include_unmapped, standard_labels)
             for c in columns:
                 if c.field_key is None and c.label not in built.unmapped_columns:

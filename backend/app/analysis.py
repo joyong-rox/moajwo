@@ -58,9 +58,10 @@ from app.mapping import TOTAL_WORDS, load_dictionary, normalize, split_column_na
 from app.mapping_review import SheetView, declared_units, file_view, sheet_id
 from app.parsing import is_missing
 from app.pii import mask_text
+from app.quantity import quantity_value
 from app.validation import STOCK_FIELDS, _month_of, _text_periods, _year_of
 
-POLICY = "analysis-policy-5"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
+POLICY = "analysis-policy-6"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
 MAX_TARGETS = 20  # 한 번에 고를 수 있는 파일·시트
 MAX_ROWS = 300_000  # 고른 시트의 데이터 행 합계 상한
 MAX_GROUPS = 5_000
@@ -111,7 +112,7 @@ _COLUMN_UNIT = re.compile(r"\(\s*((?:천|만|백만|억|조)?(?:명|대|원|건|
 REASONS: dict[str, tuple[str, bool]] = {
     "blank": ("빈칸", True),
     "missing_marker": ("비공개·해당 없음 표기 ('-', 'x', '…' 등)", True),
-    "not_number": ("숫자가 아닌 값 (글자로 저장된 숫자 포함)", True),
+    "not_number": ("숫자로 읽을 수 없는 값 (앞자리 0이 있는 숫자 글자·문자 등)", True),
     "pii": ("개인정보 형식이라 가린 값", True),
     "period_unknown": ("기간을 확인할 수 없는 행", True),
     "period_conflict": ("기간 열(연도·월·기준일)이 서로 맞지 않는 행 (기간을 추정하지 않음)", True),
@@ -867,7 +868,9 @@ def _read_rows(ev: Evaluation) -> None:
             period, day, clash = _row_period(t, cells)
             rec = RowRec(t.index, row_no, period, dims, day=day)
             t.rows.append(rec)
-            measured = classify_value(cells[col]) if col is not None else (None, "blank", None)
+            # 측정 열은 사용자가 확정한 수량 열 — 숫자로 읽을 수 있는 글자는 수량으로 (캐시의 셀은 바꾸지 않음)
+            value = quantity_value(cells[col]) if col is not None else None
+            measured = classify_value(value) if col is not None else (None, "blank", None)
             rec.user_out = _outside_conditions(dims, period, measured[0], wanted, f)
             if kind == "subtotal":
                 rec.reason = "subtotal"
@@ -900,7 +903,7 @@ def _read_rows(ev: Evaluation) -> None:
             rec.level = region_level(region_key(dims)) if any(k in dims for k in REGION_FIELDS) else None
             rec.value, rec.reason, rec.shown = measured
             if rec.value is not None and col is not None:
-                rec.exact = exact_number(cells[col])
+                rec.exact = exact_number(value)
             if rec.reason is None and rec.user_out:
                 # 숫자 범위도 지역·기간 필터와 같은 시점에 적용한다 — 이후 반복·중복·상위·하위 판정과 계산이
                 # 같은 행 범위를 쓰게 (뒤늦게 적용하면 사용자가 뺀 행이 비교를 바꾸고, 비교 뒤에 빠진다)

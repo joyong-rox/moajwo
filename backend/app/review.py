@@ -25,6 +25,7 @@ from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, R
 from app.parsing import FileResult, SheetResult
 from app.pii import PII_LABEL, has_pii
 from app.promotion import load_standard, record_approval
+from app.quantity import confirmed_quantity_indexes, quantity_sheet
 from app.validation import (
     EntityResolver,
     FileInput,
@@ -236,17 +237,16 @@ def _load(
 
 def _file_input(loaded: _Loaded) -> FileInput:
     record = loaded.record
-    sheets = [
-        SheetInput(
-            sheet,
-            [
-                MappedColumn(i, c.column, c.field_key, c.qualifier)
-                for i, c in enumerate(loaded.mappings[sheet.name])
-                if c.field_key and c.status in ("confirmed", "auto")
-            ],
-        )
-        for sheet in loaded.parsed.sheets
-    ]
+    sheets = []
+    for sheet in loaded.parsed.sheets:
+        mappings = loaded.mappings[sheet.name]
+        quantity = confirmed_quantity_indexes(mappings)  # 사용자가 수량 항목으로 확정한 열은 계산용 값으로 검사
+        columns = [
+            MappedColumn(i, c.column, c.field_key, c.qualifier)
+            for i, c in enumerate(mappings)
+            if c.field_key and c.status in ("confirmed", "auto")
+        ]
+        sheets.append(SheetInput(quantity_sheet(sheet, quantity), columns, quantity))
     summary = json.loads(record.pii_summary) if record.pii_summary else {"counts": {}, "items": []}
     return FileInput(
         record.id,

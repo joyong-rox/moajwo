@@ -105,6 +105,9 @@ def _amount(c: TestClient, column: str, rows: list[list], kind: str, tag: str) -
         "fid": fid,
         "parsed": [r["cells"][j] for r in pv["rows"]],
         "blocks": [b["code"] for b in validation["blocks"]],
+        "block_messages": [b["message"] for b in validation["blocks"]],
+        "status": validation["status"],
+        "warnings": [w["code"] for w in validation["warnings"]],
         "sum": group["sum"],
         "count": group["count"],
         "excluded": sorted(e["reason"] for e in excluded),
@@ -172,3 +175,91 @@ def test_identifier_with_quantity_word_keeps_text_through_api_and_excel(pu, colu
     assert _excel_column(grid, column) == [(v, "s") for v in LONG]  # 글자 셀, 끝자리만 다른 값 각각 유지
     assert _excel_column(grid, "식별부호") == [(int(v), "n") for v in SHORT]
     assert _excel_column(grid, "수량") == [(1, "n"), (2, "n"), (3, "n")]
+
+
+# ---------------------------------------------------------------- 이름에 '식별'이 든 열을 수량으로 확정
+
+CORRECT = [["합계", "1000000000000300"], ["사업A", "1000000000000000"], ["사업B", "100"], ["사업C", "200"]]
+
+
+@pytest.mark.parametrize("column", ["비식별처리비용", "식별부호"])
+@pytest.mark.parametrize("kind", ["csv", "xlsx"])
+def test_confirmed_quantity_with_identifier_name_is_blocked_on_wrong_total(pu, column: str, kind: str) -> None:
+    r = _amount(pu, column, BAD, kind, f"식별이름_합계오류_{column}_{kind}")
+    assert r["parsed"] == ["2000000000000000", "1000000000000000", "100", "200"]  # 미리보기는 원문 그대로 (글자)
+    assert r["blocks"] == ["sum_mismatch"]  # 확정한 수량 열은 계산용 값으로 합계 검사
+    assert "1,000,000,000,000,300" in r["block_messages"][0] and "차이 999,999,999,999,700" in r["block_messages"][0]
+    assert (r["sum"], r["count"], r["excluded"]) == (1000000000000300, 3, ["subtotal"])  # 상세 행이 빠지지 않음
+    assert r["review"]["can_complete"] is False
+    assert pu.post(f"/reviews/{r['review']['id']}/integrate", json={}).status_code == 409  # 통합 차단
+
+
+@pytest.mark.parametrize("column", ["비식별처리비용", "식별부호"])
+@pytest.mark.parametrize("kind", ["csv", "xlsx"])
+def test_confirmed_quantity_with_identifier_name_integrates_numbers(pu, column: str, kind: str) -> None:
+    r = _amount(pu, column, CORRECT, kind, f"식별이름_정상_{column}_{kind}")
+    assert (r["status"], r["blocks"], r["warnings"]) == ("passed", [], [])
+    assert (r["sum"], r["count"], r["excluded"]) == (1000000000000300, 3, ["subtotal"])
+    cells = _excel_column(_integrate(pu, r["review"]), "집행액")
+    assert cells == [(1000000000000000, "n"), (100, "n"), (200, "n")]  # 확정 항목 이름·숫자 셀
+
+
+def test_confirmed_quantity_with_identifier_name_mixed_values(pu) -> None:
+    r = _amount(pu, "비식별처리비용", OK, "csv", "식별이름_혼합")
+    assert (r["status"], r["blocks"]) == ("passed", [])
+    assert (r["sum"], r["count"], r["excluded"]) == (1000000000000010, 4, ["missing_marker", "subtotal"])
+    cells = _excel_column(_integrate(pu, r["review"]), "집행액")
+    assert cells == [(1000000000000000, "n"), (12.5, "n"), (-2.5, "n"), (0, "n"), ("-", "s")]  # 결측 표기는 그대로
+
+
+def _validate_status(c: TestClient, fid: int) -> tuple[str, list[str]]:
+    body = c.post("/validation", json={"file_ids": [fid]}).json()
+    return body["status"], [b["code"] for b in body["blocks"]]
+
+
+def _preview_cells(c: TestClient, fid: int, column: str) -> list[Any]:
+    pv = c.get(f"/files/{fid}/preview").json()
+    j = [col["name"] for col in pv["columns"]].index(column)
+    return [r["cells"][j] for r in pv["rows"]]
+
+
+def test_reread_follows_latest_confirmation_without_changing_cached_original(pu) -> None:
+    """같은 파일을 다시 올리지 않고 확정만 바꾼다: 확정 없음(원문 보존) → 수량 확정 → 다른 항목 → '해당 없음'."""
+    c = pu
+    raw = ["1000000000000300", "1000000000000000", "100", "200"]
+    bad_data, ctype = _file([["구분", "식별부호"], *BAD], "csv")
+    ok_data, _ = _file([["구분", "식별부호"], *CORRECT], "csv")
+    bad, ok = _upload(c, "재읽기_합계오류.csv", bad_data, ctype), _upload(c, "재읽기_정상.csv", ok_data, ctype)
+    for fid in (bad, ok):
+        _confirm(c, fid, {"구분": "department"})
+
+    def integrated(column: str) -> list[tuple[Any, str]]:
+        return _excel_column(_integrate(c, c.post("/reviews", json={"file_ids": [ok]}).json()), column)
+
+    # 1) 확정 없음 — 식별자 원문 보존: 계산하지 않음 (통합하려면 검토에서 이 열을 직접 결정해야 하므로 3)·4)에서 확인)
+    assert _validate_status(c, bad) == ("passed", [])
+    assert _preview_cells(c, ok, "식별부호") == raw
+    # 2) 수량 항목으로 확정 — 같은 파일을 다시 읽어 계산용 값으로 검사·분석·통합
+    for fid in (bad, ok):
+        _confirm(c, fid, {"식별부호": "expenditure"})
+    assert _validate_status(c, bad) == ("blocked", ["sum_mismatch"])
+    body = {"field_key": "expenditure", "targets": [{"file_id": ok}]}
+    run = c.post(
+        "/analysis/run",
+        json={**body, "expected_fingerprint": c.post("/analysis/preview", json=body).json()["fingerprint"]},
+    )
+    group = c.get(f"/analysis/runs/{run.json()['id']}/groups").json()["items"][0]
+    assert (group["sum"], group["count"]) == (1000000000000300, 3)
+    assert integrated("집행액") == [(1000000000000000, "n"), (100, "n"), (200, "n")]
+    assert _preview_cells(c, ok, "식별부호") == raw  # 분석이 미리보기 캐시를 읽은 뒤에도 원문 그대로
+    # 3) 다른 항목(비고)으로 변경 — 수량 해석을 하지 않고, 원문 자릿수가 그대로 남음
+    for fid in (bad, ok):
+        _confirm(c, fid, {"식별부호": "note"})
+    assert _validate_status(c, bad) == ("passed", [])
+    assert integrated("비고") == [(v, "s") for v in raw[1:]]
+    # 4) '해당 없음'으로 확정 — 마찬가지로 원문 그대로
+    for fid in (bad, ok):
+        _confirm(c, fid, {"식별부호": None})
+    assert _validate_status(c, bad) == ("passed", [])
+    assert integrated("식별부호") == [(v, "s") for v in raw[1:]]
+    assert _preview_cells(c, ok, "식별부호") == raw and _preview_cells(c, bad, "식별부호")[0] == "2000000000000000"

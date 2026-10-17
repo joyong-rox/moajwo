@@ -33,6 +33,7 @@ from app.mapping import TOTAL_WORDS, get_engine, split_column_name
 from app.models import MappingAnalysis, SourceFile
 from app.pii import column_letter, mask_cell, mask_rrn_number, mask_text
 from app.promotion import record_approval
+from app.quantity import QUANTITY_FIELDS
 from app.timefmt import utc_to_kst
 from app.validation import _COLUMN_STOCK_WORDS, _FLOW_WORDS, _UNIT_DECL
 
@@ -393,13 +394,7 @@ class CommonOut(BaseModel):
 _MASKED = re.compile(r"\*{3,}")
 _DATE = re.compile(r"^\d{4}[-./년]\s?\d{1,2}([-./월]\s?\d{1,2}일?)?$|^\d{4}년?$")
 GENERIC_NAMES = frozenset({*TOTAL_WORDS, "구분", "비고", "기타", "항목", "내용", "값", "수", "건수"})
-# 수량으로 비교하는 표준 항목 (값이 '010'처럼 글자로 저장돼도 단위를 비교한다). 이름·코드·구분 항목은 넣지 않는다.
-QUANTITY_FIELDS = frozenset({
-    "population", "population_male", "population_female", "households", "budget", "expenditure", "execution_rate",
-    "amount", "count", "ratio", "change_rate", "headcount", "vehicles_total", "passenger_car", "van", "truck",
-    "special_vehicle", "motorcycle", "eco_friendly_car", "electric_car", "hydrogen_car", "hybrid_car",
-    "government_use", "private_use", "commercial_use", "total", "registration_count",
-})  # fmt: skip
+# 수량으로 비교하는 표준 항목은 app.quantity.QUANTITY_FIELDS (확정 수량 열의 계산용 값과 같은 기준)
 
 
 def _norm(name: str) -> str:

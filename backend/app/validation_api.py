@@ -18,6 +18,7 @@ from app.mapping import get_engine
 from app.models import SourceFile, ValidationRun
 from app.pii import has_pii, mask_nested, mask_rrn_number, mask_text
 from app.promotion import load_standard
+from app.quantity import confirmed_quantity_indexes, quantity_sheet
 from app.timefmt import utc_to_kst
 from app.validation import (
     BLOCK_LABEL,
@@ -187,7 +188,8 @@ def _file_input(
             for i, c in enumerate(result.columns)
             if c.field_key and c.status in ("confirmed", "auto")
         ]
-        sheets.append(SheetInput(sheet, columns))
+        quantity = confirmed_quantity_indexes(result.columns)
+        sheets.append(SheetInput(quantity_sheet(sheet, quantity), columns, quantity))
     summary = json.loads(record.pii_summary) if record.pii_summary else {"counts": {}, "items": []}
     return FileInput(
         record.id,
