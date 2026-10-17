@@ -133,6 +133,49 @@ def test_numeric_cells_and_text_cells_in_amount_column(tmp_path: Path) -> None:
     assert _columns(numeric)["집행액"] == _columns(text)["집행액"] == [1000000000000000, 100]
 
 
+# ================================================================ 회귀 (PR #9 두 번째 수정): 이름 근거 판정
+
+SCALE_BAD = [
+    ["구분", "규모"],
+    ["합계", "2000000000000000"],
+    ["사업A", "1000000000000000"],
+    ["사업B", "100"],
+    ["사업C", "200"],
+]
+SCALE_BAD_COMMA = [["구분", "규모"], ["합계", "2,000,000,000,000,000"], ["사업A", "1,000,000,000,000,000"],
+                   ["사업B", "100"], ["사업C", "200"]]  # fmt: skip
+
+
+@pytest.mark.parametrize("rows", [SCALE_BAD, SCALE_BAD_COMMA], ids=["쉼표 없음", "쉼표 있음"])
+@pytest.mark.parametrize("kind", ["csv", "xlsx"])
+def test_amount_column_outside_name_list_stays_numeric(tmp_path: Path, rows: list[list], kind: str) -> None:
+    """수량 이름 목록에 없는 이름('규모')도 식별자 근거가 없으면 수량 — 긴 값이 상세 행에 있어도 숫자."""
+    path = _csv(tmp_path, rows) if kind == "csv" else _xlsx_text(tmp_path, rows, "scale.xlsx")
+    assert _columns(path)["규모"] == [2000000000000000, 1000000000000000, 100, 200]
+
+
+@pytest.mark.parametrize("name", ["매출식별부호", "고유식별부호", "관리부호"])
+def test_identifier_name_keeps_long_values_even_with_quantity_word(tmp_path: Path, name: str) -> None:
+    rows = [[name, "수량"]] + [[LONG[i], str(i + 1)] for i in range(3)]
+    cols = _columns(_csv(tmp_path, rows))
+    assert cols[name] == LONG and cols["수량"] == [1, 2, 3]  # '매출'이 있어도 '식별부호'면 원문 보존
+
+
+def test_short_identifier_keeps_existing_number_type(tmp_path: Path) -> None:
+    rows = [["매출식별부호", "식별부호"], ["1741000", "1360000"], ["1310000", "1760000"]]
+    cols = _columns(_csv(tmp_path, rows))
+    assert cols["매출식별부호"] == [1741000, 1310000] and cols["식별부호"] == [
+        1360000,
+        1760000,
+    ]  # 긴 값이 없으면 그대로
+
+
+def test_long_digits_without_identifier_evidence_are_read_as_exact_numbers(tmp_path: Path) -> None:
+    """이름에 식별자 근거가 없으면 수량으로 읽는다 (정수 자릿수는 그대로 — float를 거치지 않음)."""
+    rows = [["열값"]] + [[v] for v in LONG]
+    assert _columns(_csv(tmp_path, rows))["열값"] == [int(v) for v in LONG]
+
+
 # ================================================================ 보존: 이미 정상인 사례와 수량의 기존 의미
 
 

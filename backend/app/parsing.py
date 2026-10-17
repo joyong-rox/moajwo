@@ -112,22 +112,19 @@ _TEXT_COLUMN_HINT = re.compile(
 )
 _DIGITS_ONLY = re.compile(r"^\d+$")
 # 숫자로 정확히 다룰 수 있는 최대 자릿수 (Excel 숫자 셀은 15자리, 브라우저 Number는 2^53 미만).
-# 상세 행에 이보다 긴 숫자 글자가 있고 이름이 금액·수량이 아닌 열은 식별자로 보고 글자로 둔다
-# (끝자리만 다른 식별자가 같은 값이 되지 않게).
 MAX_NUMBER_DIGITS = 15
-# 금액·수량을 뜻하는 열 이름 — 긴 값이 있어도 식별자로 보지 않는다 (작은 값·소수·음수가 계산에서 빠지지 않게).
-# '…액'은 '집행액·예산액·총액'처럼 이름 끝(또는 단위 괄호 앞)에 올 때만 본다.
-_QUANTITY_COLUMN_HINT = re.compile(
-    r"(금액|예산|집행|결산|지출|수입|비용|매출|실적|인구|세대수|건수|수량|대수|인원|면적|합계|소계|총계|[가-힣]액(?![가-힣]))"
-)
+# 식별자를 뜻하는 이름 ('식별부호'·'고유식별부호'·'매출식별부호'·'관리부호'). 긴 숫자 글자가 있을 때만 글자로 둔다
+# — 짧은 코드의 기존 자료형은 그대로. 이름에 '매출' 같은 수량 단어가 함께 있어도 식별자 근거는 그대로 본다.
+# 이름에 식별자 근거가 없으면 긴 숫자 글자도 수량으로 읽는다 (수량 이름 목록에 없다는 이유로 식별자로 보지 않음).
+_LONG_ID_HINT = re.compile(r"(식별|부호)")
 
 
 def text_columns(columns: list[str], grid: list[list[Cell]], raw: list[list[Any]], body_start: int) -> set[int]:
     """숫자로 바꾸면 안 되는 열을 고른다 (열 전체를 같은 기준으로).
 
     - 이름에 코드·번호·시각 같은 표시가 있거나, 앞자리 0이 있는 숫자 글자('0900', '011')가 섞인 열
-    - 상세 행(합계·소계 행 제외)에 숫자로만 된 글자가 MAX_NUMBER_DIGITS(15)자리보다 길게 있고, 이름이 금액·수량을
-      뜻하지 않는 열 (숫자로 바꾸면 Excel·브라우저에서 끝자리가 바뀜). 합계 행의 큰 값은 집계값이라 근거로 보지 않는다.
+    - 이름이 식별자('식별'·'부호')를 뜻하고 숫자로만 된 글자가 MAX_NUMBER_DIGITS(15)자리보다 긴 열
+      (숫자로 바꾸면 브라우저 Number·Excel 숫자 셀에서 끝자리가 바뀌어 서로 다른 식별자가 같아짐)
     - 같은 열에서 '0900'은 글자, '1800'은 숫자가 되는 뒤섞임과 코드의 앞자리 0 손실을 막는다.
     - 천 단위 구분('1,000')이 쓰인 열은 수량으로 보고 숫자로 둔다. 엑셀에 숫자로 저장된 셀은 대상이 아니다.
     """
@@ -142,14 +139,9 @@ def text_columns(columns: list[str], grid: list[list[Cell]], raw: list[list[Any]
         if any(_GROUPED_NUMBER.match(s) and not _PLAIN_NUMBER.match(s) for s in converted):
             continue
         leading_zero = any(len(s) > 1 and s.startswith("0") and _DIGITS_ONLY.match(s) for s in texts)
-        detail = [
-            raw[r][j].strip()
-            for r in range(body_start, len(grid))
-            if j < len(raw[r]) and isinstance(raw[r][j], str) and classify_row(grid[r]) != "subtotal"
-        ]
-        long_id = any(len(s) > MAX_NUMBER_DIGITS and _DIGITS_ONLY.match(s) for s in detail)
-        too_long = long_id and not _QUANTITY_COLUMN_HINT.search(name or "")
-        if leading_zero or too_long or _TEXT_COLUMN_HINT.search(name or ""):
+        long_digits = any(len(s) > MAX_NUMBER_DIGITS and _DIGITS_ONLY.match(s) for s in texts)
+        long_id = long_digits and _LONG_ID_HINT.search(name or "") is not None
+        if leading_zero or long_id or _TEXT_COLUMN_HINT.search(name or ""):
             keep.add(j)
     return keep
 
