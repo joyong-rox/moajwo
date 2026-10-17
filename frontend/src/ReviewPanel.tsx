@@ -267,7 +267,10 @@ function ReviewPanel({
                     ? "검사한 뒤 열 매핑 확정이 바뀌어 이 검토로는 새 결과를 만들 수 없습니다 — '다시 검사 (결정 이어받기)'로 지금 확정을 검사하세요."
                     : null
                 }
-                onFailed={() => void refresh()}
+                onFailed={() => {
+                  setMessage(null) // '검토 완료 — 통합 준비가 끝났습니다' 같은 지난 안내가 바뀐 상태와 섞이지 않게
+                  void refresh()
+                }}
               />
             )}
             <details className="review-replace">
