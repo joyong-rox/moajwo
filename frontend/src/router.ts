@@ -30,9 +30,10 @@ export function useSearch(): string {
 }
 
 /** path는 '/reviews?review=12'처럼 검색 조건을 포함할 수 있다 (같은 주소면 기록을 만들지 않음).
- * 검색 조건 없는 경로는 예전처럼 경로만 비교한다 (같은 화면 안의 선택 상태를 지우지 않음). */
-export function navigate(path: string) {
-  const here = path.includes('?') ? `${currentPath()}${window.location.search}` : currentPath()
+ * 검색 조건 없는 경로는 예전처럼 경로만 비교한다 — 메뉴를 다시 눌러도 그 화면의 검색 조건(고른 파일 등)을 지우지 않는다.
+ * clearSearch: 같은 경로라도 검색 조건을 지운 주소로 옮긴다 (상세에서 '목록으로'·'닫기'처럼 검색 조건을 버리는 이동). */
+export function navigate(path: string, { clearSearch = false }: { clearSearch?: boolean } = {}) {
+  const here = path.includes('?') || clearSearch ? `${currentPath()}${window.location.search}` : currentPath()
   if (path === here) return
   window.history.pushState(null, '', path)
   window.dispatchEvent(new Event(NAVIGATE_EVENT))

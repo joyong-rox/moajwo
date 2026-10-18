@@ -1139,7 +1139,7 @@ function AnalysisResult({ id }: { id: number }) {
           href="/analysis"
           onClick={(e) => {
             e.preventDefault()
-            navigate('/analysis')
+            navigate('/analysis', { clearSearch: true }) // 보던 결과(?id=)를 닫고 새 분석으로
           }}
         >
           새 분석
