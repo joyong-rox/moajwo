@@ -3331,3 +3331,643 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* ---- 작업 화면 공용 (업로드·열 매핑·공통 검토·검사·검토·검토 목록) : wk- 클래스만 사용, 기존 색 변수 사용 ---- */
+.wk-icon {
+  flex: none;
+  vertical-align: -3px;
+}
+
+/* 단계 안내: 파일 선택 → 열 매핑 → 검사·검토 → 결과 */
+.wk-steps {
+  margin: 0 0 14px;
+}
+
+.wk-steps ol {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wk-step-body {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  box-sizing: border-box;
+  height: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: inherit;
+  text-decoration: none;
+}
+
+a.wk-step-body:hover {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+a.wk-step-body:focus-visible,
+.wk-card:focus-visible,
+.wk-tab:focus-visible,
+.wk-rowpick:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.wk-step.is-current .wk-step-body {
+  border: 2px solid var(--accent);
+  background: var(--accent-bg);
+}
+
+.wk-step-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+}
+
+.wk-step-mark.is-done {
+  background: var(--pass-bg);
+  color: var(--pass-text);
+}
+
+.wk-step-mark.is-attention {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.wk-step-mark.is-todo {
+  background: var(--tag-bg);
+  color: var(--muted);
+}
+
+.wk-step-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.wk-step-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.wk-step-state {
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+/* 상태 카드 (아이콘 + 건수 + 이름) */
+.wk-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.wk-card {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: center;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  box-shadow: 0 1px 2px rgb(31 35 40 / 6%);
+}
+
+button.wk-card {
+  cursor: pointer;
+}
+
+button.wk-card:hover {
+  border-color: var(--accent);
+}
+
+.wk-card.is-picked {
+  border: 2px solid var(--accent);
+  background: var(--accent-bg);
+}
+
+.wk-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+
+.wk-card-count {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.wk-card-label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.wk-card-hint {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.tone-ok {
+  background: var(--confirmed-bg);
+  color: var(--confirmed-text);
+}
+
+.tone-auto {
+  background: var(--auto-bg);
+  color: var(--auto-text);
+}
+
+.tone-review,
+.tone-warn {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.tone-unresolved,
+.tone-block {
+  background: var(--block-bg);
+  color: var(--block-text);
+}
+
+.tone-recheck {
+  background: var(--note-bg);
+  color: var(--note-text);
+}
+
+.tone-muted {
+  background: var(--tag-bg);
+  color: var(--muted);
+}
+
+.tone-info {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
+.tone-pii {
+  background: var(--pii-bg);
+  color: var(--pii-text);
+}
+
+/* 안내 띠 */
+.wk-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: flex-start;
+  margin: 8px 0;
+  padding: 12px 14px;
+  border: 1px solid currentColor;
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+
+.wk-banner.tone-info {
+  border-color: #9ec5fe;
+}
+
+.wk-banner.tone-recheck {
+  border-color: #a8b1e8;
+}
+
+.wk-banner.tone-warn {
+  border-color: var(--warning-border);
+}
+
+.wk-banner.tone-block {
+  border-color: var(--block-border);
+}
+
+.wk-banner.tone-muted {
+  border-color: var(--border);
+}
+
+.wk-banner-icon {
+  display: inline-flex;
+  padding-top: 2px;
+}
+
+.wk-banner-body {
+  flex: 1 1 260px;
+  min-width: 0;
+  color: var(--text);
+}
+
+.wk-banner-title {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.wk-banner-body p,
+.wk-banner-body ul {
+  margin: 2px 0 0;
+}
+
+.wk-banner-body ul {
+  padding-left: 20px;
+}
+
+.wk-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+/* 탭 (매핑 목록 | 데이터 미리보기) */
+.wk-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.wk-tab {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: -1px;
+  padding: 8px 12px;
+  border: none;
+  border-bottom: 3px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.wk-tab.is-active {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* 목록 + 상세 */
+.wk-split.mw-main {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 400px);
+  gap: 16px;
+}
+
+.wk-split-main {
+  min-width: 0;
+}
+
+.wk-tabpanel {
+  min-width: 0;
+}
+
+.wk-detail.mw-detail {
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgb(31 35 40 / 8%);
+}
+
+.wk-detail-state {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+}
+
+/* 원본 열 ↔ 표준 항목 비교 표 */
+.wk-table-wrap {
+  max-height: 70vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.wk-maplist {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.9rem;
+}
+
+.wk-maplist th,
+.wk-maplist td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.wk-maplist thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #eef2f6;
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.wk-maplist tbody th {
+  min-width: 160px;
+  font-weight: normal;
+}
+
+.wk-maplist tbody tr:hover {
+  background: #f6f9fc;
+}
+
+.wk-maplist tbody tr.is-selected {
+  background: var(--accent-bg);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.wk-rowpick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.wk-rowpick:disabled {
+  cursor: default;
+}
+
+.wk-colname {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.wk-samples {
+  min-width: 140px;
+  max-width: 280px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.wk-field {
+  min-width: 110px;
+  overflow-wrap: anywhere;
+}
+
+.wk-chip.upload-tag {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.wk-empty-row {
+  padding: 12px;
+}
+
+/* 작업 상태 막대 (선택 · 저장 · 다음 단계) */
+.wk-actionbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  margin: 8px 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #f6f9fc;
+}
+
+.wk-actionbar-item {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wk-actionbar .wk-next {
+  margin-left: auto;
+  text-decoration: none;
+}
+
+@media (max-width: 1100px) {
+  .wk-split.mw-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .wk-steps ol {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .wk-card {
+    flex: 1 1 calc(50% - 8px);
+  }
+
+  .wk-actionbar .wk-next {
+    flex: 1 1 100%;
+    margin-left: 0;
+    text-align: center;
+  }
+}
+
+/* 상태 배지 (아이콘 + 문구) */
+.wk-badge {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.wk-head-sub {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: normal;
+}
+
+.wk-subhead {
+  margin: 16px 0 8px;
+  font-size: 1rem;
+}
+
+.review-head .wk-permalink {
+  margin-left: auto;
+  font-size: 0.85rem;
+}
+
+/* 다시 검사가 필요하면 지난 점수를 '통과' 색으로 보이지 않게 */
+.review-score.is-stale .review-score-value strong {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+}
+
+.wk-score-note {
+  display: block;
+  margin: 4px 0 0;
+  color: var(--note-text);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.review-score .wk-cards {
+  margin: 4px 0 8px;
+}
+
+.wk-next-action {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  margin: 4px 0 8px;
+  font-weight: 600;
+}
+
+.wk-banner .review-recheck {
+  margin: 6px 0;
+}
+
+.review-state.wk-waiting {
+  color: var(--note-text);
+  font-weight: 600;
+}
+
+/* 파일 고르기 막대 (검색 · 선택 수 · 해제) */
+.wk-pickbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.wk-pickbar .mw-search {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.wk-pickcount {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.wk-filetable {
+  max-height: 420px;
+}
+
+.wk-filetable tr.is-picked td {
+  background: var(--accent-bg);
+}
+
+.wk-filename {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wk-filepick.is-picked {
+  background: var(--accent-bg);
+}
+
+.mw-file-option.wk-filepick {
+  overflow-wrap: anywhere;
+}
+
+/* 적용 대상 막대 (공통 검토) — 묶음 상세 머리에도 범위를 함께 보여 준다 (고정하면 상세를 가려 고정하지 않음) */
+.wk-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: flex-start;
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid #9ec5fe;
+  border-radius: 10px;
+  background: var(--accent-bg);
+  overflow-wrap: anywhere;
+}
+
+.wk-scope > span {
+  flex: 1 1 300px;
+  min-width: 0;
+}
+
+.wk-scope-names {
+  color: var(--muted);
+}
+
+.wk-scope .wk-scope-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* 업로드한 파일 카드 */
+.wk-filecard .upload-file-head {
+  align-items: center;
+}
+
+.wk-filecard.is-failed {
+  border-color: var(--block-border);
+}
+
+.wk-upload .wk-actionbar {
+  margin-top: 12px;
+}
+
+/* 검토 목록 */
+.wk-files-cell {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wk-review-table td {
+  vertical-align: top;
+}
+
+.wk-run-review {
+  margin-left: 6px;
+}
+
+.wk-reviews > .mapping-confirm {
+  margin-bottom: 8px;
+}
+
+.review-head {
+  flex-wrap: wrap;
+}
+
+.review-head h2 {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.review-head > button,
+.review-head > a {
+  white-space: nowrap;
+}

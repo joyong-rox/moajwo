@@ -4,6 +4,8 @@ import PiiNotice from './PiiNotice'
 import { ProgressPanel, SkeletonRows } from './Progress'
 import { UPLOAD_STAGES } from './progressStages'
 import { ACCEPTED_EXTENSIONS, uploadFiles, type Cell, type RowKind, type SheetSummary, type UploadResult } from './api'
+import { navigate } from './router'
+import { Banner, Icon, NavLink } from './Workflow'
 
 const KIND_LABEL: Record<RowKind, string> = { data: '데이터', empty: '빈 행', subtotal: '소계/합계', note: '주석' }
 
@@ -58,8 +60,11 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
     void handleFiles(e.dataTransfer.files)
   }
 
+  const okIds = results.filter((r) => r.id !== null && !r.error).map((r) => r.id as number)
+  const failed = results.filter((r) => r.error).length
+
   return (
-    <section className="upload">
+    <section className="upload wk-upload">
       <h2>파일 업로드</h2>
       <div
         className={`upload-drop${dragging ? ' is-dragging' : ''}${busy ? ' is-busy' : ''}`}
@@ -104,19 +109,41 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
       )}
 
       {error && (
-        <p className="upload-error" role="alert">
-          {error}
-        </p>
+        <Banner tone="block" icon="block" title="올리지 못한 파일이 있습니다" live="alert">
+          <p>{error}</p>
+        </Banner>
       )}
 
       {results.length > 0 && (
-        <ul className="upload-results">
-          {results.map((r, i) => (
-            <li key={`${r.id ?? 'x'}-${i}`} className="upload-file">
-              <FileSummary result={r} onPiiChanged={onPiiChanged} />
-            </li>
-          ))}
-        </ul>
+        <>
+          <h3 className="wk-subhead">
+            이번에 올린 파일 {results.length}개{failed > 0 && <span className="wk-head-sub"> · 실패 {failed}개</span>}
+          </h3>
+          <ul className="upload-results">
+            {results.map((r, i) => (
+              <li key={`${r.id ?? 'x'}-${i}`} className={`upload-file wk-filecard${r.error ? ' is-failed' : ''}`}>
+                <FileSummary result={r} onPiiChanged={onPiiChanged} />
+              </li>
+            ))}
+          </ul>
+          {okIds.length > 0 && (
+            <div className="wk-actionbar" role="region" aria-label="다음 단계">
+              <span className="wk-actionbar-item">
+                <strong>다음</strong> 열 매핑을 확인한 뒤 검사·검토합니다. 자동 제안은 아직 확정 전입니다.
+              </span>
+              <NavLink className="mapping-confirm" href={`/mapping?file=${okIds[0]}`}>
+                열 매핑 열기
+              </NavLink>
+              <button
+                type="button"
+                className="mapping-run wk-next"
+                onClick={() => navigate(`/?files=${okIds.slice(0, 50).join(',')}`)}
+              >
+                올린 파일로 검사 대상 고르기 ({Math.min(okIds.length, 50)})
+              </button>
+            </div>
+          )}
+        </>
       )}
     </section>
   )
@@ -126,7 +153,14 @@ function FileSummary({ result, onPiiChanged }: { result: UploadResult; onPiiChan
   return (
     <>
       <div className="upload-file-head">
-        <strong className="upload-file-name">{result.original_name}</strong>
+        <Icon name="file" />
+        <strong className="upload-file-name">
+          {result.id !== null && `#${result.id} `}
+          {result.original_name}
+        </strong>
+        <span className={`wk-badge ${result.error ? 'tone-block' : 'tone-ok'}`}>
+          <Icon name={result.error ? 'block' : 'check'} /> {result.error ? '실패' : '올림 완료'}
+        </span>
         {result.error ? (
           <span className="upload-error">{result.error}</span>
         ) : (

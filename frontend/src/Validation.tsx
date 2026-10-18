@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { replaceSearch, useSearch } from './router'
+import { Banner } from './Workflow'
 import PiiNotice from './PiiNotice'
 import {
   createAlias,
@@ -19,6 +21,8 @@ const STATUS_TEXT: Record<ValidationStatus, string> = {
   passed: '통합 가능 — 문제가 없습니다',
 }
 
+const MAX_TARGETS = 50 // 서버의 한 번에 검사하는 파일 수 제한과 같음 (validation_api.MAX_FILES)
+
 const ENTITY_OPTIONS = [
   { value: '', label: '자동 (기관명 → 시군구 → 행정구역 → 시도)' },
   { value: 'org_name', label: '기관명' },
@@ -33,9 +37,10 @@ type ValidationProps = {
   canManageGlossary?: boolean // 용어사전 별칭 등록은 관리자·소유자만
   onGlossaryChanged: () => void
   onOpenReview: (request: ValidationRequest) => void
+  onSelection?: (ids: number[]) => void // 검사 대상 선택 (홈 단계 안내)
 }
 
-function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, onOpenReview }: ValidationProps) {
+function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, onOpenReview, onSelection }: ValidationProps) {
   const [files, setFiles] = useState<StoredFile[]>([])
   const [targets, setTargets] = useState<Set<number>>(new Set())
   const [baseline, setBaseline] = useState<Set<number>>(new Set())
@@ -47,6 +52,37 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
   const [error, setError] = useState<string | null>(null)
   const [run, setRun] = useState<ValidationRun | null>(null)
   const [localVersion, setLocalVersion] = useState(0)
+  const [query, setQuery] = useState('')
+  const search = useSearch()
+  const wanted = window.location.pathname === '/' ? new URLSearchParams(search).get('files') : null
+
+  // 열 매핑 화면의 '다음: 이 파일로 검사·검토' (/?files=번호) — 그 파일을 검사 대상으로 골라 둔다 (실행은 하지 않음)
+  const [applied, setApplied] = useState<string | null>(null)
+  if (!wanted && applied !== null) setApplied(null)
+  if (wanted && files.length > 0 && wanted !== applied) {
+    setApplied(wanted)
+    const ids = wanted
+      .split(',')
+      .map(Number)
+      .filter((id) => files.some((f) => f.id === id))
+      .slice(0, MAX_TARGETS)
+    if (ids.length) {
+      setTargets(new Set(ids))
+      setBaseline((prev) => new Set([...prev].filter((id) => !ids.includes(id))))
+    }
+  }
+  // 반영한 뒤 주소에서 빼고(새로고침해도 다시 고르지 않음) 검사 영역으로 옮긴다
+  useEffect(() => {
+    if (!wanted || applied !== wanted) return
+    document.getElementById('wk-validation')?.scrollIntoView({ block: 'start' })
+    const q = new URLSearchParams(window.location.search)
+    q.delete('files')
+    replaceSearch(q.toString() ? `?${q.toString()}` : '')
+  }, [wanted, applied])
+
+  useEffect(() => {
+    onSelection?.([...targets])
+  }, [targets, onSelection])
 
   useEffect(() => {
     let cancelled = false
@@ -95,13 +131,58 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
     }
   }
 
+  const q = query.replace(/\s+/g, '').toLowerCase()
+  const shownFiles = q
+    ? files.filter((f) => `#${f.id}${f.display_name}`.replace(/\s+/g, '').toLowerCase().includes(q))
+    : files
+  const hiddenPicked = [...targets, ...baseline].filter((id) => !shownFiles.some((f) => f.id === id)).length
+  const full = targets.size >= MAX_TARGETS
+
   return (
-    <section className="validation">
-      <h2>통합 전 검증</h2>
+    <section className="validation wk-validation" id="wk-validation">
+      <h2>통합 전 검증 · 검토</h2>
       {files.length === 0 ? (
-        <p className="upload-drop-hint">먼저 파일을 업로드하세요.</p>
+        <Banner tone="info" icon="file" title="아직 올린 파일이 없습니다">
+          <p>위의 '파일 업로드'에서 파일을 올리면 여기서 검사할 파일을 고를 수 있습니다.</p>
+        </Banner>
       ) : (
-        <div className="upload-table-wrap">
+        <>
+          <div className="wk-pickbar">
+            <input
+              type="search"
+              className="mw-search"
+              placeholder="파일 번호·이름 검색"
+              aria-label="검사할 파일 검색"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <span className="wk-pickcount" role="status">
+              검증 대상 <strong>{targets.size}</strong>개 (최대 {MAX_TARGETS}) · 전월 자료 <strong>{baseline.size}</strong>개 · 전체{' '}
+              {files.length}개
+            </span>
+            {(targets.size > 0 || baseline.size > 0) && (
+              <button
+                type="button"
+                className="login-link"
+                onClick={() => {
+                  setTargets(new Set())
+                  setBaseline(new Set())
+                }}
+              >
+                선택 모두 해제
+              </button>
+            )}
+          </div>
+          {hiddenPicked > 0 && (
+            <p className="mapping-warn" role="status">
+              고른 파일 중 {hiddenPicked}개가 검색으로 숨겨져 있습니다 — 숨겨져도 검사 대상에 그대로 들어갑니다.{' '}
+              <button type="button" className="login-link" onClick={() => setQuery('')}>
+                검색 지우기
+              </button>
+            </p>
+          )}
+          {full && <p className="mw-muted">한 번에 {MAX_TARGETS}개까지 검사할 수 있습니다.</p>}
+        <div className="upload-table-wrap wk-filetable">
           <table className="upload-table validation-files">
             <thead>
               <tr>
@@ -112,13 +193,14 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
               </tr>
             </thead>
             <tbody>
-              {files.map((f) => (
-                <tr key={f.id}>
+              {shownFiles.map((f) => (
+                <tr key={f.id} className={targets.has(f.id) ? 'is-picked' : undefined}>
                   <td>
                     <input
                       type="checkbox"
-                      aria-label={`${f.original_name} 검증 대상`}
+                      aria-label={`${f.display_name} 검증 대상`}
                       checked={targets.has(f.id)}
+                      disabled={!targets.has(f.id) && full}
                       onChange={(e) => {
                         setTargets(toggle(targets, f.id, e.target.checked))
                         if (e.target.checked) setBaseline(toggle(baseline, f.id, false))
@@ -128,7 +210,7 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
                   <td>
                     <input
                       type="checkbox"
-                      aria-label={`${f.original_name} 전월 자료`}
+                      aria-label={`${f.display_name} 전월 자료`}
                       checked={baseline.has(f.id)}
                       onChange={(e) => {
                         setBaseline(toggle(baseline, f.id, e.target.checked))
@@ -136,8 +218,8 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
                       }}
                     />
                   </td>
-                  <td>
-                    #{f.id} {f.original_name}
+                  <td className="wk-filename">
+                    #{f.id} {f.display_name}
                   </td>
                   <td>
                     {f.pii ? (
@@ -153,6 +235,7 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       <div className="validation-form">

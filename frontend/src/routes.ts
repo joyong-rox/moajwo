@@ -17,6 +17,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/', label: '홈', roles: ALL, inMenu: true },
   { path: '/automations', label: '자동화', roles: ALL, inMenu: true },
   { path: '/runs', label: '실행 기록', roles: ALL, inMenu: true },
+  { path: '/reviews', label: '검토 목록', roles: ALL, inMenu: true },
   { path: '/mapping', label: '열 매핑', roles: ALL, inMenu: true },
   { path: '/mapping/common', label: '공통 항목 검토', roles: ALL, inMenu: false },
   { path: '/analysis', label: '데이터 분석', roles: ALL, inMenu: true },

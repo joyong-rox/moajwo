@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
   authStatus,
   fetchHealth,
@@ -6,6 +6,7 @@ import {
   UNAUTHORIZED_EVENT,
   type Health,
   type Me,
+  type Review,
   type Role,
   type ValidationRequest,
 } from './api'
@@ -21,8 +22,10 @@ import MappingWorkspace from './MappingWorkspace'
 import MoajwoAdmin from './MoajwoAdmin'
 import Promotions from './Promotions'
 import ReviewPanel from './ReviewPanel'
-import { navigate, usePath } from './router'
+import HomeSteps from './HomeSteps'
+import { navigate, replaceSearch, usePath } from './router'
 import { ADMIN_BASE, findRoute, isActiveMenu, ROUTES } from './routes'
+import Reviews from './Reviews'
 import Runs from './Runs'
 import Settings from './Settings'
 import Upload from './Upload'
@@ -90,6 +93,20 @@ function Workspace() {
   const [filesVersion, setFilesVersion] = useState(0)
   const refreshFiles = () => setFilesVersion((v) => v + 1)
   const [reviewRequest, setReviewRequest] = useState<ValidationRequest | null>(null)
+  // 홈에서 연 검토 — 주소(/?review=번호)로 새로고침·직접 접근해도 같은 검토를 다시 연다
+  const [homeReviewId, setHomeReviewId] = useState<number | null>(() => {
+    if (window.location.pathname !== '/') return null
+    const id = Number(new URLSearchParams(window.location.search).get('review'))
+    return Number.isInteger(id) && id > 0 ? id : null
+  })
+  const [selected, setSelected] = useState<number[]>([])
+  const onHomeReview = useCallback((review: Review) => {
+    if (window.location.pathname === '/') {
+      const q = new URLSearchParams(window.location.search)
+      q.set('review', String(review.id))
+      replaceSearch(`?${q.toString()}`)
+    }
+  }, [])
   // 검토를 새로 열 때마다 패널을 새로 만든다 (이전 검토 상태를 섞지 않음)
   const [reviewKey, setReviewKey] = useState(0)
   // 홈으로 돌아올 때마다 대시보드·파일 목록을 새로 불러온다
@@ -126,6 +143,8 @@ function Workspace() {
           {/* 홈(취합 작업)은 다른 메뉴로 옮겨도 진행 중인 검토가 사라지지 않도록 숨기기만 한다 */}
           <div id="home" hidden={path !== '/'}>
             <h1 className="page-title">홈</h1>
+            {/* 검토를 열면 검토 화면의 단계 안내를 쓴다 (같은 안내를 두 번 보이지 않음) */}
+            {!reviewRequest && homeReviewId === null && <HomeSteps refreshKey={filesVersion} selected={selected} />}
             <Dashboard refreshKey={homeVisit} />
 
             <section className="status" aria-live="polite">
@@ -147,17 +166,25 @@ function Workspace() {
               refreshKey={filesVersion}
               canManageGlossary={isManager(me.role)}
               onGlossaryChanged={() => undefined}
+              onSelection={setSelected}
               onOpenReview={(request) => {
+                setHomeReviewId(null)
                 setReviewRequest(request)
                 setReviewKey((k) => k + 1)
               }}
             />
-            {reviewRequest && (
+            {(reviewRequest || homeReviewId !== null) && (
               <ReviewPanel
                 key={reviewKey}
-                request={reviewRequest}
+                request={reviewRequest ?? undefined}
+                reviewId={reviewRequest ? undefined : (homeReviewId ?? undefined)}
+                onLoaded={onHomeReview}
                 onClose={() => {
                   setReviewRequest(null)
+                  setHomeReviewId(null)
+                  const q = new URLSearchParams(window.location.search)
+                  q.delete('review')
+                  replaceSearch(q.toString() ? `?${q.toString()}` : '')
                   refreshFiles()
                   setHomeVisit((v) => v + 1)
                 }}
@@ -173,6 +200,7 @@ function Workspace() {
               )}
               {allowed && path === '/automations' && <Automations />}
               {allowed && path === '/runs' && <Runs />}
+              {allowed && path === '/reviews' && <Reviews />}
               {allowed && path === '/mapping' && <MappingWorkspace />}
               {allowed && path === '/mapping/common' && <MappingCommon />}
               {allowed && path === '/analysis' && <Analysis />}

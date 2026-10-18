@@ -400,6 +400,7 @@ export type Review = {
   learned: { columns: number; names: number; names_skipped?: number } | null
   parent_id: number | null
   child_id: number | null
+  latest_id?: number | null // 대체된 검토면 다시 검사로 이어진 최신 검토
   history: { id: number; status: string; score: number; blocks: number; pending_open: number }[]
   changes: ReviewChanges | null
   automation_id: number | null
@@ -529,6 +530,31 @@ export async function listRuns(reviewId: number): Promise<IntegrationRun[]> {
 
 export async function getReview(reviewId: number): Promise<Review> {
   return json(await apiFetch(`${API_BASE}/reviews/${reviewId}`))
+}
+
+/** 검토 목록 항목 (조회 전용). 볼 수 있는 범위는 단건 조회와 같다 (일반 사용자는 자기 검토, 최고 관리자는 전체). */
+export type ReviewListItem = {
+  id: number
+  status: 'in_review' | 'ready' | 'superseded'
+  status_label: string
+  needs_recheck: boolean
+  file_count: number
+  file_names: string[] // 앞의 몇 개, 개인정보 형식은 가림
+  created_at: string
+  completed_at: string | null
+  created_by: number | null
+  created_by_name: string | null
+  automation_name: string | null
+  latest_id: number
+  run_count: number
+  last_run_id: number | null
+  can_edit: boolean
+}
+
+export async function listReviews(includeSuperseded = false, limit = 100): Promise<ReviewListItem[]> {
+  const q = new URLSearchParams({ limit: String(limit) })
+  if (includeSuperseded) q.set('include_superseded', 'true')
+  return json(await apiFetch(`${API_BASE}/reviews?${q.toString()}`))
 }
 
 export async function listAllRuns(limit = 100): Promise<IntegrationRun[]> {
