@@ -198,7 +198,7 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
                   <td>
                     <input
                       type="checkbox"
-                      aria-label={`${f.display_name} 검증 대상`}
+                      aria-label={`#${f.id} ${f.display_name} 검증 대상`}
                       checked={targets.has(f.id)}
                       disabled={!targets.has(f.id) && full}
                       onChange={(e) => {
@@ -210,7 +210,7 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
                   <td>
                     <input
                       type="checkbox"
-                      aria-label={`${f.display_name} 전월 자료`}
+                      aria-label={`#${f.id} ${f.display_name} 전월 자료`}
                       checked={baseline.has(f.id)}
                       onChange={(e) => {
                         setBaseline(toggle(baseline, f.id, e.target.checked))
