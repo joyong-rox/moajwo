@@ -3971,3 +3971,16 @@ button.wk-card:hover {
 .review-head > a {
   white-space: nowrap;
 }
+
+/* 검토 목록: 전체 건수 기준 안내와 '더 보기' */
+.wk-count-scope {
+  margin: 4px 0 8px;
+}
+
+.wk-list-more {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin-top: 10px;
+}

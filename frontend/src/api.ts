@@ -551,10 +551,27 @@ export type ReviewListItem = {
   can_edit: boolean
 }
 
-export async function listReviews(includeSuperseded = false, limit = 100): Promise<ReviewListItem[]> {
-  const q = new URLSearchParams({ limit: String(limit) })
+export type ReviewFilter = 'all' | 'open' | 'recheck' | 'ready'
+// next_before: 이어서 볼 때 넘길 번호 — null이면 조건에 맞는 검토를 끝까지 살펴봄 ('다시 검사 필요'는 items가 비어도 남을 수 있음)
+export type ReviewPage = { items: ReviewListItem[]; next_before: number | null }
+// 볼 수 있는 검토 전체의 상태별 건수 (목록에 불러온 범위와 상관없음)
+export type ReviewCounts = { total: number; live: number; open: number; ready: number; superseded: number; recheck: number }
+
+/** 상태 조건을 서버에서 먼저 걸고 최신 순으로 나눠 받는다 (before = 앞 쪽의 next_before). */
+export async function listReviews(
+  filter: ReviewFilter,
+  includeSuperseded: boolean,
+  before: number | null = null,
+  limit = 50,
+): Promise<ReviewPage> {
+  const q = new URLSearchParams({ filter, limit: String(limit) })
   if (includeSuperseded) q.set('include_superseded', 'true')
+  if (before !== null) q.set('before', String(before))
   return json(await apiFetch(`${API_BASE}/reviews?${q.toString()}`))
+}
+
+export async function countReviews(): Promise<ReviewCounts> {
+  return json(await apiFetch(`${API_BASE}/reviews/counts`))
 }
 
 export async function listAllRuns(limit = 100): Promise<IntegrationRun[]> {

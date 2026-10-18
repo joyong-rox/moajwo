@@ -1,12 +1,21 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { listReviews, runDownloadUrl, type Review, type ReviewListItem } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  countReviews,
+  listReviews,
+  runDownloadUrl,
+  type Review,
+  type ReviewCounts,
+  type ReviewFilter,
+  type ReviewListItem,
+} from './api'
 import { isManager, useAuth } from './authContext'
 import ReviewPanel from './ReviewPanel'
 import { navigate, replaceSearch, useSearch } from './router'
 import { formatTime } from './runFormat'
 import { Icon, StatusCards, type IconName, type Tone } from './Workflow'
 
-type Filter = 'open' | 'recheck' | 'ready' | 'all'
+type Filter = ReviewFilter
+const PAGE = 50 // 한 번에 불러오는 검토 수 (더 오래된 검토는 '더 보기'로 이어서)
 
 const FILTER_TEXT: Record<Filter, string> = {
   open: '검토 중',
@@ -22,6 +31,14 @@ function stateOf(r: ReviewListItem): { text: string; tone: Tone; icon: IconName 
   return { text: '검토 중', tone: 'review', icon: 'clock' }
 }
 
+// 불러온 목록은 어느 조건(key)으로 받았는지와 함께 둔다 — 조건이 바뀌면 그 목록을 쓰지 않는다
+type Loaded = { key: string; items: ReviewListItem[]; next: number | null; error: string | null }
+
+function totalFor(filter: Filter, withOld: boolean, c: ReviewCounts): number {
+  if (filter === 'all') return withOld ? c.total : c.live
+  return filter === 'open' ? c.open : filter === 'ready' ? c.ready : c.recheck
+}
+
 function reviewIdFrom(search: string): number | null {
   const id = Number(new URLSearchParams(search).get('review'))
   return Number.isInteger(id) && id > 0 ? id : null
@@ -33,46 +50,75 @@ function Reviews() {
   const showUser = isManager(me.role)
   const search = useSearch()
   const openId = reviewIdFrom(search)
-  const [rows, setRows] = useState<ReviewListItem[] | null>(null)
-  const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<Filter>('all') // 처음엔 대체되지 않은 검토 전부 (완료·다시 검사 필요도 바로 보이게)
   const [withOld, setWithOld] = useState(false)
+  const [reload, setReload] = useState(0)
+  const [loaded, setLoaded] = useState<Loaded | null>(null)
+  const [more, setMore] = useState<{ key: string; before: number } | null>(null)
+  const [counts, setCounts] = useState<ReviewCounts | null>(null)
+  const [countsError, setCountsError] = useState(false)
+  const listSeq = useRef(0) // 마지막 요청만 화면에 반영한다 (늦게 도착한 이전 조건의 응답은 버림)
+  const countSeq = useRef(0)
+  const key = `${filter}|${withOld}|${reload}`
 
-  const load = useCallback(() => {
-    let alive = true
-    listReviews(withOld)
-      .then((list) => {
-        if (!alive) return
-        setRows(list)
-        setError(null)
+  // 상태 조건은 서버에서 먼저 걸고 첫 쪽부터 받는다 — 조건·새로고침이 바뀌거나 상세에서 돌아오면 다시
+  useEffect(() => {
+    if (openId !== null) return
+    const mine = ++listSeq.current
+    listReviews(filter, withOld, null, PAGE)
+      .then((page) => {
+        if (listSeq.current === mine) setLoaded({ key, items: page.items, next: page.next_before, error: null })
       })
-      .catch((err: unknown) => alive && setError(`검토 목록을 불러오지 못했습니다: ${err instanceof Error ? err.message : err}`))
-    return () => {
-      alive = false
-    }
-  }, [withOld])
+      .catch((err: unknown) => {
+        if (listSeq.current !== mine) return
+        const error = `검토 목록을 불러오지 못했습니다: ${err instanceof Error ? err.message : err}`
+        setLoaded({ key, items: [], next: null, error })
+      })
+  }, [filter, withOld, key, openId])
 
-  useEffect(() => (openId === null ? load() : undefined), [load, openId])
+  // 카드 숫자: 볼 수 있는 검토 전체의 건수 (불러온 쪽과 상관없음)
+  useEffect(() => {
+    if (openId !== null) return
+    const mine = ++countSeq.current
+    countReviews()
+      .then((c) => {
+        if (countSeq.current !== mine) return
+        setCounts(c)
+        setCountsError(false)
+      })
+      .catch(() => countSeq.current === mine && setCountsError(true))
+  }, [reload, openId])
 
-  const counts = useMemo(() => {
-    const c: Record<Filter, number> = { open: 0, recheck: 0, ready: 0, all: rows?.length ?? 0 }
-    for (const r of rows ?? []) {
-      if (r.status === 'superseded') continue
-      if (r.needs_recheck) c.recheck += 1
-      if (r.status === 'in_review') c.open += 1
-      if (r.status === 'ready') c.ready += 1
-    }
-    return c
-  }, [rows])
-  const shown = (rows ?? []).filter((r) =>
-    filter === 'all'
-      ? true
-      : filter === 'recheck'
-        ? r.needs_recheck
-        : filter === 'open'
-          ? r.status === 'in_review'
-          : r.status === 'ready',
-  )
+  const current = loaded?.key === key ? loaded : null
+  const loadingMore = current !== null && more?.key === key && more.before === current.next
+
+  function loadMore() {
+    if (current === null || current.next === null || loadingMore) return
+    const mine = listSeq.current
+    const before = current.next
+    setMore({ key, before })
+    listReviews(filter, withOld, before, PAGE)
+      .then((page) => {
+        if (listSeq.current !== mine) return
+        setLoaded((prev) => {
+          if (prev === null || prev.key !== key || prev.next !== before) return prev
+          const seen = new Set(prev.items.map((r) => r.id))
+          return { ...prev, items: [...prev.items, ...page.items.filter((r) => !seen.has(r.id))], next: page.next_before }
+        })
+      })
+      .catch((err: unknown) => {
+        if (listSeq.current !== mine) return
+        setLoaded((prev) =>
+          prev && prev.key === key
+            ? { ...prev, error: `더 불러오지 못했습니다: ${err instanceof Error ? err.message : err}` }
+            : prev,
+        )
+      })
+      .finally(() => setMore((m) => (m?.key === key && m.before === before ? null : m)))
+  }
+
+  const shown = current?.items ?? []
+  const total = counts ? totalFor(filter, withOld, counts) : null
 
   // 열어 둔 검토가 다시 검사로 바뀌면 주소도 새 검토로 (새로고침하면 최신 검토가 열림)
   const onLoaded = useCallback(
@@ -85,10 +131,16 @@ function Reviews() {
   if (openId !== null) {
     return (
       <section className="wk wk-reviews" aria-label="검토">
-        <button type="button" className="mapping-confirm" onClick={() => navigate('/reviews')}>
+        {/* 검색 조건(?review=)을 지우고 목록으로 — 같은 경로라도 이동한다 */}
+        <button type="button" className="mapping-confirm" onClick={() => navigate('/reviews', { clearSearch: true })}>
           ← 검토 목록으로
         </button>
-        <ReviewPanel key={openId} reviewId={openId} onClose={() => navigate('/reviews')} onLoaded={onLoaded} />
+        <ReviewPanel
+          key={openId}
+          reviewId={openId}
+          onClose={() => navigate('/reviews', { clearSearch: true })}
+          onLoaded={onLoaded}
+        />
       </section>
     )
   }
@@ -97,7 +149,7 @@ function Reviews() {
     <section className="wk wk-reviews runs" aria-label="검토 목록">
       <div className="runs-head">
         <h2>검토 목록</h2>
-        <button type="button" className="mapping-confirm" onClick={() => load()}>
+        <button type="button" className="mapping-confirm" onClick={() => setReload((v) => v + 1)}>
           새로고침
         </button>
       </div>
@@ -111,23 +163,42 @@ function Reviews() {
         picked={filter}
         onPick={(key) => setFilter(key as Filter)}
         cards={[
-          { key: 'all', label: FILTER_TEXT.all, count: counts.all, tone: 'info', icon: 'list' },
-          { key: 'open', label: FILTER_TEXT.open, count: counts.open, tone: 'review', icon: 'clock' },
-          { key: 'recheck', label: FILTER_TEXT.recheck, count: counts.recheck, tone: 'recheck', icon: 'recheck' },
-          { key: 'ready', label: FILTER_TEXT.ready, count: counts.ready, tone: 'ok', icon: 'check' },
+          { key: 'all', label: FILTER_TEXT.all, count: counts ? totalFor('all', withOld, counts) : '…', tone: 'info', icon: 'list' },
+          { key: 'open', label: FILTER_TEXT.open, count: counts?.open ?? '…', tone: 'review', icon: 'clock' },
+          {
+            key: 'recheck',
+            label: FILTER_TEXT.recheck,
+            count: counts?.recheck ?? '…',
+            tone: 'recheck',
+            icon: 'recheck',
+          },
+          { key: 'ready', label: FILTER_TEXT.ready, count: counts?.ready ?? '…', tone: 'ok', icon: 'check' },
         ]}
       />
+      <p className="mw-muted wk-count-scope">
+        {countsError
+          ? '상태별 건수를 불러오지 못했습니다 — 새로고침하세요. 목록은 아래에서 계속 볼 수 있습니다.'
+          : `카드 숫자는 볼 수 있는 검토 전체 기준입니다(대체된 검토 ${withOld ? '포함' : '제외'}) — 아래 목록에 불러온 범위와 상관없습니다.`}
+      </p>
       <label className="review-remember">
         <input type="checkbox" checked={withOld} onChange={(e) => setWithOld(e.target.checked)} />
         다시 검사로 대체된 이전 검토도 보기
       </label>
-      {error && (
+      {current?.error && (
         <p className="upload-error" role="alert">
-          {error}
+          {current.error}
         </p>
       )}
-      {rows === null && !error && <p className="mw-muted">불러오는 중…</p>}
-      {rows !== null && shown.length === 0 && <p className="upload-drop-hint">해당하는 검토가 없습니다.</p>}
+      {current === null && <p className="mw-muted">불러오는 중…</p>}
+      {/* '없음'은 끝까지 살펴봤을 때만 — 아직 보지 않은 더 오래된 검토가 있으면 그렇게 말한다 */}
+      {current !== null && !current.error && shown.length === 0 && current.next === null && (
+        <p className="upload-drop-hint">해당하는 검토가 없습니다.</p>
+      )}
+      {current !== null && shown.length === 0 && current.next !== null && (
+        <p className="upload-drop-hint">
+          최근 검토부터 살펴봤지만 아직 찾지 못했습니다. 더 오래된 검토가 남아 있습니다 — '더 찾아보기'를 누르세요.
+        </p>
+      )}
       {shown.length > 0 && (
         <div className="runs-scroll">
           <table className="runs-table wk-review-table">
@@ -184,6 +255,19 @@ function Reviews() {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+      {current !== null && (shown.length > 0 || current.next !== null) && (
+        <div className="wk-list-more">
+          <span role="status">
+            {shown.length}개 표시{total !== null && ` · 전체 ${total}개`}
+            {current.next === null ? ' · 끝까지 봤습니다' : ''}
+          </span>
+          {current.next !== null && (
+            <button type="button" className="mapping-confirm" onClick={loadMore} disabled={loadingMore}>
+              {loadingMore ? '불러오는 중…' : filter === 'recheck' ? '더 찾아보기' : `더 보기 (${PAGE}개씩)`}
+            </button>
+          )}
         </div>
       )}
     </section>

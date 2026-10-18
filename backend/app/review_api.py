@@ -241,52 +241,130 @@ def _latest(db: Session, session: ReviewSession) -> int:
     return current
 
 
-@router.get("", response_model=list[ReviewListItem])
+ReviewFilter = Literal["all", "open", "recheck", "ready"]
+PAGE_MAX = 100  # 한 번에 돌려주는 검토 수 상한 (더 오래된 검토는 next_before로 이어서)
+RECHECK_SCAN = 300  # '다시 검사 필요'는 계산해야 알므로 한 번에 살펴보는 검토 수 (못 다 보면 이어서 찾기)
+
+
+class ReviewPage(BaseModel):
+    items: list[ReviewListItem]
+    # 이어서 볼 때 before로 넘길 값 — None이면 조건에 맞는 검토를 끝까지 살펴봤다.
+    # '다시 검사 필요'는 items가 비어 있어도 값이 있을 수 있다 (아직 살펴보지 않은 더 오래된 검토가 남음).
+    next_before: int | None
+
+
+class ReviewCounts(BaseModel):
+    """볼 수 있는 검토 전체의 상태별 건수 (목록에 불러온 범위와 상관없음)."""
+
+    total: int  # 대체된 검토 포함
+    live: int  # 대체된 검토 제외
+    open: int  # 검토 중
+    ready: int  # 검토 완료
+    superseded: int
+    recheck: int  # 다시 검사 필요 (대체된 검토 제외)
+
+
+def _visible(stmt: Any, user: CurrentUser) -> Any:
+    """볼 수 있는 범위는 단건 조회와 같다: 일반 사용자는 자기 검토, 최고 관리자는 전체."""
+    return stmt if user.is_manager else stmt.where(ReviewSession.created_by == user.id)
+
+
+def _list_item(db: Session, session: ReviewSession, user: CurrentUser, needs_recheck: bool) -> ReviewListItem:
+    fids = json.loads(session.file_ids)
+    names = [mask_text(r.original_name) if (r := db.get(SourceFile, f)) else "?" for f in fids[:LIST_FILE_NAMES]]
+    creator = db.get(User, session.created_by) if session.created_by is not None else None
+    automation = db.get(Automation, session.automation_id) if session.automation_id is not None else None
+    runs = select(IntegrationRun.id).where(IntegrationRun.review_session_id == session.id)
+    return ReviewListItem(
+        id=session.id,
+        status=session.status,
+        status_label=REVIEW_STATUS_LABEL.get(session.status, session.status),
+        needs_recheck=needs_recheck,
+        file_count=len(fids),
+        file_names=names,
+        created_at=session.created_at,
+        completed_at=session.completed_at,
+        created_by=session.created_by,
+        created_by_name=creator.display_name if creator is not None else None,
+        automation_name=automation.name if automation is not None else None,
+        latest_id=_latest(db, session) if session.status == "superseded" else session.id,
+        run_count=db.scalar(select(func.count()).select_from(runs.subquery())) or 0,
+        last_run_id=db.scalar(runs.where(IntegrationRun.status == "done").order_by(IntegrationRun.id.desc()).limit(1)),
+        can_edit=session.created_by == user.id or (session.created_by is None and user.is_manager),
+    )
+
+
+def _needs_recheck(db: Session, session: ReviewSession) -> bool:
+    return session.status != "superseded" and bool(recheck_reasons(db, session))
+
+
+@router.get("", response_model=ReviewPage)
 def list_reviews(
     db: Annotated[Session, Depends(get_session)],
     user: CurrentUserDep,
-    status_filter: Annotated[Literal["in_review", "ready", "superseded"] | None, Query(alias="status")] = None,
+    filter_: Annotated[ReviewFilter, Query(alias="filter")] = "all",
     include_superseded: bool = False,
-    limit: Annotated[int, Query(ge=1, le=200)] = 50,
-) -> list[ReviewListItem]:
+    limit: Annotated[int, Query(ge=1, le=PAGE_MAX)] = 50,
+    before: Annotated[int | None, Query(ge=1)] = None,
+) -> ReviewPage:
     """검토 목록 (최신 순, 조회 전용) — 결과를 아직 만들지 않은 검토도 찾아 이어갈 수 있게 한다.
-    볼 수 있는 범위는 단건 조회와 같다: 일반 사용자는 자기 검토, 최고 관리자는 전체 (남의 검토는 can_edit=False)."""
-    stmt = select(ReviewSession).order_by(ReviewSession.id.desc()).limit(limit)
-    if not user.is_manager:
-        stmt = stmt.where(ReviewSession.created_by == user.id)
-    if status_filter is not None:
-        stmt = stmt.where(ReviewSession.status == status_filter)
-    elif not include_superseded:
+
+    상태 조건을 먼저 걸고 그 결과를 번호 순으로 나눠 준다 (최신 몇 개를 받은 뒤 거르지 않음).
+    before를 주면 그 번호보다 오래된 검토부터 — 응답의 next_before를 그대로 넘기면 빠짐·겹침 없이 이어진다.
+    '다시 검사 필요'(filter=recheck)는 저장된 상태가 아니라 계산해야 알므로 최신 순으로 살펴보며 채우고,
+    한 번에 RECHECK_SCAN개까지만 본다 (모델 호출·원본 읽기·쓰기 없음 — recheck_reasons).
+    include_superseded는 '전체'에만 쓴다 (대체된 검토는 검토 중·완료·다시 검사 필요가 아님).
+    """
+    stmt = _visible(select(ReviewSession).order_by(ReviewSession.id.desc()), user)
+    if before is not None:
+        stmt = stmt.where(ReviewSession.id < before)
+    if filter_ == "open":
+        stmt = stmt.where(ReviewSession.status == "in_review")
+    elif filter_ == "ready":
+        stmt = stmt.where(ReviewSession.status == "ready")
+    elif filter_ == "recheck" or not include_superseded:
         stmt = stmt.where(ReviewSession.status != "superseded")
-    out = []
-    for session in db.scalars(stmt):
-        fids = json.loads(session.file_ids)
-        names = [mask_text(r.original_name) if (r := db.get(SourceFile, f)) else "?" for f in fids[:LIST_FILE_NAMES]]
-        creator = db.get(User, session.created_by) if session.created_by is not None else None
-        automation = db.get(Automation, session.automation_id) if session.automation_id is not None else None
-        runs = select(IntegrationRun.id).where(IntegrationRun.review_session_id == session.id)
-        out.append(
-            ReviewListItem(
-                id=session.id,
-                status=session.status,
-                status_label=REVIEW_STATUS_LABEL.get(session.status, session.status),
-                needs_recheck=session.status != "superseded" and bool(recheck_reasons(db, session)),
-                file_count=len(fids),
-                file_names=names,
-                created_at=session.created_at,
-                completed_at=session.completed_at,
-                created_by=session.created_by,
-                created_by_name=creator.display_name if creator is not None else None,
-                automation_name=automation.name if automation is not None else None,
-                latest_id=_latest(db, session) if session.status == "superseded" else session.id,
-                run_count=db.scalar(select(func.count()).select_from(runs.subquery())) or 0,
-                last_run_id=db.scalar(
-                    runs.where(IntegrationRun.status == "done").order_by(IntegrationRun.id.desc()).limit(1)
-                ),
-                can_edit=session.created_by == user.id or (session.created_by is None and user.is_manager),
-            )
+
+    if filter_ != "recheck":
+        rows = list(db.scalars(stmt.limit(limit + 1)))
+        page = rows[:limit]
+        return ReviewPage(
+            items=[_list_item(db, s, user, _needs_recheck(db, s)) for s in page],
+            next_before=page[-1].id if len(rows) > limit else None,
         )
-    return out
+
+    items: list[ReviewListItem] = []
+    rows = list(db.scalars(stmt.limit(RECHECK_SCAN + 1)))
+    next_before = None
+    for i, session in enumerate(rows[:RECHECK_SCAN]):
+        if _needs_recheck(db, session):
+            items.append(_list_item(db, session, user, True))
+        if len(items) == limit or i == RECHECK_SCAN - 1:
+            # 여기서 멈춘다 — 살펴보지 않은 더 오래된 검토가 남았으면 이 번호부터 이어서
+            next_before = session.id if i < len(rows) - 1 else None
+            break
+    return ReviewPage(items=items, next_before=next_before)
+
+
+@router.get("/counts", response_model=ReviewCounts)
+def review_counts(db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> ReviewCounts:
+    """상태 카드용 전체 건수 (볼 수 있는 범위 전체, 조회 전용). '다시 검사 필요'는 대체되지 않은 검토마다 계산한다."""
+    by_status = dict(
+        db.execute(
+            _visible(select(ReviewSession.status, func.count()).group_by(ReviewSession.status), user)
+        ).all()  # fmt: skip
+    )
+    live = _visible(select(ReviewSession).where(ReviewSession.status != "superseded"), user)
+    total = sum(by_status.values())
+    superseded = by_status.get("superseded", 0)
+    return ReviewCounts(
+        total=total,
+        live=total - superseded,
+        open=by_status.get("in_review", 0),
+        ready=by_status.get("ready", 0),
+        superseded=superseded,
+        recheck=sum(1 for s in db.scalars(live) if recheck_reasons(db, s)),
+    )
 
 
 @router.get("/{review_id}", response_model=ReviewOut)
