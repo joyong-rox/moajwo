@@ -947,8 +947,8 @@ export type StoredMapping = {
   sheets: { sheet_id: string; name: string; columns: ColumnMapping[] }[]
 }
 
-export async function fetchLatestMapping(fileId: number): Promise<StoredMapping> {
-  return json(await apiFetch(`${API_BASE}/files/${fileId}/mapping/latest`))
+export async function fetchLatestMapping(fileId: number, signal?: AbortSignal): Promise<StoredMapping> {
+  return json(await apiFetch(`${API_BASE}/files/${fileId}/mapping/latest`, { signal }))
 }
 
 export type PreviewColumn = { column_id: string; name: string; letter: string }
