@@ -25,9 +25,10 @@ from app.glossary import Glossary, Resolution, parse_date_value, period_end, pre
 from app.mapping import load_dictionary
 from app.parsing import Cell, SheetResult, is_missing, is_subtotal_label
 from app.pii import mask_cell
+from app.quantity import QUANTITY_FIELDS, quantity_value
 
 BlockCode = Literal["sum_mismatch", "required_entity_missing", "period_mismatch"]
-WarningCode = Literal["mom_outlier", "blank_value", "unit_estimate", "header_missing"]
+WarningCode = Literal["mom_outlier", "blank_value", "unit_estimate", "header_missing", "quantity_not_number"]
 Status = Literal["blocked", "pii_confirmation_required", "passed_with_warnings", "passed"]
 
 BLOCK_LABEL: dict[str, str] = {
@@ -40,6 +41,7 @@ WARNING_LABEL: dict[str, str] = {
     "blank_value": "공백 값",
     "unit_estimate": "단위 추정",
     "header_missing": "헤더 확인 필요",
+    "quantity_not_number": "수량으로 계산하지 못한 값",
 }
 
 # 합산하면 안 되는 항목 (비율·연월·코드·연락처)
@@ -136,8 +138,9 @@ class MappedColumn:
 
 @dataclass
 class SheetInput:
-    sheet: SheetResult
+    sheet: SheetResult  # 확정한 수량 열은 계산용 값으로 바꾼 시트 (app.quantity.quantity_sheet)
     columns: list[MappedColumn]  # 확정·자동 적용된 매핑만
+    quantity_columns: frozenset[int] = frozenset()  # 사용자가 수량 항목으로 확정한 열
 
     def by_field(self, key: str) -> list[MappedColumn]:
         return [c for c in self.columns if c.field_key == key]
@@ -268,6 +271,13 @@ STOCK_FIELDS = frozenset(
         "government_use", "private_use", "commercial_use",
     }
 )  # fmt: skip
+PERIOD_FIELDS = frozenset({"year", "month", "base_date"})  # 기간 검사·기관 이름 해석 기준일의 근거
+# 검사가 표준 항목 key로 읽는 항목 — 열을 이 항목으로 연결하거나 바꾸면 검사 결과가 달라질 수 있다
+# (기간 / 기관·지역 / 합산 제외·시점 값·합계 / 수량·금액). 새 검사에서 항목 key를 읽으면 여기에도 넣는다.
+# 그 밖의 항목도 열에 빈 칸·숫자가 있으면 공백 경고·합계·전월·단위 비교에 쓰인다 (review._effect_free가 함께 본다).
+CHECKED_FIELDS = frozenset(
+    QUANTITY_FIELDS | MONEY_FIELDS | NON_ADDITIVE_FIELDS | STOCK_FIELDS | {"total"} | set(ENTITY_FIELDS) | PERIOD_FIELDS
+)
 # 파일명·시트명·제목에서만 찾는다 ('인구' 같은 넓은 단어는 '전입 인구' 같은 발생 실적에도 쓰여 근거로 쓰지 않음)
 _STOCK_WORDS = (
     "등록대수",
@@ -476,6 +486,8 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
             numbers = [p for p in parts if _is_number(p)]
             if not numbers:
                 continue
+            # 글자로 남아 합계에 넣지 않은 하위 값 (결측 표기 제외) — 실제 불일치와 일부를 읽지 못한 경우를 문구로 구분
+            unread = sum(1 for p in parts if isinstance(p, str) and p.strip() and not is_missing(p))
             computed = math.fsum(numbers)
             # 표시 단위 반올림 허용: 하위 행 수 × 마지막 자리의 절반
             unit = 10 ** -max([_decimals(total), *(_decimals(n) for n in numbers)])
@@ -485,7 +497,8 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
                     BlockIssue(
                         "sum_mismatch",
                         f"'{label}' 행의 '{columns[j]}' 값 {_fmt(total)}이(가) 하위 {len(numbers)}행 합계 "
-                        f"{_fmt(computed)}와(과) 다릅니다 (차이 {_fmt(total - computed)}).",
+                        f"{_fmt(computed)}와(과) 다릅니다 (차이 {_fmt(total - computed)})."
+                        + (f" 글자로 남아 합계에 넣지 않은 하위 값 {unread}개가 있습니다." if unread else ""),
                         file.file_id,
                         file.file_name,
                         sheet.sheet.name,
@@ -1003,6 +1016,57 @@ def check_blanks(file: FileInput, sheet: SheetInput) -> list[WarningIssue]:
     return issues
 
 
+def check_quantity_text(file: FileInput, sheet: SheetInput) -> list[WarningIssue]:
+    """수량 항목 열인데 글자로 남아 합계 검사·계산에서 빠지는 값을 알린다 (검사를 건너뛴 채 정상 통과로 두지 않음).
+
+    - 사용자가 확정한 수량 열: 계산용 값으로 바꾼 뒤에도 숫자로 읽을 수 없는 값 (문자·앞자리 0이 있는 숫자 글자 등)
+    - 자동 적용된 수량 열 (확정 아님): 숫자로 읽을 수 있지만 원문 보존(식별자·코드 이름 등)으로 글자로 남은 값 —
+      자동 제안만으로는 원문을 숫자로 바꾸지 않으므로, 수량이면 열 매핑에서 확정하도록 안내한다.
+    빈 칸과 결측·비공개 표기('-', 'x', '…' 등)는 대상이 아니다 (기존 규칙대로 처리).
+    """
+    labels = _field_labels()
+    auto = {
+        c.index: c.field_key
+        for c in sheet.columns
+        if c.field_key in QUANTITY_FIELDS and c.index not in sheet.quantity_columns
+    }
+    issues = []
+    for j in sorted(set(sheet.quantity_columns) | set(auto)):
+        texts = [
+            (r["row"], r["cells"][j])
+            for r in sheet.sheet.body
+            if r["kind"] in ("data", "subtotal")
+            and j < len(r["cells"])
+            and isinstance(r["cells"][j], str)
+            and r["cells"][j].strip()
+            and not is_missing(r["cells"][j])
+        ]
+        confirmed = j in sheet.quantity_columns
+        bad = texts if confirmed else [(row, v) for row, v in texts if not isinstance(quantity_value(v), str)]
+        if not bad:
+            continue
+        name = sheet.sheet.columns[j]
+        shown = ", ".join(f"{row}행 '{mask_cell(value)}'" for row, value in bad[:3]) + (" …" if len(bad) > 3 else "")
+        if confirmed:
+            message = (
+                f"'{name}' 열은 수량 항목으로 확정했지만 숫자로 읽을 수 없는 값 {len(bad)}개가 있어 "
+                f"합계 검사·계산에서 빠집니다 ({shown})"
+            )
+        else:
+            message = (
+                f"'{name}' 열은 '{labels.get(auto[j], auto[j])}'(으)로 자동 적용됐지만 값 {len(bad)}개가 "
+                f"원문 글자로 보존되어(식별자·코드 이름 등) 합계 검사·계산을 하지 않았습니다 — "
+                f"수량이면 열 매핑에서 확정하세요 ({shown})"
+            )
+        issues.append(
+            WarningIssue(
+                "quantity_not_number", message, file.file_id, file.file_name, sheet.sheet.name, bad[0][0], name,
+                actual=len(bad),
+            )
+        )  # fmt: skip
+    return issues
+
+
 # ---------------------------------------------------------------- 경고: 단위 추정
 
 UNIT_SCALE: dict[str, tuple[str, float]] = {
@@ -1158,6 +1222,7 @@ def validate(
         for s in f.sheets:
             warnings.extend(check_header(f, s))
             warnings.extend(check_blanks(f, s))
+            warnings.extend(check_quantity_text(f, s))
     warnings.extend(check_units(files))
 
     pii = [

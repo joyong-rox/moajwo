@@ -229,7 +229,13 @@ def test_unit_estimate_warnings(tmp_path: Path) -> None:
 def test_block_and_warning_codes_are_disjoint() -> None:
     assert not set(get_args(BlockCode)) & set(get_args(WarningCode))
     assert set(get_args(BlockCode)) == {"sum_mismatch", "required_entity_missing", "period_mismatch"}
-    assert set(get_args(WarningCode)) == {"mom_outlier", "blank_value", "unit_estimate", "header_missing"}
+    assert set(get_args(WarningCode)) == {
+        "mom_outlier",
+        "blank_value",
+        "unit_estimate",
+        "header_missing",
+        "quantity_not_number",
+    }
 
 
 def test_status_precedence_and_separation(tmp_path: Path) -> None:

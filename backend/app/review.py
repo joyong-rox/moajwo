@@ -16,6 +16,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import MANAGERS
+from app.check_basis import (
+    BASIS_VERSION,
+    CHECK_BASIS_KEY,
+    INTERNAL_PARAMS,
+    LEGACY_REASON,
+    Decisions,
+    basis_changes,
+    build_basis,
+    column_facts,
+    confirmed_entry,
+    effect_free,
+)
 from app.decisions import DecisionInput, learn_column, load_decisions, load_learned, load_org_codes, save_decisions
 from app.files import load_parsed
 from app.glossary import normalize_name
@@ -25,6 +37,7 @@ from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, R
 from app.parsing import FileResult, SheetResult
 from app.pii import PII_LABEL, has_pii
 from app.promotion import load_standard, record_approval
+from app.quantity import confirmed_quantity_indexes, quantity_sheet
 from app.validation import (
     EntityResolver,
     FileInput,
@@ -206,6 +219,7 @@ class _Loaded:
     record: SourceFile
     parsed: FileResult
     mappings: dict[str, list[ColumnMapping]]  # 시트 → 열 매핑
+    decisions: Decisions  # 이 검사에 쓴 확정
 
 
 def _load(
@@ -231,22 +245,21 @@ def _load(
         ).columns
         for sheet in parsed.sheets
     }
-    return _Loaded(record, parsed, mappings)
+    return _Loaded(record, parsed, mappings, decisions)
 
 
 def _file_input(loaded: _Loaded) -> FileInput:
     record = loaded.record
-    sheets = [
-        SheetInput(
-            sheet,
-            [
-                MappedColumn(i, c.column, c.field_key, c.qualifier)
-                for i, c in enumerate(loaded.mappings[sheet.name])
-                if c.field_key and c.status in ("confirmed", "auto")
-            ],
-        )
-        for sheet in loaded.parsed.sheets
-    ]
+    sheets = []
+    for sheet in loaded.parsed.sheets:
+        mappings = loaded.mappings[sheet.name]
+        quantity = confirmed_quantity_indexes(mappings)  # 사용자가 수량 항목으로 확정한 열은 계산용 값으로 검사
+        columns = [
+            MappedColumn(i, c.column, c.field_key, c.qualifier)
+            for i, c in enumerate(mappings)
+            if c.field_key and c.status in ("confirmed", "auto")
+        ]
+        sheets.append(SheetInput(quantity_sheet(sheet, quantity), columns, quantity))
     summary = json.loads(record.pii_summary) if record.pii_summary else {"counts": {}, "items": []}
     return FileInput(
         record.id,
@@ -272,6 +285,7 @@ def create_session(
     자동화에 없는 새 열만 확인 필요로 남긴다.
     user_id: 검토를 만든 사용자 (그 사용자의 학습 별칭을 쓰고, 승인·완료는 이 사용자만 한다)
     """
+    params = {k: v for k, v in params.items() if k not in INTERNAL_PARAMS}  # 다시 검사면 새로 계산한다
     engine = get_engine()
     rules = AutomationRules.of(automation) if automation is not None else None
     if rules is not None:
@@ -298,10 +312,14 @@ def create_session(
     if inferred:
         params["name_period"] = name_period
     run = save_run(db, json.dumps(params, ensure_ascii=False), result, user_id)
+    # 검사 기준: 이 검사에 적용한 매핑 (검토 대상 + 전월 비교 자료) — 완료·통합 전에 지금 매핑과 비교한다
+    basis = build_basis(
+        [(t.record.id, t.mappings) for t in [*targets, *baseline]], [b.record.id for b in baseline], learned, standard
+    )
 
     session = ReviewSession(
         status="in_review",
-        params=json.dumps(params, ensure_ascii=False),
+        params=json.dumps({**params, CHECK_BASIS_KEY: basis}, ensure_ascii=False),
         file_ids=json.dumps([t.record.id for t in targets]),
         excluded_file_ids="[]",
         validation_run_id=run.id,
@@ -409,6 +427,7 @@ def _pii_items(targets: list[_Loaded]) -> list[ReviewItem]:
 def _mapping_items(loaded: _Loaded, rules: AutomationRules | None = None) -> list[ReviewItem]:
     items = []
     for sheet in loaded.parsed.sheets:
+        facts = column_facts(sheet)
         for m in loaded.mappings[sheet.name]:
             reason, source = mapping_reason(m)
             in_rules = rules is not None and column_rule_key(m.column) in rules.columns
@@ -421,6 +440,8 @@ def _mapping_items(loaded: _Loaded, rules: AutomationRules | None = None) -> lis
                 "candidates": [{"key": c.key, "label": c.label, "score": c.score} for c in m.candidates],
                 "method": m.method,
                 "score": m.score,
+                # 검토에서 승인할 때 검사 입력이 그대로인지 판단하는 근거 (check_basis.effect_free)
+                **facts.get(m.column, {}),
             }
             common = {
                 "file_id": loaded.record.id,
@@ -613,9 +634,29 @@ class Summary:
     auto: int
     warnings: int
     can_complete: bool
+    needs_recheck: bool = False  # 검사 기준과 지금 매핑이 달라 이 검사 결과로 완료·통합할 수 없음 (다시 검사 필요)
 
 
-def summarize(session: ReviewSession, items: list[ReviewItem]) -> Summary:
+def recheck_reasons(db: Session, session: ReviewSession) -> list[str]:
+    """이 검토의 검사 결과로 완료·통합할 수 없는 이유 — 검사 기준(검사에 적용한 매핑)과 지금이 다른 점.
+
+    파일은 읽지 않고 모델도 부르지 않는다 (확정값·학습 별칭·전사 표준 사전만 조회 — check_basis.basis_changes).
+    개인정보 때문에 제외한 파일은 통합하지 않으므로 보지 않고, 전월 비교 자료는 검사에 썼으므로 본다.
+    기준을 기록하기 전 버전의 검토는 같은지 확인할 수 없으므로 다시 검사가 필요하다.
+    """
+    if session.status == "superseded":
+        return []
+    basis = json.loads(session.params).get(CHECK_BASIS_KEY)
+    if not basis or basis.get("v") != BASIS_VERSION:
+        return [LEGACY_REASON]
+    excluded = set(json.loads(session.excluded_file_ids))
+    fids = [f for f in json.loads(session.file_ids) if f not in excluded] + list(basis.get("baseline", []))
+    decisions: dict[int, Decisions] = {f: load_decisions(db, f) for f in fids}
+    return basis_changes(db, basis, decisions, load_learned(db, session.created_by), load_standard(db))
+
+
+def summarize(session: ReviewSession, items: list[ReviewItem], recheck: list[str] | None = None) -> Summary:
+    """recheck: recheck_reasons() 결과 — 있으면 완료할 수 없고 (통합도 막힘) 다시 검사하라고 안내한다."""
     excluded = set(json.loads(session.excluded_file_ids))
     active = [i for i in items if i.file_id is None or i.file_id not in excluded or i.kind == "pii"]
     blocks = sum(1 for i in active if i.category == "block")
@@ -629,8 +670,17 @@ def summarize(session: ReviewSession, items: list[ReviewItem]) -> Summary:
     if blocks:
         score = min(score, BLOCKED_SCORE_CAP)
     score = max(0, score)
+    stale = bool(recheck) and session.status != "superseded"
     if session.status == "superseded":
         text = "다시 검사로 대체된 이전 검토입니다. 최신 검토에서 계속하세요."
+    elif stale:
+        assert recheck is not None
+        shown = "; ".join(recheck[:3]) + (f" 외 {len(recheck) - 3}건" if len(recheck) > 3 else "")
+        target = "통합" if session.status == "ready" else "완료·통합"
+        text = (
+            f"다시 검사 필요 — 이 검사 결과로 {target}할 수 없습니다 ({shown}). "
+            "다시 검사하면 지금 열 매핑으로 검사합니다."
+        )
     elif session.status == "ready":
         text = f"검토 완료 — 통합 준비가 끝났습니다 (자동 보정 {auto}건 적용 예정)."
     elif blocks:
@@ -639,7 +689,8 @@ def summarize(session: ReviewSession, items: list[ReviewItem]) -> Summary:
         text = f"확인 필요 {open_}건이 남았습니다 — 승인 또는 거부하면 통합할 수 있습니다."
     else:
         text = f"통합 가능 — 자동 보정 {auto}건이 적용됩니다" + (f" (경고 {warnings}건 확인)" if warnings else "") + "."
-    return Summary(score, text, blocks, len(pending), open_, auto, warnings, blocks == 0 and open_ == 0)
+    can_complete = blocks == 0 and open_ == 0 and not stale
+    return Summary(score, text, blocks, len(pending), open_, auto, warnings, can_complete, stale)
 
 
 def session_items(db: Session, session: ReviewSession) -> list[ReviewItem]:
@@ -660,7 +711,7 @@ def decide(db: Session, session: ReviewSession, item: ReviewItem, decision: str,
     payload = json.loads(item.payload)
     now = datetime.now(UTC)
     if item.kind == "mapping":
-        _decide_mapping(db, item, payload, decision, choice, session.created_by)
+        _decide_mapping(db, session, item, payload, decision, choice)
     elif item.kind == "entity":
         codes = [c["code"] for c in payload.get("candidates", [])]
         if decision == "approved":
@@ -682,7 +733,7 @@ def decide(db: Session, session: ReviewSession, item: ReviewItem, decision: str,
 
 
 def _decide_mapping(
-    db: Session, item: ReviewItem, payload: dict[str, Any], decision: str, choice: str | None, user_id: int | None
+    db: Session, session: ReviewSession, item: ReviewItem, payload: dict[str, Any], decision: str, choice: str | None
 ) -> None:
     engine = get_engine()
     labels = {f.key: f.label for f in engine.fields}
@@ -695,9 +746,17 @@ def _decide_mapping(
     assert item.file_id is not None and item.sheet is not None and item.column is not None
     save_decisions(db, engine, item.file_id, [DecisionInput(item.sheet, item.column, key)], learn=False)
     if key is not None:
-        record_approval(db, engine, user_id, item.column, key)  # 전사 표준 사전 승격 집계
+        record_approval(db, engine, session.created_by, item.column, key)  # 전사 표준 사전 승격 집계
     item.choice = key
     item.after = labels[key] if key else "(해당 없음)"
+    # 승인은 확정으로 남긴다. 검사 기준은 검사 입력이 그대로임을 확인한 승인만 이어 쓴다 — 나머지는 다시 검사해야
+    # 완료·통합할 수 있다 (승인했다는 이유만으로 기준을 최신으로 덮어쓰지 않음)
+    params = json.loads(session.params)
+    basis = params.get(CHECK_BASIS_KEY)
+    sheet_basis = basis["files"].get(str(item.file_id), {}).get(item.sheet) if basis else None
+    if sheet_basis is not None and effect_free(sheet_basis, item.column, payload, key):
+        sheet_basis[item.column] = confirmed_entry(item.column, key)
+        session.params = json.dumps(params, ensure_ascii=False)
 
 
 def _decide_pii(db: Session, session: ReviewSession, item: ReviewItem, decision: str, now: datetime) -> None:
@@ -722,7 +781,7 @@ def complete(db: Session, session: ReviewSession, learn_names: bool = True) -> d
     if session.status != "in_review":
         raise ReviewError("이미 검토가 끝난 세션입니다.")
     items = session_items(db, session)
-    summary = summarize(session, items)
+    summary = summarize(session, items, recheck_reasons(db, session))
     if not summary.can_complete:
         raise ReviewError(summary.summary)
     learned = {"columns": 0, "names": 0, "names_skipped": 0}

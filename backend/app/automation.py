@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.integration import KST, IntegrationError, integrate
 from app.mapping import get_engine
 from app.models import Automation, IntegrationRun, ReviewSession, SourceFile
-from app.review import column_rule_key, complete, create_session, session_items, summarize
+from app.review import column_rule_key, complete, create_session, recheck_reasons, session_items, summarize
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,7 @@ def run_automation(
     )
     db.add(run)
     db.commit()
-    if not summarize(session, session_items(db, session)).can_complete:
+    if not summarize(session, session_items(db, session), recheck_reasons(db, session)).can_complete:
         return run, session
     complete(db, session)
     try:
