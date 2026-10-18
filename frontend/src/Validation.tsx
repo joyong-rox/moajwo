@@ -23,6 +23,12 @@ const STATUS_TEXT: Record<ValidationStatus, string> = {
 
 const MAX_TARGETS = 50 // 서버의 한 번에 검사하는 파일 수 제한과 같음 (validation_api.MAX_FILES)
 
+// 안내에 보일 파일 번호 (많으면 앞 몇 개와 개수)
+function idList(ids: (number | string)[], shown = 5): string {
+  const head = ids.slice(0, shown).map((id) => `#${id}`).join(', ')
+  return ids.length > shown ? `${head} 외 ${ids.length - shown}개` : head
+}
+
 const ENTITY_OPTIONS = [
   { value: '', label: '자동 (기관명 → 시군구 → 행정구역 → 시도)' },
   { value: 'org_name', label: '기관명' },
@@ -57,26 +63,32 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
   const wanted = window.location.pathname === '/' ? new URLSearchParams(search).get('files') : null
 
   // 열 매핑 화면의 '다음: 이 파일로 검사·검토' (/?files=번호) — 그 파일을 검사 대상으로 골라 둔다 (실행은 하지 않음)
-  // 한도(50개)를 넘으면 앞부분만 고르지 않고 하나도 고르지 않은 채 알린다 (일부만 반영하지 않음)
+  // 요청을 받아들이지 못하면(한도 초과·하나도 찾지 못함) 이전 검증 대상도 비운다 — 안내와 실제 선택이 다르지 않게,
+  // 이전 대상으로 검사·검토가 진행되지 않게. 한도를 넘으면 앞부분만 고르지도 않는다 (일부만 반영하지 않음)
   const [applied, setApplied] = useState<string | null>(null)
   const [preselectNote, setPreselectNote] = useState<string | null>(null)
   if (!wanted && applied !== null) setApplied(null)
   if (wanted && files.length > 0 && wanted !== applied) {
     setApplied(wanted)
-    const asked = [...new Set(wanted.split(',').map(Number))]
-    const ids = asked.filter((id) => files.some((f) => f.id === id))
-    if (ids.length > MAX_TARGETS) {
+    const asked = [...new Set(wanted.split(',').map((v) => v.trim()).filter(Boolean))]
+    const found = asked.map(Number).filter((id) => Number.isInteger(id) && files.some((f) => f.id === id))
+    const missing = asked.filter((v) => !found.includes(Number(v)))
+    const cleared = targets.size > 0 ? ' 이전에 고른 검증 대상도 비웠습니다.' : ''
+    if (found.length > MAX_TARGETS || found.length === 0) {
+      setTargets(new Set())
       setPreselectNote(
-        `넘어온 파일 ${ids.length}개는 한 번에 검사할 수 있는 ${MAX_TARGETS}개를 넘어 하나도 고르지 않았습니다 — 아래 목록에서 ${MAX_TARGETS}개까지 직접 고르세요.`,
+        found.length
+          ? `넘어온 파일 ${found.length}개는 한 번에 검사할 수 있는 ${MAX_TARGETS}개를 넘어 하나도 고르지 않았습니다.${cleared} 아래 목록에서 ${MAX_TARGETS}개까지 직접 고르세요.`
+          : `넘어온 파일 ${asked.length}개(${idList(missing)})를 목록에서 찾지 못해 하나도 고르지 않았습니다.${cleared}`,
       )
     } else {
+      setTargets(new Set(found))
+      setBaseline((prev) => new Set([...prev].filter((id) => !found.includes(id))))
       setPreselectNote(
-        ids.length < asked.length ? `넘어온 파일 중 ${asked.length - ids.length}개는 목록에 없어 빼고 골랐습니다.` : null,
+        missing.length
+          ? `넘어온 파일 ${asked.length}개 중 ${found.length}개(${idList(found)})를 골랐습니다 — 목록에 없는 ${missing.length}개(${idList(missing)})는 뺐습니다.`
+          : null,
       )
-      if (ids.length) {
-        setTargets(new Set(ids))
-        setBaseline((prev) => new Set([...prev].filter((id) => !ids.includes(id))))
-      }
     }
   }
   // 반영한 뒤 주소에서 빼고(새로고침해도 다시 고르지 않음) 검사 영역으로 옮긴다
