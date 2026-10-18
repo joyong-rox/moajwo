@@ -8,6 +8,7 @@ import { navigate } from './router'
 import { Banner, Icon, NavLink } from './Workflow'
 
 const KIND_LABEL: Record<RowKind, string> = { data: '데이터', empty: '빈 행', subtotal: '소계/합계', note: '주석' }
+const MAX_TARGETS = 50 // 홈에서 한 번에 검사할 수 있는 파일 수 (Validation과 같음)
 
 function isAccepted(file: File) {
   const name = file.name.toLowerCase()
@@ -134,13 +135,20 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
               <NavLink className="mapping-confirm" href={`/mapping?file=${okIds[0]}`}>
                 열 매핑 열기
               </NavLink>
+              {/* 한도를 넘으면 앞 50개만 고르지 않는다 — 목록에서 직접 고르도록 안내 */}
               <button
                 type="button"
                 className="mapping-run wk-next"
-                onClick={() => navigate(`/?files=${okIds.slice(0, 50).join(',')}`)}
+                disabled={okIds.length > MAX_TARGETS}
+                onClick={() => navigate(`/?files=${okIds.join(',')}`)}
               >
-                올린 파일로 검사 대상 고르기 ({Math.min(okIds.length, 50)})
+                올린 파일로 검사 대상 고르기 ({okIds.length})
               </button>
+              {okIds.length > MAX_TARGETS && (
+                <span className="wk-actionbar-item mw-muted">
+                  한 번에 {MAX_TARGETS}개까지 검사할 수 있어 바로 고르지 않습니다 — 아래 검사 목록에서 직접 고르세요.
+                </span>
+              )}
             </div>
           )}
         </>

@@ -57,18 +57,26 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
   const wanted = window.location.pathname === '/' ? new URLSearchParams(search).get('files') : null
 
   // 열 매핑 화면의 '다음: 이 파일로 검사·검토' (/?files=번호) — 그 파일을 검사 대상으로 골라 둔다 (실행은 하지 않음)
+  // 한도(50개)를 넘으면 앞부분만 고르지 않고 하나도 고르지 않은 채 알린다 (일부만 반영하지 않음)
   const [applied, setApplied] = useState<string | null>(null)
+  const [preselectNote, setPreselectNote] = useState<string | null>(null)
   if (!wanted && applied !== null) setApplied(null)
   if (wanted && files.length > 0 && wanted !== applied) {
     setApplied(wanted)
-    const ids = wanted
-      .split(',')
-      .map(Number)
-      .filter((id) => files.some((f) => f.id === id))
-      .slice(0, MAX_TARGETS)
-    if (ids.length) {
-      setTargets(new Set(ids))
-      setBaseline((prev) => new Set([...prev].filter((id) => !ids.includes(id))))
+    const asked = [...new Set(wanted.split(',').map(Number))]
+    const ids = asked.filter((id) => files.some((f) => f.id === id))
+    if (ids.length > MAX_TARGETS) {
+      setPreselectNote(
+        `넘어온 파일 ${ids.length}개는 한 번에 검사할 수 있는 ${MAX_TARGETS}개를 넘어 하나도 고르지 않았습니다 — 아래 목록에서 ${MAX_TARGETS}개까지 직접 고르세요.`,
+      )
+    } else {
+      setPreselectNote(
+        ids.length < asked.length ? `넘어온 파일 중 ${asked.length - ids.length}개는 목록에 없어 빼고 골랐습니다.` : null,
+      )
+      if (ids.length) {
+        setTargets(new Set(ids))
+        setBaseline((prev) => new Set([...prev].filter((id) => !ids.includes(id))))
+      }
     }
   }
   // 반영한 뒤 주소에서 빼고(새로고침해도 다시 고르지 않음) 검사 영역으로 옮긴다
@@ -178,6 +186,14 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
               고른 파일 중 {hiddenPicked}개가 검색으로 숨겨져 있습니다 — 숨겨져도 검사 대상에 그대로 들어갑니다.{' '}
               <button type="button" className="login-link" onClick={() => setQuery('')}>
                 검색 지우기
+              </button>
+            </p>
+          )}
+          {preselectNote && (
+            <p className="mapping-warn" role="status">
+              {preselectNote}{' '}
+              <button type="button" className="login-link" onClick={() => setPreselectNote(null)}>
+                안내 닫기
               </button>
             </p>
           )}
