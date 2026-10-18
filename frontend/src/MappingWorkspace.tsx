@@ -29,8 +29,18 @@ import {
 } from './mappingText'
 import { ProgressPanel } from './Progress'
 import { MAPPING_STAGES } from './progressStages'
-import { navigate } from './router'
 import { formatTime } from './runFormat'
+import {
+  Banner,
+  Icon,
+  NavLink,
+  StatusCards,
+  WorkflowSteps,
+  type IconName,
+  type StatusCard,
+  type Step,
+  type Tone,
+} from './Workflow'
 
 const PAGE = 50
 const NARROW = '(max-width: 1100px)'
@@ -70,8 +80,6 @@ function writeParams(file: number | null, sheet: string | null, col: string | nu
   if (next !== `${window.location.pathname}${window.location.search}`) window.history.replaceState(null, '', next)
 }
 
-const statusClass = (s: MappingStatus) => `mapping-${s}`
-
 function initialChoice(c: ColumnMapping | undefined): string {
   if (!c) return ''
   if (c.status === 'confirmed' && c.field_key === null) return NONE
@@ -97,7 +105,9 @@ function MappingWorkspace() {
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [batch, setBatch] = useState<{ targets: BatchTarget[]; note?: string } | null>(null)
-  const [showGrid, setShowGrid] = useState(false)
+  const [tab, setTab] = useState<'list' | 'grid'>('list')
+  // 마지막으로 저장한 내용 (작업 상태 막대에 '저장됨'으로 보여 준다)
+  const [saved, setSaved] = useState<{ file: number; text: string } | null>(null)
   const [reload, setReload] = useState(0)
   // 지금 화면이 가리키는 파일 — 늦게 도착한 다른 파일의 응답을 화면에 반영하지 않으려고 비교한다
   const currentFile = useRef<number | null>(fileId)
@@ -261,6 +271,7 @@ function MappingWorkspace() {
       setDraft(null)
       const label = value === NONE ? '해당 없음' : (fields.find((f) => f.key === value)?.label ?? value)
       setMessage(`'${target.col.column}' 열을 '${label}'(으)로 확정했습니다.`)
+      setSaved({ file: target.fileId, text: `'${target.col.column}' → ${label} (${new Date().toLocaleTimeString('ko-KR')})` })
     } catch (err) {
       if (currentFile.current !== target.fileId) return
       if (err instanceof BatchConflictError) {
@@ -279,19 +290,74 @@ function MappingWorkspace() {
   const hiddenSuggestions = suggestions.filter((c) => !shownColumns.some((pc) => pc.column_id === c.column_id)).length
   const reviewCount = (sheetMapping?.columns ?? []).filter((c) => c.status === 'review').length
 
+  // 단계 안내: 파일 전체(모든 시트)의 저장된 분석·확정으로 정한다 (이 화면을 열었다고 완료로 보지 않음)
+  const fileCounts = useMemo(() => {
+    const c: Record<string, number> = {}
+    for (const s of mapping?.sheets ?? []) for (const col of s.columns) c[col.status] = (c[col.status] ?? 0) + 1
+    return c
+  }, [mapping])
+  const left = (fileCounts.review ?? 0) + (fileCounts.unresolved ?? 0) + (fileCounts.unanalyzed ?? 0)
+  const steps: Step[] = [
+    {
+      key: 'files',
+      state: fileId !== null && (files ?? []).some((f) => f.id === fileId) ? 'done' : 'todo',
+      detail: fileId !== null ? `#${fileId}` : '파일을 고르세요',
+      href: '/',
+    },
+    {
+      key: 'mapping',
+      current: true,
+      state: !mapping ? 'todo' : left > 0 ? 'attention' : 'done',
+      detail: !mapping
+        ? undefined
+        : left > 0
+          ? [
+              fileCounts.review && `확인 필요 ${fileCounts.review}`,
+              fileCounts.unresolved && `미해결 ${fileCounts.unresolved}`,
+              fileCounts.unanalyzed && `미분석 ${fileCounts.unanalyzed}`,
+            ]
+              .filter(Boolean)
+              .join(' · ')
+          : `확정 ${fileCounts.confirmed ?? 0} · 자동 제안 ${fileCounts.auto ?? 0}`,
+    },
+    { key: 'review', state: 'todo', detail: '선택한 파일로 검사', href: fileId !== null ? `/?files=${fileId}` : '/' },
+    { key: 'result', state: 'todo', detail: '실행 기록', href: '/runs' },
+  ]
+
+  const cards: StatusCard[] = (['all', 'confirmed', 'auto', 'review', 'unresolved', 'unanalyzed'] as Filter[]).map(
+    (f) => ({
+      key: f,
+      label: f === 'all' ? '전체 열' : STATUS_TEXT[f],
+      count: counts[f] ?? 0,
+      tone: f === 'all' ? 'info' : STATUS_TONE[f],
+      icon: f === 'all' ? 'list' : STATUS_ICON[f],
+    }),
+  )
+
+  const draftChanged = Boolean(
+    selectedCol && draft?.col === selectedCol.column_id && draft.value !== initialChoice(selectedCol),
+  )
+  const saveState =
+    busy === 'save'
+      ? '저장 중…'
+      : draftChanged
+        ? '선택을 바꿨습니다 — 아직 저장 전'
+        : saved && saved.file === fileId
+          ? `저장됨 · ${saved.text}`
+          : '바꾼 것 없음'
+
   const detail = selectedCol && selectedPreview && (
-    <aside className="mw-detail" aria-label="선택한 열">
+    <aside className="mw-detail wk-detail" aria-label="선택한 열">
       {narrow && (
         <button type="button" className="mapping-confirm" onClick={() => setSelected(null)}>
-          ← 열 목록으로
+          ← 열 목록으로 (필터·검색 유지)
         </button>
       )}
       <h3>
         <span className="mw-letter">{selectedPreview.letter}</span> {selectedCol.column}
       </h3>
-      <p>
-        <span className={`upload-tag ${statusClass(selectedCol.status)}`}>{STATUS_TEXT[selectedCol.status]}</span>{' '}
-        {selectedCol.field_label ?? (selectedCol.status === 'confirmed' ? '해당 없음' : '연결 없음')}
+      <p className="wk-detail-state">
+        <StatusChip status={selectedCol.status} /> {fieldText(selectedCol)}
         {selectedCol.qualifier && <span className="upload-tag">{selectedCol.qualifier}</span>}
       </p>
       <p className="mw-muted">{STATUS_HELP[selectedCol.status]}</p>
@@ -362,23 +428,60 @@ function MappingWorkspace() {
         )}
         {/* 사용자가 확정한 수량 항목만. 선택값만 넘기고 계산·저장은 분석 화면에서 따로 한다 */}
         {selectedCol.status === 'confirmed' && selectedCol.field_key && ANALYSIS_FIELDS.has(selectedCol.field_key) && (
-          <a
-            className="mapping-confirm mw-link"
-            href={`/analysis?field=${selectedCol.field_key}&files=${fileId}`}
-            onClick={(e) => {
-              e.preventDefault()
-              navigate(`/analysis?field=${selectedCol.field_key}&files=${fileId}`)
-            }}
-          >
+          <NavLink className="mapping-confirm mw-link" href={`/analysis?field=${selectedCol.field_key}&files=${fileId}`}>
             이 항목으로 분석
-          </a>
+          </NavLink>
         )}
       </div>
     </aside>
   )
 
+  // 원본 열 ↔ 표준 항목 비교 목록 (열을 고르면 상세에서 값 예시·후보·근거를 보고 확정)
+  const list = view && (
+    <div className="wk-table-wrap" role="region" aria-label="열 매핑 목록" tabIndex={0}>
+      <table className="wk-maplist">
+        <thead>
+          <tr>
+            <th scope="col">원본 열</th>
+            <th scope="col">값 예시</th>
+            <th scope="col">연결할 표준 항목</th>
+            <th scope="col">상태</th>
+          </tr>
+        </thead>
+        <tbody>
+          {shownColumns.map((pc) => {
+            const m = byId.get(pc.column_id)
+            const active = pc.column_id === selected
+            return (
+              <tr key={pc.column_id} className={active ? 'is-selected' : undefined}>
+                <th scope="row">
+                  <button
+                    type="button"
+                    className="wk-rowpick"
+                    aria-pressed={active}
+                    aria-label={`${pc.letter}열 ${pc.name} 선택`}
+                    disabled={!aligned}
+                    onClick={() => pickColumn(pc.column_id)}
+                  >
+                    <span className="mw-letter">{pc.letter}</span>
+                    <span className="wk-colname">{pc.name}</span>
+                    {m?.qualifier && <span className="upload-tag">{m.qualifier}</span>}
+                  </button>
+                </th>
+                <td className="wk-samples">{m ? m.samples.slice(0, 3).map(formatCell).join(' · ') || '—' : '—'}</td>
+                <td className="wk-field">{m ? fieldText(m) : '—'}</td>
+                <td>{m ? <StatusChip status={m.status} /> : '—'}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      {shownColumns.length === 0 && <p className="mw-muted wk-empty-row">조건에 맞는 열이 없습니다.</p>}
+    </div>
+  )
+
   const grid = view && (
-    <div className="mw-grid-wrap" role="region" aria-label="데이터 미리보기 (파싱 후 정리된 값)" tabIndex={0}>
+    <div className="mw-grid-wrap" role="region" aria-label="데이터 미리보기 (원문 그대로, 읽기 전용)" tabIndex={0}>
       <table className="mw-grid">
         <thead>
           <tr>
@@ -400,11 +503,7 @@ function MappingWorkspace() {
                   >
                     <span className="mw-letter">{pc.letter}</span>
                     <span className="mw-colname">{pc.name}</span>
-                    {m && (
-                      <span className={`upload-tag ${statusClass(m.status)}`}>
-                        {m.field_label ?? (m.status === 'confirmed' ? '해당 없음' : '미매핑')} · {STATUS_TEXT[m.status]}
-                      </span>
-                    )}
+                    {m && <StatusChip status={m.status} text={fieldText(m)} />}
                   </button>
                 </th>
               )
@@ -432,9 +531,69 @@ function MappingWorkspace() {
     </div>
   )
 
+  const pager = view && (
+    <div className="mw-pager">
+      <button type="button" className="mapping-confirm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
+        이전 {PAGE}행
+      </button>
+      <span className="mw-muted">
+        {view.total_rows === 0
+          ? '행 없음'
+          : `${view.rows[0]?.row ?? '-'}~${view.rows[view.rows.length - 1]?.row ?? '-'}행 (${offset + 1}~${offset + view.rows.length}번째 / 전체 ${view.total_rows.toLocaleString('ko-KR')})`}
+      </span>
+      <button
+        type="button"
+        className="mapping-confirm"
+        disabled={offset + PAGE >= view.total_rows}
+        onClick={() => setOffset(offset + PAGE)}
+      >
+        다음 {PAGE}행
+      </button>
+    </div>
+  )
+
+  const tabs = view && (
+    <div className="wk-tabs" role="tablist" aria-label="보기">
+      {(
+        [
+          ['list', '매핑 목록', 'list'],
+          ['grid', '데이터 미리보기', 'table'],
+        ] as const
+      ).map(([key, text, icon]) => (
+        <button
+          key={key}
+          type="button"
+          role="tab"
+          id={`mw-tab-${key}`}
+          aria-selected={tab === key}
+          aria-controls={`mw-panel-${key}`}
+          className={`wk-tab${tab === key ? ' is-active' : ''}`}
+          onClick={() => setTab(key)}
+        >
+          <Icon name={icon} /> {text}
+        </button>
+      ))}
+    </div>
+  )
+
+  const body = view && (
+    <div id={`mw-panel-${tab}`} role="tabpanel" aria-labelledby={`mw-tab-${tab}`} className="wk-tabpanel">
+      {tab === 'list' ? (
+        list
+      ) : (
+        <>
+          <p className="mw-muted">원문 그대로 보여 주는 읽기 전용 표입니다 (계산용 해석은 검사·통합에서만 씁니다).</p>
+          {grid}
+          {pager}
+        </>
+      )}
+    </div>
+  )
+
   return (
-    <section className="mw" aria-label="열 매핑 작업">
-      <div className="mw-top">
+    <section className="mw wk" aria-label="열 매핑 작업">
+      <WorkflowSteps steps={steps} />
+      <div className="mw-top wk-head">
         <label>
           파일
           <select
@@ -452,7 +611,7 @@ function MappingWorkspace() {
         </label>
         {view && view.sheets.length > 1 && (
           <label>
-            시트
+            시트 ({view.sheets.length}개)
             <select value={sheetId ?? ''} onChange={(e) => pickSheet(e.target.value)} aria-label="시트 선택">
               {view.sheets.map((s) => (
                 <option key={s.sheet_id} value={s.sheet_id}>
@@ -471,16 +630,9 @@ function MappingWorkspace() {
                 : '열 매핑 분석'}
           </button>
         )}
-        <a
-          className="mapping-confirm mw-link"
-          href="/mapping/common"
-          onClick={(e) => {
-            e.preventDefault()
-            navigate('/mapping/common')
-          }}
-        >
+        <NavLink className="mapping-confirm mw-link" href="/mapping/common">
           여러 파일 공통 검토
-        </a>
+        </NavLink>
       </div>
       {busy === 'analyze' && <ProgressPanel stages={MAPPING_STAGES} />}
       {message && (
@@ -493,7 +645,11 @@ function MappingWorkspace() {
           {error}
         </p>
       )}
-      {fileId === null && <p className="upload-drop-hint">열 매핑을 볼 파일을 고르세요.</p>}
+      {fileId === null && (
+        <Banner tone="info" icon="file" title="열 매핑을 볼 파일을 고르세요">
+          <p>위의 '파일'에서 고르거나, 홈에서 파일을 올린 뒤 '열 매핑 열기'를 누르세요.</p>
+        </Banner>
+      )}
       {fileId !== null && view === null && !error && (
         <p className="mw-muted" role="status">
           미리보기를 불러오는 중… 큰 파일(수만 행)은 처음 열 때 수십 초 걸릴 수 있습니다. 같은 파일의 다음 쪽부터는 바로
@@ -501,73 +657,84 @@ function MappingWorkspace() {
         </p>
       )}
       {mapping && !mapping.analyzed && busy !== 'analyze' && (
-        <p className="mapping-warn" role="status">
-          이 파일의 저장된 분석이 없습니다. 저장된 확정값은 '사용자 확정'으로, 나머지 열은 '미분석'으로 보입니다. '열
-          매핑 분석'을 눌러야 분석합니다 (자동으로 분석하지 않음).
-        </p>
+        <Banner tone="muted" icon="clock" title="저장된 분석이 없습니다" live="status">
+          <p>
+            저장된 확정값은 '사용자 확정'으로, 나머지 열은 '미분석'으로 보입니다. '열 매핑 분석'을 눌러야 분석합니다
+            (자동으로 분석하지 않음).
+          </p>
+        </Banner>
       )}
-      {mapping?.analyzed && (
-        <p className="mw-muted">
-          분석 {formatTime(mapping.analyzed_at)}
-          {mapping.stale && <strong className="mw-stale"> · 파일 구성이 분석 때와 달라 다시 분석이 필요합니다</strong>}
-          {!mapping.can_change && ' · 조회 전용 (다른 사용자의 파일)'}
-        </p>
+      {mapping?.stale && (
+        <Banner tone="warn" icon="alert" title="다시 분석 필요" live="status">
+          <p>파일 구성이 분석 때와 달라 확정할 수 없습니다. '열 매핑 다시 분석'을 누르세요.</p>
+        </Banner>
       )}
-      {mapping && !mapping.analyzed && !mapping.can_change && (
-        <p className="mw-muted">조회 전용 (다른 사용자의 파일)</p>
+      {mapping && !mapping.can_change && (
+        <Banner tone="muted" icon="lock" title="조회 전용" live="status">
+          <p>다른 사용자의 파일입니다. 파일을 올린 사용자만 확정할 수 있습니다.</p>
+        </Banner>
       )}
-      {view && (
+      {(mapping?.analyzed || view) && (
         <p className="mw-basis">
-          {view.basis} 머리글 {view.header_row ? `${view.header_row}~${view.header_row_end}행` : '없음'} · 데이터{' '}
-          {view.data_rows.toLocaleString('ko-KR')}행
-          {view.dropped_columns > 0 && ` · 병합 복제 열 ${view.dropped_columns}개 제외`}
+          {mapping?.analyzed && `분석 ${formatTime(mapping.analyzed_at)} · `}
+          {view &&
+            `${view.basis} 머리글 ${view.header_row ? `${view.header_row}~${view.header_row_end}행` : '없음'} · 데이터 ${view.data_rows.toLocaleString('ko-KR')}행${view.dropped_columns > 0 ? ` · 병합 복제 열 ${view.dropped_columns}개 제외` : ''}`}
         </p>
       )}
       {sheetMapping && (
-        <div className="mw-tools">
-          <div className="admin-filters" role="group" aria-label="상태 필터">
-            {(['all', 'confirmed', 'auto', 'review', 'unresolved', 'unanalyzed'] as Filter[]).map((f) => (
-              <button
-                key={f}
-                type="button"
-                className={`admin-filter${filter === f ? ' is-active' : ''}`}
-                aria-pressed={filter === f}
-                onClick={() => setFilter(f)}
-              >
-                {f === 'all' ? '전체' : STATUS_TEXT[f]} {counts[f] ?? 0}
-              </button>
-            ))}
-          </div>
-          <input
-            type="search"
-            className="mw-search"
-            placeholder="열 이름·표준 항목 검색"
-            aria-label="열 검색"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
+        <>
+          <StatusCards
+            cards={cards}
+            label="상태별 열 수 (누르면 그 상태만 보기)"
+            picked={filter}
+            onPick={(key) => setFilter(key as Filter)}
           />
-          <button
-            type="button"
-            className="mapping-confirm"
-            disabled={!canChange || suggestions.length === 0 || busy !== null}
-            onClick={() =>
-              setBatch({
-                targets: suggestions.map((c) => ({
-                  file_id: fileId as number,
-                  sheet_id: sheetId as string,
-                  column_id: c.column_id,
-                  field_key: c.field_key,
-                })),
-                note:
-                  (hiddenSuggestions > 0
-                    ? `지금 필터·검색으로 화면에 보이지 않는 자동 제안 ${hiddenSuggestions}개도 포함됩니다. `
-                    : '') +
-                  `이 시트의 '자동 제안' 열만 대상입니다. '확인 필요' ${reviewCount}개는 포함하지 않으며, 열을 골라 직접 확인·확정하세요. 확인 표에서 열마다 뺄 수 있습니다.`,
-              })
-            }
-          >
-            자동 제안 일괄 확정 준비 ({suggestions.length})
-          </button>
+          <div className="mw-tools">
+            <input
+              type="search"
+              className="mw-search"
+              placeholder="열 이름·표준 항목 검색"
+              aria-label="열 검색"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <button
+              type="button"
+              className="mapping-confirm"
+              disabled={!canChange || suggestions.length === 0 || busy !== null}
+              onClick={() =>
+                setBatch({
+                  targets: suggestions.map((c) => ({
+                    file_id: fileId as number,
+                    sheet_id: sheetId as string,
+                    column_id: c.column_id,
+                    field_key: c.field_key,
+                  })),
+                  note:
+                    (hiddenSuggestions > 0
+                      ? `지금 필터·검색으로 화면에 보이지 않는 자동 제안 ${hiddenSuggestions}개도 포함됩니다. `
+                      : '') +
+                    `이 시트의 '자동 제안' 열만 대상입니다. '확인 필요' ${reviewCount}개는 포함하지 않으며, 열을 골라 직접 확인·확정하세요. 확인 표에서 열마다 뺄 수 있습니다.`,
+                })
+              }
+            >
+              자동 제안 일괄 확정 준비 ({suggestions.length})
+            </button>
+          </div>
+        </>
+      )}
+      {fileId !== null && view !== null && (
+        <div className="wk-actionbar" role="region" aria-label="작업 상태">
+          <span className="wk-actionbar-item">
+            <strong>선택</strong>{' '}
+            {selectedCol && selectedPreview ? `${selectedPreview.letter}열 '${selectedCol.column}'` : '없음'}
+          </span>
+          <span className="wk-actionbar-item" role="status">
+            <strong>저장</strong> {saveState}
+          </span>
+          <NavLink className="mapping-run wk-next" href={`/?files=${fileId}`}>
+            다음: 이 파일로 검사·검토 →
+          </NavLink>
         </div>
       )}
       {batch && (
@@ -589,8 +756,9 @@ function MappingWorkspace() {
         </p>
       )}
       {view && hidden > 0 && (
-        <p className="mw-muted">
-          필터로 {hidden}개 열을 숨겼습니다.{' '}
+        <p className="mw-muted" role="status">
+          필터·검색으로 {hidden}개 열을 숨겼습니다
+          {selected && !shownColumns.some((pc) => pc.column_id === selected) ? ' (선택한 열도 숨겨져 있음)' : ''}.{' '}
           <button
             type="button"
             className="login-link"
@@ -605,82 +773,63 @@ function MappingWorkspace() {
       )}
       {view && narrow && (
         <div className="mw-mobile">
+          {/* 좁은 화면: 목록에서 열을 고르면 상세로 바뀌고, 돌아오면 같은 목록·필터 그대로 */}
           {!selectedCol && (
-            <ul className="mw-collist" aria-label="열 목록">
-              {shownColumns.map((pc) => {
-                const m = byId.get(pc.column_id)
-                return (
-                  <li key={pc.column_id}>
-                    <button
-                      type="button"
-                      className="mw-colitem"
-                      disabled={!aligned}
-                      onClick={() => pickColumn(pc.column_id)}
-                    >
-                      <span className="mw-letter">{pc.letter}</span>
-                      <span className="mw-colname">{pc.name}</span>
-                      {m && (
-                        <span className={`upload-tag ${statusClass(m.status)}`}>
-                          {m.field_label ?? (m.status === 'confirmed' ? '해당 없음' : '미매핑')} ·{' '}
-                          {STATUS_TEXT[m.status]}
-                        </span>
-                      )}
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
+            <>
+              {tabs}
+              {body}
+            </>
           )}
           {detail}
-          <button
-            type="button"
-            className="mapping-confirm"
-            onClick={() => setShowGrid((v) => !v)}
-            aria-expanded={showGrid}
-          >
-            {showGrid ? '데이터 미리보기 닫기' : '데이터 미리보기 열기'}
-          </button>
-          {showGrid && grid}
         </div>
       )}
       {view && !narrow && (
-        <div className={`mw-main${detail ? ' has-detail' : ''}`}>
-          {grid}
+        <div className={`mw-main wk-split${detail ? ' has-detail' : ''}`}>
+          <div className="wk-split-main">
+            {tabs}
+            {body}
+          </div>
           {detail || (
-            <aside className="mw-detail mw-empty" aria-label="선택한 열">
+            <aside className="mw-detail mw-empty wk-detail" aria-label="선택한 열">
               <p className="mw-muted">
-                미리보기의 열 머리글을 누르면 그 열의 값 예시·후보·근거를 보고 확정할 수 있습니다.
+                목록이나 미리보기에서 열을 고르면 값 예시·추천 후보·근거를 보고 확정할 수 있습니다.
               </p>
             </aside>
           )}
         </div>
       )}
-      {view && (
-        <div className="mw-pager">
-          <button
-            type="button"
-            className="mapping-confirm"
-            disabled={offset === 0}
-            onClick={() => setOffset(Math.max(0, offset - PAGE))}
-          >
-            이전 {PAGE}행
-          </button>
-          <span className="mw-muted">
-            {view.total_rows === 0
-              ? '행 없음'
-              : `${view.rows[0]?.row ?? '-'}~${view.rows[view.rows.length - 1]?.row ?? '-'}행 (${offset + 1}~${offset + view.rows.length}번째 / 전체 ${view.total_rows.toLocaleString('ko-KR')})`}
-          </span>
-          <button
-            type="button"
-            className="mapping-confirm"
-            disabled={offset + PAGE >= view.total_rows}
-            onClick={() => setOffset(offset + PAGE)}
-          >
-            다음 {PAGE}행
-          </button>
-        </div>
-      )}
     </section>
+  )
+}
+
+const STATUS_TONE: Record<MappingStatus, Tone> = {
+  confirmed: 'ok',
+  auto: 'auto',
+  review: 'review',
+  unresolved: 'unresolved',
+  unanalyzed: 'muted',
+}
+const STATUS_ICON: Record<MappingStatus, IconName> = {
+  confirmed: 'user',
+  auto: 'check',
+  review: 'alert',
+  unresolved: 'question',
+  unanalyzed: 'clock',
+}
+
+/** 현재 연결: 표준 항목 / '해당 없음'(사용자가 확정) / '연결 없음'(판단하지 못함·미분석) — 둘을 섞지 않는다 */
+function fieldText(c: ColumnMapping): string {
+  if (c.field_label) return c.field_label
+  return c.status === 'confirmed' ? '해당 없음' : '연결 없음'
+}
+
+function StatusChip({ status, text }: { status: MappingStatus; text?: string }) {
+  return (
+    <span className={`upload-tag mapping-${status} wk-chip`}>
+      <Icon name={STATUS_ICON[status]} />
+      {text ? `${text} · ` : ''}
+      {STATUS_TEXT[status]}
+    </span>
   )
 }
 

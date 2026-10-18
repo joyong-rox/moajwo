@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { listAllRuns, runDownloadUrl, type IntegrationRun } from './api'
 import { isManager, useAuth } from './authContext'
-import ReviewPanel from './ReviewPanel'
+import { navigate } from './router'
 import { formatDuration, formatTime, STATUS_CLASS } from './runFormat'
 
 /** 실행 기록: runs 테이블 기반 (입력 파일 수, 결과 파일 경로, 상태, 소요 시간). */
@@ -10,7 +10,6 @@ function Runs() {
   const showUser = isManager(me.role) // 최고 관리자는 전체 사용자의 실행을 본다
   const [runs, setRuns] = useState<IntegrationRun[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [openReview, setOpenReview] = useState<number | null>(null)
 
   const load = useCallback(() => {
     listAllRuns()
@@ -80,17 +79,21 @@ function Runs() {
                         <code>{r.output_path}</code> <a href={runDownloadUrl(r.id)}>내려받기</a>
                       </>
                     ) : r.status === 'review' && r.review_session_id !== null ? (
-                      <button
-                        type="button"
-                        className="mapping-confirm"
-                        onClick={() => setOpenReview(r.review_session_id)}
-                      >
-                        {r.user_id === me.id ? '검토 이어서 하기' : '검토 보기'}
-                      </button>
+                      <span className="mw-muted">검토 대기</span>
                     ) : r.status === 'failed' ? (
                       <span className="upload-error">{r.error ?? '실패'}</span>
                     ) : (
                       '-'
+                    )}
+                    {/* 결과가 있는 수동 검토도 같은 주소로 다시 연다 (조회 권한은 서버가 정함) */}
+                    {r.review_session_id !== null && (
+                      <button
+                        type="button"
+                        className="mapping-confirm wk-run-review"
+                        onClick={() => navigate(`/reviews?review=${r.review_session_id}`)}
+                      >
+                        {r.status === 'review' && r.user_id === me.id ? '검토 이어서 하기' : '검토 보기'}
+                      </button>
                     )}
                   </td>
                 </tr>
@@ -98,16 +101,6 @@ function Runs() {
             </tbody>
           </table>
         </div>
-      )}
-      {openReview !== null && (
-        <ReviewPanel
-          key={openReview}
-          reviewId={openReview}
-          onClose={() => {
-            setOpenReview(null)
-            load()
-          }}
-        />
       )}
     </section>
   )

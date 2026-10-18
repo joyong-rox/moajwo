@@ -400,6 +400,7 @@ export type Review = {
   learned: { columns: number; names: number; names_skipped?: number } | null
   parent_id: number | null
   child_id: number | null
+  latest_id?: number | null // 대체된 검토면 다시 검사로 이어진 최신 검토
   history: { id: number; status: string; score: number; blocks: number; pending_open: number }[]
   changes: ReviewChanges | null
   automation_id: number | null
@@ -529,6 +530,48 @@ export async function listRuns(reviewId: number): Promise<IntegrationRun[]> {
 
 export async function getReview(reviewId: number): Promise<Review> {
   return json(await apiFetch(`${API_BASE}/reviews/${reviewId}`))
+}
+
+/** 검토 목록 항목 (조회 전용). 볼 수 있는 범위는 단건 조회와 같다 (일반 사용자는 자기 검토, 최고 관리자는 전체). */
+export type ReviewListItem = {
+  id: number
+  status: 'in_review' | 'ready' | 'superseded'
+  status_label: string
+  needs_recheck: boolean
+  file_count: number
+  file_names: string[] // 앞의 몇 개, 개인정보 형식은 가림
+  created_at: string
+  completed_at: string | null
+  created_by: number | null
+  created_by_name: string | null
+  automation_name: string | null
+  latest_id: number
+  run_count: number
+  last_run_id: number | null
+  can_edit: boolean
+}
+
+export type ReviewFilter = 'all' | 'open' | 'recheck' | 'ready'
+// next_before: 이어서 볼 때 넘길 번호 — null이면 조건에 맞는 검토를 끝까지 살펴봄 ('다시 검사 필요'는 items가 비어도 남을 수 있음)
+export type ReviewPage = { items: ReviewListItem[]; next_before: number | null }
+// 볼 수 있는 검토 전체의 상태별 건수 (목록에 불러온 범위와 상관없음)
+export type ReviewCounts = { total: number; live: number; open: number; ready: number; superseded: number; recheck: number }
+
+/** 상태 조건을 서버에서 먼저 걸고 최신 순으로 나눠 받는다 (before = 앞 쪽의 next_before). */
+export async function listReviews(
+  filter: ReviewFilter,
+  includeSuperseded: boolean,
+  before: number | null = null,
+  limit = 50,
+): Promise<ReviewPage> {
+  const q = new URLSearchParams({ filter, limit: String(limit) })
+  if (includeSuperseded) q.set('include_superseded', 'true')
+  if (before !== null) q.set('before', String(before))
+  return json(await apiFetch(`${API_BASE}/reviews?${q.toString()}`))
+}
+
+export async function countReviews(): Promise<ReviewCounts> {
+  return json(await apiFetch(`${API_BASE}/reviews/counts`))
 }
 
 export async function listAllRuns(limit = 100): Promise<IntegrationRun[]> {
@@ -904,8 +947,8 @@ export type StoredMapping = {
   sheets: { sheet_id: string; name: string; columns: ColumnMapping[] }[]
 }
 
-export async function fetchLatestMapping(fileId: number): Promise<StoredMapping> {
-  return json(await apiFetch(`${API_BASE}/files/${fileId}/mapping/latest`))
+export async function fetchLatestMapping(fileId: number, signal?: AbortSignal): Promise<StoredMapping> {
+  return json(await apiFetch(`${API_BASE}/files/${fileId}/mapping/latest`, { signal }))
 }
 
 export type PreviewColumn = { column_id: string; name: string; letter: string }

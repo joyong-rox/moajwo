@@ -4,16 +4,16 @@ import json
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
 from app.db import get_session
 from app.files import get_file_for
 from app.integration import include_unmapped_default
-from app.models import Automation, ReviewItem, ReviewSession, SourceFile, User
+from app.models import Automation, IntegrationRun, ReviewItem, ReviewSession, SourceFile, User
 from app.pii import mask_nested, mask_rrn_number, mask_text
 from app.review import (
     INTERNAL_PARAMS,
@@ -80,6 +80,7 @@ class ReviewOut(BaseModel):
     learned: dict[str, int] | None = None
     parent_id: int | None = None
     child_id: int | None = None  # 이 세션을 이어받아 다시 검사한 세션 (대체된 경우)
+    latest_id: int | None = None  # 대체된 검토면 다시 검사로 이어진 최신 검토
     history: list[dict[str, Any]] = []  # 처음 검사부터 이 세션까지
     changes: dict[str, Any] | None = None  # 이전 검사 대비 변화
     automation_id: int | None = None  # 저장된 자동화로 실행한 검토
@@ -109,7 +110,8 @@ def review_out(
     files = []
     for fid in json.loads(session.file_ids):
         record = db.get(SourceFile, fid)
-        files.append(ReviewFileOut(id=fid, name=record.original_name if record else "?", excluded=fid in excluded))
+        name = mask_text(record.original_name) if record else "?"  # 화면 표시용 (연결은 id로)
+        files.append(ReviewFileOut(id=fid, name=name, excluded=fid in excluded))
     rrn_files = {
         fid
         for fid in {i.file_id for i in items if i.file_id is not None}
@@ -147,8 +149,8 @@ def review_out(
                 category=i.category,
                 kind=i.kind,
                 file_id=i.file_id,
-                file_name=i.file_name,
-                sheet=i.sheet,
+                file_name=_masked(i.file_name),
+                sheet=_masked(i.sheet),
                 row=i.row,
                 column=_masked(i.column),
                 before=shown(i, i.before),
@@ -171,6 +173,7 @@ def review_out(
         learned=learned,
         parent_id=session.parent_id,
         child_id=db.scalar(select(ReviewSession.id).where(ReviewSession.parent_id == session.id)),
+        latest_id=_latest(db, session) if session.status == "superseded" else None,
         history=history(db, session),
         changes=changes(db, session),
         automation_id=session.automation_id,
@@ -203,6 +206,165 @@ def create_review(body: ValidationIn, db: Annotated[Session, Depends(get_session
         get_file_for(db, user, fid)
     session = create_session(db, body.model_dump(), user_id=user.id)
     return review_out(db, session, user=user)
+
+
+REVIEW_STATUS_LABEL = {"in_review": "검토 중", "ready": "검토 완료", "superseded": "다시 검사로 대체됨"}
+LIST_FILE_NAMES = 3  # 목록에 보이는 파일 이름 수 (나머지는 개수로)
+
+
+class ReviewListItem(BaseModel):
+    id: int
+    status: str  # in_review / ready / superseded
+    status_label: str
+    needs_recheck: bool  # 검사 기준과 지금 매핑이 달라 다시 검사해야 완료·통합할 수 있음 (대체된 검토는 False)
+    file_count: int
+    file_names: list[str]  # 앞의 몇 개만, 개인정보 형식은 가림
+    created_at: datetime
+    completed_at: datetime | None
+    created_by: int | None
+    created_by_name: str | None
+    automation_name: str | None
+    latest_id: int  # 대체된 검토면 다시 검사로 이어진 최신 검토, 아니면 자기 자신
+    run_count: int  # 이 검토로 만든 실행 기록 (실패·대기 포함)
+    last_run_id: int | None  # 결과 파일이 있는 가장 최근 실행
+    can_edit: bool  # 만든 사람만 승인·완료·통합 (최고 관리자도 남의 검토는 조회만)
+
+
+def _latest(db: Session, session: ReviewSession) -> int:
+    """다시 검사로 이어진 마지막 검토 (대체되지 않은 검토는 자기 자신)."""
+    current, seen = session.id, {session.id}
+    while (child := db.scalar(select(ReviewSession.id).where(ReviewSession.parent_id == current))) is not None:
+        if child in seen:  # 순환은 없어야 하지만 끝없이 돌지 않게
+            break
+        seen.add(child)
+        current = child
+    return current
+
+
+ReviewFilter = Literal["all", "open", "recheck", "ready"]
+PAGE_MAX = 100  # 한 번에 돌려주는 검토 수 상한 (더 오래된 검토는 next_before로 이어서)
+RECHECK_SCAN = 300  # '다시 검사 필요'는 계산해야 알므로 한 번에 살펴보는 검토 수 (못 다 보면 이어서 찾기)
+
+
+class ReviewPage(BaseModel):
+    items: list[ReviewListItem]
+    # 이어서 볼 때 before로 넘길 값 — None이면 조건에 맞는 검토를 끝까지 살펴봤다.
+    # '다시 검사 필요'는 items가 비어 있어도 값이 있을 수 있다 (아직 살펴보지 않은 더 오래된 검토가 남음).
+    next_before: int | None
+
+
+class ReviewCounts(BaseModel):
+    """볼 수 있는 검토 전체의 상태별 건수 (목록에 불러온 범위와 상관없음)."""
+
+    total: int  # 대체된 검토 포함
+    live: int  # 대체된 검토 제외
+    open: int  # 검토 중
+    ready: int  # 검토 완료
+    superseded: int
+    recheck: int  # 다시 검사 필요 (대체된 검토 제외)
+
+
+def _visible(stmt: Any, user: CurrentUser) -> Any:
+    """볼 수 있는 범위는 단건 조회와 같다: 일반 사용자는 자기 검토, 최고 관리자는 전체."""
+    return stmt if user.is_manager else stmt.where(ReviewSession.created_by == user.id)
+
+
+def _list_item(db: Session, session: ReviewSession, user: CurrentUser, needs_recheck: bool) -> ReviewListItem:
+    fids = json.loads(session.file_ids)
+    names = [mask_text(r.original_name) if (r := db.get(SourceFile, f)) else "?" for f in fids[:LIST_FILE_NAMES]]
+    creator = db.get(User, session.created_by) if session.created_by is not None else None
+    automation = db.get(Automation, session.automation_id) if session.automation_id is not None else None
+    runs = select(IntegrationRun.id).where(IntegrationRun.review_session_id == session.id)
+    return ReviewListItem(
+        id=session.id,
+        status=session.status,
+        status_label=REVIEW_STATUS_LABEL.get(session.status, session.status),
+        needs_recheck=needs_recheck,
+        file_count=len(fids),
+        file_names=names,
+        created_at=session.created_at,
+        completed_at=session.completed_at,
+        created_by=session.created_by,
+        created_by_name=creator.display_name if creator is not None else None,
+        automation_name=automation.name if automation is not None else None,
+        latest_id=_latest(db, session) if session.status == "superseded" else session.id,
+        run_count=db.scalar(select(func.count()).select_from(runs.subquery())) or 0,
+        last_run_id=db.scalar(runs.where(IntegrationRun.status == "done").order_by(IntegrationRun.id.desc()).limit(1)),
+        can_edit=session.created_by == user.id or (session.created_by is None and user.is_manager),
+    )
+
+
+def _needs_recheck(db: Session, session: ReviewSession) -> bool:
+    return session.status != "superseded" and bool(recheck_reasons(db, session))
+
+
+@router.get("", response_model=ReviewPage)
+def list_reviews(
+    db: Annotated[Session, Depends(get_session)],
+    user: CurrentUserDep,
+    filter_: Annotated[ReviewFilter, Query(alias="filter")] = "all",
+    include_superseded: bool = False,
+    limit: Annotated[int, Query(ge=1, le=PAGE_MAX)] = 50,
+    before: Annotated[int | None, Query(ge=1)] = None,
+) -> ReviewPage:
+    """검토 목록 (최신 순, 조회 전용) — 결과를 아직 만들지 않은 검토도 찾아 이어갈 수 있게 한다.
+
+    상태 조건을 먼저 걸고 그 결과를 번호 순으로 나눠 준다 (최신 몇 개를 받은 뒤 거르지 않음).
+    before를 주면 그 번호보다 오래된 검토부터 — 응답의 next_before를 그대로 넘기면 빠짐·겹침 없이 이어진다.
+    '다시 검사 필요'(filter=recheck)는 저장된 상태가 아니라 계산해야 알므로 최신 순으로 살펴보며 채우고,
+    한 번에 RECHECK_SCAN개까지만 본다 (모델 호출·원본 읽기·쓰기 없음 — recheck_reasons).
+    include_superseded는 '전체'에만 쓴다 (대체된 검토는 검토 중·완료·다시 검사 필요가 아님).
+    """
+    stmt = _visible(select(ReviewSession).order_by(ReviewSession.id.desc()), user)
+    if before is not None:
+        stmt = stmt.where(ReviewSession.id < before)
+    if filter_ == "open":
+        stmt = stmt.where(ReviewSession.status == "in_review")
+    elif filter_ == "ready":
+        stmt = stmt.where(ReviewSession.status == "ready")
+    elif filter_ == "recheck" or not include_superseded:
+        stmt = stmt.where(ReviewSession.status != "superseded")
+
+    if filter_ != "recheck":
+        rows = list(db.scalars(stmt.limit(limit + 1)))
+        page = rows[:limit]
+        return ReviewPage(
+            items=[_list_item(db, s, user, _needs_recheck(db, s)) for s in page],
+            next_before=page[-1].id if len(rows) > limit else None,
+        )
+
+    items: list[ReviewListItem] = []
+    rows = list(db.scalars(stmt.limit(RECHECK_SCAN + 1)))
+    next_before = None
+    for i, session in enumerate(rows[:RECHECK_SCAN]):
+        if _needs_recheck(db, session):
+            items.append(_list_item(db, session, user, True))
+        if len(items) == limit or i == RECHECK_SCAN - 1:
+            # 여기서 멈춘다 — 살펴보지 않은 더 오래된 검토가 남았으면 이 번호부터 이어서
+            next_before = session.id if i < len(rows) - 1 else None
+            break
+    return ReviewPage(items=items, next_before=next_before)
+
+
+@router.get("/counts", response_model=ReviewCounts)
+def review_counts(db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> ReviewCounts:
+    """상태 카드용 전체 건수 (볼 수 있는 범위 전체, 조회 전용). '다시 검사 필요'는 대체되지 않은 검토마다 계산한다."""
+    by_status = dict(
+        db.execute(
+            _visible(select(ReviewSession.status, func.count()).group_by(ReviewSession.status), user)
+        ).all()  # fmt: skip
+    )
+    live = _visible(select(ReviewSession).where(ReviewSession.status != "superseded"), user)
+    total = sum(by_status.values())
+    superseded = by_status.get("superseded", 0)
+    return ReviewCounts(
+        total=total,
+        live=total - superseded,
+        open=by_status.get("in_review", 0),
+        ready=by_status.get("ready", 0),
+        superseded=superseded,
+        recheck=sum(1 for s in db.scalars(live) if recheck_reasons(db, s)),
+    )
 
 
 @router.get("/{review_id}", response_model=ReviewOut)

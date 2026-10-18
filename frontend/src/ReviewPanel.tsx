@@ -19,6 +19,9 @@ import {
 import IntegrationResult from './IntegrationResult'
 import { ProgressPanel } from './Progress'
 import { REVIEW_STAGES } from './progressStages'
+import { Banner, NavLink, StatusCards, WorkflowSteps, type Step } from './Workflow'
+
+const RECHECK_LABEL = '다시 검사 — 결정 이어받기'
 
 const KIND_LABEL: Record<string, string> = {
   mapping: '열 매핑',
@@ -58,12 +61,18 @@ function ReviewPanel({
   request,
   reviewId,
   onClose,
+  onLoaded,
 }: {
   request?: ValidationRequest
-  reviewId?: number // 이미 만든 검토(자동화 실행에서 확인할 항목이 남은 경우)를 이어서 연다
+  reviewId?: number // 이미 만든 검토(수동·자동화)를 이어서 연다 — 주소 /reviews?review=번호
   onClose: () => void
+  onLoaded?: (review: Review) => void // 지금 보이는 검토 (주소·단계 안내를 맞춘다)
 }) {
   const [review, setReview] = useState<Review | null>(null)
+  // 마지막으로 보낸 요청 번호 — 늦게 도착한 이전 응답이 지금 상태(다시 검사한 새 검토 등)를 덮어쓰지 않게 한다
+  const seq = useRef(0)
+  // 이 검토로 만든 결과(실행) — 단계 안내의 '결과'를 서버 기록으로 정한다
+  const [runsDone, setRunsDone] = useState(0)
   const [loading, setLoading] = useState(true)
   const [busyItem, setBusyItem] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -86,8 +95,9 @@ function ReviewPanel({
     let cancelled = false
     const load = reviewId !== undefined ? getReview(reviewId) : request ? createReview(request) : null
     if (load === null) return
+    const my = ++seq.current
     load
-      .then((r) => !cancelled && setReview(r))
+      .then((r) => !cancelled && my === seq.current && setReview(r))
       .catch((err: unknown) => !cancelled && setError(`검토를 만들지 못했습니다: ${errorText(err)}`))
       .finally(() => !cancelled && setLoading(false))
     listFiles()
@@ -111,34 +121,70 @@ function ReviewPanel({
       .catch(() => undefined)
   }
 
-  // 결정이 거부된 뒤(권한이 바뀐 경우 등) 서버의 최신 상태로 화면을 맞춘다
+  useEffect(() => {
+    if (review) onLoaded?.(review)
+  }, [review, onLoaded])
+
+  // 결정·통합이 거부된 뒤(권한·확정이 바뀐 경우 등) 서버의 최신 상태로 화면을 맞춘다
   function refresh(): Promise<void> {
     if (!review) return Promise.resolve()
-    return getReview(review.id).then(setReview, () => undefined)
+    const my = ++seq.current
+    return getReview(review.id).then(
+      (r) => {
+        if (my === seq.current) setReview(r)
+      },
+      () => undefined,
+    )
   }
 
   async function run(itemId: number | null, fn: () => Promise<Review>): Promise<boolean> {
+    const my = ++seq.current
     setBusyItem(itemId)
     setError(null)
     try {
-      setReview(await fn())
+      const next = await fn()
+      if (my === seq.current) setReview(next)
       return true
     } catch (err) {
-      setError(errorText(err))
+      if (my === seq.current) setError(errorText(err))
       return false
     } finally {
       setBusyItem(null)
     }
   }
 
+  const complete = (current: Review) =>
+    void run(null, async () => {
+      const done = await completeReview(current.id)
+      const learned = done.learned
+      const skipped = learned?.names_skipped
+        ? ` 기관·지역 이름 ${learned.names_skipped}개는 공용 용어사전이라 관리자만 등록할 수 있어 기억하지 않았습니다.`
+        : ''
+      setMessage(
+        (learned && (learned.columns || learned.names)
+          ? `검토 완료 — 열 이름 ${learned.columns}개, 기관·지역 이름 ${learned.names}개를 기억했습니다.`
+          : '검토 완료 — 통합 준비가 끝났습니다.') + skipped,
+      )
+      return done
+    })
+
   return (
     <section className="review-panel review-panel-wide" aria-label="통합 전 사전 검토">
       <div className="review-head">
-        <h2>통합 전 사전 검토</h2>
+        <h2>
+          통합 전 사전 검토{review ? ` #${review.id}` : ''}
+          {review && <span className="wk-head-sub">{STATUS_TEXT[review.status]}</span>}
+        </h2>
+        {review && (
+          <NavLink className="wk-permalink" href={`/reviews?review=${review.id}`}>
+            이 검토 주소
+          </NavLink>
+        )}
         <button type="button" className="mapping-confirm" onClick={onClose}>
           닫기
         </button>
       </div>
+      {review && !loading && <WorkflowSteps steps={reviewSteps(review, runsDone)} />}
 
       {loading && <ProgressPanel stages={REVIEW_STAGES} title="검토 항목을 만드는 중 (LLM 판정이 필요한 열이 있으면 수십 초)" />}
       {error && (
@@ -149,7 +195,12 @@ function ReviewPanel({
 
       {review && !loading && (
         <>
-          <ScoreHeader review={review} />
+          <ScoreHeader
+            review={review}
+            busy={busyItem !== null}
+            onRecheck={() => void recheck(review)}
+            onComplete={() => complete(review)}
+          />
           {review.items.some((i) => i.kind === 'header_missing') && (
             <div className="review-header-warning" role="alert">
               <strong>머리글(열 이름)을 확인하세요</strong>
@@ -174,6 +225,7 @@ function ReviewPanel({
               title={g.title}
               hint={g.hint}
               busyItem={busyItem}
+              pendingCheck={(item) => waitingRecheck(review, item)}
               onDecide={(item, decision, choice) =>
                 void run(item.id, () => decideReviewItem(review.id, item.id, decision, choice)).then((ok) => {
                   if (!ok) void refresh()
@@ -225,27 +277,13 @@ function ReviewPanel({
                 disabled={busyItem !== null || review.status === 'superseded' || !review.can_edit}
                 onClick={() => void recheck(review)}
               >
-                다시 검사 (결정 이어받기)
+                {RECHECK_LABEL}
               </button>
               <button
                 type="button"
                 className="mapping-run"
                 disabled={!review.can_complete || busyItem !== null || !review.can_edit}
-                onClick={() =>
-                  void run(null, async () => {
-                    const done = await completeReview(review.id)
-                    const learned = done.learned
-                    const skipped = learned?.names_skipped
-                      ? ` 기관·지역 이름 ${learned.names_skipped}개는 공용 용어사전이라 관리자만 등록할 수 있어 기억하지 않았습니다.`
-                      : ''
-                    setMessage(
-                      (learned && (learned.columns || learned.names)
-                        ? `검토 완료 — 열 이름 ${learned.columns}개, 기관·지역 이름 ${learned.names}개를 기억했습니다.`
-                        : '검토 완료 — 통합 준비가 끝났습니다.') + skipped,
-                    )
-                    return done
-                  })
-                }
+                onClick={() => complete(review)}
               >
                 {review.status === 'ready' ? '검토 완료됨' : '검토 완료'}
               </button>
@@ -257,6 +295,7 @@ function ReviewPanel({
             )}
             {review.status === 'ready' && review.can_edit && (
               <IntegrationResult
+                onRuns={(runs) => setRunsDone(runs.filter((r) => r.status === 'done').length)}
                 reviewId={review.id}
                 defaultIncludeUnmapped={review.include_unmapped_default}
                 piiIncluded={review.items.some(
@@ -264,7 +303,7 @@ function ReviewPanel({
                 )}
                 blocked={
                   review.needs_recheck
-                    ? "이 검토의 검사 결과를 지금 열 매핑에 쓸 수 없어 새 결과를 만들 수 없습니다 — '다시 검사 (결정 이어받기)'로 지금 매핑을 검사하세요."
+                    ? `이 검토의 검사 결과를 지금 열 매핑에 쓸 수 없어 새 결과를 만들 수 없습니다 — '${RECHECK_LABEL}'로 지금 매핑을 검사하세요. 이미 만든 결과는 아래에서 계속 내려받을 수 있습니다.`
                     : null
                 }
                 onFailed={() => {
@@ -307,69 +346,212 @@ function ReviewPanel({
   )
 }
 
-function ScoreHeader({ review }: { review: Review }) {
+const STATUS_TEXT: Record<Review['status'], string> = {
+  in_review: '검토 중',
+  ready: '검토 완료',
+  superseded: '다시 검사로 대체됨',
+}
+
+/** 단계 안내: 검토·결과 상태는 서버가 준 검토 상태와 실행 기록으로 정한다 */
+function reviewSteps(review: Review, runsDone: number): Step[] {
+  const openMapping = review.items.filter((i) => i.category === 'pending' && i.kind === 'mapping' && !i.decision).length
+  const ready = review.status === 'ready' && !review.needs_recheck
+  const reviewDetail = review.needs_recheck
+    ? '다시 검사 필요'
+    : review.status === 'superseded'
+      ? '대체된 검토'
+      : review.counts.block
+        ? `차단 ${review.counts.block}`
+        : review.counts.pending_open
+          ? `확인 필요 ${review.counts.pending_open}`
+          : review.status === 'ready'
+            ? '검토 완료'
+            : '검토 완료를 누르면 끝'
+  return [
+    { key: 'files', state: 'done', detail: `${review.files.length}개 파일`, href: '/' },
+    {
+      key: 'mapping',
+      state: openMapping ? 'attention' : 'done',
+      detail: openMapping ? `확인할 열 ${openMapping}` : '검토에서 확인할 열 없음',
+      href: review.files.length ? `/mapping?file=${review.files[0].id}` : '/mapping',
+    },
+    { key: 'review', current: true, state: ready ? 'done' : 'attention', detail: reviewDetail },
+    {
+      key: 'result',
+      state: runsDone > 0 ? 'done' : 'todo',
+      detail: runsDone > 0 ? `결과 ${runsDone}개` : ready ? '통합 결과 만들기' : '검토 완료 뒤',
+      href: '/runs',
+    },
+  ]
+}
+
+/** 다시 검사 이유에 이 항목의 열이 들어 있으면, 승인은 저장됐지만 아직 검사에 반영되지 않은 상태 */
+function waitingRecheck(review: Review, item: ReviewItem): boolean {
+  if (!review.needs_recheck || !item.decision || !item.column) return false
+  const col = `'${item.column}' 열`
+  return (review.recheck_reasons ?? []).some((r) => r.includes(col) && (!item.file_name || r.includes(item.file_name)))
+}
+
+function ScoreHeader({
+  review,
+  busy,
+  onRecheck,
+  onComplete,
+}: {
+  review: Review
+  busy: boolean
+  onRecheck: () => void
+  onComplete: () => void
+}) {
   // 남이 올린 파일의 매핑·개인정보 항목 (서버가 판단한 조회 전용 항목)
   const readOnlyFiles = [
     ...new Set(
       review.items.filter((i) => i.category === 'pending' && i.can_change === false).map((i) => i.file_name ?? `#${i.file_id}`),
     ),
   ]
-  const level = review.counts.block
-    ? 'is-block'
-    : review.counts.pending_open || review.needs_recheck
-      ? 'is-pending'
-      : 'is-ok'
+  const stale = Boolean(review.needs_recheck)
+  // 다시 검사가 필요하면 지난 검사 점수를 '통과'처럼 보이게 하지 않는다 (색 없이, 지난 점수라고 적음)
+  const level = stale
+    ? 'is-stale'
+    : review.counts.block
+      ? 'is-block'
+      : review.counts.pending_open
+        ? 'is-pending'
+        : 'is-ok'
+  const target = review.status === 'ready' ? '통합' : '완료·통합'
+  const latest = review.latest_id ?? review.child_id
   return (
-    <div className={`review-score ${level}`}>
-      <div className="review-score-value" aria-label={`데이터 품질 점수 ${review.score}점`}>
-        <strong>{review.score}</strong>
-        <span>/ 100</span>
+    <>
+      {review.status === 'superseded' && (
+        <Banner tone="muted" icon="recheck" title="다시 검사로 대체된 이전 검토" live="status">
+          <p>이 검토의 결정은 다시 검사한 검토로 이어졌습니다. 이 화면은 조회만 할 수 있습니다.</p>
+          {latest && (
+            <p>
+              <NavLink href={`/reviews?review=${latest}`}>최신 검토 #{latest}로 이동</NavLink>
+            </p>
+          )}
+        </Banner>
+      )}
+      {stale && (
+        <Banner
+          tone="recheck"
+          icon="recheck"
+          title="다시 검사 필요"
+          live="status"
+          actions={
+            review.can_edit && review.status !== 'superseded' ? (
+              <button type="button" className="mapping-run" disabled={busy} onClick={onRecheck}>
+                {RECHECK_LABEL}
+              </button>
+            ) : undefined
+          }
+        >
+          <p>이전 검사 결과로는 지금 열 매핑을 {target}할 수 없습니다. 승인한 내용은 저장되어 있으며, 다시 검사하면 이어받습니다.</p>
+          {(review.recheck_reasons?.length ?? 0) > 0 && (
+            <details className="review-recheck" open>
+              <summary>다시 검사가 필요한 이유 {review.recheck_reasons?.length}건</summary>
+              <ul>
+                {review.recheck_reasons?.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            </details>
+          )}
+          <p className="mw-muted">이미 만든 통합 결과는 계속 조회·내려받을 수 있습니다 (실행 기록·아래 결과 목록).</p>
+        </Banner>
+      )}
+      <div className={`review-score ${level}`}>
+        <div
+          className="review-score-value"
+          aria-label={stale ? `지난 검사 점수 ${review.score}점 (지금 매핑 기준 아님)` : `데이터 품질 점수 ${review.score}점`}
+        >
+          <strong>{review.score}</strong>
+          <span>/ 100</span>
+          {stale && <span className="wk-score-note">지난 검사 점수 · 지금 매핑 기준 아님</span>}
+        </div>
+        <div className="review-score-text">
+          {!review.can_edit && (
+            <p className="review-automation">
+              {review.created_by_name ?? '다른 사용자'}님의 검토입니다 — 조회만 할 수 있습니다 (승인·완료·통합은 만든 사람만).
+            </p>
+          )}
+          {review.can_edit && readOnlyFiles.length > 0 && (
+            <p className="review-automation" role="note">
+              조회 전용이며 파일을 올린 사용자만 변경할 수 있습니다 — {readOnlyFiles.join(', ')}의 열 매핑·개인정보 항목은 승인·거부할 수 없습니다.
+            </p>
+          )}
+          {review.automation_name && (
+            <p className="review-automation">
+              자동화 '{review.automation_name}'의 규칙을 적용한 검토입니다 — 저장된 규칙에 없는 새 열 등만 확인하면 됩니다.
+            </p>
+          )}
+          {/* 다시 검사가 필요하면 위의 띠가 상태·이유·행동을 모두 보여 주므로 같은 문장을 되풀이하지 않는다 */}
+          {!stale && <p className="review-summary">{review.summary}</p>}
+          <StatusCards
+            label="검토 상태 요약"
+            cards={[
+              { key: 'block', label: '차단', count: review.counts.block, tone: 'block', icon: 'block', hint: review.counts.block ? '원본을 고친 뒤 다시 검사' : undefined },
+              {
+                key: 'pending',
+                label: '확인 필요 (남음/전체)',
+                count: `${review.counts.pending_open}/${review.counts.pending}`,
+                tone: 'review',
+                icon: 'alert',
+              },
+              { key: 'warning', label: '경고 (통합은 진행)', count: review.counts.warning, tone: 'warn', icon: 'info' },
+              { key: 'auto', label: '자동 적용', count: review.counts.auto, tone: 'auto', icon: 'check' },
+              ...(stale ? [{ key: 'recheck', label: '다시 검사 필요', count: review.recheck_reasons?.length ?? 1, tone: 'recheck' as const, icon: 'recheck' as const }] : []),
+            ]}
+          />
+          <NextAction review={review} busy={busy} onComplete={onComplete} />
+          <p className="upload-drop-hint">
+            점수: 100 − 차단 25 × 건수 − 남은 확인 필요 5 × 건수 − 경고 2 × 건수(최대 10). 차단이 있으면 최고 59점.
+            {review.files.some((f) => f.excluded) &&
+              ` · 이번 통합에서 제외: ${review.files
+                .filter((f) => f.excluded)
+                .map((f) => f.name)
+                .join(', ')}`}
+          </p>
+        </div>
       </div>
-      <div className="review-score-text">
-        {!review.can_edit && (
-          <p className="review-automation">
-            {review.created_by_name ?? '다른 사용자'}님의 검토입니다 — 조회만 할 수 있습니다 (승인·완료·통합은 만든 사람만).
-          </p>
-        )}
-        {review.can_edit && readOnlyFiles.length > 0 && (
-          <p className="review-automation" role="note">
-            조회 전용이며 파일을 올린 사용자만 변경할 수 있습니다 — {readOnlyFiles.join(', ')}의 열 매핑·개인정보 항목은 승인·거부할 수 없습니다.
-          </p>
-        )}
-        {review.automation_name && (
-          <p className="review-automation">
-            자동화 '{review.automation_name}'의 규칙을 적용한 검토입니다 — 저장된 규칙에 없는 새 열 등만 확인하면 됩니다.
-          </p>
-        )}
-        <p className="review-summary">{review.summary}</p>
-        {review.needs_recheck && (review.recheck_reasons?.length ?? 0) > 0 && (
-          <details className="review-recheck">
-            <summary>다시 검사가 필요한 이유 {review.recheck_reasons?.length}건</summary>
-            <ul>
-              {review.recheck_reasons?.map((reason) => (
-                <li key={reason}>{reason}</li>
-              ))}
-            </ul>
-          </details>
-        )}
-        <p className="review-counts">
-          <span className="review-chip is-block">차단 {review.counts.block}</span>
-          <span className="review-chip is-pending">
-            확인 필요 {review.counts.pending_open}/{review.counts.pending}
-          </span>
-          <span className="review-chip is-auto">자동 적용 {review.counts.auto}</span>
-          <span className="review-chip">경고 {review.counts.warning}</span>
-        </p>
-        <p className="upload-drop-hint">
-          점수: 100 − 차단 25 × 건수 − 남은 확인 필요 5 × 건수 − 경고 2 × 건수(최대 10). 차단이 있으면 최고 59점.
-          {review.files.some((f) => f.excluded) &&
-            ` · 이번 통합에서 제외: ${review.files
-              .filter((f) => f.excluded)
-              .map((f) => f.name)
-              .join(', ')}`}
-        </p>
-      </div>
-    </div>
+    </>
+  )
+}
+
+/** 다음 행동 한 줄 (서버의 can_complete·needs_recheck·상태만 쓴다 — 화면에서 따로 추정하지 않음) */
+function NextAction({
+  review,
+  busy,
+  onComplete,
+}: {
+  review: Review
+  busy: boolean
+  onComplete: () => void
+}) {
+  // 다시 검사가 필요하면 위의 '다시 검사 필요' 띠에 행동 버튼이 있다
+  if (!review.can_edit || review.status === 'superseded' || review.needs_recheck) return null
+  let text: string
+  let action: React.ReactNode = null
+  if (review.status === 'ready') {
+    text = "다음: 아래 '통합 결과 만들기'로 결과 엑셀을 만드세요."
+  } else if (review.counts.block) {
+    text = '다음: 차단 항목의 원본 파일을 고친 뒤 다시 검사하세요 (아래 원본 교체).'
+  } else if (review.counts.pending_open) {
+    text = `다음: 확인 필요 ${review.counts.pending_open}건을 승인 또는 거부하세요.`
+  } else if (review.can_complete) {
+    text = '다음: 검토를 완료하면 통합 결과를 만들 수 있습니다.'
+    action = (
+      <button type="button" className="mapping-run" disabled={busy} onClick={onComplete}>
+        검토 완료
+      </button>
+    )
+  } else {
+    return null
+  }
+  return (
+    <p className="wk-next-action" role="status">
+      <span>{text}</span> {action}
+    </p>
   )
 }
 
@@ -422,13 +604,14 @@ type GroupProps = {
   category: ReviewCategory
   title: string
   hint: string
+  pendingCheck?: (item: ReviewItem) => boolean
   busyItem: number | null
   onDecide: (item: ReviewItem, decision: 'approved' | 'rejected', choice: string | null) => void
   onOpenReason: (item: ReviewItem) => void
   fields: StandardFieldInfo[]
 }
 
-function ItemGroup({ review, category, title, hint, busyItem, onDecide, onOpenReason, fields }: GroupProps) {
+function ItemGroup({ review, category, title, hint, pendingCheck, busyItem, onDecide, onOpenReason, fields }: GroupProps) {
   const items = review.items.filter((i) => i.category === category)
   return (
     <section className={`review-group is-${category}`}>
@@ -454,6 +637,7 @@ function ItemGroup({ review, category, title, hint, busyItem, onDecide, onOpenRe
                 item={i}
                 disabled={review.status !== 'in_review' || busyItem !== null || !review.can_edit || i.can_change === false}
                 busy={busyItem === i.id}
+                waiting={pendingCheck?.(i) ?? false}
                 onDecide={onDecide}
                 onOpenReason={onOpenReason}
                 fields={fields}
@@ -486,12 +670,13 @@ type RowProps = {
   item: ReviewItem
   disabled?: boolean
   busy?: boolean
+  waiting?: boolean // 승인은 저장됐지만 다시 검사 전 (검사 결과에 아직 반영 안 됨)
   onDecide?: GroupProps['onDecide']
   onOpenReason?: (item: ReviewItem) => void
   fields?: StandardFieldInfo[]
 }
 
-function ItemRow({ item, disabled, busy, onDecide, onOpenReason, fields = [] }: RowProps) {
+function ItemRow({ item, disabled, busy, waiting, onDecide, onOpenReason, fields = [] }: RowProps) {
   const choices = choicesOf(item)
   // 후보에 없는 표준 항목 (열 매핑만)
   const others =
@@ -584,7 +769,12 @@ function ItemRow({ item, disabled, busy, onDecide, onOpenReason, fields = [] }: 
               ) : item.can_change === false ? (
                 <span className="review-state">조회 전용</span>
               ) : (
-                decided && <span className="review-state">{decided}</span>
+                decided && (
+                  <span className={`review-state${waiting ? ' wk-waiting' : ''}`}>
+                    {decided}
+                    {waiting ? ' · 저장됨, 다시 검사 전' : ''}
+                  </span>
+                )
               )}
             </span>
           ) : (

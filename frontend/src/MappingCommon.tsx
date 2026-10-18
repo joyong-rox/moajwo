@@ -14,6 +14,7 @@ import BatchConfirm from './BatchConfirm'
 import FieldPicker from './FieldPicker'
 import { formatCell, loadFields, NONE, NONE_HELP, STATUS_TEXT, VALUE_KIND_LABEL } from './mappingText'
 import { navigate } from './router'
+import { Banner, Icon, StatusCards, WorkflowSteps, type IconName, type Tone } from './Workflow'
 
 const CATEGORY: Record<CommonCategory, { label: string; help: string }> = {
   common: {
@@ -28,6 +29,13 @@ const CATEGORY: Record<CommonCategory, { label: string; help: string }> = {
   only: { label: '특정 파일에만 있는 항목', help: '선택한 파일 중 한 파일에만 있는 이름입니다.' },
 }
 const ORDER: CommonCategory[] = ['common', 'divergent', 'unresolved', 'only']
+const CATEGORY_LOOK: Record<CommonCategory, { icon: IconName; tone: Tone }> = {
+  common: { icon: 'link', tone: 'auto' },
+  divergent: { icon: 'alert', tone: 'warn' },
+  unresolved: { icon: 'question', tone: 'unresolved' },
+  only: { icon: 'one', tone: 'muted' },
+}
+const MAX_PICK = 20 // 서버의 공통 검토 파일 수 제한과 같음 (mapping_review.COMMON_FILES_MAX)
 
 const memberKey = (m: CommonMember) => `${m.file_id}|${m.sheet_id}|${m.column_id}`
 
@@ -49,6 +57,7 @@ function MappingCommon() {
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [query, setQuery] = useState('')
 
   useEffect(() => {
     listFiles()
@@ -67,6 +76,10 @@ function MappingCommon() {
         if (!alive) return
         setReview(r)
         setLoading(false)
+        // 묶음이 있는 첫 구분을 연다 (빈 구분부터 보이지 않게, 사용자가 고른 구분에 묶음이 있으면 그대로)
+        setCategory((prev) =>
+          r.groups.some((g) => g.category === prev) ? prev : (ORDER.find((c) => r.groups.some((g) => g.category === c)) ?? prev),
+        )
       })
       .catch((err: unknown) => {
         if (!alive) return
@@ -86,6 +99,14 @@ function MappingCommon() {
   const groups = (review?.groups ?? []).filter((g) => g.category === category)
   const group = review?.groups.find((g) => g.group_id === groupId) ?? null
 
+  const q = query.replace(/\s+/g, '').toLowerCase()
+  const shownFiles = (files ?? []).filter(
+    (f) => !q || `#${f.id}${f.display_name}`.replace(/\s+/g, '').toLowerCase().includes(q),
+  )
+  const hiddenPicked = [...picked].filter((id) => !shownFiles.some((f) => f.id === id)).length
+  const nameOf = (id: number) => files?.find((f) => f.id === id)?.display_name ?? `#${id}`
+  const scope = requested ?? []
+
   function open() {
     setError(null)
     setMessage(null)
@@ -95,22 +116,65 @@ function MappingCommon() {
   }
 
   return (
-    <section className="mw mw-common" aria-label="여러 파일 공통 항목 검토">
+    <section className="mw mw-common wk" aria-label="여러 파일 공통 항목 검토">
+      <WorkflowSteps
+        steps={[
+          { key: 'files', state: picked.size ? 'done' : 'todo', detail: `고른 파일 ${picked.size}개`, href: '/' },
+          {
+            key: 'mapping',
+            current: true,
+            state: !review ? 'todo' : (counts.divergent ?? 0) + (counts.unresolved ?? 0) > 0 ? 'attention' : 'done',
+            detail: review
+              ? `공통 후보 ${counts.common ?? 0} · 판단이 다름 ${counts.divergent ?? 0} · 미해결 ${counts.unresolved ?? 0}`
+              : '공통 검토를 열면 확인',
+          },
+          { key: 'review', state: 'todo', detail: '고른 파일로 검사', href: picked.size ? `/?files=${[...picked].join(',')}` : '/' },
+          { key: 'result', state: 'todo', detail: '실행 기록', href: '/runs' },
+        ]}
+      />
       <p className="upload-drop-hint">
         각 파일에서 이미 실행한 '열 매핑 분석' 결과와 지금의 확정값만 모아 비교합니다. 이 화면을 열어도 다시 분석하거나
         모델을 부르지 않습니다. 같은 열 이름이라는 이유만으로 같은 항목으로 묶지 않습니다.
       </p>
-      <fieldset className="mw-files">
-        <legend>검토할 파일 (최대 20개)</legend>
+      <fieldset className="mw-files" id="wk-common-files">
+        <legend>검토할 파일 (최대 {MAX_PICK}개)</legend>
         {files === null && <p className="mw-muted">불러오는 중…</p>}
         {files?.length === 0 && <p className="mw-muted">올린 파일이 없습니다.</p>}
+        {files && files.length > 0 && (
+          <div className="wk-pickbar">
+            <input
+              type="search"
+              className="mw-search"
+              placeholder="파일 번호·이름 검색"
+              aria-label="공통 검토할 파일 검색"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <span className="wk-pickcount" role="status">
+              고른 파일 <strong>{picked.size}</strong>개 (최대 {MAX_PICK}) · 전체 {files.length}개
+            </span>
+            {picked.size > 0 && (
+              <button type="button" className="login-link" onClick={() => setPicked(new Set())}>
+                선택 모두 해제
+              </button>
+            )}
+          </div>
+        )}
+        {hiddenPicked > 0 && (
+          <p className="mapping-warn" role="status">
+            고른 파일 중 {hiddenPicked}개가 검색으로 숨겨져 있습니다 — 숨겨져도 검토 대상에 들어갑니다.{' '}
+            <button type="button" className="login-link" onClick={() => setQuery('')}>
+              검색 지우기
+            </button>
+          </p>
+        )}
         <div className="mw-file-list">
-          {(files ?? []).map((f) => (
-            <label key={f.id} className="mw-file-option">
+          {shownFiles.map((f) => (
+            <label key={f.id} className={`mw-file-option wk-filepick${picked.has(f.id) ? ' is-picked' : ''}`}>
               <input
                 type="checkbox"
                 checked={picked.has(f.id)}
-                disabled={!picked.has(f.id) && picked.size >= 20}
+                disabled={!picked.has(f.id) && picked.size >= MAX_PICK}
                 onChange={(e) =>
                   setPicked((prev) => {
                     const next = new Set(prev)
@@ -182,23 +246,32 @@ function MappingCommon() {
       )}
       {review && (
         <>
-          <div className="admin-filters" role="tablist" aria-label="검토 구분">
-            {ORDER.map((c) => (
-              <button
-                key={c}
-                type="button"
-                role="tab"
-                aria-selected={category === c}
-                className={`admin-filter${category === c ? ' is-active' : ''}`}
-                onClick={() => {
-                  setCategory(c)
-                  setGroupId(null)
-                }}
-              >
-                {CATEGORY[c].label} {counts[c] ?? 0}
-              </button>
-            ))}
+          {/* 적용 대상: 검토하는 동안 어느 파일들을 모았는지 계속 보이게 한다 (파일 선택을 바꿔도 다시 열기 전에는 그대로) */}
+          <div className="wk-scope" role="region" aria-label="적용 대상">
+            <Icon name="file" />
+            <span>
+              <strong>적용 대상</strong> 공통 검토를 연 파일 {scope.length}개:{' '}
+              <span className="wk-scope-names">{scope.map((id) => `#${id} ${nameOf(id)}`).join(', ')}</span>
+            </span>
+            {[...picked].sort().join(',') !== [...scope].sort().join(',') && (
+              <span className="mapping-warn wk-scope-note">파일 선택이 바뀌었습니다 — '공통 검토 열기'를 다시 눌러야 반영됩니다.</span>
+            )}
           </div>
+          <StatusCards
+            label="검토 구분 (누르면 그 구분만 보기)"
+            picked={category}
+            onPick={(key) => {
+              setCategory(key as CommonCategory)
+              setGroupId(null)
+            }}
+            cards={ORDER.map((c) => ({
+              key: c,
+              label: CATEGORY[c].label,
+              count: counts[c] ?? 0,
+              tone: CATEGORY_LOOK[c].tone,
+              icon: CATEGORY_LOOK[c].icon,
+            }))}
+          />
           <p className="mw-muted">{CATEGORY[category].help}</p>
           <div className={`mw-common-main${group ? ' has-detail' : ''}`}>
             <ul className="mw-groups" aria-label={CATEGORY[category].label}>
@@ -211,7 +284,9 @@ function MappingCommon() {
                     aria-pressed={g.group_id === groupId}
                     onClick={() => setGroupId(g.group_id)}
                   >
-                    <strong className="mw-colname">{g.name}</strong>
+                    <strong className="mw-colname">
+                      <Icon name={CATEGORY_LOOK[g.category].icon} /> {g.name}
+                    </strong>
                     <span className="mw-muted">
                       파일 {g.files}개 · 열 {g.members.length}개{g.field_label ? ` · ${g.field_label}` : ''}
                     </span>
@@ -224,6 +299,7 @@ function MappingCommon() {
               <GroupDetail
                 key={group.group_id}
                 group={group}
+                scopeCount={scope.length}
                 fields={fields}
                 onDone={(text) => {
                   setMessage(text)
@@ -242,11 +318,13 @@ function MappingCommon() {
 
 function GroupDetail({
   group,
+  scopeCount,
   fields,
   onDone,
   onClose,
 }: {
   group: CommonGroup
+  scopeCount: number
   fields: StandardFieldInfo[]
   onDone: (message: string) => void
   onClose: () => void
@@ -271,13 +349,17 @@ function GroupDetail({
         ← 목록으로
       </button>
       <h3 className="mw-colname">{group.name}</h3>
-      <p>
-        <span className="upload-tag">{CATEGORY[group.category].label}</span> 파일 {group.files}개 · 열{' '}
-        {group.members.length}개
+      <p className="wk-detail-state">
+        <span className={`wk-badge tone-${CATEGORY_LOOK[group.category].tone}`}>
+          <Icon name={CATEGORY_LOOK[group.category].icon} /> {CATEGORY[group.category].label}
+        </span>
+        <span>
+          이 묶음: 파일 {group.files}개 · 열 {group.members.length}개 (공통 검토한 파일 {scopeCount}개 중)
+        </span>
       </p>
       {group.evidence.length > 0 && (
         <div className="mw-evidence">
-          <strong>확인한 근거</strong>
+          <strong>묶음의 근거 (확인한 것·확인하지 못한 것)</strong>
           <ul>
             {group.evidence.map((e) => (
               <li key={e}>{e}</li>
@@ -286,11 +368,13 @@ function GroupDetail({
         </div>
       )}
       {group.reasons.length > 0 && (
-        <ul className="mw-problems">
-          {group.reasons.map((r) => (
-            <li key={r}>{r}</li>
-          ))}
-        </ul>
+        <Banner tone="warn" icon="alert" title="파일별 예외·주의">
+          <ul className="mw-problems">
+            {group.reasons.map((r) => (
+              <li key={r}>{r}</li>
+            ))}
+          </ul>
+        </Banner>
       )}
       <div className="upload-table-wrap">
         <table className="upload-table mw-members">
