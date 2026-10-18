@@ -3410,6 +3410,11 @@ a.wk-step-body:focus-visible,
   color: var(--muted);
 }
 
+.wk-step-mark.is-partial {
+  background: var(--accent-bg);
+  color: var(--accent);
+}
+
 .wk-step-text {
   display: flex;
   flex-direction: column;
@@ -3983,4 +3988,9 @@ button.wk-card:hover {
   gap: 8px 12px;
   align-items: center;
   margin-top: 10px;
+}
+
+/* 홈 단계: 일부만 확인했을 때 나머지 확인 */
+.wk-steps-more {
+  margin: -6px 0 12px;
 }

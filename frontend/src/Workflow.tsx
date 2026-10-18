@@ -127,8 +127,9 @@ export function Icon({ name, label }: { name: IconName; label?: string }) {
 
 // ---------------------------------------------------------------- 단계 안내
 
-/** done: 서버 상태로 끝난 단계 · attention: 처리할 것이 남음 · todo: 아직 · (current는 지금 보고 있는 단계 — 완료와 별개) */
-export type StepState = 'done' | 'attention' | 'todo'
+/** done: 서버 상태로 끝난 단계 · attention: 처리할 것이 남음 · partial: 일부만 확인함 (완료로 보이지 않게) · todo: 아직
+ * (current는 지금 보고 있는 단계 — 완료와 별개) */
+export type StepState = 'done' | 'attention' | 'partial' | 'todo'
 export type Step = {
   key: 'files' | 'mapping' | 'review' | 'result'
   state: StepState
@@ -143,8 +144,8 @@ const STEP_LABEL: Record<Step['key'], string> = {
   review: '검사·검토',
   result: '결과',
 }
-const STATE_TEXT: Record<StepState, string> = { done: '완료', attention: '확인할 것 있음', todo: '아직' }
-const STATE_ICON: Record<StepState, IconName> = { done: 'check', attention: 'alert', todo: 'clock' }
+const STATE_TEXT: Record<StepState, string> = { done: '완료', attention: '확인할 것 있음', partial: '일부 확인', todo: '아직' }
+const STATE_ICON: Record<StepState, IconName> = { done: 'check', attention: 'alert', partial: 'info', todo: 'clock' }
 
 function go(href: string) {
   return (e: React.MouseEvent<HTMLAnchorElement>) => {
