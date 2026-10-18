@@ -4,16 +4,16 @@ import json
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
 from app.db import get_session
 from app.files import get_file_for
 from app.integration import include_unmapped_default
-from app.models import Automation, ReviewItem, ReviewSession, SourceFile, User
+from app.models import Automation, IntegrationRun, ReviewItem, ReviewSession, SourceFile, User
 from app.pii import mask_nested, mask_rrn_number, mask_text
 from app.review import (
     INTERNAL_PARAMS,
@@ -80,6 +80,7 @@ class ReviewOut(BaseModel):
     learned: dict[str, int] | None = None
     parent_id: int | None = None
     child_id: int | None = None  # 이 세션을 이어받아 다시 검사한 세션 (대체된 경우)
+    latest_id: int | None = None  # 대체된 검토면 다시 검사로 이어진 최신 검토
     history: list[dict[str, Any]] = []  # 처음 검사부터 이 세션까지
     changes: dict[str, Any] | None = None  # 이전 검사 대비 변화
     automation_id: int | None = None  # 저장된 자동화로 실행한 검토
@@ -109,7 +110,8 @@ def review_out(
     files = []
     for fid in json.loads(session.file_ids):
         record = db.get(SourceFile, fid)
-        files.append(ReviewFileOut(id=fid, name=record.original_name if record else "?", excluded=fid in excluded))
+        name = mask_text(record.original_name) if record else "?"  # 화면 표시용 (연결은 id로)
+        files.append(ReviewFileOut(id=fid, name=name, excluded=fid in excluded))
     rrn_files = {
         fid
         for fid in {i.file_id for i in items if i.file_id is not None}
@@ -147,8 +149,8 @@ def review_out(
                 category=i.category,
                 kind=i.kind,
                 file_id=i.file_id,
-                file_name=i.file_name,
-                sheet=i.sheet,
+                file_name=_masked(i.file_name),
+                sheet=_masked(i.sheet),
                 row=i.row,
                 column=_masked(i.column),
                 before=shown(i, i.before),
@@ -171,6 +173,7 @@ def review_out(
         learned=learned,
         parent_id=session.parent_id,
         child_id=db.scalar(select(ReviewSession.id).where(ReviewSession.parent_id == session.id)),
+        latest_id=_latest(db, session) if session.status == "superseded" else None,
         history=history(db, session),
         changes=changes(db, session),
         automation_id=session.automation_id,
@@ -203,6 +206,87 @@ def create_review(body: ValidationIn, db: Annotated[Session, Depends(get_session
         get_file_for(db, user, fid)
     session = create_session(db, body.model_dump(), user_id=user.id)
     return review_out(db, session, user=user)
+
+
+REVIEW_STATUS_LABEL = {"in_review": "검토 중", "ready": "검토 완료", "superseded": "다시 검사로 대체됨"}
+LIST_FILE_NAMES = 3  # 목록에 보이는 파일 이름 수 (나머지는 개수로)
+
+
+class ReviewListItem(BaseModel):
+    id: int
+    status: str  # in_review / ready / superseded
+    status_label: str
+    needs_recheck: bool  # 검사 기준과 지금 매핑이 달라 다시 검사해야 완료·통합할 수 있음 (대체된 검토는 False)
+    file_count: int
+    file_names: list[str]  # 앞의 몇 개만, 개인정보 형식은 가림
+    created_at: datetime
+    completed_at: datetime | None
+    created_by: int | None
+    created_by_name: str | None
+    automation_name: str | None
+    latest_id: int  # 대체된 검토면 다시 검사로 이어진 최신 검토, 아니면 자기 자신
+    run_count: int  # 이 검토로 만든 실행 기록 (실패·대기 포함)
+    last_run_id: int | None  # 결과 파일이 있는 가장 최근 실행
+    can_edit: bool  # 만든 사람만 승인·완료·통합 (최고 관리자도 남의 검토는 조회만)
+
+
+def _latest(db: Session, session: ReviewSession) -> int:
+    """다시 검사로 이어진 마지막 검토 (대체되지 않은 검토는 자기 자신)."""
+    current, seen = session.id, {session.id}
+    while (child := db.scalar(select(ReviewSession.id).where(ReviewSession.parent_id == current))) is not None:
+        if child in seen:  # 순환은 없어야 하지만 끝없이 돌지 않게
+            break
+        seen.add(child)
+        current = child
+    return current
+
+
+@router.get("", response_model=list[ReviewListItem])
+def list_reviews(
+    db: Annotated[Session, Depends(get_session)],
+    user: CurrentUserDep,
+    status_filter: Annotated[Literal["in_review", "ready", "superseded"] | None, Query(alias="status")] = None,
+    include_superseded: bool = False,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> list[ReviewListItem]:
+    """검토 목록 (최신 순, 조회 전용) — 결과를 아직 만들지 않은 검토도 찾아 이어갈 수 있게 한다.
+    볼 수 있는 범위는 단건 조회와 같다: 일반 사용자는 자기 검토, 최고 관리자는 전체 (남의 검토는 can_edit=False)."""
+    stmt = select(ReviewSession).order_by(ReviewSession.id.desc()).limit(limit)
+    if not user.is_manager:
+        stmt = stmt.where(ReviewSession.created_by == user.id)
+    if status_filter is not None:
+        stmt = stmt.where(ReviewSession.status == status_filter)
+    elif not include_superseded:
+        stmt = stmt.where(ReviewSession.status != "superseded")
+    out = []
+    for session in db.scalars(stmt):
+        fids = json.loads(session.file_ids)
+        names = [mask_text(r.original_name) if (r := db.get(SourceFile, f)) else "?" for f in fids[:LIST_FILE_NAMES]]
+        creator = db.get(User, session.created_by) if session.created_by is not None else None
+        automation = db.get(Automation, session.automation_id) if session.automation_id is not None else None
+        runs = select(IntegrationRun.id).where(IntegrationRun.review_session_id == session.id)
+        out.append(
+            ReviewListItem(
+                id=session.id,
+                status=session.status,
+                status_label=REVIEW_STATUS_LABEL.get(session.status, session.status),
+                needs_recheck=session.status != "superseded" and bool(recheck_reasons(db, session)),
+                file_count=len(fids),
+                file_names=names,
+                created_at=session.created_at,
+                completed_at=session.completed_at,
+                created_by=session.created_by,
+                created_by_name=creator.display_name if creator is not None else None,
+                automation_name=automation.name if automation is not None else None,
+                latest_id=_latest(db, session) if session.status == "superseded" else session.id,
+                run_count=db.scalar(select(func.count()).select_from(runs.subquery())) or 0,
+                last_run_id=db.scalar(
+                    runs.where(IntegrationRun.status == "done").order_by(IntegrationRun.id.desc()).limit(1)
+                ),
+                can_edit=session.created_by == user.id or (session.created_by is None and user.is_manager),
+            )
+        )
+    return out
 
 
 @router.get("/{review_id}", response_model=ReviewOut)
