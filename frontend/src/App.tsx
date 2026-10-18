@@ -30,6 +30,7 @@ import Runs from './Runs'
 import Settings from './Settings'
 import Upload from './Upload'
 import Validation from './Validation'
+import { Banner } from './Workflow'
 
 type Gate = { kind: 'loading' } | { kind: 'signed-out'; setupRequired: boolean } | { kind: 'signed-in'; me: Me }
 
@@ -142,54 +143,54 @@ function Workspace() {
         <main className="app">
           {/* 홈(취합 작업)은 다른 메뉴로 옮겨도 진행 중인 검토가 사라지지 않도록 숨기기만 한다 */}
           <div id="home" hidden={path !== '/'}>
-            <h1 className="page-title">홈</h1>
-            {/* 검토를 열면 검토 화면의 단계 안내를 쓴다 (같은 안내를 두 번 보이지 않음) */}
-            {!reviewRequest && homeReviewId === null && <HomeSteps refreshKey={filesVersion} selected={selected} />}
-            <Dashboard refreshKey={homeVisit} />
-
-            <section className="status" aria-live="polite">
-              <h2>백엔드 상태</h2>
-              {state.kind === 'loading' && <p>확인 중…</p>}
-              {state.kind === 'ok' && (
-                <dl>
-                  <dt>API</dt>
-                  <dd className={state.health.status === 'ok' ? 'ok' : 'fail'}>{state.health.status}</dd>
-                  <dt>DB</dt>
-                  <dd className={state.health.database === 'ok' ? 'ok' : 'fail'}>{state.health.database}</dd>
-                </dl>
+            {/* 홈 작업 영역: 넓은 화면을 쓰고 '올리기 → 고르기 → 검토 시작' 순서로 보인다 (대시보드는 아래) */}
+            <div className="wk-home">
+              <header className="wk-home-head">
+                <div>
+                  <h1 className="page-title">홈</h1>
+                  <p className="wk-home-lead">파일을 올리고, 검사할 파일을 고른 뒤 사전 검토를 여세요.</p>
+                </div>
+                <ServerStatus state={state} />
+              </header>
+              {state.kind === 'error' && (
+                <Banner tone="block" icon="block" title="서버에 연결할 수 없습니다" live="alert">
+                  <p>연결 실패: {state.message}</p>
+                </Banner>
               )}
-              {state.kind === 'error' && <p className="fail">연결 실패: {state.message}</p>}
-            </section>
+              {/* 검토를 열면 검토 화면의 단계 안내를 쓴다 (같은 안내를 두 번 보이지 않음) */}
+              {!reviewRequest && homeReviewId === null && <HomeSteps refreshKey={filesVersion} selected={selected} />}
 
-            <Upload onUploaded={refreshFiles} onPiiChanged={refreshFiles} />
-            <Validation
-              refreshKey={filesVersion}
-              canManageGlossary={isManager(me.role)}
-              onGlossaryChanged={() => undefined}
-              onSelection={setSelected}
-              onOpenReview={(request) => {
-                setHomeReviewId(null)
-                setReviewRequest(request)
-                setReviewKey((k) => k + 1)
-              }}
-            />
-            {(reviewRequest || homeReviewId !== null) && (
-              <ReviewPanel
-                key={reviewKey}
-                request={reviewRequest ?? undefined}
-                reviewId={reviewRequest ? undefined : (homeReviewId ?? undefined)}
-                onLoaded={onHomeReview}
-                onClose={() => {
-                  setReviewRequest(null)
+              <Upload onUploaded={refreshFiles} onPiiChanged={refreshFiles} />
+              <Validation
+                refreshKey={filesVersion}
+                canManageGlossary={isManager(me.role)}
+                onGlossaryChanged={() => undefined}
+                onSelection={setSelected}
+                onOpenReview={(request) => {
                   setHomeReviewId(null)
-                  const q = new URLSearchParams(window.location.search)
-                  q.delete('review')
-                  replaceSearch(q.toString() ? `?${q.toString()}` : '')
-                  refreshFiles()
-                  setHomeVisit((v) => v + 1)
+                  setReviewRequest(request)
+                  setReviewKey((k) => k + 1)
                 }}
               />
-            )}
+              {(reviewRequest || homeReviewId !== null) && (
+                <ReviewPanel
+                  key={reviewKey}
+                  request={reviewRequest ?? undefined}
+                  reviewId={reviewRequest ? undefined : (homeReviewId ?? undefined)}
+                  onLoaded={onHomeReview}
+                  onClose={() => {
+                    setReviewRequest(null)
+                    setHomeReviewId(null)
+                    const q = new URLSearchParams(window.location.search)
+                    q.delete('review')
+                    replaceSearch(q.toString() ? `?${q.toString()}` : '')
+                    refreshFiles()
+                    setHomeVisit((v) => v + 1)
+                  }}
+                />
+              )}
+              <Dashboard refreshKey={homeVisit} />
+            </div>
           </div>
           {path !== '/' && (
             <>
@@ -215,6 +216,25 @@ function Workspace() {
         </main>
       </div>
     </div>
+  )
+}
+
+/** 홈 머리 영역의 서버 상태 (예전 '백엔드 상태' 칸) — 색만이 아니라 글자로도 알린다 */
+function ServerStatus({ state }: { state: HealthState }) {
+  const ok = state.kind === 'ok' && state.health.status === 'ok' && state.health.database === 'ok'
+  const look = state.kind === 'loading' ? 'loading' : ok ? 'ok' : 'fail'
+  const text =
+    state.kind === 'loading' ? '서버 확인 중…' : state.kind === 'error' ? '서버 연결 실패' : ok ? '서버 정상' : '서버 확인 필요'
+  return (
+    <p className={`wk-server is-${look}`} role="status" aria-live="polite">
+      <span className="wk-server-dot" aria-hidden="true" />
+      {text}
+      {state.kind === 'ok' && (
+        <span className="wk-server-detail">
+          API {state.health.status} · DB {state.health.database}
+        </span>
+      )}
+    </p>
   )
 }
 

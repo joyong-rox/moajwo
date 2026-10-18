@@ -4000,3 +4000,513 @@ button.wk-card:hover {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* ---- 홈 시안 (TailGrids 디자인 참고 — 의존성·전역 리셋 없이 .wk-home 안에서만) ---- */
+.wk-home {
+  --tg-primary: #3758f9;
+  --tg-primary-hover: #2237ee;
+  --tg-primary-soft: #eff3ff;
+  --tg-ring: rgb(55 88 249 / 20%);
+  --tg-title: #1f2937;
+  --tg-text: #374151;
+  --tg-muted: #6b7280;
+  --tg-border: #e5e7eb;
+  --tg-border-strong: #d1d5db;
+  --tg-soft: #f9fafb;
+  --tg-soft-2: #f3f4f6;
+  --wk-home-w: min(1200px, calc(100vw - var(--shell-side, 0px) - 32px));
+
+  box-sizing: border-box;
+  /* 본문 칸(.app 720px)보다 넓게, 가운데 정렬 (transform 없이 여백 계산) */
+  width: var(--wk-home-w);
+  margin-left: calc((100% - var(--wk-home-w)) / 2);
+  color: var(--tg-text);
+}
+
+.wk-home-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+}
+
+.wk-home .page-title {
+  margin: 0;
+  color: var(--tg-title);
+  font-size: 1.75rem;
+  letter-spacing: -0.2px;
+}
+
+.wk-home-lead {
+  margin: 4px 0 0;
+  color: var(--tg-muted);
+}
+
+.wk-server {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0;
+  padding: 4px 12px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.wk-server.is-ok {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.wk-server.is-fail {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.wk-server.is-loading {
+  border-color: var(--tg-border);
+  background: var(--tg-soft);
+  color: var(--tg-muted);
+}
+
+.wk-server-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.wk-server-detail {
+  color: var(--tg-muted);
+  font-weight: 400;
+}
+
+/* 단계 안내: 한 장의 카드 안 네 칸 (칸 사이 1px 선), 지금 단계는 아래 파란 줄 */
+.wk-home .wk-steps {
+  margin: 0 0 16px;
+}
+
+.wk-home .wk-steps ol {
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--tg-border);
+  border-radius: 16px;
+  background: var(--tg-border);
+  box-shadow: 0 1px 2px rgb(16 24 40 / 5%);
+}
+
+.wk-home .wk-step {
+  background: #fff;
+}
+
+.wk-home .wk-step-body {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 0;
+}
+
+.wk-home a.wk-step-body:hover {
+  background: var(--tg-soft);
+}
+
+.wk-home .wk-step.is-current .wk-step-body {
+  border: 0;
+  background: var(--tg-primary-soft);
+  box-shadow: inset 0 -3px 0 var(--tg-primary);
+}
+
+.wk-home .wk-step-name {
+  color: var(--tg-title);
+}
+
+.wk-home .wk-step-mark {
+  width: 28px;
+  height: 28px;
+}
+
+/* 카드: 흰 바탕·옅은 테두리·둥근 모서리 */
+.wk-home .upload,
+.wk-home .validation,
+.wk-home .dash {
+  margin: 0 0 16px;
+  padding: 20px;
+  border: 1px solid var(--tg-border);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 5%);
+}
+
+.wk-home .upload > h2,
+.wk-home .validation > h2,
+.wk-home .dash-head h2 {
+  margin: 0;
+  color: var(--tg-title);
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.wk-home .wk-card-desc {
+  margin: 4px 0 14px;
+  color: var(--tg-muted);
+  font-size: 0.875rem;
+}
+
+/* 업로드 영역 */
+.wk-drop-text {
+  min-width: 0;
+}
+
+.wk-home .upload-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 24px 16px;
+  border: 1.5px dashed var(--tg-border-strong);
+  border-radius: 12px;
+  background: var(--tg-soft);
+}
+
+.wk-home .upload-drop:hover,
+.wk-home .upload-drop:focus-visible,
+.wk-home .upload-drop.is-dragging {
+  border-color: var(--tg-primary);
+  background: var(--tg-primary-soft);
+}
+
+.wk-home .upload-drop-title {
+  margin: 4px 0 0;
+  color: var(--tg-title);
+}
+
+.wk-drop-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--tg-primary-soft);
+  color: var(--tg-primary);
+}
+
+.wk-drop-icon .wk-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.wk-drop-button {
+  display: inline-flex;
+  margin-top: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--tg-border-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--tg-title);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+/* 검사할 파일: 왼쪽 표, 오른쪽 '검사 시작' 패널 */
+.wk-val-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 20px;
+  align-items: start;
+}
+
+.wk-val-main {
+  min-width: 0;
+}
+
+.wk-home .wk-pickbar {
+  margin-top: 0;
+}
+
+.wk-home input[type='text'],
+.wk-home input[type='number'],
+.wk-home input[type='search'],
+.wk-home select,
+.wk-home textarea {
+  box-sizing: border-box;
+  min-height: 38px;
+  padding: 7px 12px;
+  border: 1px solid var(--tg-border-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--tg-text);
+  font: inherit;
+}
+
+.wk-home input[type='text']:focus,
+.wk-home input[type='number']:focus,
+.wk-home input[type='search']:focus,
+.wk-home select:focus,
+.wk-home textarea:focus {
+  border-color: var(--tg-primary);
+  box-shadow: 0 0 0 3px var(--tg-ring);
+}
+
+.wk-home .wk-filetable {
+  max-height: 440px;
+  overflow: auto;
+  border: 1px solid var(--tg-border);
+  border-radius: 12px;
+}
+
+.wk-home .validation-files {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.875rem;
+}
+
+/* 표를 내려도 머리글(검증 대상·전월 자료·파일)이 보이게 */
+.wk-home .validation-files thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--tg-border);
+  background: var(--tg-soft);
+  color: var(--tg-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.wk-home .validation-files td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--tg-border);
+  color: var(--tg-text);
+}
+
+/* 긴 파일 이름은 잘리지 않고 줄바꿈해 전부 보이게 (표 안 가로 스크롤 없이) */
+.wk-home .validation-files .wk-filename {
+  min-width: 12em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.wk-home .validation-files tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.wk-home .validation-files tbody tr:hover td {
+  background: var(--tg-soft);
+}
+
+.wk-home .wk-filetable tr.is-picked td {
+  background: var(--tg-primary-soft);
+}
+
+.wk-home .validation-files input[type='checkbox'] {
+  accent-color: var(--tg-primary);
+}
+
+.wk-val-side {
+  position: sticky;
+  top: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr); /* 긴 파일 이름이 패널 폭을 넘지 않게 */
+  min-width: 0;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--tg-border);
+  border-radius: 12px;
+  background: var(--tg-soft);
+}
+
+.wk-val-side-title {
+  margin: 0;
+  color: var(--tg-title);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.wk-val-summary {
+  margin: 0;
+  color: var(--tg-text);
+  font-size: 0.875rem;
+}
+
+.wk-val-picked {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wk-val-picked li {
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 2px 10px;
+  border: 1px solid var(--tg-border);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wk-val-picked .wk-val-more-count {
+  border-style: dashed;
+  color: var(--tg-muted);
+}
+
+.wk-val-field {
+  display: grid;
+  gap: 4px;
+  color: var(--tg-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.wk-val-hint {
+  margin: -4px 0 2px;
+  color: var(--tg-muted);
+  font-size: 0.78rem;
+  font-weight: 400;
+}
+
+.wk-val-empty {
+  margin: 0;
+}
+
+.wk-val-hint-field {
+  margin-top: -6px;
+}
+
+.wk-btn-primary,
+.wk-btn-outline {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 16px;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.wk-btn-primary {
+  border: 1px solid var(--tg-primary);
+  background: var(--tg-primary);
+  color: #fff;
+}
+
+.wk-btn-primary:hover:not(:disabled) {
+  border-color: var(--tg-primary-hover);
+  background: var(--tg-primary-hover);
+}
+
+.wk-btn-outline {
+  border: 1px solid var(--tg-border-strong);
+  background: #fff;
+  color: var(--tg-title);
+  font-weight: 500;
+}
+
+.wk-btn-outline:hover:not(:disabled) {
+  background: var(--tg-soft-2);
+}
+
+.wk-btn-primary:disabled,
+.wk-btn-outline:disabled {
+  border-color: var(--tg-soft-2);
+  background: var(--tg-soft-2);
+  color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.wk-home .wk-btn-primary:focus-visible,
+.wk-home .wk-btn-outline:focus-visible {
+  outline: 2px solid var(--tg-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--tg-ring);
+}
+
+.wk-val-more {
+  padding-top: 6px;
+  border-top: 1px solid var(--tg-border);
+}
+
+.wk-val-more summary {
+  color: var(--tg-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.wk-val-more .validation-form {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin: 10px 0 0;
+}
+
+/* 대시보드: 작업 아래, 네 칸 한 줄 */
+.wk-home .dash-cards {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.wk-home .dash-card {
+  border-color: var(--tg-border);
+  border-radius: 12px;
+  background: var(--tg-soft);
+}
+
+.wk-home .dash-value {
+  color: var(--tg-title);
+}
+
+@media (max-width: 1100px) {
+  .wk-val-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wk-val-side {
+    position: static;
+  }
+
+  .wk-home .dash-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .wk-home .upload,
+  .wk-home .validation,
+  .wk-home .dash {
+    padding: 16px;
+  }
+
+  .wk-home .page-title {
+    font-size: 1.5rem;
+  }
+}
+
+/* 넓은 화면의 업로드 칸은 한 줄로 낮게 (파일을 이미 올린 사용자가 목록까지 덜 내려가게) */
+@media (min-width: 768px) {
+  .wk-home .upload-drop {
+    flex-direction: row;
+    justify-content: center;
+    gap: 16px;
+    padding: 18px 20px;
+    text-align: left;
+  }
+
+  .wk-home .wk-drop-button {
+    margin-top: 0;
+  }
+}

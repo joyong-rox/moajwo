@@ -161,165 +161,205 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
   return (
     <section className="validation wk-validation" id="wk-validation">
       <h2>통합 전 검증 · 검토</h2>
+      <p className="wk-card-desc">검증 대상은 이번에 검사할 파일, 전월 자료는 비교에만 쓰는 지난 자료입니다.</p>
       {files.length === 0 ? (
         <Banner tone="info" icon="file" title="아직 올린 파일이 없습니다">
           <p>위의 '파일 업로드'에서 파일을 올리면 여기서 검사할 파일을 고를 수 있습니다.</p>
         </Banner>
       ) : (
-        <>
-          <div className="wk-pickbar">
-            <input
-              type="search"
-              className="mw-search"
-              placeholder="파일 번호·이름 검색"
-              aria-label="검사할 파일 검색"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            <span className="wk-pickcount" role="status">
-              검증 대상 <strong>{targets.size}</strong>개 (최대 {MAX_TARGETS}) · 전월 자료 <strong>{baseline.size}</strong>개 · 전체{' '}
-              {files.length}개
-            </span>
-            {(targets.size > 0 || baseline.size > 0) && (
-              <button
-                type="button"
-                className="login-link"
-                onClick={() => {
-                  setTargets(new Set())
-                  setBaseline(new Set())
-                }}
-              >
-                선택 모두 해제
-              </button>
+        <div className="wk-val-grid">
+          <div className="wk-val-main">
+            <div className="wk-pickbar">
+              <input
+                type="search"
+                className="mw-search"
+                placeholder="파일 번호·이름 검색"
+                aria-label="검사할 파일 검색"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              <span className="wk-pickcount" role="status">
+                검증 대상 <strong>{targets.size}</strong>개 (최대 {MAX_TARGETS}) · 전월 자료 <strong>{baseline.size}</strong>개 · 전체{' '}
+                {files.length}개
+              </span>
+              {(targets.size > 0 || baseline.size > 0) && (
+                <button
+                  type="button"
+                  className="login-link"
+                  onClick={() => {
+                    setTargets(new Set())
+                    setBaseline(new Set())
+                  }}
+                >
+                  선택 모두 해제
+                </button>
+              )}
+            </div>
+            {hiddenPicked > 0 && (
+              <p className="mapping-warn" role="status">
+                고른 파일 중 {hiddenPicked}개가 검색으로 숨겨져 있습니다 — 숨겨져도 검사 대상에 그대로 들어갑니다.{' '}
+                <button type="button" className="login-link" onClick={() => setQuery('')}>
+                  검색 지우기
+                </button>
+              </p>
             )}
+            {preselectNote && (
+              <p className="mapping-warn" role="status">
+                {preselectNote}{' '}
+                <button type="button" className="login-link" onClick={() => setPreselectNote(null)}>
+                  안내 닫기
+                </button>
+              </p>
+            )}
+            {full && <p className="mw-muted">한 번에 {MAX_TARGETS}개까지 검사할 수 있습니다.</p>}
+            <div className="upload-table-wrap wk-filetable">
+              <table className="upload-table validation-files">
+                <thead>
+                  <tr>
+                    <th scope="col">검증 대상</th>
+                    <th scope="col">전월 자료</th>
+                    <th scope="col">파일</th>
+                    <th scope="col">개인정보</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shownFiles.map((f) => (
+                    <tr key={f.id} className={targets.has(f.id) ? 'is-picked' : undefined}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={`#${f.id} ${f.display_name} 검증 대상`}
+                          checked={targets.has(f.id)}
+                          disabled={!targets.has(f.id) && full}
+                          onChange={(e) => {
+                            setTargets(toggle(targets, f.id, e.target.checked))
+                            if (e.target.checked) setBaseline(toggle(baseline, f.id, false))
+                          }}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={`#${f.id} ${f.display_name} 전월 자료`}
+                          checked={baseline.has(f.id)}
+                          onChange={(e) => {
+                            setBaseline(toggle(baseline, f.id, e.target.checked))
+                            if (e.target.checked) setTargets(toggle(targets, f.id, false))
+                          }}
+                        />
+                      </td>
+                      <td className="wk-filename">
+                        #{f.id} {f.display_name}
+                      </td>
+                      <td>
+                        {f.pii ? (
+                          <span className={`upload-tag ${f.pii.acknowledged ? 'mapping-confirmed' : 'mapping-unresolved'}`}>
+                            {f.pii.acknowledged ? '확인됨' : '확인 필요'}
+                          </span>
+                        ) : (
+                          '-'
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-          {hiddenPicked > 0 && (
-            <p className="mapping-warn" role="status">
-              고른 파일 중 {hiddenPicked}개가 검색으로 숨겨져 있습니다 — 숨겨져도 검사 대상에 그대로 들어갑니다.{' '}
-              <button type="button" className="login-link" onClick={() => setQuery('')}>
-                검색 지우기
-              </button>
+          <aside className="wk-val-side" aria-label="검사 시작">
+            <h3 className="wk-val-side-title">검사 시작</h3>
+            <p className="wk-val-summary">
+              검증 대상 <strong>{targets.size}</strong>개 · 전월 자료 <strong>{baseline.size}</strong>개
             </p>
-          )}
-          {preselectNote && (
-            <p className="mapping-warn" role="status">
-              {preselectNote}{' '}
-              <button type="button" className="login-link" onClick={() => setPreselectNote(null)}>
-                안내 닫기
-              </button>
+            {targets.size === 0 && (
+              <p className="wk-val-hint wk-val-empty">표에서 검증 대상을 1개 이상 고르면 시작할 수 있습니다.</p>
+            )}
+            {targets.size > 0 && (
+              <ul className="wk-val-picked" aria-label="고른 검증 대상">
+                {[...targets].slice(0, 4).map((id) => (
+                  <li key={id} title={files.find((f) => f.id === id)?.display_name}>
+                    #{id} {files.find((f) => f.id === id)?.display_name}
+                  </li>
+                ))}
+                {targets.size > 4 && <li className="wk-val-more-count">외 {targets.size - 4}개</li>}
+              </ul>
+            )}
+            {/* 안내 문장은 이름에 섞지 않고 설명(aria-describedby)으로 연결한다 */}
+            <label className="wk-val-field">
+              기준 기간
+              <input
+                type="text"
+                inputMode="numeric"
+                placeholder="2026-09 또는 2026"
+                aria-describedby="wk-hint-period"
+                value={period}
+                onChange={(e) => setPeriod(e.target.value)}
+              />
+            </label>
+            <p className="wk-val-hint wk-val-hint-field" id="wk-hint-period">
+              입력하면 이 기간과 다른 자료를 찾아 알려 줍니다 (선택).
             </p>
-          )}
-          {full && <p className="mw-muted">한 번에 {MAX_TARGETS}개까지 검사할 수 있습니다.</p>}
-        <div className="upload-table-wrap wk-filetable">
-          <table className="upload-table validation-files">
-            <thead>
-              <tr>
-                <th scope="col">검증 대상</th>
-                <th scope="col">전월 자료</th>
-                <th scope="col">파일</th>
-                <th scope="col">개인정보</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shownFiles.map((f) => (
-                <tr key={f.id} className={targets.has(f.id) ? 'is-picked' : undefined}>
-                  <td>
-                    <input
-                      type="checkbox"
-                      aria-label={`#${f.id} ${f.display_name} 검증 대상`}
-                      checked={targets.has(f.id)}
-                      disabled={!targets.has(f.id) && full}
-                      onChange={(e) => {
-                        setTargets(toggle(targets, f.id, e.target.checked))
-                        if (e.target.checked) setBaseline(toggle(baseline, f.id, false))
-                      }}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      type="checkbox"
-                      aria-label={`#${f.id} ${f.display_name} 전월 자료`}
-                      checked={baseline.has(f.id)}
-                      onChange={(e) => {
-                        setBaseline(toggle(baseline, f.id, e.target.checked))
-                        if (e.target.checked) setTargets(toggle(targets, f.id, false))
-                      }}
-                    />
-                  </td>
-                  <td className="wk-filename">
-                    #{f.id} {f.display_name}
-                  </td>
-                  <td>
-                    {f.pii ? (
-                      <span className={`upload-tag ${f.pii.acknowledged ? 'mapping-confirmed' : 'mapping-unresolved'}`}>
-                        {f.pii.acknowledged ? '확인됨' : '확인 필요'}
-                      </span>
-                    ) : (
-                      '-'
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+            <button
+              type="button"
+              className="wk-btn-primary"
+              aria-describedby="wk-hint-review"
+              disabled={busy || targets.size === 0}
+              onClick={() => onOpenReview(buildRequest())}
+            >
+              사전 검토 열기 (통합 전)
+            </button>
+            <p className="wk-val-hint" id="wk-hint-review">
+              문제를 확인·승인한 뒤 통합 결과까지 이어집니다.
+            </p>
+            <button
+              type="button"
+              className="wk-btn-outline"
+              aria-describedby="wk-hint-validate"
+              disabled={busy || targets.size === 0}
+              onClick={() => void submit()}
+            >
+              {busy ? '검증 중…' : `검증 실행 (${targets.size}개 파일)`}
+            </button>
+            <p className="wk-val-hint" id="wk-hint-validate">
+              검사 결과만 빠르게 봅니다 (검토는 만들지 않음).
+            </p>
+            <details className="wk-val-more">
+              <summary>추가 검사 설정</summary>
+              <div className="validation-form">
+                <label>
+                  기관·지역 기준 열
+                  <select value={entityField} onChange={(e) => setEntityField(e.target.value)}>
+                    {ENTITY_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  전월 대비 이상치 기준 (±%)
+                  <input
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={threshold}
+                    onChange={(e) => setThreshold(Number(e.target.value) || 50)}
+                  />
+                </label>
+                <label className="validation-wide">
+                  필수 기관·지역 (쉼표 또는 줄바꿈으로 구분)
+                  <textarea
+                    rows={2}
+                    placeholder="행정안전부, 기상청, 인사혁신처"
+                    value={entities}
+                    onChange={(e) => setEntities(e.target.value)}
+                  />
+                </label>
+              </div>
+            </details>
+          </aside>
         </div>
-        </>
       )}
-
-      <div className="validation-form">
-        <label>
-          기준 기간
-          <input
-            type="text"
-            inputMode="numeric"
-            placeholder="2026-09 또는 2026"
-            value={period}
-            onChange={(e) => setPeriod(e.target.value)}
-          />
-        </label>
-        <label>
-          기관·지역 기준 열
-          <select value={entityField} onChange={(e) => setEntityField(e.target.value)}>
-            {ENTITY_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          전월 대비 이상치 기준 (±%)
-          <input
-            type="number"
-            min={1}
-            max={1000}
-            value={threshold}
-            onChange={(e) => setThreshold(Number(e.target.value) || 50)}
-          />
-        </label>
-        <label className="validation-wide">
-          필수 기관·지역 (쉼표 또는 줄바꿈으로 구분)
-          <textarea
-            rows={2}
-            placeholder="행정안전부, 기상청, 인사혁신처"
-            value={entities}
-            onChange={(e) => setEntities(e.target.value)}
-          />
-        </label>
-      </div>
-      <div className="review-open">
-        <button type="button" className="mapping-run" disabled={busy || targets.size === 0} onClick={() => void submit()}>
-          {busy ? '검증 중…' : `검증 실행 (${targets.size}개 파일)`}
-        </button>
-        <button
-          type="button"
-          className="mapping-run"
-          disabled={busy || targets.size === 0}
-          onClick={() => onOpenReview(buildRequest())}
-        >
-          사전 검토 열기 (통합 전)
-        </button>
-      </div>
       {error && (
         <p className="upload-error" role="alert">
           {error}

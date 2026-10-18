@@ -19,8 +19,15 @@ export type IconName =
   | 'one'
   | 'list'
   | 'table'
+  | 'upload'
 
 const PATHS: Record<IconName, ReactNode> = {
+  upload: (
+    <>
+      <path d="M8 10.5V3M5 6l3-3 3 3" />
+      <path d="M3 10.5v1.8A1.2 1.2 0 0 0 4.2 13.5h7.6a1.2 1.2 0 0 0 1.2-1.2v-1.8" />
+    </>
+  ),
   check: <path d="M3.5 8.5l3 3 6-7" />,
   alert: (
     <>
