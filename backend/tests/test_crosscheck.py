@@ -534,8 +534,11 @@ def test_title_wording_is_independent_evidence(tmp_path: Path) -> None:
 
 def test_alias_api_and_learning_never_store_pii_names(client_with_entry) -> None:
     """병합 전 보완 ③: 별칭 등록 API와 검토 완료 학습 모두 개인정보 형식 이름을 별칭으로 저장하지 않는다."""
+    import json
+
     from sqlalchemy import select as sql_select
 
+    from app.check_basis import CHECK_BASIS_KEY, build_basis
     from app.db import SessionLocal
     from app.models import GlossaryAlias, ReviewItem, ReviewSession
     from app.review import complete
@@ -546,8 +549,9 @@ def test_alias_api_and_learning_never_store_pii_names(client_with_entry) -> None
     ok = client.post("/glossary/aliases", json={"alias": "정상별칭기관", "target_code": code})
     assert ok.status_code == 201, ok.text
     with SessionLocal() as db:
+        basis = json.dumps({CHECK_BASIS_KEY: build_basis([], [], {}, {})})  # 파일 없는 검토의 검사 기준
         session = ReviewSession(
-            status="in_review", params="{}", file_ids="[]", excluded_file_ids="[]", remember_format=True
+            status="in_review", params=basis, file_ids="[]", excluded_file_ids="[]", remember_format=True
         )
         db.add(session)
         db.flush()

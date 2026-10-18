@@ -183,6 +183,10 @@ def test_remember_format_learns_on_complete(client: TestClient) -> None:
         assert client.post(f"/reviews/{rid}/items/{item['id']}/decision", json=body).status_code == 200
 
     review = client.patch(f"/reviews/{rid}", json={"remember_format": True}).json()
+    # 숫자 열을 금액 등으로 승인하면 검사 입력이 바뀌므로 다시 검사해야 완료할 수 있다 (승인·기억하기 선택은 이어받음)
+    assert review["remember_format"] is True and review["needs_recheck"] and not review["can_complete"]
+    review = client.post(f"/reviews/{rid}/recheck", json={"replace": {}}).json()
+    rid = review["id"]
     assert review["remember_format"] is True and review["can_complete"]
     done = client.post(f"/reviews/{rid}/complete").json()
     assert done["status"] == "ready" and done["summary"].startswith("검토 완료")

@@ -264,7 +264,7 @@ function ReviewPanel({
                 )}
                 blocked={
                   review.needs_recheck
-                    ? "검사한 뒤 열 매핑 확정이 바뀌어 이 검토로는 새 결과를 만들 수 없습니다 — '다시 검사 (결정 이어받기)'로 지금 확정을 검사하세요."
+                    ? "이 검토의 검사 결과를 지금 열 매핑에 쓸 수 없어 새 결과를 만들 수 없습니다 — '다시 검사 (결정 이어받기)'로 지금 매핑을 검사하세요."
                     : null
                 }
                 onFailed={() => {
@@ -344,7 +344,7 @@ function ScoreHeader({ review }: { review: Review }) {
         <p className="review-summary">{review.summary}</p>
         {review.needs_recheck && (review.recheck_reasons?.length ?? 0) > 0 && (
           <details className="review-recheck">
-            <summary>검사한 뒤 바뀐 열 매핑 확정 {review.recheck_reasons?.length}건</summary>
+            <summary>다시 검사가 필요한 이유 {review.recheck_reasons?.length}건</summary>
             <ul>
               {review.recheck_reasons?.map((reason) => (
                 <li key={reason}>{reason}</li>

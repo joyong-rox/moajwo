@@ -26,6 +26,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.check_basis import BASIS_VERSION, CHECK_BASIS_KEY, LEGACY_REASON, applied_drift, basis_changes
 from app.config import DATA_DIR
 from app.decisions import load_decisions, load_learned, load_org_codes
 from app.files import load_parsed
@@ -36,8 +37,8 @@ from app.models import Automation, IntegrationRun, ReviewSession, RunChange
 from app.parsing import Cell, is_missing
 from app.pii import mask_text
 from app.promotion import load_standard
-from app.quantity import QUANTITY_FIELDS, confirmed_quantity_indexes, quantity_sheet, text_value_columns
-from app.review import VERIFIED_KEY, decision_changes, mapping_reason, session_items, summarize
+from app.quantity import confirmed_quantity_indexes, quantity_sheet
+from app.review import mapping_reason, session_items, summarize
 from app.validation import EntityResolver
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,10 @@ def _display_name(ref: EntityRef, field_key: str, has_sido: bool = True) -> str:
     return ref.name
 
 
+def _few(items: list[str], limit: int = 3) -> str:
+    return "; ".join(items[:limit]) + (f" 외 {len(items) - limit}건" if len(items) > limit else "")
+
+
 def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -> _Built:
     if session.status != "ready":
         raise IntegrationError("검토가 끝난(검토 완료) 세션만 통합할 수 있습니다.")
@@ -232,8 +237,19 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
     if not file_ids:
         raise IntegrationError("통합할 파일이 없습니다 (모두 제외됨).")
 
+    basis = params.get(CHECK_BASIS_KEY)
+    if not basis or basis.get("v") != BASIS_VERSION:  # 같은지 확인할 수 없으면 같다고 보지 않는다
+        raise IntegrationError(f"{LEGACY_REASON} — 검토에서 다시 검사하세요.")
     engine = get_engine()
+    # 확정·학습 별칭·전사 표준 사전은 한 번만 읽어 검사 기준과 비교하고, 그 값으로 결과를 만든다
+    # (비교한 뒤 다른 요청이 바꿔도 이 실행은 비교한 값으로 만든다 — 바뀐 값은 다음 요청에서 거절됨)
     learned, standard = load_learned(db, session.created_by), load_standard(db)
+    snapshot = {fid: load_decisions(db, fid) for fid in [*file_ids, *basis.get("baseline", [])]}
+    if changed := basis_changes(db, basis, snapshot, learned, standard):
+        raise IntegrationError(
+            f"검사한 뒤 열 매핑이 바뀌어 이 검토 결과로 통합할 수 없습니다 — 검토에서 다시 검사하세요 "
+            f"({_few(changed)})."
+        )
     glossary = get_glossary(db)
     items = session_items(db, session)
     choices = {
@@ -258,34 +274,9 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
             record, _ = load_parsed(db, fid)
             built.files.append({"id": fid, "name": record.original_name, "excluded": True, "sheets": []})
     org_codes = load_org_codes(db)
-    # 확정은 한 번만 읽어 검사 결과가 유효한 확정 상태와 비교하고, 출력에도 그대로 쓴다
-    # (비교한 뒤 다른 요청이 확정을 바꿔도 이 실행은 비교한 확정으로 만든다 — 바뀐 확정은 다음 통합 요청에서 거절됨)
-    snapshot = {fid: load_decisions(db, fid) for fid in file_ids}
-    verified = params.get(VERIFIED_KEY)  # None: 이 기록을 남기기 전 버전에서 만든 검토
-    if verified is not None and (changed := decision_changes(db, verified, snapshot)):
-        shown = "; ".join(changed[:3]) + (f" 외 {len(changed) - 3}건" if len(changed) > 3 else "")
-        raise IntegrationError(
-            f"검사한 뒤 열 매핑 확정이 바뀌어 이 검토 결과로 통합할 수 없습니다 — 검토에서 다시 검사하세요 ({shown})."
-        )
     for fid in file_ids:
         record, parsed = load_parsed(db, fid)
         decisions = snapshot[fid]
-        if verified is None:
-            # 이전 버전 검토는 확정한 수량 열의 숫자 글자를 계산용 값으로 검사하지 않았다 — 그 결과로 통합하지 않는다
-            unchecked = [
-                f"'{c}'"
-                for sheet in parsed.sheets
-                for c in text_value_columns(sheet, numeric_only=True)
-                if decisions.get(sheet.name, {}).get(c) in QUANTITY_FIELDS
-            ]
-            if unchecked:
-                raise IntegrationError(
-                    mask_text(
-                        f"{record.original_name}: 확정한 수량 열({', '.join(unchecked[:3])})의 숫자 글자를 "
-                        "계산용 값으로 검사하기 전 버전에서 만든 검토라 이 결과로 통합할 수 없습니다 — "
-                        "검토에서 다시 검사하세요."
-                    )
-                )
         info: dict[str, Any] = {"id": fid, "name": record.original_name, "excluded": False, "sheets": []}
         for sheet in parsed.sheets:
             mappings = engine.map_columns(
@@ -297,6 +288,15 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                 standard=standard,
                 org_codes=org_codes,
             ).columns
+            # 출력에 쓸 매핑(자동 적용 포함)이 검사에 적용한 매핑과 같아야 그 검사 결과로 만든다 — 임베딩 유사도 등
+            # 조회 때는 알 수 없는 자동 적용 변화도 결과 파일을 만들기 전에 여기서 막는다
+            if drift := applied_drift(basis, fid, sheet.name, mappings):
+                raise IntegrationError(
+                    mask_text(
+                        f"{record.original_name}: 결과에 쓸 열 매핑이 검사 때와 다릅니다 — 검토에서 다시 검사하세요 "
+                    )
+                    + f"({_few(drift)})."
+                )
             sheet = quantity_sheet(sheet, confirmed_quantity_indexes(mappings))  # 확정한 수량 열은 계산용 값
             columns, dropped = _columns(sheet.columns, mappings, include_unmapped, standard_labels)
             for c in columns:

@@ -5,11 +5,11 @@ import csv
 import io
 from pathlib import Path
 
+from app.check_basis import column_facts, effect_free
 from app.mapping import ColumnMapping
 from app.parsing import parse_file
 from app.quantity import QUANTITY_FIELDS, confirmed_quantity_indexes, quantity_sheet, quantity_value, text_value_columns
-from app.review import _changes_check
-from app.validation import FileInput, MappedColumn, SheetInput, ValidationParams, validate
+from app.validation import CHECKED_FIELDS, FileInput, MappedColumn, SheetInput, ValidationParams, validate
 
 LONG = "1000000000000000"
 
@@ -100,14 +100,50 @@ def test_text_value_columns_are_the_columns_whose_checks_depend_on_quantity_conf
     assert text_value_columns(sheet, numeric_only=True) == ["식별부호"]  # 숫자로 읽을 수 있는 글자가 있는 열
 
 
-def test_review_approval_changes_checks_only_for_quantity_on_text_or_a_different_applied_mapping() -> None:
-    """검토에서 승인할 때 다시 검사가 필요한지 (review._changes_check)."""
-    assert _changes_check({"text_values": True, "applied": None}, "expenditure") is True  # 글자 값이 계산용 값이 됨
-    assert _changes_check({"text_values": False, "applied": None}, "expenditure") is False  # 값이 모두 숫자
-    assert _changes_check({"text_values": True, "applied": None}, "note") is False  # 수량이 아닌 항목
-    assert _changes_check({"text_values": True, "applied": None}, None) is False  # '해당 없음' (검사 때도 미매핑)
-    # 검사에 쓴 자동 매핑(자동화에 없는 새 열의 확인)과 다른 항목은 합계 검사 대상 등이 바뀔 수 있다
-    assert _changes_check({"text_values": False, "applied": "ratio"}, "count") is True
-    assert _changes_check({"text_values": False, "applied": "ratio"}, None) is True
-    assert _changes_check({"text_values": False, "applied": "ratio"}, "ratio") is False
-    assert _changes_check({}, "expenditure") is False  # 근거가 없는 이전 버전 항목 (그 검토는 확정 기록도 없음)
+def test_fields_that_checks_read_by_key() -> None:
+    """검사가 항목 key로 읽지 않는 항목은 이것뿐이다 (새 검사가 항목을 읽으면 CHECKED_FIELDS와 함께 고친다)."""
+    from app.mapping import load_dictionary
+
+    keys = {f.key for f in load_dictionary()}
+    assert CHECKED_FIELDS <= keys
+    assert keys - CHECKED_FIELDS == {"department", "manager", "note", "vehicle_type", "vehicle_use", "fuel_type"}
+    assert {"base_date", "year", "month", "sigungu", "org_name", "population", "total", "expenditure"} <= CHECKED_FIELDS
+
+
+def test_column_facts(tmp_path: Path) -> None:
+    sheet = _sheet(
+        tmp_path, [["구분", "식별부호", "건수", "메모"], ["합계", LONG, "3", "가"], ["사업A", "100", "", "나"]]
+    )
+    facts = column_facts(sheet)
+    assert facts["식별부호"] == {"text_values": True, "blank_values": False, "numeric_values": False}  # 원문 보존 글자
+    assert facts["건수"] == {"text_values": False, "blank_values": True, "numeric_values": True}
+    assert facts["메모"] == {"text_values": True, "blank_values": False, "numeric_values": False}
+
+
+def test_review_approval_keeps_the_checked_result_only_when_the_check_input_is_unchanged() -> None:
+    """검토에서 승인해도 기존 검사 결과를 이어 쓰는 경우 (check_basis.effect_free) — 나머지는 다시 검사해야 한다."""
+    text = {"text_values": True, "blank_values": False, "numeric_values": False}
+    sheet = {
+        "메모": ["unresolved", None, None, "none"],  # 검사에 쓰지 않은 열
+        "자료시점": ["review", "base_date", None, "llm"],  # 제안만 있음 (검사에 쓰지 않음)
+        "담당": ["auto", "department", None, "learned"],
+        "기준": ["auto", "base_date", None, "pattern"],
+        "율": ["auto", "ratio", None, "exact"],
+        "금액": ["auto", "expenditure", None, "similarity"],
+    }
+    assert effect_free(sheet, "메모", text, None) is True  # '해당 없음' — 검사 입력 그대로
+    assert effect_free(sheet, "메모", text, "note") is True  # 검사가 읽지 않는 항목 + 빈 칸·숫자 없는 글자 열
+    assert effect_free(sheet, "자료시점", text, "base_date") is False  # 기간 항목은 기간 검사에 쓰인다
+    assert effect_free(sheet, "메모", text, "sigungu") is False  # 기관·지역 항목
+    assert effect_free(sheet, "메모", text, "expenditure") is False  # 수량·금액 항목
+    assert effect_free(sheet, "메모", {**text, "blank_values": True}, "note") is False  # 빈 칸 → 공백 경고
+    assert effect_free(sheet, "메모", {**text, "numeric_values": True}, "note") is False  # 숫자 → 합계·전월·단위 비교
+    assert effect_free(sheet, "메모", text, "department") is False  # 같은 항목 열이 둘 → 전월·단위 비교 대상이 바뀜
+    assert effect_free(sheet, "기준", text, "base_date") is True  # 검사에 쓴 자동 매핑을 그대로 확정
+    assert effect_free(sheet, "기준", text, "year") is False  # 검사에 쓴 매핑과 다른 항목
+    assert effect_free(sheet, "기준", text, None) is False
+    assert effect_free(sheet, "율", text, "ratio") is False  # 수량 항목 자동 → 확정: 글자 값의 해석이 바뀜
+    assert effect_free(sheet, "율", {**text, "text_values": False}, "ratio") is True
+    assert effect_free(sheet, "금액", text, "expenditure") is False  # 자동 → 확정: 글자 값이 계산용 값으로 바뀜
+    assert effect_free(sheet, "금액", {**text, "text_values": False}, "expenditure") is True
+    assert effect_free(sheet, "없는열", text, None) is False

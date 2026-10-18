@@ -271,6 +271,13 @@ STOCK_FIELDS = frozenset(
         "government_use", "private_use", "commercial_use",
     }
 )  # fmt: skip
+PERIOD_FIELDS = frozenset({"year", "month", "base_date"})  # 기간 검사·기관 이름 해석 기준일의 근거
+# 검사가 표준 항목 key로 읽는 항목 — 열을 이 항목으로 연결하거나 바꾸면 검사 결과가 달라질 수 있다
+# (기간 / 기관·지역 / 합산 제외·시점 값·합계 / 수량·금액). 새 검사에서 항목 key를 읽으면 여기에도 넣는다.
+# 그 밖의 항목도 열에 빈 칸·숫자가 있으면 공백 경고·합계·전월·단위 비교에 쓰인다 (review._effect_free가 함께 본다).
+CHECKED_FIELDS = frozenset(
+    QUANTITY_FIELDS | MONEY_FIELDS | NON_ADDITIVE_FIELDS | STOCK_FIELDS | {"total"} | set(ENTITY_FIELDS) | PERIOD_FIELDS
+)
 # 파일명·시트명·제목에서만 찾는다 ('인구' 같은 넓은 단어는 '전입 인구' 같은 발생 실적에도 쓰여 근거로 쓰지 않음)
 _STOCK_WORDS = (
     "등록대수",

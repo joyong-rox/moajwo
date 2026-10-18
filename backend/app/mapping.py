@@ -8,6 +8,7 @@ LLM에는 미해결 열 하나씩, 열 이름과 샘플 값 5개만 보낸다 (�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -110,6 +111,12 @@ def load_dictionary(path: Path = DICTIONARY_PATH) -> list[StandardField]:
     if len(keys) != len(set(keys)):
         raise ValueError("표준 사전에 중복된 key가 있습니다.")
     return fields
+
+
+@lru_cache(maxsize=1)
+def dictionary_digest() -> str:
+    """표준 사전 파일의 지문 — 검토가 검사할 때와 지금 사전이 같은지 본다 (배포로 사전이 바뀌면 다시 검사)."""
+    return hashlib.sha256(DICTIONARY_PATH.read_bytes()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------- 정규화
