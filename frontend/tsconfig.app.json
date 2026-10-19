@@ -20,7 +20,10 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+
+    /* Tailgrids 컴포넌트 경로 별칭 */
+    "paths": { "@/*": ["./src/*"] }
   },
   "include": ["src"]
 }

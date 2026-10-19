@@ -10,6 +10,7 @@ import {
   type AutomationRunResult,
   type StoredFile,
 } from './api'
+import ConfirmDialog from './ConfirmDialog'
 import { ProgressPanel } from './Progress'
 import { REVIEW_STAGES } from './progressStages'
 import ReviewPanel from './ReviewPanel'
@@ -107,6 +108,7 @@ function AutomationDetail({
   const [result, setResult] = useState<AutomationRunResult | null>(null)
   const [openReview, setOpenReview] = useState<number | null>(null)
   const [running, setRunning] = useState(false) // 자동화 실행 중 (업로드 중과 구분)
+  const [askDelete, setAskDelete] = useState(false)
 
   const loadFiles = useCallback(() => {
     listFiles()
@@ -171,16 +173,26 @@ function AutomationDetail({
           type="button"
           className="mapping-confirm wk-danger"
           disabled={busy}
-          onClick={() => {
-            if (!window.confirm(`자동화 '${automation.name}'을(를) 지울까요? 실행 기록과 결과 파일은 남습니다.`)) return
-            deleteAutomation(automation.id)
-              .then(onDeleted)
-              .catch((err: unknown) => setError(`삭제 실패: ${errorText(err)}`))
-          }}
+          onClick={() => setAskDelete(true)}
         >
           자동화 삭제
         </button>
       </div>
+      <ConfirmDialog
+        open={askDelete}
+        title="자동화를 지울까요?"
+        confirmLabel="자동화 삭제"
+        danger
+        onCancel={() => setAskDelete(false)}
+        onConfirm={() => {
+          setAskDelete(false)
+          deleteAutomation(automation.id)
+            .then(onDeleted)
+            .catch((err: unknown) => setError(`삭제 실패: ${errorText(err)}`))
+        }}
+      >
+        자동화 &lsquo;{automation.name}&rsquo;을(를) 지웁니다. 실행 기록과 결과 파일은 남습니다.
+      </ConfirmDialog>
       <p className="upload-drop-hint">
         저장: {formatTime(automation.updated_at)} (실행 #{automation.source_run_id ?? '-'}에서) · 필수 기관{' '}
         {v.required_entities?.length ? v.required_entities.join(', ') : '없음'} · 증감 기준{' '}
@@ -263,6 +275,11 @@ function AutomationDetail({
         >
           {busy ? '실행 중…' : `자동화 실행 (${targets.length}개 파일)`}
         </button>
+        {!busy && targets.length === 0 && (
+          <p className="wk-why" role="note">
+            <strong>누를 수 없음</strong> 실행할 파일을 하나 이상 고르세요 (새로 올린 파일은 자동으로 골라집니다).
+          </p>
+        )}
       </div>
 
       {running && <ProgressPanel stages={REVIEW_STAGES} title="자동화 규칙 적용 중" />}

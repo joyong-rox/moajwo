@@ -14,6 +14,7 @@ import {
   type GlossaryInfo,
   type ImportReport,
 } from './api'
+import ConfirmDialog from './ConfirmDialog'
 
 const SOURCE_LABEL = { example: '예시', upload: '업로드', user: '직접 등록', base: '기본' } as const
 
@@ -43,6 +44,8 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [searchVersion, setSearchVersion] = useState(0)
+  // 확인을 받은 뒤 실행할 삭제 (되돌릴 수 없으므로 바로 지우지 않음)
+  const [ask, setAsk] = useState<{ title: string; body: string; run: () => Promise<string> } | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -220,10 +223,14 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
                       className="mapping-confirm wk-danger"
                       disabled={busy}
                       onClick={() =>
-                        void act(async () => {
-                          await deleteEntry(e.id)
-                          if (target?.id === e.id) setTarget(null)
-                          return `'${e.name}' 항목과 별칭 삭제`
+                        setAsk({
+                          title: '용어사전 항목을 삭제할까요?',
+                          body: `'${e.name}' 항목과 이 항목에 연결된 별칭 ${e.aliases.length}개를 지웁니다. 되돌릴 수 없습니다.`,
+                          run: async () => {
+                            await deleteEntry(e.id)
+                            if (target?.id === e.id) setTarget(null)
+                            return `'${e.name}' 항목과 별칭 삭제`
+                          },
                         })
                       }
                     >
@@ -319,9 +326,13 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
                         className="mapping-confirm wk-danger"
                         disabled={busy}
                         onClick={() =>
-                          void act(async () => {
-                            await deleteAlias(a.id)
-                            return `'${a.alias}' 별칭 삭제`
+                          setAsk({
+                            title: '별칭을 삭제할까요?',
+                            body: `'${a.alias}' → ${a.target_name ?? a.target_code} 연결을 지웁니다. 되돌릴 수 없습니다.`,
+                            run: async () => {
+                              await deleteAlias(a.id)
+                              return `'${a.alias}' 별칭 삭제`
+                            },
                           })
                         }
                       >
@@ -335,6 +346,19 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
           </div>
         </details>
       )}
+      <ConfirmDialog
+        open={ask !== null}
+        title={ask?.title ?? ''}
+        confirmLabel="삭제"
+        danger
+        onCancel={() => setAsk(null)}
+        onConfirm={() => {
+          if (ask) void act(ask.run)
+          setAsk(null)
+        }}
+      >
+        {ask?.body}
+      </ConfirmDialog>
     </section>
   )
 }

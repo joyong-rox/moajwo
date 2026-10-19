@@ -181,6 +181,11 @@ function LlmSettings() {
             {busy ? '확인 중…' : '연결 테스트 (저장된 설정)'}
           </button>
         </div>
+        {!busy && !sameMode && data && (
+          <p className="wk-why" role="note">
+            <strong>연결 테스트를 누를 수 없음</strong> 고른 방식이 저장된 설정과 다릅니다 — 먼저 저장하세요.
+          </p>
+        )}
       </form>
       {message && (
         <p className="mapping-message" role="status">

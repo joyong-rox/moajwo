@@ -202,6 +202,11 @@ function MappingCommon() {
             선택한 파일로 분석
           </button>
         </div>
+        {picked.size === 0 && (
+          <p className="wk-why" role="note">
+            <strong>누를 수 없음</strong> 위 목록에서 검토할 파일을 하나 이상 고르세요.
+          </p>
+        )}
       </fieldset>
       {error && (
         <p className="upload-error" role="alert">
@@ -499,6 +504,16 @@ function GroupDetail({
           선택 해제
         </button>
       </div>
+      {(chosen.size === 0 || target === '' || selectable.length === 0) && (
+        <p className="wk-why" role="note">
+          <strong>누를 수 없음</strong>{' '}
+          {selectable.length === 0
+            ? '이 묶음에는 바꿀 수 있는 열이 없습니다 (남이 올린 파일은 조회 전용).'
+            : chosen.size === 0
+              ? '확정할 열을 하나 이상 고르세요.'
+              : '적용할 표준 항목을 고르세요.'}
+        </p>
+      )}
       {batch && (
         <BatchConfirm
           targets={batch}

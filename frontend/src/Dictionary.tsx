@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { deleteStandardTerm, listStandardTerms, type StandardTerm } from './api'
+import ConfirmDialog from './ConfirmDialog'
 import Glossary from './Glossary'
 import { formatTime } from './runFormat'
 
@@ -17,6 +18,7 @@ function Dictionary() {
 function StandardTerms() {
   const [terms, setTerms] = useState<StandardTerm[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [ask, setAsk] = useState<StandardTerm | null>(null)
 
   const load = useCallback(() => {
     listStandardTerms()
@@ -64,17 +66,7 @@ function StandardTerms() {
                     {t.approved_by_name ?? '-'} · {formatTime(t.created_at)}
                   </td>
                   <td>
-                    <button
-                      type="button"
-                      className="mapping-confirm"
-                      onClick={() => {
-                        if (!window.confirm(`'${t.term}'을(를) 전사 표준 사전에서 뺄까요? 이미 만든 결과는 그대로입니다.`))
-                          return
-                        deleteStandardTerm(t.id)
-                          .then(load)
-                          .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
-                      }}
-                    >
+                    <button type="button" className="mapping-confirm wk-danger" onClick={() => setAsk(t)}>
                       빼기
                     </button>
                   </td>
@@ -84,6 +76,23 @@ function StandardTerms() {
           </table>
         </div>
       )}
+      <ConfirmDialog
+        open={ask !== null}
+        title="전사 표준 사전에서 뺄까요?"
+        confirmLabel="빼기"
+        danger
+        onCancel={() => setAsk(null)}
+        onConfirm={() => {
+          if (ask)
+            deleteStandardTerm(ask.id)
+              .then(load)
+              .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+          setAsk(null)
+        }}
+      >
+        &lsquo;{ask?.term}&rsquo;을(를) 전사 표준 사전에서 뺍니다. 모든 사용자의 열 매핑 1단계에 더는 적용되지 않습니다.
+        이미 만든 결과는 그대로입니다.
+      </ConfirmDialog>
     </section>
   )
 }
