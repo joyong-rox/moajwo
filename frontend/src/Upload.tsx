@@ -31,8 +31,10 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
   const [pending, setPending] = useState<string[]>([])
   const [sent, setSent] = useState<number | null>(null)
   // 화면 읽기 도구에 전할 업로드 상태 (이 요청의 시작·결과만, 건수만 — 파일 이름은 넣지 않음).
-  // 상태 영역은 처음부터 화면에 두고 내용만 바꾼다. 같은 문구가 이어져도 전달되도록 비웠다가 다시 채운다.
+  // 상태 영역은 처음부터 화면에 두고 내용만 바꾼다. 시작 → 결과는 글자가 달라 바로 바꾸고,
+  // 직전과 같은 글자일 때만 비웠다가 다시 채워 같은 문구도 새로 전달되게 한다 (다시 그리기만으로는 바뀌지 않음).
   const [announcement, setAnnouncement] = useState('')
+  const shown = useRef('')
   const announceTimer = useRef<number | undefined>(undefined)
   const titleId = useId()
   const hintId = useId()
@@ -41,8 +43,16 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
 
   function announce(message: string) {
     window.clearTimeout(announceTimer.current)
-    setAnnouncement('')
-    announceTimer.current = window.setTimeout(() => setAnnouncement(message), 100)
+    const set = (text: string) => {
+      shown.current = text
+      setAnnouncement(text)
+    }
+    if (message !== '' && message === shown.current) {
+      set('')
+      announceTimer.current = window.setTimeout(() => set(message), 100)
+    } else {
+      set(message)
+    }
   }
 
   async function handleFiles(list: FileList | null) {
