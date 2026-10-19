@@ -4,12 +4,16 @@ import json
 from playwright.sync_api import sync_playwright
 
 from diag_common import EV, URL, USERS, creds
+from diag_scope import browser_proxy, route_guard
+
+BLOCKED: list[str] = []  # 진단 주소 밖이라 막은 첫 요청
 
 IDS = json.loads((EV / "seed-ids.json").read_text(encoding="utf-8"))
 with sync_playwright() as p:
-    b = p.chromium.launch(channel="msedge", headless=True)
+    b = p.chromium.launch(channel="msedge", headless=True, proxy=browser_proxy(URL))  # 진단 주소 밖은 리다이렉트 이후까지 막음
     for w in (320, 390):
         pg = b.new_page(viewport={"width": w, "height": 800})
+        pg.route("**/*", route_guard(URL, BLOCKED))
         pg.goto(URL + "/")
         pg.get_by_label("아이디").fill(USERS["user1"])
         pg.get_by_label("비밀번호", exact=True).fill(creds()["user1"])

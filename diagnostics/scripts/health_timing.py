@@ -14,6 +14,15 @@ import urllib.request
 
 PATH = "/api/health"
 PORT = 8080
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN201 — 운영 전용 경로: 리다이렉트를 따르지 않는다
+        return None
+
+
+# 진단 요청(diag_scope)과 분리된 운영 health 전용: GET만, 환경 프록시 미사용
+PROD_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 OUT = sys.argv[1]
 res: dict = {"proxy_env_set": {k: bool(os.environ.get(k)) for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy")},
              "urllib_getproxies_keys": sorted(urllib.request.getproxies().keys())}  # fmt: skip
@@ -72,7 +81,7 @@ for host in ("localhost", "127.0.0.1"):
     rows = []
     for _ in range(3):
         a = time.perf_counter()
-        with urllib.request.urlopen(f"http://{host}:{PORT}{PATH}", timeout=10) as r:
+        with PROD_OPENER.open(f"http://{host}:{PORT}{PATH}", timeout=10) as r:
             r.read()
             code = r.status
         rows.append({"status": code, "seconds": round(time.perf_counter() - a, 4)})

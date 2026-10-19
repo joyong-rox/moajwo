@@ -3,7 +3,10 @@
 - 서버가 돌려준 문서(index.html)·CSS·SVG는 받은 그대로 Nu로 검사한다.
 - 화면 상태마다 렌더링된 DOM(page.content())을 Nu로, 같은 상태를 axe로 검사한다 (서버 문서 검사와 구분해 기록).
 - 상태에 도달하지 못하면 '검사 실패'로 남긴다 (통과로 세지 않음).
-사용법: python a11y_scan.py <출력 폴더>   환경: AXE_JS(axe.min.js 경로), NU_URL(기본 http://127.0.0.1:8888)
+- 요청 범위는 diag_scope.py: 브라우저·Python 요청 모두 진단 주소만, Nu로 보내는 HTML은 로컬 검사기 주소만.
+사용법: python a11y_scan.py <출력 폴더>
+환경: AXE_JS(axe.min.js 경로), NU_URL(기본 http://127.0.0.1:8888 — 그 주소만 허용).
+      NU_URL=off 이면 DOM·서버 문서만 저장하고 Nu 검사는 nu_check_dom.py로 따로 한다 (브라우저와 Nu를 동시에 띄우지 않기).
 """
 
 import json
@@ -11,18 +14,19 @@ import os
 import re
 import sys
 import time
-import urllib.request
 from pathlib import Path
-from urllib.parse import urlparse
 
 from playwright.sync_api import Page, sync_playwright
 
 from diag_common import EV, URL, USERS, creds
+from diag_scope import browser_proxy, check_url, nu_base, opener, route_guard
 
 OUT = Path(sys.argv[1])
 OUT.mkdir(parents=True, exist_ok=True)
 AXE_JS = Path(os.environ["AXE_JS"])
-NU = os.environ.get("NU_URL", "http://127.0.0.1:8888")
+NU = None if os.environ.get("NU_URL") == "off" else nu_base(os.environ.get("NU_URL"))  # 허용 밖이면 ScopeError
+NU_OPENER = opener(NU) if NU else None
+SITE = opener(URL)
 AXE_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]
 VIEWPORTS = {"desktop": {"width": 1280, "height": 800}, "mobile": {"width": 390, "height": 844}}
 IDS = json.loads((EV / "seed-ids.json").read_text(encoding="utf-8"))
@@ -31,19 +35,17 @@ RESULTS: list[dict] = []
 EXTERNAL: list[str] = []
 
 
-def nu(body: bytes, ctype: str) -> list[dict]:
-    req = urllib.request.Request(f"{NU}/?out=json", data=body, headers={"Content-Type": ctype}, method="POST")
-    with urllib.request.urlopen(req, timeout=120) as r:
+def nu(body: bytes, ctype: str) -> list[dict] | None:
+    if NU_OPENER is None:
+        return None  # 나중에 nu_check_dom.py로 검사
+    import urllib.request
+
+    req = urllib.request.Request(check_url(f"{NU}/?out=json", NU), data=body, headers={"Content-Type": ctype}, method="POST")
+    with NU_OPENER.open(req, timeout=120) as r:
         return json.loads(r.read())["messages"]
 
 
-def guard(route) -> None:
-    """진단 주소 밖으로 나가는 요청은 막는다."""
-    u = urlparse(route.request.url)
-    if f"{u.scheme}://{u.netloc}" != URL:
-        EXTERNAL.append(route.request.url[:120])
-        return route.abort()
-    return route.continue_()
+guard = route_guard(URL, EXTERNAL)
 
 
 def settle(pg: Page) -> None:
@@ -147,8 +149,9 @@ def run_state(pg: Page, vp: str, sid: str, who, path: str, action, desc: str) ->
         rec["h1"] = pg.locator("h1:visible").all_inner_texts()[:3]
         rec["dup_ids"] = pg.evaluate("(() => { const c = {}; document.querySelectorAll('[id]').forEach(e => c[e.id] = (c[e.id] || 0) + 1);"
                                      " return Object.entries(c).filter(([, n]) => n > 1).map(([k, n]) => k + ':' + n) })()")  # fmt: skip
-        rec["nu"] = [{"type": m["type"], "sub": m.get("subType"), "msg": m["message"][:220], "extract": (m.get("extract") or "")[:120]}
-                     for m in nu(html.encode("utf-8"), "text/html; charset=utf-8")]  # fmt: skip
+        msgs = nu(html.encode("utf-8"), "text/html; charset=utf-8")
+        rec["nu"] = None if msgs is None else [{"type": m["type"], "sub": m.get("subType"), "msg": m["message"][:220],
+                                                 "extract": (m.get("extract") or "")[:120]} for m in msgs]  # fmt: skip
         pg.add_script_tag(path=str(AXE_JS))
         ax = pg.evaluate("tags => axe.run(document, {runOnly: {type: 'tag', values: tags}, resultTypes: ['violations', 'incomplete']})", AXE_TAGS)
         bp = pg.evaluate("() => axe.run(document, {runOnly: {type: 'tag', values: ['best-practice']}, resultTypes: ['violations']})")
@@ -175,20 +178,24 @@ def run_state(pg: Page, vp: str, sid: str, who, path: str, action, desc: str) ->
         pg.unroute_all(behavior="ignoreErrors")
         pg.route("**/*", guard)
     RESULTS.append(rec)
-    nerr = sum(1 for m in rec.get("nu", []) if m["type"] == "error")
+    nerr = "나중" if rec.get("nu") is None and rec["status"] == "검사함" else sum(1 for m in rec.get("nu") or [] if m["type"] == "error")
     print(f"{vp:7} {sid:22} {rec['status']} Nu오류 {nerr} axe위반 {len(rec.get('axe_violations', []))} 확인필요 {len(rec.get('axe_incomplete', []))} "
           f"{rec.get('error', '')[:120]}", flush=True)  # fmt: skip
 
 
 def server_documents() -> dict:
+    """서버가 돌려준 문서를 받은 그대로 저장하고 (Nu가 켜져 있으면) 검사한다."""
     out = {}
-    with urllib.request.urlopen(URL + "/", timeout=30) as r:
+    (OUT / "server").mkdir(exist_ok=True)
+    with SITE.open(check_url(URL + "/", URL), timeout=30) as r:
         html = r.read()
+    (OUT / "server" / "index.html").write_bytes(html)
     out["index.html"] = nu(html, "text/html; charset=utf-8")
     for asset in re.findall(rb'(?:href|src)="(/[^"]+\.(?:css|svg))"', html):
         a = asset.decode()
-        with urllib.request.urlopen(URL + a, timeout=30) as r:
+        with SITE.open(check_url(URL + a, URL), timeout=30) as r:
             body = r.read()
+        (OUT / "server" / a.strip("/").replace("/", "__")).write_bytes(body)
         out[a] = nu(body, "text/css; charset=utf-8" if a.endswith(".css") else "image/svg+xml")
     return out
 
@@ -200,7 +207,7 @@ def main() -> None:
         print("서버 문서", k, {t: sum(1 for m in v if m["type"] == t) for t in ("error", "info", "non-document-error")})
     t0 = time.time()
     with sync_playwright() as p:
-        b = p.chromium.launch(channel="msedge", headless=True)
+        b = p.chromium.launch(channel="msedge", headless=True, proxy=browser_proxy(URL))
         for vp, size in VIEWPORTS.items():
             by_user: dict = {}
             only = set(filter(None, os.environ.get("ONLY_STATES", "").split(",")))

@@ -9,12 +9,12 @@ import json
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
 
 import openpyxl
 from playwright.sync_api import Page, sync_playwright
 
 from diag_common import EV, URL, USERS, creds
+from diag_scope import browser_proxy, route_guard
 
 OUT = Path(sys.argv[1])
 OUT.mkdir(parents=True, exist_ok=True)
@@ -83,12 +83,12 @@ def rec(group: str, item: dict) -> None:
     print(group, json.dumps(item, ensure_ascii=False)[:260], flush=True)
 
 
-def guard_ctx(cx) -> None:
-    def g(route):
-        u = urlparse(route.request.url)
-        return route.continue_() if f"{u.scheme}://{u.netloc}" == URL else route.abort()
+BLOCKED: list[str] = []
 
-    cx.route("**/*", g)
+
+def guard_ctx(cx) -> None:
+    """첫 요청이 진단 주소 밖이면 막는다 (리다이렉트 이후 요청은 launch의 browser_proxy가 막음)."""
+    cx.route("**/*", route_guard(URL, BLOCKED))
 
 
 def settle(pg: Page) -> None:
@@ -359,7 +359,7 @@ def check_zoom(p) -> None:
     """실제 브라우저 확대 200% (1280×800 창) — 확장의 chrome.tabs.setZoom."""
     import tempfile
 
-    cx = p.chromium.launch_persistent_context(tempfile.mkdtemp(), channel="msedge", headless=True, viewport={"width": 1280, "height": 800},
+    cx = p.chromium.launch_persistent_context(tempfile.mkdtemp(), channel="msedge", headless=True, viewport={"width": 1280, "height": 800}, proxy=browser_proxy(URL),
                                               args=[f"--disable-extensions-except={ZOOMEXT}", f"--load-extension={ZOOMEXT}"])  # fmt: skip
     guard_ctx(cx)
     pg = cx.pages[0] if cx.pages else cx.new_page()
@@ -480,7 +480,7 @@ def check_login(b) -> None:
 
 def main() -> None:
     with sync_playwright() as p:
-        b = p.chromium.launch(channel="msedge", headless=True)
+        b = p.chromium.launch(channel="msedge", headless=True, proxy=browser_proxy(URL))
 
         def fresh():
             cx = b.new_context(viewport={"width": 1280, "height": 800}, locale="ko-KR", accept_downloads=True)

@@ -4,7 +4,7 @@ extend = "../backend/pyproject.toml"
 line-length = 240
 
 [lint.isort]
-known-first-party = ["diag_common", "seed"]
+known-first-party = ["diag_common", "diag_scope", "seed"]
 
 [lint.per-file-ignores]
 # 한 줄짜리 JavaScript 식을 그대로 넘기는 파일 (쪼개면 브라우저에서 평가되는 식이 바뀔 수 있음)
