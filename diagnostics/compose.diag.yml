@@ -1,0 +1,52 @@
+# 진단 전용 격리 스택 — 운영(moajwo, 8080)·기능 격리(moajwo-feat, 8085)와 다른 프로젝트·포트·볼륨. 합성 자료만 넣는다.
+# 이미지는 미리 정한 것만 쓴다 (build 없음). 운영 볼륨·세션·인증 정보는 연결하지 않는다.
+#   DIAG_BE_IMAGE / DIAG_FE_IMAGE : 검사할 backend·frontend 이미지 (운영과 같은 이미지 ID에 붙인 진단용 태그)
+#   ZAP_API_KEY                   : ZAP API 키 (실행 때만 환경변수로 — 파일에 적지 않음)
+# 공유 PC 보호: 컨테이너마다 메모리·CPU 상한. 외부 이름 조회 차단(dns 127.0.0.1 — 서비스 이름은 Docker 내장 DNS로 풀림).
+# 모델(Ollama) 호출은 닿지 않는 주소로 막는다 (진단 중 모델 부하 방지 — 운영과 다른 점으로 보고서에 기록).
+name: moajwo-diag
+
+services:
+  backend:
+    image: ${DIAG_BE_IMAGE:?DIAG_BE_IMAGE 필요}
+    environment:
+      MOAJWO_DATA_DIR: /app/data
+      OLLAMA_BASE_URL: http://127.0.0.1:9
+    dns: [127.0.0.1]
+    volumes:
+      - data:/app/data
+    mem_limit: 768m
+    cpus: 1.0
+
+  frontend:
+    image: ${DIAG_FE_IMAGE:?DIAG_FE_IMAGE 필요}
+    ports:
+      - "127.0.0.1:8086:80"
+    dns: [127.0.0.1]
+    depends_on:
+      backend:
+        condition: service_healthy
+    mem_limit: 128m
+    cpus: 0.5
+
+  # [미실행·미검증] 실행 중 보안 검사용으로 준비만 한 설정 (profile zap). 1차 진단에서는 ZAP을 실행하지 않았다 —
+  # 이미지도 받지 않았고 동작을 확인하지 않았다 (diagnostics/REPORT-20261020.md '미수행' 참고).
+  # -silent: 업데이트 확인 등 스스로 보내는 요청 없음. 외부 이름 조회 차단.
+  zap:
+    profiles: [zap]
+    image: ${DIAG_ZAP_IMAGE:-zaproxy/zap-stable}
+    command: >-
+      zap.sh -daemon -silent -host 0.0.0.0 -port 8080
+      -config api.key=${ZAP_API_KEY:-}
+      -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true
+    environment:
+      ZAP_JVM_OPTIONS: -Xmx1024m
+    ports:
+      - "127.0.0.1:8091:8080"
+    dns: [127.0.0.1]
+    mem_limit: 1536m
+    cpus: 2.0
+
+volumes:
+  data:
+    name: moajwo-diag-data

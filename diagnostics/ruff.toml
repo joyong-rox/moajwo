@@ -1,0 +1,13 @@
+# 진단 스크립트 전용 린트 설정 (앱 코드의 린트 범위 backend/와 별개). 백엔드 규칙을 이어받고,
+# 브라우저에 넘기는 JavaScript 문자열이 길어 줄 길이만 넓힌다.
+extend = "../backend/pyproject.toml"
+line-length = 240
+
+[lint.isort]
+known-first-party = ["diag_common", "seed"]
+
+[lint.per-file-ignores]
+# 한 줄짜리 JavaScript 식을 그대로 넘기는 파일 (쪼개면 브라우저에서 평가되는 식이 바뀔 수 있음)
+"scripts/a11y_manual.py" = ["E501"]
+"scripts/contrast_check.py" = ["E501"]
+"scripts/toggle_check.py" = ["E501"]
