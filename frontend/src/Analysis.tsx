@@ -1143,8 +1143,8 @@ function AnalysisResult({ id }: { id: number }) {
           {detail.inputs.filter((t) => t.status === 'ok').length}개
         </dd>
       </dl>
-      {c.warnings.map((w) => (
-        <p key={w} className="mapping-warn">
+      {c.warnings.map((w, i) => (
+        <p key={i} className="mapping-warn">
           {w}
         </p>
       ))}
@@ -1185,8 +1185,9 @@ function AnalysisResult({ id }: { id: number }) {
             </tr>
           </thead>
           <tbody>
-            {groups?.items.map((g) => (
-              <tr key={g.keys.join('|') || 'all'}>
+            {/* 키는 결과 번호와 목록 안의 위치 — 가린 이름이 서로 같아져도 행이 합쳐지지 않게 */}
+            {groups?.items.map((g, i) => (
+              <tr key={`${id}-${groups.offset + i}`}>
                 {r.group_labels.map((l, i) => (
                   <td key={l} data-label={l}>
                     {g.keys[i] || '(전체)'}
@@ -1238,8 +1239,8 @@ function AnalysisResult({ id }: { id: number }) {
               </tr>
             </thead>
             <tbody>
-              {excluded.items.map((x) => (
-                <tr key={`${x.file_id}-${x.sheet}-${x.row}`}>
+              {excluded.items.map((x, i) => (
+                <tr key={`${id}-${excluded.offset + i}`}>
                   <td data-label="파일 · 시트 · 원본 행">
                     #{x.file_id} {x.file_name} · {x.sheet} · {x.row}행
                   </td>
@@ -1276,8 +1277,8 @@ function AnalysisResult({ id }: { id: number }) {
               </tr>
             </thead>
             <tbody>
-              {rows.items.map((x) => (
-                <tr key={`${x.file_id}-${x.sheet}-${x.row}`}>
+              {rows.items.map((x, i) => (
+                <tr key={`${id}-${rows.offset + i}`}>
                   <td data-label="파일 · 시트 · 원본 행">
                     #{x.file_id} {x.file_name} · {x.sheet} · {x.row}행
                   </td>
@@ -1326,8 +1327,8 @@ function AnalysisResult({ id }: { id: number }) {
                 </td>
                 <td data-label="상태">
                   {STATUS_LABEL[t.status]}
-                  {t.reasons.map((x) => (
-                    <span key={x} className="mw-muted mw-block">
+                  {t.reasons.map((x, i) => (
+                    <span key={i} className="mw-muted mw-block">
                       {x}
                     </span>
                   ))}
