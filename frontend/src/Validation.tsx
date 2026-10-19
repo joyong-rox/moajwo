@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { replaceSearch, useSearch } from './router'
+import { RadioInput } from './components/tailgrids/core/radio-input'
+import { navigate, replaceSearch, useSearch } from './router'
 import { Banner } from './Workflow'
 import PiiNotice from './PiiNotice'
 import {
@@ -23,6 +24,32 @@ const STATUS_TEXT: Record<ValidationStatus, string> = {
 
 const MAX_TARGETS = 50 // 서버의 한 번에 검사하는 파일 수 제한과 같음 (validation_api.MAX_FILES)
 
+// 결과 형태: 하나의 통합표(검토 → 통합 결과) · 파일별 시트로 묶기(시트 하나씩 + 통계 요약 선택)
+export type ResultMode = 'table' | 'sheets'
+const MODE_KEY = 'moajwo.home.mode' // 이 브라우저에서 마지막으로 고른 결과 형태
+const MODES: { value: ResultMode; title: string; desc: string; example: string }[] = [
+  {
+    value: 'table',
+    title: '하나의 통합표로 만들기',
+    desc: '여러 파일의 같은 항목을 한 표로 합칩니다. 열 매핑을 확인하고 사전 검토를 거쳐 통합 결과를 만듭니다.',
+    example: '예: a·b·c·d → 시트 「통합 데이터」 하나 (+ 변경 내역·처리 요약)',
+  },
+  {
+    value: 'sheets',
+    title: '파일별 시트로 묶기',
+    desc: '고른 시트를 결과 파일의 시트 하나씩으로 옮깁니다. 검토·열 매핑 없이도 됩니다. 통계 요약 시트는 선택입니다.',
+    example: '예: a·b·c·d → 시트 a·b·c·d (요약을 켜면 + 「통계 요약」)',
+  },
+]
+
+function savedMode(): ResultMode {
+  try {
+    return localStorage.getItem(MODE_KEY) === 'sheets' ? 'sheets' : 'table'
+  } catch {
+    return 'table'
+  }
+}
+
 // 안내에 보일 파일 번호 (많으면 앞 몇 개와 개수)
 function idList(ids: (number | string)[], shown = 5): string {
   const head = ids.slice(0, shown).map((id) => `#${id}`).join(', ')
@@ -44,9 +71,17 @@ type ValidationProps = {
   onGlossaryChanged: () => void
   onOpenReview: (request: ValidationRequest) => void
   onSelection?: (ids: number[]) => void // 검사 대상 선택 (홈 단계 안내)
+  onMode?: (mode: ResultMode) => void // 고른 결과 형태 (홈 단계 안내)
 }
 
-function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, onOpenReview, onSelection }: ValidationProps) {
+function Validation({
+  refreshKey,
+  canManageGlossary = true,
+  onGlossaryChanged,
+  onOpenReview,
+  onSelection,
+  onMode,
+}: ValidationProps) {
   const [files, setFiles] = useState<StoredFile[]>([])
   const [targets, setTargets] = useState<Set<number>>(new Set())
   const [baseline, setBaseline] = useState<Set<number>>(new Set())
@@ -59,6 +94,7 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
   const [run, setRun] = useState<ValidationRun | null>(null)
   const [localVersion, setLocalVersion] = useState(0)
   const [query, setQuery] = useState('')
+  const [mode, setMode] = useState<ResultMode>(savedMode)
   const search = useSearch()
   const wanted = window.location.pathname === '/' ? new URLSearchParams(search).get('files') : null
 
@@ -103,6 +139,15 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
   useEffect(() => {
     onSelection?.([...targets])
   }, [targets, onSelection])
+
+  useEffect(() => {
+    onMode?.(mode)
+    try {
+      localStorage.setItem(MODE_KEY, mode)
+    } catch {
+      // 저장소를 쓸 수 없으면 이번 화면에서만 유지한다
+    }
+  }, [mode, onMode])
 
   useEffect(() => {
     let cancelled = false
@@ -284,79 +329,124 @@ function Validation({ refreshKey, canManageGlossary = true, onGlossaryChanged, o
                 {targets.size > 4 && <li className="wk-val-more-count">외 {targets.size - 4}개</li>}
               </ul>
             )}
-            {/* 안내 문장은 이름에 섞지 않고 설명(aria-describedby)으로 연결한다 */}
-            <label className="wk-val-field">
-              기준 기간
-              <input
-                type="text"
-                inputMode="numeric"
-                placeholder="2026-09 또는 2026"
-                aria-describedby="wk-hint-period"
-                value={period}
-                onChange={(e) => setPeriod(e.target.value)}
-              />
-            </label>
-            <p className="wk-val-hint wk-val-hint-field" id="wk-hint-period">
-              입력하면 이 기간과 다른 자료를 찾아 알려 줍니다 (선택).
-            </p>
-            <button
-              type="button"
-              className="wk-btn-primary"
-              aria-describedby="wk-hint-review"
-              disabled={busy || targets.size === 0}
-              onClick={() => onOpenReview(buildRequest())}
-            >
-              사전 검토 열기 (통합 전)
-            </button>
-            <p className="wk-val-hint" id="wk-hint-review">
-              문제를 확인·승인한 뒤 통합 결과까지 이어집니다.
-            </p>
-            <button
-              type="button"
-              className="wk-btn-outline"
-              aria-describedby="wk-hint-validate"
-              disabled={busy || targets.size === 0}
-              onClick={() => void submit()}
-            >
-              {busy ? '검증 중…' : `검증 실행 (${targets.size}개 파일)`}
-            </button>
-            <p className="wk-val-hint" id="wk-hint-validate">
-              검사 결과만 빠르게 봅니다 (검토는 만들지 않음).
-            </p>
-            <details className="wk-val-more">
-              <summary>추가 검사 설정</summary>
-              <div className="validation-form">
-                <label>
-                  기관·지역 기준 열
-                  <select value={entityField} onChange={(e) => setEntityField(e.target.value)}>
-                    {ENTITY_OPTIONS.map((o) => (
-                      <option key={o.value} value={o.value}>
-                        {o.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  전월 대비 이상치 기준 (±%)
-                  <input
-                    type="number"
-                    min={1}
-                    max={1000}
-                    value={threshold}
-                    onChange={(e) => setThreshold(Number(e.target.value) || 50)}
+            <fieldset className="wk-mode">
+              <legend>결과 형태</legend>
+              {MODES.map((m) => (
+                <label key={m.value} className={`wk-mode-card${mode === m.value ? ' is-picked' : ''}`}>
+                  <RadioInput
+                    name="wk-result-mode"
+                    value={m.value}
+                    size="md"
+                    checked={mode === m.value}
+                    onChange={() => setMode(m.value)}
+                    className="wk-mode-radio"
                   />
+                  <span className="wk-mode-text">
+                    <strong>{m.title}</strong>
+                    <span>{m.desc}</span>
+                    <span className="wk-mode-example">{m.example}</span>
+                  </span>
                 </label>
-                <label className="validation-wide">
-                  필수 기관·지역 (쉼표 또는 줄바꿈으로 구분)
-                  <textarea
-                    rows={2}
-                    placeholder="행정안전부, 기상청, 인사혁신처"
-                    value={entities}
-                    onChange={(e) => setEntities(e.target.value)}
-                  />
-                </label>
+              ))}
+            </fieldset>
+            {mode === 'sheets' && (
+              <div className="wk-mode-next">
+                <button
+                  type="button"
+                  className="wk-btn-primary"
+                  aria-describedby="wk-hint-bundle"
+                  disabled={targets.size === 0}
+                  onClick={() => navigate(`/bundle?files=${[...targets].join(',')}`)}
+                >
+                  다음: 시트·통계 요약 설정 ({targets.size}개 파일)
+                </button>
+                <p className="wk-val-hint" id="wk-hint-bundle">
+                  다음 화면에서 넣을 시트·순서·통계 요약(선택)을 정하고 결과 구성을 확인한 뒤 엑셀을 만듭니다.
+                </p>
+                {baseline.size > 0 && (
+                  <p className="wk-why" role="note">
+                    전월 자료 {baseline.size}개는 통합표 검사에만 씁니다 — 파일별 시트로 묶기에는 넣지 않습니다.
+                  </p>
+                )}
               </div>
-            </details>
+            )}
+            {mode === 'table' && (
+              <>
+                {/* 안내 문장은 이름에 섞지 않고 설명(aria-describedby)으로 연결한다 */}
+                <label className="wk-val-field">
+                  기준 기간
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="2026-09 또는 2026"
+                    aria-describedby="wk-hint-period"
+                    value={period}
+                    onChange={(e) => setPeriod(e.target.value)}
+                  />
+                </label>
+                <p className="wk-val-hint wk-val-hint-field" id="wk-hint-period">
+                  입력하면 이 기간과 다른 자료를 찾아 알려 줍니다 (선택).
+                </p>
+                <button
+                  type="button"
+                  className="wk-btn-primary"
+                  aria-describedby="wk-hint-review"
+                  disabled={busy || targets.size === 0}
+                  onClick={() => onOpenReview(buildRequest())}
+                >
+                  사전 검토 열기 (통합 전)
+                </button>
+                <p className="wk-val-hint" id="wk-hint-review">
+                  문제를 확인·승인한 뒤 통합 결과까지 이어집니다.
+                </p>
+                <button
+                  type="button"
+                  className="wk-btn-outline"
+                  aria-describedby="wk-hint-validate"
+                  disabled={busy || targets.size === 0}
+                  onClick={() => void submit()}
+                >
+                  {busy ? '검증 중…' : `검증 실행 (${targets.size}개 파일)`}
+                </button>
+                <p className="wk-val-hint" id="wk-hint-validate">
+                  검사 결과만 빠르게 봅니다 (검토는 만들지 않음).
+                </p>
+                <details className="wk-val-more">
+                  <summary>추가 검사 설정</summary>
+                  <div className="validation-form">
+                    <label>
+                      기관·지역 기준 열
+                      <select value={entityField} onChange={(e) => setEntityField(e.target.value)}>
+                        {ENTITY_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      전월 대비 이상치 기준 (±%)
+                      <input
+                        type="number"
+                        min={1}
+                        max={1000}
+                        value={threshold}
+                        onChange={(e) => setThreshold(Number(e.target.value) || 50)}
+                      />
+                    </label>
+                    <label className="validation-wide">
+                      필수 기관·지역 (쉼표 또는 줄바꿈으로 구분)
+                      <textarea
+                        rows={2}
+                        placeholder="행정안전부, 기상청, 인사혁신처"
+                        value={entities}
+                        onChange={(e) => setEntities(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                </details>
+              </>
+            )}
           </aside>
         </div>
       )}

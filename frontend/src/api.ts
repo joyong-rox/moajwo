@@ -506,6 +506,9 @@ export type IntegrationRun = {
     columns?: string[]
     include_unmapped?: boolean
     unmapped_columns?: string[]
+    mode?: 'sheets' // 파일별 시트로 묶기 (없으면 하나의 통합표)
+    stats_summary?: boolean
+    sheet_order?: string[]
   }
   error: string | null
   created_at: string
@@ -1370,4 +1373,142 @@ export type AnalysisRunSummary = {
 
 export async function fetchAnalysisRuns(): Promise<AnalysisRunSummary[]> {
   return json(await apiFetch(`${API_BASE}/analysis/runs`))
+}
+
+// ---------------------------------------------------------------- 파일별 시트로 묶기 (취합 방식 '파일별 시트')
+
+export type BundleSheetRef = { file_id: number; sheet_id: string }
+
+export type BundleLink = BundleSheetRef & {
+  column_id?: string | null
+  unit?: string | null
+  period?: string | null
+  rows_are_records?: boolean
+  exclude?: boolean
+  exclude_reason?: string | null
+}
+
+// variant·unit·region_level은 계산 엔진이 요구할 때만 보낸다 (variant ''는 '구분 없음')
+export type BundleItem = {
+  field_key: string
+  aggregates: AggKey[]
+  variant?: string | null
+  unit?: string | null
+  region_level?: 'lower' | 'upper' | null
+  links?: BundleLink[]
+}
+
+// summary가 null이면 통계 요약 시트를 만들지 않는다 (서버도 분석 엔진을 부르지 않음)
+export type BundleRequest = { file_ids: number[]; sheets: BundleSheetRef[]; summary: { items: BundleItem[] } | null }
+
+export type BundlePlanFile = {
+  file_id: number
+  file_name: string
+  sheets: { sheet_id: string; sheet: string; rows: number; columns: number }[]
+  skipped_sheets: string[]
+  pii: 'none' | 'acknowledged' | 'needs_ack'
+  pii_summary: PiiSummary | null // 파일 목록과 같은 형식 (가린 값·위치)
+  own: boolean
+  problems: string[]
+}
+
+export type BundlePlanSheet = BundleSheetRef & {
+  file_name: string
+  sheet: string
+  name: string // 결과 시트 이름
+  renamed: string[] // 원래 이름에서 바꾼 이유
+  rows: number
+  kinds: { data: number; subtotal: number; note: number }
+  empty_rows: number
+  title_rows: number
+  two_level_header: boolean
+  columns: number
+  formula_missing: number
+  formula_cached: number
+  formula_checked: boolean
+  long_numbers: number
+}
+
+export type BundlePlanLink = BundleSheetRef & {
+  file_name: string
+  sheet: string
+  output_sheet: string
+  status: 'ok' | 'needs_input' | 'excluded' | 'user_excluded' | 'unchecked'
+  reasons: string[]
+  exclude_reason: string | null
+  column_id?: string | null
+  column?: string | null
+  candidates?: { column_id: string; column: string; variant: string }[]
+  field_label?: string
+  unit?: string | null
+  unit_source?: string | null
+  period?: string | null
+  period_source?: string | null
+  period_columns?: string[]
+  rows_are_records?: boolean
+  // 같은 시트에서 같은 대상의 행이 반복된 정도 (있으면 '서로 다른 기록'인지 사용자가 확인해야 함)
+  repeated?: { keys: number; rows: number; same_value: number; different_value: number } | null
+}
+
+export type BundleLevelConflict = {
+  period: string | null
+  upper: { target: string; file_id: number; row: number; value: number | string | null; rows: number }
+  lower_count: number
+  lower_sum: number | null
+  lower_missing: number
+  difference: number | null
+}
+
+export type BundlePlanItem = {
+  field_key: string
+  field_label: string
+  aggregates: AggKey[]
+  aggregate_labels: string[]
+  choices: { variant: string | null; unit: string | null; region_level: 'lower' | 'upper' | null }
+  variants: string[]
+  units: string[]
+  region_levels: { choice: 'lower' | 'upper' | null; mismatch: number; conflicts: BundleLevelConflict[] } | null
+  unit: string | null
+  periods: string[]
+  links: BundlePlanLink[]
+  coverage: { included: number; total: number; text: string }
+  rows: { candidate: number; excluded: Record<string, number> } | null
+  reason_labels: Record<string, string>
+  warnings: string[]
+  problems: string[]
+  ready: boolean
+}
+
+export type BundlePlan = {
+  mode: 'sheets'
+  files: BundlePlanFile[]
+  sheets: BundlePlanSheet[]
+  summary: { sheet_name: string; items: BundlePlanItem[]; ready: boolean } | null
+  fields: { key: string; label: string; sheets: number }[]
+  problems: string[]
+  warnings: string[]
+  total_rows: number
+  sheet_count: number
+  limits: { files: number; sheets: number; rows: number; excel_rows: number; items: number; summary_sheets: number }
+  basis: string
+  ready: boolean
+}
+
+export async function planBundle(body: BundleRequest, signal?: AbortSignal): Promise<BundlePlan> {
+  const res = await apiFetch(`${API_BASE}/bundle/plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+  return json(res)
+}
+
+export async function runBundle(body: BundleRequest, basis: string): Promise<IntegrationRun> {
+  const res = await apiFetch(`${API_BASE}/bundle/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, expected_basis: basis }),
+  })
+  return analysisJson(res) // 409는 사유 목록과 함께 (AnalysisProblemError)
 }

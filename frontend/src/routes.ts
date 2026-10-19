@@ -20,6 +20,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/reviews', label: '검토 목록', roles: ALL, inMenu: true },
   { path: '/mapping', label: '열 매핑', roles: ALL, inMenu: true },
   { path: '/mapping/common', label: '공통 항목 검토', roles: ALL, inMenu: false },
+  { path: '/bundle', label: '파일별 시트로 묶기', roles: ALL, inMenu: false },
   { path: '/analysis', label: '데이터 분석', roles: ALL, inMenu: true },
   { path: '/dictionary', label: '사전 관리', roles: OWNER, inMenu: true },
   { path: '/promotions', label: '승격 심사', roles: OWNER, inMenu: true },
