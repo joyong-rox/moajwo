@@ -217,7 +217,7 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
                     </button>
                     <button
                       type="button"
-                      className="mapping-confirm"
+                      className="mapping-confirm wk-danger"
                       disabled={busy}
                       onClick={() =>
                         void act(async () => {
@@ -316,7 +316,7 @@ function Glossary({ refreshKey, onChanged }: { refreshKey: number; onChanged: ()
                     <td>
                       <button
                         type="button"
-                        className="mapping-confirm"
+                        className="mapping-confirm wk-danger"
                         disabled={busy}
                         onClick={() =>
                           void act(async () => {

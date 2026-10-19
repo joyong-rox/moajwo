@@ -30,7 +30,7 @@ import Runs from './Runs'
 import Settings from './Settings'
 import Upload from './Upload'
 import Validation from './Validation'
-import { Banner } from './Workflow'
+import { Banner, Icon, type IconName } from './Workflow'
 
 type Gate = { kind: 'loading' } | { kind: 'signed-out'; setupRequired: boolean } | { kind: 'signed-in'; me: Me }
 
@@ -140,7 +140,7 @@ function Workspace() {
     <div className="shell">
       <Sidebar path={path} />
       <div className="shell-main">
-        <main className="app">
+        <main className={`app${NARROW_PAGES.has(path) ? ' app-narrow' : ''}`}>
           {/* 홈(취합 작업)은 다른 메뉴로 옮겨도 진행 중인 검토가 사라지지 않도록 숨기기만 한다 */}
           <div id="home" hidden={path !== '/'}>
             {/* 홈 작업 영역: 넓은 화면을 쓰고 '올리기 → 고르기 → 검토 시작' 순서로 보인다 (대시보드는 아래) */}
@@ -238,7 +238,24 @@ function ServerStatus({ state }: { state: HealthState }) {
   )
 }
 
-function MenuLink({ to, label, active }: { to: string; label: string; active: boolean }) {
+// 양식 위주 화면은 좁은 칸, 나머지(목록·작업 화면)는 넓은 칸을 쓴다
+const NARROW_PAGES = new Set(['/settings', '/account'])
+
+// 메뉴 아이콘 — 글자와 함께 보여 훑어보며 찾기 쉽게 (아이콘만으로 구분하지 않음)
+const MENU_ICON: Record<string, IconName> = {
+  '/': 'home',
+  '/automations': 'bolt',
+  '/runs': 'list',
+  '/reviews': 'clipboard',
+  '/mapping': 'table',
+  '/analysis': 'chart',
+  '/dictionary': 'book',
+  '/promotions': 'arrowup',
+  [ADMIN_BASE]: 'shield',
+  '/settings': 'gear',
+}
+
+function MenuLink({ to, label, active, icon }: { to: string; label: string; active: boolean; icon?: IconName }) {
   return (
     <a
       href={to}
@@ -250,7 +267,8 @@ function MenuLink({ to, label, active }: { to: string; label: string; active: bo
         navigate(to)
       }}
     >
-      {label}
+      {icon && <Icon name={icon} />}
+      <span className="side-label">{label}</span>
     </a>
   )
 }
@@ -270,11 +288,12 @@ function Sidebar({ path }: { path: string }) {
       </div>
       <nav className="side-nav" aria-label="메뉴">
         {ROUTES.filter((r) => r.inMenu && r.roles.includes(me.role)).map((r) => (
-          <MenuLink key={r.path} to={r.path} label={r.label} active={isActiveMenu(r.path, path)} />
+          <MenuLink key={r.path} to={r.path} label={r.label} icon={MENU_ICON[r.path]} active={isActiveMenu(r.path, path)} />
         ))}
         {/* 데이터 연결은 아직 준비 중: 누를 수 없게 두고 뱃지만 단다 */}
         <button type="button" className="side-link is-disabled" disabled aria-disabled="true">
-          데이터 연결 (DB·Kibana) <span className="side-badge">준비 중</span>
+          <Icon name="link" />
+          <span className="side-label">데이터 연결 (DB·Kibana)</span> <span className="side-badge">준비 중</span>
         </button>
       </nav>
       {/* 권한 없는 관리 메뉴는 그리지 않고, 그런 메뉴가 있다는 것만 알린다 */}
@@ -286,7 +305,7 @@ function Sidebar({ path }: { path: string }) {
       )}
       <div className="side-user">
         <div className="side-user-actions">
-          <MenuLink to="/account" label="내 계정" active={path === '/account'} />
+          <MenuLink to="/account" label="내 계정" icon="user" active={path === '/account'} />
           <button type="button" className="side-logout" onClick={signOut}>
             로그아웃
           </button>

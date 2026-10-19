@@ -20,8 +20,44 @@ export type IconName =
   | 'list'
   | 'table'
   | 'upload'
+  | 'home'
+  | 'bolt'
+  | 'clipboard'
+  | 'chart'
+  | 'book'
+  | 'arrowup'
+  | 'shield'
+  | 'gear'
 
 const PATHS: Record<IconName, ReactNode> = {
+  home: (
+    <>
+      <path d="M2.5 7.5L8 3l5.5 4.5" />
+      <path d="M4 6.6V13h3V9.6h2V13h3V6.6" />
+    </>
+  ),
+  bolt: <path d="M9 2L4 9h3.6L7 14l5-7H8.4z" />,
+  clipboard: (
+    <>
+      <rect x="3.8" y="3" width="8.4" height="11" rx="1.2" />
+      <path d="M6 3V2h4v1M6 7h4M6 10h2.8" />
+    </>
+  ),
+  chart: <path d="M3 2.8V13h10.2M6 10.8V8M9 10.8V5M12 10.8V7" />,
+  book: (
+    <>
+      <path d="M3.5 3.2c0-.7.5-1.2 1.2-1.2h7.8v9.6H4.7c-.7 0-1.2.5-1.2 1.2z" />
+      <path d="M3.5 12.8c0 .7.5 1.2 1.2 1.2h7.8" />
+    </>
+  ),
+  arrowup: <path d="M8 13.5V3M4.5 6.5L8 3l3.5 3.5" />,
+  shield: <path d="M8 2l5 2v3.8c0 3-2.2 5.2-5 6.2-2.8-1-5-3.2-5-6.2V4z" />,
+  gear: (
+    <>
+      <circle cx="8" cy="8" r="2.2" />
+      <path d="M8 1.8v1.8M8 12.4v1.8M1.8 8h1.8M12.4 8h1.8M3.6 3.6l1.3 1.3M11.1 11.1l1.3 1.3M3.6 12.4l1.3-1.3M11.1 4.9l1.3-1.3" />
+    </>
+  ),
   upload: (
     <>
       <path d="M8 10.5V3M5 6l3-3 3 3" />

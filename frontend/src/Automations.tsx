@@ -169,7 +169,7 @@ function AutomationDetail({
         <h3>{automation.name}</h3>
         <button
           type="button"
-          className="mapping-confirm"
+          className="mapping-confirm wk-danger"
           disabled={busy}
           onClick={() => {
             if (!window.confirm(`자동화 '${automation.name}'을(를) 지울까요? 실행 기록과 결과 파일은 남습니다.`)) return
