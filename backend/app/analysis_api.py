@@ -162,13 +162,28 @@ def _get(db: Session, user: CurrentUserDep, run_id: int) -> AnalysisRun:
     return run
 
 
+# 저장한 결과의 글자는 저장 당시 규칙으로 가린 것이라, 내보낼 때마다 지금 규칙(mask_text)으로 다시 가린다.
+# 저장값은 바꾸지 않고 내보낼 사본만 가린다 (다시 가려도 그대로). 숫자·참거짓·None은 형 그대로 둔다.
+# 식별자·해시·코드(조회 키로 쓰는 값)는 가리지 않는다 — sha256 같은 16진수 안의 숫자열이 전화번호 형태로 바뀔 수 있음.
+_KEEP = frozenset({"sha256", "sheet_id", "column_id", "field_key", "policy", "status", "reason", "region_level"})
+_KEEP |= {"group_by", "group_fields", "aggregates", "on"}
+
+
+def shown(value: Any, key: str | None = None) -> Any:
+    if isinstance(value, dict):
+        return {k: v if k in _KEEP else shown(v, k) for k, v in value.items()}
+    if isinstance(value, list):
+        return [shown(v, key) for v in value]
+    return mask_text(value) if isinstance(value, str) else value
+
+
 @router.get("/runs")
 def analysis_runs(db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> list[dict]:
     """내 분석 결과 (최근 순)."""
     runs = db.scalars(
         select(AnalysisRun).where(AnalysisRun.created_by == user.id).order_by(AnalysisRun.id.desc()).limit(100)
     )
-    return [{"id": r.id, "created_at": utc_to_kst(r.created_at), **json.loads(r.summary)} for r in runs]
+    return [{"id": r.id, "created_at": utc_to_kst(r.created_at), **shown(json.loads(r.summary))} for r in runs]
 
 
 @router.get("/runs/{run_id}")
@@ -180,16 +195,16 @@ def analysis_detail(run_id: int, db: Annotated[Session, Depends(get_session)], u
     return {
         "id": run.id,
         "created_at": utc_to_kst(run.created_at),  # DB 기본값(UTC) → KST
-        "created_by": owner.display_name if owner else None,
+        "created_by": mask_text(owner.display_name) if owner else None,
         "read_only": run.created_by != user.id,
-        "conditions": json.loads(run.conditions),
-        "inputs": json.loads(run.inputs),
-        "result": {**meta, "groups_total": len(res["groups"])},
+        "conditions": shown(json.loads(run.conditions)),
+        "inputs": shown(json.loads(run.inputs)),
+        "result": shown({**meta, "groups_total": len(res["groups"])}),
     }
 
 
 def _page(items: list[Any], offset: int, limit: int) -> dict:
-    return {"total": len(items), "offset": offset, "items": items[offset : offset + limit]}
+    return {"total": len(items), "offset": offset, "items": shown(items[offset : offset + limit])}
 
 
 @router.get("/runs/{run_id}/groups")
@@ -290,7 +305,7 @@ def _state_text(res: dict[str, Any]) -> str:
 
 
 def workbook_bytes(run: AnalysisRun) -> bytes:
-    cond, inp, res = json.loads(run.conditions), json.loads(run.inputs), json.loads(run.result)
+    cond, inp, res = (shown(json.loads(x)) for x in (run.conditions, run.inputs, run.result))
     wb = Workbook()
     ws = wb.active
     ws.title = "결과"
