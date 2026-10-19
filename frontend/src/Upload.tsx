@@ -67,6 +67,7 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
   return (
     <section className="upload wk-upload">
       <h2>파일 업로드</h2>
+      <p className="wk-card-desc">올린 원본은 바꾸지 않고 읽기만 합니다. 통합 결과는 언제나 새 파일로 만듭니다.</p>
       <div
         className={`upload-drop${dragging ? ' is-dragging' : ''}${busy ? ' is-busy' : ''}`}
         role="button"
@@ -86,8 +87,18 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}
       >
-        <p className="upload-drop-title">{busy ? '업로드·분석 중…' : '파일을 여기에 끌어다 놓으세요'}</p>
-        <p className="upload-drop-hint">또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능 · 파일당 최대 50MB</p>
+        <span className="wk-drop-icon" aria-hidden="true">
+          <Icon name="upload" />
+        </span>
+        <div className="wk-drop-text">
+          <p className="upload-drop-title">{busy ? '업로드·분석 중…' : '파일을 여기에 끌어다 놓으세요'}</p>
+          <p className="upload-drop-hint">또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능 · 파일당 최대 50MB</p>
+        </div>
+        {!busy && (
+          <span className="wk-drop-button" aria-hidden="true">
+            파일 선택
+          </span>
+        )}
         <input
           ref={inputRef}
           type="file"

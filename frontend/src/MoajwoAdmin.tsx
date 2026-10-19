@@ -550,7 +550,7 @@ function UserAdmin() {
                           <button
                             key={a}
                             type="button"
-                            className="mapping-confirm"
+                            className={`mapping-confirm${a === "reject" || a === "suspend" ? " wk-danger" : ""}`}
                             aria-label={`${u.username} ${ACTION[a].label}`}
                             disabled={busy}
                             onClick={() =>

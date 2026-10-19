@@ -1,14 +1,14 @@
 :root {
   --bg: #ffffff;
-  --text: #1f2328;
-  --muted: #59636e;
-  --border: #d1d9e0;
+  --text: #1f2937;
+  --muted: #5b6472; /* 흰·회색·옅은 파랑 바탕 모두 대비 5.4:1 이상 */
+  --border: #d1d5db; /* 입력칸 테두리 (이전보다 대비가 낮아지지 않게) */
   --ok: #1a7f37;
   --fail: #cf222e;
-  --accent: #0969da;
-  --accent-bg: #f0f6ff;
-  --tag-bg: #f6f8fa;
-  --empty-bg: #f6f8fa;
+  --accent: #3758f9;
+  --accent-bg: #eff3ff;
+  --tag-bg: #f3f4f6;
+  --empty-bg: #f3f4f6;
   --subtotal-bg: #fff1c2;
   --subtotal-text: #7d4e00;
   --subtotal-row-bg: #fffbea;
@@ -33,6 +33,14 @@
   --pii-text: #6639ba;
   --pass-bg: #dafbe1;
   --pass-text: #116329;
+  /* 공통 틀 (TailGrids 디자인 참고) */
+  --accent-hover: #2237ee;
+  --ring: rgb(55 88 249 / 20%);
+  --border-soft: #e5e7eb; /* 카드·표 구분선 */
+  --surface-soft: #f9fafb;
+  --text-soft: #374151;
+  --shadow-xs: 0 1px 2px rgb(16 24 40 / 5%);
+  --shadow-md: 0 4px 12px rgb(16 24 40 / 8%);
 
   color-scheme: light;
   font-family: system-ui, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
@@ -2105,29 +2113,33 @@ body {
   cursor: pointer;
 }
 
+/* 대화상자 모양은 Tailgrids 확인창(ConfirmDialog)과 같은 값: 모서리 12px, 안쪽 24px, 옅은 테두리·그림자, 흐린 배경 */
 .review-dialog {
   width: min(640px, calc(100vw - 32px));
   max-height: calc(100vh - 64px);
   padding: 0;
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
   background: var(--bg);
   color: var(--text);
+  box-shadow: 0 10px 15px -3px rgb(0 0 0 / 10%), 0 4px 6px -4px rgb(0 0 0 / 10%);
 }
 
 .review-dialog::backdrop {
-  background: rgb(15 23 32 / 45%);
+  background: rgb(0 0 0 / 50%);
+  backdrop-filter: blur(4px);
 }
 
 .review-dialog-body {
   display: grid;
   gap: 8px;
-  padding: 18px 20px;
+  padding: 24px;
 }
 
 .review-dialog-body h3 {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: 1.125rem;
+  font-weight: 600;
 }
 
 .review-dialog-kind,
@@ -3999,4 +4011,950 @@ button.wk-card:hover {
 :is(.wk, .review-panel, .wk-upload, .wk-validation, .wk-steps, .wk-steps-more) :is(button, a, input, select, summary):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* ---- 홈 시안 (TailGrids 디자인 참고 — 의존성·전역 리셋 없이 .wk-home 안에서만) ---- */
+.wk-home {
+  --tg-primary: var(--accent);
+  --tg-primary-hover: var(--accent-hover);
+  --tg-primary-soft: var(--accent-bg);
+  --tg-ring: var(--ring);
+  --tg-title: var(--text);
+  --tg-text: var(--text-soft);
+  --tg-muted: var(--muted);
+  --tg-border: var(--border-soft);
+  --tg-border-strong: var(--border);
+  --tg-soft: var(--surface-soft);
+  --tg-soft-2: var(--tag-bg);
+
+  color: var(--tg-text);
+}
+
+.wk-home-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+}
+
+.wk-home .page-title {
+  margin: 0;
+  color: var(--tg-title);
+  font-size: 1.75rem;
+  letter-spacing: -0.2px;
+}
+
+.wk-home-lead {
+  margin: 4px 0 0;
+  color: var(--tg-muted);
+}
+
+.wk-server {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0;
+  padding: 4px 12px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.wk-server.is-ok {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.wk-server.is-fail {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.wk-server.is-loading {
+  border-color: var(--tg-border);
+  background: var(--tg-soft);
+  color: var(--tg-muted);
+}
+
+.wk-server-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.wk-server-detail {
+  color: var(--tg-muted);
+  font-weight: 400;
+}
+
+/* 단계 안내: 한 장의 카드 안 네 칸 (칸 사이 1px 선), 지금 단계는 아래 파란 줄 */
+.wk-home .wk-steps {
+  margin: 0 0 16px;
+}
+
+.wk-home .wk-steps ol {
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--tg-border);
+  border-radius: 16px;
+  background: var(--tg-border);
+  box-shadow: 0 1px 2px rgb(16 24 40 / 5%);
+}
+
+.wk-home .wk-step {
+  background: #fff;
+}
+
+.wk-home .wk-step-body {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 0;
+}
+
+.wk-home a.wk-step-body:hover {
+  background: var(--tg-soft);
+}
+
+.wk-home .wk-step.is-current .wk-step-body {
+  border: 0;
+  background: var(--tg-primary-soft);
+  box-shadow: inset 0 -3px 0 var(--tg-primary);
+}
+
+.wk-home .wk-step-name {
+  color: var(--tg-title);
+}
+
+.wk-home .wk-step-mark {
+  width: 28px;
+  height: 28px;
+}
+
+/* 카드: 흰 바탕·옅은 테두리·둥근 모서리 */
+.wk-home .upload,
+.wk-home .validation,
+.wk-home .dash {
+  margin: 0 0 16px;
+  padding: 20px;
+  border: 1px solid var(--tg-border);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(16 24 40 / 5%);
+}
+
+.wk-home .upload > h2,
+.wk-home .validation > h2,
+.wk-home .dash-head h2 {
+  margin: 0;
+  color: var(--tg-title);
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+.wk-home .wk-card-desc {
+  margin: 4px 0 14px;
+  color: var(--tg-muted);
+  font-size: 0.875rem;
+}
+
+/* 업로드 영역 */
+.wk-drop-text {
+  min-width: 0;
+}
+
+.wk-home .upload-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 24px 16px;
+  border: 1.5px dashed var(--tg-border-strong);
+  border-radius: 12px;
+  background: var(--tg-soft);
+}
+
+.wk-home .upload-drop:hover,
+.wk-home .upload-drop:focus-visible,
+.wk-home .upload-drop.is-dragging {
+  border-color: var(--tg-primary);
+  background: var(--tg-primary-soft);
+}
+
+.wk-home .upload-drop-title {
+  margin: 4px 0 0;
+  color: var(--tg-title);
+}
+
+.wk-drop-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--tg-primary-soft);
+  color: var(--tg-primary);
+}
+
+.wk-drop-icon .wk-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.wk-drop-button {
+  display: inline-flex;
+  margin-top: 8px;
+  padding: 7px 14px;
+  border: 1px solid var(--tg-border-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--tg-title);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+/* 검사할 파일: 왼쪽 표, 오른쪽 '검사 시작' 패널 */
+.wk-val-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 20px;
+  align-items: start;
+}
+
+.wk-val-main {
+  min-width: 0;
+}
+
+.wk-home .wk-pickbar {
+  margin-top: 0;
+}
+
+.wk-home input[type='text'],
+.wk-home input[type='number'],
+.wk-home input[type='search'],
+.wk-home select,
+.wk-home textarea {
+  box-sizing: border-box;
+  min-height: 38px;
+  padding: 7px 12px;
+  border: 1px solid var(--tg-border-strong);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--tg-text);
+  font: inherit;
+}
+
+.wk-home input[type='text']:focus,
+.wk-home input[type='number']:focus,
+.wk-home input[type='search']:focus,
+.wk-home select:focus,
+.wk-home textarea:focus {
+  border-color: var(--tg-primary);
+  box-shadow: 0 0 0 3px var(--tg-ring);
+}
+
+.wk-home .wk-filetable {
+  max-height: 440px;
+  overflow: auto;
+  border: 1px solid var(--tg-border);
+  border-radius: 12px;
+}
+
+.wk-home .validation-files {
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.875rem;
+}
+
+/* 표를 내려도 머리글(검증 대상·전월 자료·파일)이 보이게 */
+.wk-home .validation-files thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--tg-border);
+  background: var(--tg-soft);
+  color: var(--tg-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.wk-home .validation-files td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--tg-border);
+  color: var(--tg-text);
+}
+
+/* 긴 파일 이름은 잘리지 않고 줄바꿈해 전부 보이게 (표 안 가로 스크롤 없이) */
+.wk-home .validation-files .wk-filename {
+  min-width: 12em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.wk-home .validation-files tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.wk-home .validation-files tbody tr:hover td {
+  background: var(--tg-soft);
+}
+
+.wk-home .wk-filetable tr.is-picked td {
+  background: var(--tg-primary-soft);
+}
+
+.wk-home .validation-files input[type='checkbox'] {
+  accent-color: var(--tg-primary);
+}
+
+.wk-val-side {
+  position: sticky;
+  top: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr); /* 긴 파일 이름이 패널 폭을 넘지 않게 */
+  min-width: 0;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--tg-border);
+  border-radius: 12px;
+  background: var(--tg-soft);
+}
+
+.wk-val-side-title {
+  margin: 0;
+  color: var(--tg-title);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.wk-val-summary {
+  margin: 0;
+  color: var(--tg-text);
+  font-size: 0.875rem;
+}
+
+.wk-val-picked {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wk-val-picked li {
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 2px 10px;
+  border: 1px solid var(--tg-border);
+  border-radius: 999px;
+  background: #fff;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wk-val-picked .wk-val-more-count {
+  border-style: dashed;
+  color: var(--tg-muted);
+}
+
+.wk-val-field {
+  display: grid;
+  gap: 4px;
+  color: var(--tg-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.wk-val-hint {
+  margin: -4px 0 2px;
+  color: var(--tg-muted);
+  font-size: 0.78rem;
+  font-weight: 400;
+}
+
+.wk-val-empty {
+  margin: 0;
+}
+
+.wk-val-hint-field {
+  margin-top: -6px;
+}
+
+.wk-btn-primary,
+.wk-btn-outline {
+  width: 100%;
+  min-height: 42px;
+  padding: 9px 16px;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+
+.wk-btn-primary {
+  border: 1px solid var(--tg-primary);
+  background: var(--tg-primary);
+  color: #fff;
+}
+
+.wk-btn-primary:hover:not(:disabled) {
+  border-color: var(--tg-primary-hover);
+  background: var(--tg-primary-hover);
+}
+
+.wk-btn-outline {
+  border: 1px solid var(--tg-border-strong);
+  background: #fff;
+  color: var(--tg-title);
+  font-weight: 500;
+}
+
+.wk-btn-outline:hover:not(:disabled) {
+  background: var(--tg-soft-2);
+}
+
+.wk-btn-primary:disabled,
+.wk-btn-outline:disabled {
+  border-color: var(--tg-soft-2);
+  background: var(--tg-soft-2);
+  color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.wk-home .wk-btn-primary:focus-visible,
+.wk-home .wk-btn-outline:focus-visible {
+  outline: 2px solid var(--tg-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--tg-ring);
+}
+
+.wk-val-more {
+  padding-top: 6px;
+  border-top: 1px solid var(--tg-border);
+}
+
+.wk-val-more summary {
+  color: var(--tg-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.wk-val-more .validation-form {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin: 10px 0 0;
+}
+
+/* 대시보드: 작업 아래, 네 칸 한 줄 */
+.wk-home .dash-cards {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.wk-home .dash-card {
+  border-color: var(--tg-border);
+  border-radius: 12px;
+  background: var(--tg-soft);
+}
+
+.wk-home .dash-value {
+  color: var(--tg-title);
+}
+
+@media (max-width: 1100px) {
+  .wk-val-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wk-val-side {
+    position: static;
+  }
+
+  .wk-home .dash-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .wk-home .upload,
+  .wk-home .validation,
+  .wk-home .dash {
+    padding: 16px;
+  }
+
+  .wk-home .page-title {
+    font-size: 1.5rem;
+  }
+}
+
+/* 넓은 화면의 업로드 칸은 한 줄로 낮게 (파일을 이미 올린 사용자가 목록까지 덜 내려가게) */
+@media (min-width: 768px) {
+  .wk-home .upload-drop {
+    flex-direction: row;
+    justify-content: center;
+    gap: 16px;
+    padding: 18px 20px;
+    text-align: left;
+  }
+
+  .wk-home .wk-drop-button {
+    margin-top: 0;
+  }
+}
+
+/* ==== 공통 틀 (TailGrids 디자인 참고 — 모든 화면, 전역 초기화·외부 글꼴·새 의존성 없이 기존 클래스를 덮어씀) ==== */
+
+/* 본문 폭: 모든 화면이 같은 칸(최대 1440px)에서 같은 시작선으로. 양식 화면(설정·내 계정)은 내용만 좁게 (App.tsx NARROW_PAGES) */
+.shell-main .app {
+  max-width: 1440px;
+  padding: 28px 24px 40px;
+}
+
+.shell-main .app.app-narrow > * {
+  max-width: 880px;
+}
+
+/* 예전에 본문(720px)보다 넓게 펼치던 표·작업 영역·검토 패널은 이제 본문 폭을 그대로 쓴다 (시작선을 제목과 맞춤) */
+.shell-main .runs,
+.shell-main .admin-wide,
+.shell-main .mw,
+.shell-main .review-panel,
+.shell-main .review-panel.review-panel-wide {
+  width: auto;
+  margin-left: 0;
+  transform: none;
+}
+
+.app .page-title {
+  margin: 0 0 18px;
+  color: var(--text);
+  font-size: 1.625rem;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+
+/* 카드: 흰 바탕·옅은 테두리·둥근 모서리·옅은 그림자 */
+.admin,
+.glossary,
+.automation,
+.runs,
+.upload,
+.validation,
+.dash {
+  border-color: var(--border-soft);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: var(--shadow-xs);
+}
+
+.admin,
+.glossary,
+.automation,
+.runs {
+  padding: 20px;
+}
+
+.admin h2,
+.glossary h2,
+.automation h2,
+.runs h2,
+.upload h2,
+.validation h2 {
+  color: var(--text);
+  font-size: 1.125rem;
+  font-weight: 600;
+}
+
+/* 사전 검토 패널: 두꺼운 파란 테두리 대신 카드 테두리와 그림자 */
+.review-panel {
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  box-shadow: var(--shadow-md);
+}
+
+/* 버튼: 주(채움)·보조(테두리)·글자 링크 */
+.mapping-run,
+.mapping-confirm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 38px;
+  border-radius: 8px;
+  box-sizing: border-box;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.mapping-run {
+  padding: 7px 16px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.mapping-run:hover:not(:disabled),
+.mapping-run:focus-visible {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+  color: #fff;
+}
+
+.mapping-run:disabled {
+  border-color: var(--tag-bg);
+  background: var(--tag-bg);
+  color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.mapping-confirm {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.mapping-confirm:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--tag-bg);
+  color: var(--text);
+}
+
+.mapping-confirm:focus-visible {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.mapping-run:focus-visible,
+.mapping-confirm:focus-visible,
+.side-logout:focus-visible,
+.admin-filter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
+.login-link {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* 입력칸: 둥근 모서리와 포커스 고리 (명시도를 낮춰 화면별 스타일이 우선) */
+.app :where(input:not([type='checkbox'], [type='radio'], [type='file'], [type='range']), select, textarea),
+.login-card :where(input, select) {
+  border-radius: 8px;
+}
+
+.app :where(input:not([type='checkbox'], [type='radio'], [type='file'], [type='range']), select, textarea):focus,
+.login-card :where(input, select):focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+  outline: none;
+}
+
+.app :where(input[type='checkbox'], input[type='radio']),
+.login-card :where(input[type='checkbox'], input[type='radio']) {
+  accent-color: var(--accent);
+}
+
+/* 표: 옅은 머리글 바탕·작은 머리글 글자·행 구분선·마우스 올림 */
+.upload-table-wrap,
+.runs-scroll {
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+}
+
+.upload-table th,
+.upload-table td,
+.runs-table th,
+.runs-table td {
+  padding: 8px 12px;
+  border-bottom-color: var(--border-soft);
+}
+
+.upload-table thead th,
+.runs-table thead th {
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.upload-table tbody tr:last-child > *,
+.runs-table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.upload-table tbody tr:hover > td,
+.runs-table tbody tr:hover > td {
+  background: var(--surface-soft);
+}
+
+/* 실행 기록 결과 칸: 파일 이름과 동작을 한 줄에 */
+.runs-table .runs-path {
+  min-width: 260px;
+}
+
+.runs-file {
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.runs-table .wk-run-review {
+  min-height: 30px;
+  margin-left: 8px;
+  padding: 3px 10px;
+  font-size: 0.8125rem;
+}
+
+/* 배지: 알약 모양 */
+.upload-tag {
+  padding: 1px 8px;
+  border-radius: 999px;
+}
+
+.runs-status,
+.role-badge,
+.side-badge {
+  border-radius: 999px;
+}
+
+/* 알림 문장: 줄 단위 안내는 옅은 바탕의 상자로 */
+p.upload-error {
+  padding: 10px 14px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.mapping-warn {
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+}
+
+p.mapping-message {
+  padding: 8px 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: var(--accent-bg);
+  color: var(--confirmed-text);
+}
+
+.wk-banner {
+  border-radius: 12px;
+}
+
+/* 비활성 버튼 옆 사유·해결 방법 한 줄 (버튼 바로 아래) */
+.wk-why {
+  margin: 6px 0 0;
+  color: var(--text-soft);
+  font-size: 0.85rem;
+}
+
+.wk-why strong {
+  margin-right: 4px;
+  color: var(--review-text);
+}
+
+/* 되돌리기 어려운 동작 (계정 반려·이용 중지, 사전·자동화 삭제): 빨간 테두리 보조 버튼 */
+.mapping-confirm.wk-danger {
+  border-color: #fca5a5;
+  color: #b91c1c;
+}
+
+.mapping-confirm.wk-danger:hover:not(:disabled) {
+  border-color: #ef4444;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+/* 관리 표의 동작 버튼은 충분히 넓은 화면에서 한 줄로 (행 높이를 줄임, 좁으면 기존처럼 줄바꿈) */
+@media (min-width: 1500px) {
+  .admin-users-table .admin-buttons {
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+}
+
+/* 자동화의 실행·전월 파일 체크 목록: 파일이 많아도 화면이 끝없이 길어지지 않게 */
+fieldset.automation-files,
+details.automation-files[open] {
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+/* 필터 단추 (관리자 계정 상태 등) */
+.admin-filter {
+  min-height: 34px;
+  border-color: var(--border);
+  font-weight: 500;
+}
+
+.admin-filter:hover:not(.is-active) {
+  background: var(--tag-bg);
+}
+
+/* 사이드바: 아이콘 + 글자, 지금 메뉴는 옅은 파랑 바탕 */
+.shell-side {
+  padding: 20px 14px;
+  border-right-color: var(--border-soft);
+  background: var(--surface-soft);
+}
+
+.side-brand strong {
+  color: var(--text);
+  letter-spacing: -0.3px;
+}
+
+.side-account {
+  border-color: var(--border-soft);
+  border-radius: 12px;
+  box-shadow: var(--shadow-xs);
+}
+
+.side-link {
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  color: var(--text-soft);
+  font-weight: 500;
+}
+
+.side-link .wk-icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+}
+
+.side-label {
+  min-width: 0;
+}
+
+.side-badge {
+  margin-left: auto;
+}
+
+.side-link:hover:not(:disabled) {
+  background: var(--tag-bg);
+  color: var(--text);
+}
+
+.side-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--tag-bg);
+}
+
+.side-link.is-active,
+.side-link.is-active:hover {
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.side-link.is-active .wk-icon {
+  color: var(--accent);
+}
+
+.side-link.is-disabled,
+.side-link.is-disabled .wk-icon {
+  color: #9ca3af;
+}
+
+.side-user {
+  border-top-color: var(--border-soft);
+}
+
+.side-logout {
+  border-color: var(--border);
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.side-logout:hover {
+  background: var(--tag-bg);
+}
+
+/* 로그인 화면: 가운데 카드 */
+.login {
+  background: var(--surface-soft);
+}
+
+.login-card {
+  gap: 12px;
+  width: min(400px, 100%);
+  padding: 28px;
+  border-color: var(--border-soft);
+  border-radius: 16px;
+  box-shadow: var(--shadow-md);
+}
+
+/* 404·권한 없음: 카드 안 안내 */
+.page-error {
+  padding: 24px;
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: var(--shadow-xs);
+}
+
+/* '홈으로'는 메뉴 링크가 아니라 주 버튼처럼 */
+.page-error .side-link {
+  min-height: 38px;
+  padding: 7px 16px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.page-error .side-link:hover {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+  color: #fff;
+}
+
+@media (max-width: 860px) {
+  .shell-main .app {
+    padding: 20px 16px 32px;
+  }
+
+  .shell-side {
+    padding: 12px 16px;
+    border-bottom-color: var(--border-soft);
+  }
+
+  .side-link {
+    min-height: 36px;
+    padding: 6px 10px;
+  }
+}
+
+@media (max-width: 640px) {
+  .admin,
+  .glossary,
+  .automation,
+  .runs {
+    padding: 16px;
+  }
 }

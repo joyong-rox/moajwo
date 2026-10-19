@@ -205,6 +205,11 @@ function BatchConfirm({
           취소
         </button>
       </div>
+      {plan && !busy && chosen.length === 0 && (
+        <p className="wk-why" role="note">
+          <strong>누를 수 없음</strong> 적용할 항목이 없습니다 — 표에서 적용할 열을 고르세요.
+        </p>
+      )}
     </section>
   )
 }

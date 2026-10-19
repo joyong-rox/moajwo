@@ -76,7 +76,10 @@ function Runs() {
                   <td className="runs-path" data-label="결과 파일">
                     {r.status === 'done' && r.output_path ? (
                       <>
-                        <code>{r.output_path}</code> <a href={runDownloadUrl(r.id)}>내려받기</a>
+                        <span className="runs-file" title={r.output_path}>
+                          {r.output_path.split(/[\\/]/).pop()}
+                        </span>{' '}
+                        <a href={runDownloadUrl(r.id)}>내려받기</a>
                       </>
                     ) : r.status === 'review' && r.review_session_id !== null ? (
                       <span className="mw-muted">검토 대기</span>

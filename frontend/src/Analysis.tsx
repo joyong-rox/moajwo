@@ -403,6 +403,11 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
             {busy === 'preview' ? '확인 중…' : preview ? '다시 확인 (계산 안 함)' : '대상 확인 (계산 안 함)'}
           </button>
         </div>
+        {busy === null && (!field || chosen.size === 0) && (
+          <p className="wk-why" role="note">
+            <strong>누를 수 없음</strong> {!field ? '분석할 항목을 고르세요.' : '분석할 파일을 하나 이상 고르세요.'}
+          </p>
+        )}
       </fieldset>
 
       {stale && (
@@ -899,6 +904,19 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                 다시 확인
               </button>
             </div>
+            {/* 조건 변경·확인 필요 자료는 위에서 따로 알린다 — 그 밖의 이유만 여기 */}
+            {!canRun && busy === null && !dirty && waiting.length === 0 && (
+              <p className="wk-why" role="note">
+                <strong>누를 수 없음</strong>{' '}
+                {binError
+                  ? '3단계 구간 설정을 고치세요.'
+                  : preview && preview.problems.length > 0
+                    ? '2단계의 실행할 수 없는 이유를 먼저 해결하세요.'
+                    : aggs.length === 0
+                      ? '3단계에서 계산 방식을 하나 이상 고르세요.'
+                      : "사용할 수 있는 자료가 없습니다 — 2단계에서 자료의 '사용'을 켜세요."}
+              </p>
+            )}
           </fieldset>
         </>
       )}

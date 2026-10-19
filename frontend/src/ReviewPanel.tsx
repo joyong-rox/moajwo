@@ -288,6 +288,7 @@ function ReviewPanel({
                 {review.status === 'ready' ? '검토 완료됨' : '검토 완료'}
               </button>
             </div>
+            <FooterWhy review={review} busy={busyItem !== null} />
             {message && (
               <p className="mapping-message" role="status">
                 {message}
@@ -312,32 +313,35 @@ function ReviewPanel({
                 }}
               />
             )}
-            <details className="review-replace">
-              <summary>원본을 고친 파일로 바꿔 다시 검사</summary>
-              <p className="upload-drop-hint">
-                고친 파일을 먼저 업로드한 뒤 아래에서 고르세요. 같은 형식이므로 열 매핑 확정은 이어받고, 개인정보 확인은
-                새로 받습니다.
-              </p>
-              {review.files.map((f) => (
-                <label key={f.id} className="review-replace-row">
-                  <span>{f.name}</span>
-                  <select
-                    aria-label={`${f.name} 대신 검사할 파일`}
-                    value={replace[f.id] ?? f.id}
-                    onChange={(e) => setReplace((prev) => ({ ...prev, [f.id]: Number(e.target.value) }))}
-                  >
-                    <option value={f.id}>그대로 (#{f.id})</option>
-                    {uploaded
-                      .filter((u) => u.id !== f.id && !review.files.some((rf) => rf.id === u.id))
-                      .map((u) => (
-                        <option key={u.id} value={u.id}>
-                          #{u.id} {u.original_name}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-              ))}
-            </details>
+            {/* 원본 교체는 '다시 검사'에만 쓰인다 — 다시 검사할 수 없는 조회 전용·대체된 검토에는 보이지 않는다 */}
+            {review.can_edit && review.status !== 'superseded' && (
+              <details className="review-replace">
+                <summary>원본을 고친 파일로 바꿔 다시 검사</summary>
+                <p className="upload-drop-hint">
+                  고친 파일을 먼저 업로드한 뒤 아래에서 고르세요. 같은 형식이므로 열 매핑 확정은 이어받고, 개인정보 확인은
+                  새로 받습니다.
+                </p>
+                {review.files.map((f) => (
+                  <label key={f.id} className="review-replace-row">
+                    <span>{f.name}</span>
+                    <select
+                      aria-label={`${f.name} 대신 검사할 파일`}
+                      value={replace[f.id] ?? f.id}
+                      onChange={(e) => setReplace((prev) => ({ ...prev, [f.id]: Number(e.target.value) }))}
+                    >
+                      <option value={f.id}>그대로 (#{f.id})</option>
+                      {uploaded
+                        .filter((u) => u.id !== f.id && !review.files.some((rf) => rf.id === u.id))
+                        .map((u) => (
+                          <option key={u.id} value={u.id}>
+                            #{u.id} {u.original_name}
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+                ))}
+              </details>
+            )}
           </div>
         </>
       )}
@@ -518,6 +522,24 @@ function ScoreHeader({
   )
 }
 
+/** 아래 버튼(다시 검사·검토 완료)을 누를 수 없는 이유 — 버튼 바로 옆에 (서버의 can_edit·can_complete·상태·건수만 씀) */
+function FooterWhy({ review, busy }: { review: Review; busy: boolean }) {
+  if (busy) return null
+  let text: string
+  if (!review.can_edit) text = '조회 전용 — 검토를 만든 사람만 다시 검사·완료할 수 있습니다.'
+  else if (review.status === 'superseded') text = '새 검토로 대체된 검토입니다 — 새 검토에서 이어 하세요.'
+  else if (review.status !== 'in_review' || review.can_complete) return null
+  else if (review.needs_recheck) text = "'검토 완료'를 누를 수 없음 — 먼저 다시 검사하세요."
+  else if (review.counts.block) text = `'검토 완료'를 누를 수 없음 — 차단 ${review.counts.block}건: 원본을 고친 뒤 다시 검사하세요.`
+  else if (review.counts.pending_open) text = `'검토 완료'를 누를 수 없음 — 확인 필요 ${review.counts.pending_open}건을 승인 또는 거부하세요.`
+  else return null
+  return (
+    <p className="wk-why" role="note">
+      {text}
+    </p>
+  )
+}
+
 /** 다음 행동 한 줄 (서버의 can_complete·needs_recheck·상태만 쓴다 — 화면에서 따로 추정하지 않음) */
 function NextAction({
   review,
@@ -694,7 +716,11 @@ function ItemRow({ item, disabled, busy, waiting, onDecide, onOpenReason, fields
   const long = item.reason.length > LONG_REASON || item.reason_source === 'llm'
   return (
     <li>
-      <details className={`review-item review-compact is-${item.category}${item.decision ? ` is-${item.decision}` : ''}${item.excluded ? ' is-excluded' : ''}`}>
+      {/* 차단 항목은 막는 이유가 접혀 숨지 않게 처음부터 펼친다 */}
+      <details
+        open={item.category === 'block'}
+        className={`review-item review-compact is-${item.category}${item.decision ? ` is-${item.decision}` : ''}${item.excluded ? ' is-excluded' : ''}`}
+      >
         {/* 접힌 상태에서도 마우스를 올리면 근거 요약이 툴팁으로 보인다 */}
         <summary title={`근거: ${shortReason(item.reason)}`}>
           <span className="review-kind">{KIND_LABEL[item.kind] ?? item.kind}</span>
