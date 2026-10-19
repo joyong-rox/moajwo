@@ -42,6 +42,7 @@ from sqlalchemy.orm import Session
 
 from app import analysis
 from app.analysis import AGG_LABEL, MEASURE_FIELDS, NO_VALUE, AnalysisIn, Evaluation, TargetIn, label_of
+from app.analysis_api import LEVEL_TEXT, level_conflict_text
 from app.auth import CurrentUser
 from app.config import DATA_DIR
 from app.decisions import load_decisions
@@ -618,6 +619,8 @@ def _summary(
                     "field_label": label,
                     "aggregates": list(item.aggregates),
                     "aggregate_labels": [AGG_LABEL[a] for a in item.aggregates],
+                    # 사용자가 고른 계산 조건 (고르지 않았으면 None — 엔진이 요구할 때만 화면에서 고른다)
+                    "choices": {"variant": item.variant, "unit": item.unit, "region_level": item.region_level},
                     "variant": pv["variant"] if pv else item.variant,
                     "variants": pv["variants"] if pv else [],
                     "unit": pv["unit"] if pv else None,
@@ -764,9 +767,26 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
         if cond.get("base_dates"):
             line("기준일", ", ".join(f"{k} {v}" for k, v in cond["base_dates"].items()))
         line("포함", o["coverage"]["text"])
+        # 사용자가 고른 계산 조건 — 무엇을 골랐는지 그대로 적는다 ('선택한 수준' 같은 말만 남기지 않음)
+        item = plan.item
+        variant = cond.get("variant")
+        if item.variant is not None or variant:
+            chosen = "사용자 선택" if item.variant is not None else "하나뿐이라 그대로"
+            line("구분", f"{variant or '구분 없음'} ({chosen})")
+        if item.unit is not None:
+            line("계산 단위", f"{item.unit} (사용자 선택 — 다른 단위 자료는 이 항목에서 뺌, 자동 환산 없음)")
+        conflicts = [level_conflict_text(x) for x in cond.get("level_conflicts") or []]
+        level_text = LEVEL_TEXT.get(item.region_level, LEVEL_TEXT[None])
+        if item.region_level is not None or conflicts:
+            line("집계 수준", level_text)
+            for text in conflicts:
+                line("", f"상위·하위 차이: {text}")
+        records = cond.get("records") or []
+        if records:
+            line("반복 행", f"서로 다른 기록으로 확인해 모두 더함 (사용자 확인): {', '.join(records)}")
         state = "부분 집계 (자료 문제로 뺀 값이 있음)" if res["partial"] else "전체 집계 (자료 문제로 뺀 값 없음)"
         if res.get("level_mismatch"):
-            state += " · 선택한 지역 수준 집계 (하위 지역 합계가 상위 지역 값과 다른 곳 있음)"
+            state += f" · 집계 수준 {level_text} (하위 지역 합계가 상위 지역 값과 다른 곳 {res['level_mismatch']}곳)"
         line("상태", state)
         line("계산한 행", f"{res['rows_included']:,}행 포함 · {res['rows_excluded']:,}행 제외")
         labels = o["reason_labels"]
@@ -803,6 +823,22 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
                 "partial": res["partial"],
                 "rows_included": res["rows_included"],
                 "rows_excluded": res["rows_excluded"],
+                "variant": variant,
+                "variant_chosen": item.variant is not None,
+                "unit_choice": item.unit,
+                "region_level": item.region_level,
+                "region_level_text": level_text,
+                "level_conflicts": conflicts,
+                "records": records,
+                "excluded": [
+                    {
+                        "output_sheet": lk["output_sheet"],
+                        "by": "user" if lk["status"] == "user_excluded" else "engine",
+                        "reason": lk.get("exclude_reason") or "; ".join(lk.get("reasons") or []),
+                    }
+                    for lk in o["links"]
+                    if lk["status"] in ("user_excluded", "excluded")
+                ],  # fmt: skip
                 "groups": groups,
             }  # fmt: skip
         )

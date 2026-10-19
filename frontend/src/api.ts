@@ -1388,7 +1388,15 @@ export type BundleLink = BundleSheetRef & {
   exclude_reason?: string | null
 }
 
-export type BundleItem = { field_key: string; aggregates: AggKey[]; links?: BundleLink[] }
+// variant·unit·region_level은 계산 엔진이 요구할 때만 보낸다 (variant ''는 '구분 없음')
+export type BundleItem = {
+  field_key: string
+  aggregates: AggKey[]
+  variant?: string | null
+  unit?: string | null
+  region_level?: 'lower' | 'upper' | null
+  links?: BundleLink[]
+}
 
 // summary가 null이면 통계 요약 시트를 만들지 않는다 (서버도 분석 엔진을 부르지 않음)
 export type BundleRequest = { file_ids: number[]; sheets: BundleSheetRef[]; summary: { items: BundleItem[] } | null }
@@ -1437,6 +1445,18 @@ export type BundlePlanLink = BundleSheetRef & {
   period?: string | null
   period_source?: string | null
   period_columns?: string[]
+  rows_are_records?: boolean
+  // 같은 시트에서 같은 대상의 행이 반복된 정도 (있으면 '서로 다른 기록'인지 사용자가 확인해야 함)
+  repeated?: { keys: number; rows: number; same_value: number; different_value: number } | null
+}
+
+export type BundleLevelConflict = {
+  period: string | null
+  upper: { target: string; file_id: number; row: number; value: number | string | null; rows: number }
+  lower_count: number
+  lower_sum: number | null
+  lower_missing: number
+  difference: number | null
 }
 
 export type BundlePlanItem = {
@@ -1444,6 +1464,10 @@ export type BundlePlanItem = {
   field_label: string
   aggregates: AggKey[]
   aggregate_labels: string[]
+  choices: { variant: string | null; unit: string | null; region_level: 'lower' | 'upper' | null }
+  variants: string[]
+  units: string[]
+  region_levels: { choice: 'lower' | 'upper' | null; mismatch: number; conflicts: BundleLevelConflict[] } | null
   unit: string | null
   periods: string[]
   links: BundlePlanLink[]

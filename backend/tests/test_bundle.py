@@ -482,3 +482,105 @@ def test_one_sheet_picked_from_multi_sheet_file_keeps_sheet_name(bd) -> None:
     multi = _upload(u, "두시트.xlsx", _xlsx({"1월": [HEAD, *DATASET["a"]], "2월": [HEAD, *DATASET["b"]]}))
     plan = _plan(u, {"file_ids": [multi], "sheets": [{"file_id": multi, "sheet_id": "s1"}]})
     assert plan["ready"] and [s["name"] for s in plan["sheets"]] == ["두시트-2월"]
+
+
+# ---------------------------------------------------------------- 계산 엔진이 요구하는 선택
+# 화면에서 고른 값이 결과에 남는지
+
+
+def _sheet_text(wb: openpyxl.Workbook) -> str:
+    return " ".join(str(v) for r in _summary_rows(wb) for v in r if v is not None)
+
+
+def test_region_level_choice_upper_100_lower_90_is_recorded(bd) -> None:
+    u = bd["bd-user1"]
+    fid = _upload(u, "상하위차이.xlsx", _xlsx({"현황": [HEAD, ["서울특별시", None, 100], ["서울특별시", "종로구", 40],
+                                                       ["서울특별시", "용산구", 50]]}))  # fmt: skip
+    _confirm(u, fid, MAP)
+    item = {"field_key": "population", "aggregates": ["sum"]}
+    plan = _plan(u, {"file_ids": [fid], "summary": {"items": [item]}})
+    (it,) = plan["summary"]["items"]
+    assert not plan["ready"] and any("집계 수준을 고르세요" in p for p in plan["problems"])
+    assert it["region_levels"]["mismatch"] == 1 and it["region_levels"]["conflicts"][0]["difference"] == 10
+    for level, total, text in (("upper", 100, "상위 지역만"), ("lower", 90, "하위 지역만")):
+        run, wb, plan = _make(u, {"file_ids": [fid], "summary": {"items": [{**item, "region_level": level}]}})
+        assert plan["summary"]["items"][0]["choices"]["region_level"] == level
+        assert _table(_summary_rows(wb), "인구수") == (["범위", "합계"], [["전체", total]])
+        sheet = _sheet_text(wb)
+        assert "집계 수준" in sheet and text in sheet and "차이 10" in sheet and "선택한 지역 수준" not in sheet
+        saved = run["summary"]["summary_items"][0]
+        assert saved["region_level"] == level and text in saved["region_level_text"]
+        assert saved["level_conflicts"] and "차이 10" in saved["level_conflicts"][0]
+
+
+def test_variant_unit_and_repeated_row_choices_are_required_and_recorded(bd) -> None:
+    u = bd["bd-user1"]
+    item = {"field_key": "population", "aggregates": ["sum"]}
+    head = ["시도", "시군구", "인구수(남)", "인구수(여)"]
+    v = _upload(u, "남여.xlsx", _xlsx({"현황": [head, ["광주광역시", "동구", 11, 12], ["광주광역시", "서구", 21, 22]]}))
+    _confirm(u, v, {"시도": "sido", "시군구": "sigungu", "인구수(남)": "population", "인구수(여)": "population"})
+    plan = _plan(u, {"file_ids": [v], "summary": {"items": [item]}})
+    assert not plan["ready"] and plan["summary"]["items"][0]["variants"] == ["남", "여"]
+    run, wb, _ = _make(u, {"file_ids": [v], "summary": {"items": [{**item, "variant": "남"}]}})
+    assert _table(_summary_rows(wb), "인구수")[1] == [["전체", 32]]
+    assert "구분" in _sheet_text(wb) and "남 (사용자 선택)" in _sheet_text(wb)
+    assert (
+        run["summary"]["summary_items"][0]["variant"] == "남" and run["summary"]["summary_items"][0]["variant_chosen"]
+    )
+    x1 = _upload(u, "명.xlsx", _xlsx({"현황": [HEAD, ["울산광역시", "중구", 7]]}))
+    x2 = _upload(
+        u, "천명.xlsx", _xlsx({"현황": [HEAD, ["울산광역시", "남구", 3]]}, title="인구 현황 2026년 9월 (단위: 천명)")
+    )
+    for f in (x1, x2):
+        _confirm(u, f, MAP)
+    plan = _plan(u, {"file_ids": [x1, x2], "summary": {"items": [{**item, "unit": "명"}]}})
+    assert not plan["ready"] and any(
+        "단위가 다름" in p and "빼기" in p for p in plan["problems"]
+    )  # 다른 단위는 확인 필요
+    drop = [{"file_id": x2, "sheet_id": "s0", "exclude": True}]
+    body = {"file_ids": [x1, x2], "summary": {"items": [{**item, "unit": "명", "links": drop}]}}
+    run, wb, _ = _make(u, body)
+    assert _table(_summary_rows(wb), "인구수")[1] == [["전체", 7]]
+    assert "계산 단위" in _sheet_text(wb) and "자동 환산 없음" in _sheet_text(wb)
+    assert run["summary"]["summary_items"][0]["unit_choice"] == "명"
+    d1 = _upload(u, "반복행.xlsx", _xlsx({"현황": [HEAD, ["인천광역시", "중구", 10], ["인천광역시", "중구", 20],
+                                                  ["인천광역시", "동구", 5]]}))  # fmt: skip
+    _confirm(u, d1, MAP)
+    plan = _plan(u, {"file_ids": [d1], "summary": {"items": [item]}})
+    assert not plan["ready"] and plan["summary"]["items"][0]["links"][0]["repeated"]["keys"] == 1
+    link = {"file_id": d1, "sheet_id": "s0", "rows_are_records": True}
+    run, wb, _ = _make(u, {"file_ids": [d1], "summary": {"items": [{**item, "links": [link]}]}})
+    assert _table(_summary_rows(wb), "인구수")[1] == [["전체", 35]]
+    assert "서로 다른 기록" in _sheet_text(wb) and run["summary"]["summary_items"][0]["records"]
+    # 반복 행 확인으로 파일 간 중복 차단을 우회하지 않는다
+    d2 = _upload(u, "반복행상대.xlsx", _xlsx({"현황": [HEAD, ["인천광역시", "중구", 7]]}))
+    _confirm(u, d2, MAP)
+    plan = _plan(u, {"file_ids": [d1, d2], "summary": {"items": [{**item, "links": [link]}]}})
+    assert not plan["ready"] and any("같은 대상" in p for p in plan["problems"])
+
+
+def test_base_date_conflict_is_not_bypassed_by_region_level_choice(bd) -> None:
+    u = bd["bd-user1"]
+    head = ["시도", "시군구", "기준일", "인구수"]
+    mapping = {"시도": "sido", "시군구": "sigungu", "기준일": "base_date", "인구수": "population"}
+    up = _upload(u, "기준일상위.xlsx", _xlsx({"현황": [head, ["서울특별시", None, "2026-09-15", 100]]}))
+    low = _upload(u, "기준일하위.xlsx", _xlsx({"현황": [head, ["서울특별시", "종로구", "2026-09-30", 40]]}))
+    for f in (up, low):
+        _confirm(u, f, mapping)
+    for level in (None, "upper", "lower"):
+        item = {"field_key": "population", "aggregates": ["sum"], "region_level": level}
+        plan = _plan(u, {"file_ids": [up, low], "summary": {"items": [item]}})
+        assert not plan["ready"] and any("기준일" in p for p in plan["problems"]), (level, plan["problems"])
+
+
+def test_server_still_rejects_links_to_sheets_not_in_the_result(bd) -> None:
+    u = bd["bd-user1"]
+    a = _upload(u, "연결a.xlsx", _xlsx({"현황": [HEAD, *DATASET["a"]]}))
+    b = _upload(u, "연결b.xlsx", _xlsx({"현황": [HEAD, *DATASET["b"]]}))
+    item = {
+        "field_key": "population",
+        "aggregates": ["sum"],
+        "links": [{"file_id": a, "sheet_id": "s0", "exclude": True}],
+    }
+    res = u.post("/bundle/plan", json={"file_ids": [b], "summary": {"items": [item]}})
+    assert res.status_code == 422 and "결과에 넣지 않은 시트의 연결" in res.json()["detail"]

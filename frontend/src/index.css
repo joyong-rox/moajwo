@@ -5282,3 +5282,86 @@ ul.bd-item-problems,
     justify-content: flex-end;
   }
 }
+
+/* 통계 요약: 계산 엔진이 요구할 때만 보이는 계산 조건 (구분·계산 단위·집계 수준) */
+.bd-choices {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+}
+
+.bd-choice {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.bd-choice select {
+  justify-self: start;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.bd-choice-name {
+  padding: 0;
+  font-weight: 600;
+}
+
+.bd-choice-help {
+  color: var(--text-soft);
+  font-size: 0.85rem;
+}
+
+.bd-level-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+.bd-level-options label,
+.bd-records {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.bd-records {
+  margin-top: 6px;
+}
+
+.bd-levels {
+  margin: 0;
+  padding-left: 20px;
+  overflow-wrap: anywhere;
+}
+
+/* 입력 중인 값이 형식에 맞지 않을 때 (값은 지우지 않음) */
+.bd-input[aria-invalid='true'] {
+  border-color: var(--block-border);
+}
+
+.bd-input-error {
+  display: block;
+  margin-top: 4px;
+  color: var(--block-text);
+  font-size: 0.85rem;
+}
+
+/* 바꾼 구성을 확인하는 동안의 직전 확인 결과 (만들기의 근거로 쓰지 않음) */
+.bd-stale {
+  opacity: 0.55;
+}
+
+.bd-checking {
+  margin: 0;
+}
