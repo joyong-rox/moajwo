@@ -63,11 +63,19 @@ function Runs() {
                   <td data-label="번호">#{r.id}</td>
                   <td data-label="시작">{formatTime(r.started_at)}</td>
                   {showUser && <td data-label="실행한 사람">{r.user_name ?? '(계정 도입 전)'}</td>}
-                  <td data-label="방식">
+                  <td
+                    data-label="방식"
+                    title={
+                      r.summary.mode === 'sheets'
+                        ? `파일별 시트로 묶기 (검토 없음)${r.summary.stats_summary ? ' · 통계 요약 시트 포함' : ''}`
+                        : undefined
+                    }
+                  >
+                    {/* 짧게 적어 표 열 너비를 바꾸지 않는다 (자세한 설명은 title) */}
                     {r.trigger === 'automation'
                       ? `자동화 ${r.automation_name ? `'${r.automation_name}'` : '(삭제됨)'}`
                       : r.summary.mode === 'sheets'
-                        ? `파일별 시트 묶기${r.summary.stats_summary ? ' + 통계 요약' : ''} (검토 없음)`
+                        ? `파일별 시트${r.summary.stats_summary ? '·요약' : ''}`
                         : '직접 검토'}
                   </td>
                   <td data-label="입력 파일">{r.input_file_count}개</td>
