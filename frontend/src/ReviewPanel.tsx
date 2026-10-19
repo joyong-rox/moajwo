@@ -465,10 +465,9 @@ function ScoreHeader({
         </Banner>
       )}
       <div className={`review-score ${level}`}>
-        <div
-          className="review-score-value"
-          aria-label={stale ? `지난 검사 점수 ${review.score}점 (지금 매핑 기준 아님)` : `데이터 품질 점수 ${review.score}점`}
-        >
+        {/* 일반 div의 aria-label 대신 보이지 않는 글자로 무엇의 점수인지 둔다. 다시 검사 전이면 보이는 '지난 검사 점수' 안내가 이어진다 */}
+        <div className="review-score-value">
+          <span className="sr-only">데이터 품질 점수 </span>
           <strong>{review.score}</strong>
           <span>/ 100</span>
           {stale && <span className="wk-score-note">지난 검사 점수 · 지금 매핑 기준 아님</span>}

@@ -1,4 +1,4 @@
-import { useRef, useState, type DragEvent } from 'react'
+import { useEffect, useId, useRef, useState, type DragEvent } from 'react'
 import Mapping from './Mapping'
 import PiiNotice from './PiiNotice'
 import { ProgressPanel, SkeletonRows } from './Progress'
@@ -30,6 +30,20 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
   // 처리 중인 파일 이름과 실제 업로드 진행률 (0~1). 브라우저가 진행률을 알려주지 않으면 null → 시간 기준 단계 표시
   const [pending, setPending] = useState<string[]>([])
   const [sent, setSent] = useState<number | null>(null)
+  // 화면 읽기 도구에 전할 업로드 상태 (이 요청의 시작·결과만, 건수만 — 파일 이름은 넣지 않음).
+  // 상태 영역은 처음부터 화면에 두고 내용만 바꾼다. 같은 문구가 이어져도 전달되도록 비웠다가 다시 채운다.
+  const [announcement, setAnnouncement] = useState('')
+  const announceTimer = useRef<number | undefined>(undefined)
+  const titleId = useId()
+  const hintId = useId()
+
+  useEffect(() => () => window.clearTimeout(announceTimer.current), [])
+
+  function announce(message: string) {
+    window.clearTimeout(announceTimer.current)
+    setAnnouncement('')
+    announceTimer.current = window.setTimeout(() => setAnnouncement(message), 100)
+  }
 
   async function handleFiles(list: FileList | null) {
     if (!list || list.length === 0 || busy) return
@@ -42,11 +56,16 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
     setBusy(true)
     setPending(accepted.map((f) => f.name))
     setSent(null)
+    announce(`파일 ${accepted.length}개 업로드를 시작했습니다.`)
     try {
       const uploaded = await uploadFiles(accepted, setSent)
       setResults((prev) => [...uploaded, ...prev])
+      // 누적 목록이 아니라 이번 요청의 결과만 센다. 일부 실패도 일반 상태로 전한다 (즉시 대응이 필요한 전체 실패만 alert).
+      const failedNow = uploaded.filter((r) => r.error).length
+      announce(`업로드를 마쳤습니다: 이번 요청 ${uploaded.length}개 중 성공 ${uploaded.length - failedNow}개, 실패 ${failedNow}개.`)
       onUploaded?.()
     } catch (err) {
+      announce('') // 요청 전체 실패는 아래 오류 알림(alert)이 전한다 — 같은 내용을 두 번 읽지 않게 상태는 비운다
       setError(`업로드 실패: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setBusy(false)
@@ -68,11 +87,15 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
     <section className="upload wk-upload">
       <h2>파일 업로드</h2>
       <p className="wk-card-desc">올린 원본은 바꾸지 않고 읽기만 합니다. 통합 결과는 언제나 새 파일로 만듭니다.</p>
+      <p className="sr-only" role="status">
+        {announcement}
+      </p>
       <div
         className={`upload-drop${dragging ? ' is-dragging' : ''}${busy ? ' is-busy' : ''}`}
         role="button"
         tabIndex={0}
-        aria-label="xlsx, xls, csv 파일을 끌어다 놓거나 눌러서 선택"
+        aria-label="파일 선택"
+        aria-describedby={`${titleId} ${hintId}`}
         onClick={() => inputRef.current?.click()}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
@@ -91,8 +114,12 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
           <Icon name="upload" />
         </span>
         <div className="wk-drop-text">
-          <p className="upload-drop-title">{busy ? '업로드·분석 중…' : '파일을 여기에 끌어다 놓으세요'}</p>
-          <p className="upload-drop-hint">또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능 · 파일당 최대 50MB</p>
+          <p className="upload-drop-title" id={titleId}>
+            {busy ? '업로드·분석 중…' : '파일을 여기에 끌어다 놓으세요'}
+          </p>
+          <p className="upload-drop-hint" id={hintId}>
+            또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능 · 파일당 최대 50MB
+          </p>
         </div>
         {!busy && (
           <span className="wk-drop-button" aria-hidden="true">
@@ -112,6 +139,7 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
       {busy && (
         <>
           <ProgressPanel
+            live={false}
             stages={UPLOAD_STAGES}
             uploadFraction={sent ?? undefined}
             title={`${pending.length}개 파일 처리 중 — 끝나면 행 수·헤더·매핑 분석이 아래에 표시됩니다`}

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useId, useState, type FormEvent } from "react";
 import { login, setupOwner, signup, type Me } from "./api";
 
 type Mode = "login" | "signup" | "signup-done";
@@ -24,6 +24,9 @@ function Login({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [doneMessage, setDoneMessage] = useState("");
+  const usernameHelpId = useId();
+  const passwordHelpId = useId();
+  const confirmHelpId = useId();
 
   const creating = setupRequired || mode === "signup"; // 새 계정 입력(이름·비밀번호 확인)이 필요한 화면
 
@@ -114,18 +117,26 @@ function Login({
         {!setupRequired && mode === "signup" && (
           <p className="upload-drop-hint login-notice">{SIGNUP_NOTICE}</p>
         )}
-        <label>
-          아이디
-          <input
-            name="username"
-            autoComplete="username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            required
-            maxLength={32}
-            placeholder={creating ? "영문 소문자·숫자·.-_ 3~32자" : undefined}
-          />
-        </label>
+        {/* 새 계정을 만들 때만 서버 규칙(auth.py USERNAME_RE·MIN_PASSWORD)을 입력 전에 보이고 칸과 연결한다 (입력해도 사라지지 않음) */}
+        <div className="login-field">
+          <label>
+            아이디
+            <input
+              name="username"
+              autoComplete="username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+              maxLength={32}
+              aria-describedby={creating ? usernameHelpId : undefined}
+            />
+          </label>
+          {creating && (
+            <p className="upload-drop-hint login-help" id={usernameHelpId}>
+              영문 소문자 또는 숫자로 시작하고, 영문 소문자·숫자·마침표(.)·밑줄(_)·하이픈(-)만 써서 3~32자로 입력하세요.
+            </p>
+          )}
+        </div>
         {creating && (
           <label>
             {setupRequired ? "이름" : "표시 이름"}
@@ -137,30 +148,44 @@ function Login({
             />
           </label>
         )}
-        <label>
-          비밀번호
-          <input
-            name="password"
-            type="password"
-            autoComplete={creating ? "new-password" : "current-password"}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            minLength={creating ? 8 : undefined}
-            maxLength={128}
-          />
-        </label>
-        {creating && (
+        <div className="login-field">
           <label>
-            비밀번호 확인
+            비밀번호
             <input
+              name="password"
               type="password"
-              autoComplete="new-password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
+              autoComplete={creating ? "new-password" : "current-password"}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
               required
+              minLength={creating ? 8 : undefined}
+              maxLength={128}
+              aria-describedby={creating ? passwordHelpId : undefined}
             />
           </label>
+          {creating && (
+            <p className="upload-drop-hint login-help" id={passwordHelpId}>
+              8~128자로 입력하세요.
+            </p>
+          )}
+        </div>
+        {creating && (
+          <div className="login-field">
+            <label>
+              비밀번호 확인
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={confirm}
+                onChange={(e) => setConfirm(e.target.value)}
+                required
+                aria-describedby={confirmHelpId}
+              />
+            </label>
+            <p className="upload-drop-hint login-help" id={confirmHelpId}>
+              위에 입력한 비밀번호를 한 번 더 입력하세요 (잘못 입력하지 않았는지 확인합니다).
+            </p>
+          </div>
         )}
         {error && (
           <p className="upload-error" role="alert">

@@ -287,10 +287,15 @@ function Sidebar({ path }: { path: string }) {
         <strong>Moajwo</strong>
         <span>문서취합 자동화 도구</span>
       </div>
-      {/* 로그인한 계정과 역할을 맨 위에 뱃지로 보여준다 */}
-      <div className="side-account" aria-label={`로그인: ${me.display_name} (${me.role_label})`}>
+      {/* 로그인한 계정과 역할을 맨 위에 뱃지로 보여준다. 일반 div에는 aria-label을 쓸 수 없어, 같은 설명을 보이지 않는 글자로 둔다
+          (화면 읽기: '로그인 계정 이름, 역할 일반 사용자' — 짧은 뱃지 글자 대신 역할 전체 이름) */}
+      <div className="side-account">
+        <span className="sr-only">로그인 계정 </span>
         <span className="side-account-name">{me.display_name}</span>
-        <RoleBadge role={me.role} />
+        <span className="sr-only">, 역할 {me.role_label}</span>
+        <span aria-hidden="true">
+          <RoleBadge role={me.role} />
+        </span>
       </div>
       <nav className="side-nav" aria-label="메뉴">
         {ROUTES.filter((r) => r.inMenu && r.roles.includes(me.role)).map((r) => (

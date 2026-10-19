@@ -22,7 +22,8 @@ export function Toggle({
         inputProps.disabled && "cursor-not-allowed"
       )}
     >
-      <div className="relative">
+      {/* label 안에는 문장 수준 콘텐츠만 둔다 (div 대신 span — 크기가 필요한 트랙은 block) */}
+      <span className="relative">
         <input
           type="checkbox"
           id={id}
@@ -30,9 +31,10 @@ export function Toggle({
           {...inputProps}
         />
 
-        <div
+        {/* 꺼짐 트랙·흰 손잡이·초점 링은 인접 색과 3:1 이상 (꺼짐 #767676 4.542:1, 켜짐·초점 #3758f9 5.348:1) */}
+        <span
           className={cn(
-            "peer-checked:bg-toggle-active-background peer-focus:ring-toggle-active-background/20 h-5 w-9 rounded-full bg-toggle-default-background peer-focus:ring-4 peer-disabled:bg-toggle-disabled-background",
+            "block peer-checked:bg-toggle-active-background peer-focus:ring-2 peer-focus:ring-offset-2 peer-focus:ring-toggle-active-background h-5 w-9 rounded-full bg-toggle-default-background peer-disabled:bg-toggle-disabled-background",
             {
               "h-5 w-9": size === "sm",
               "h-6 w-11": size === "md"
@@ -40,7 +42,7 @@ export function Toggle({
           )}
         />
 
-        <div
+        <span
           className={cn(
             "absolute top-1/2 left-0.5 flex -translate-y-1/2 items-center justify-center rounded-full bg-white peer-disabled:bg-toggle-disabled-foreground shadow-sm transition-all peer-checked:right-0.5 peer-checked:translate-x-full",
             {
@@ -49,7 +51,7 @@ export function Toggle({
             }
           )}
         />
-      </div>
+      </span>
 
       {label && (
         <span

@@ -357,9 +357,16 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
         {fields?.length === 0 && (
           <p className="mw-muted">확정한 수량 항목이 없습니다. 열 매핑 화면에서 열을 먼저 확정하세요.</p>
         )}
+        {/* 자료 목록 불러오기 상태: 영역은 처음부터 두고 내용만 바꾼다 (화면에는 불러오는 동안만 보임) */}
+        <p role="status" className={field && sources === null && !error ? 'mw-muted' : 'sr-only'}>
+          {!field || error
+            ? ''
+            : sources === null
+              ? '분석할 파일 목록을 불러오는 중…'
+              : `분석할 수 있는 파일 ${sources.length}개를 불러왔습니다.`}
+        </p>
         {field && (
           <div className="an-files" role="group" aria-label="분석할 파일">
-            {sources === null && <p className="mw-muted">불러오는 중…</p>}
             {sources?.map((s) => (
               <label key={s.file_id} className="an-file">
                 <input
@@ -1027,15 +1034,24 @@ function AnalysisResult({ id }: { id: number }) {
       .catch(() => undefined)
   }, [id])
 
+  // 불러오기 상태: 같은 자리의 같은 요소를 계속 두고 내용만 바꾼다 (불러오는 중 → 불러옴). 오류는 아래 alert가 전한다
+  const loadStatus = (
+    <p role="status" className={!detail && !error ? 'mw-muted' : 'sr-only'}>
+      {error ? '' : detail ? `분석 결과 #${detail.id}을(를) 불러왔습니다.` : '분석 결과를 불러오는 중…'}
+    </p>
+  )
   if (error)
     return (
-      <section className="an" aria-label="분석 결과">
-        <p className="upload-error" role="alert">
-          {error}
-        </p>
-      </section>
+      <>
+        {loadStatus}
+        <section className="an" aria-label="분석 결과">
+          <p className="upload-error" role="alert">
+            {error}
+          </p>
+        </section>
+      </>
     )
-  if (!detail) return <p className="mw-muted">불러오는 중…</p>
+  if (!detail) return <>{loadStatus}</>
   const c = detail.conditions
   const r = detail.result
   const reasons = c.reason_labels
@@ -1045,7 +1061,9 @@ function AnalysisResult({ id }: { id: number }) {
     .map(([k, v]) => `${labels[k] ?? k}: ${v.join(', ')}`)
     .join('; ')
   return (
-    <section className="an" aria-label="분석 결과">
+    <>
+      {loadStatus}
+      <section className="an" aria-label="분석 결과">
       <h2>
         분석 결과 #{detail.id}{' '}
         <span className={`upload-tag ${r.partial || r.level_mismatch ? 'an-status-needs_input' : 'an-status-ok'}`}>
@@ -1339,6 +1357,7 @@ function AnalysisResult({ id }: { id: number }) {
         </table>
       </div>
     </section>
+    </>
   )
 }
 
