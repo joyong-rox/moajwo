@@ -4,6 +4,7 @@
 
 import hashlib
 import io
+import json
 import re
 import sqlite3
 import zipfile
@@ -584,3 +585,73 @@ def test_server_still_rejects_links_to_sheets_not_in_the_result(bd) -> None:
     }
     res = u.post("/bundle/plan", json={"file_ids": [b], "summary": {"items": [item]}})
     assert res.status_code == 422 and "결과에 넣지 않은 시트의 연결" in res.json()["detail"]
+
+
+# ---------------------------------------------------------------- 계산 조건의 개인정보 가림
+# 확인 응답·저장·요약 시트가 같은 규칙
+
+PHONE, EMAIL = "010-1234-5678", "kim@example.com"
+
+
+def _raw_in(obj: Any) -> list[str]:
+    text = json.dumps(obj, ensure_ascii=False) if not isinstance(obj, str) else obj
+    return [r for r in (PHONE, EMAIL) if r in text]
+
+
+def _condition_lines(wb: openpyxl.Workbook) -> list[str]:
+    return [" | ".join(str(v) for v in r if v is not None) for r in wb["통계 요약"].iter_rows(values_only=True)
+            if r[0] in ("단위", "계산 단위", "구분")]  # fmt: skip
+
+
+def test_summary_conditions_never_return_or_store_raw_pii(bd, caplog) -> None:
+    u = bd["bd-user1"]
+    rows = [HEAD, ["서울특별시", "종로구", 10], ["서울특별시", "용산구", 20]]
+    fid = _upload(u, "조건가림.xlsx", _xlsx({"현황": rows}, title="인구 현황 2026년 9월"))
+    _confirm(u, fid, MAP)
+    item = {"field_key": "population", "aggregates": ["sum"]}
+    caplog.set_level("DEBUG")
+    # 생성 가능: 항목 단위·시트 단위 보충값에 전화번호 형태
+    link = {"file_id": fid, "sheet_id": "s0", "unit": PHONE}
+    body = {"file_ids": [fid], "summary": {"items": [{**item, "unit": PHONE, "links": [link]}]}}
+    run, wb, plan = _make(u, body)
+    (it,) = plan["summary"]["items"]
+    assert it["choices"] == {"variant": None, "unit": "010-****-5678", "region_level": None, "variant_chosen": False,
+                             "unit_chosen": True}  # fmt: skip
+    assert not _raw_in(plan) and _table(_summary_rows(wb), "인구수")[1] == [["전체", 30]]
+    saved = json.loads(_db("SELECT summary FROM runs WHERE id = ?", run["id"])[0][0])
+    assert not _raw_in(saved) and saved["summary_items"][0]["unit_choice"] == "010-****-5678"
+    assert saved["summary_items"][0]["unit_chosen"] is True
+    assert not _raw_in(u.get(f"/runs/{run['id']}").json())
+    lines = _condition_lines(wb)
+    assert not _raw_in(lines) and any(x.startswith("계산 단위 | 010-****-5678") for x in lines), lines
+    # 생성 불가: 구분에 이메일 (맞는 열 없음) · 엔진 판정 없음(모두 뺌)
+    plan = _plan(u, {"file_ids": [fid], "summary": {"items": [{**item, "variant": EMAIL}]}})
+    assert not plan["ready"] and not _raw_in(plan)
+    assert plan["summary"]["items"][0]["choices"]["variant"] == "k***@example.com"
+    drop = [{"file_id": fid, "sheet_id": "s0", "exclude": True}]
+    plan = _plan(
+        u, {"file_ids": [fid], "summary": {"items": [{**item, "variant": EMAIL, "unit": PHONE, "links": drop}]}}
+    )
+    (it,) = plan["summary"]["items"]
+    assert not plan["ready"] and not _raw_in(plan) and it["variant"] == "k***@example.com"
+    # 항목 키 오류 문구도 가린다
+    res = u.post(
+        "/bundle/plan", json={"file_ids": [fid], "summary": {"items": [{"field_key": EMAIL, "aggregates": ["sum"]}]}}
+    )
+    assert res.status_code == 422 and not _raw_in(res.json())
+    assert not _raw_in(caplog.text)
+
+
+def test_summary_condition_choice_flags_keep_null_and_empty_variant_apart(bd) -> None:
+    u = bd["bd-user1"]
+    fid = _upload(u, "구분없음.xlsx", _xlsx({"현황": [HEAD, *DATASET["a"]]}))
+    _confirm(u, fid, MAP)
+    item = {"field_key": "population", "aggregates": ["sum"]}
+    run, wb, plan = _make(u, {"file_ids": [fid], "summary": {"items": [{**item, "variant": ""}]}})
+    assert plan["summary"]["items"][0]["choices"]["variant"] == ""  # '구분 없음'을 고름 (null과 다름)
+    assert plan["summary"]["items"][0]["choices"]["variant_chosen"] is True
+    assert "구분 | 구분 없음 (사용자 선택)" in _condition_lines(wb)
+    assert run["summary"]["summary_items"][0]["variant"] == "" and run["summary"]["summary_items"][0]["variant_chosen"]
+    plan = _plan(u, {"file_ids": [fid], "summary": {"items": [item]}})
+    assert plan["summary"]["items"][0]["choices"]["variant"] is None
+    assert plan["summary"]["items"][0]["choices"]["variant_chosen"] is False

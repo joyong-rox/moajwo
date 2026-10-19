@@ -518,6 +518,19 @@ def _fields(sheets: list[OutSheet], decisions: dict[int, dict[str, dict[str, str
     return sorted(({"key": k, "label": label_of(k), "sheets": n} for k, n in count.items()), key=lambda f: f["label"])
 
 
+def shown_choices(item: ItemIn) -> dict[str, Any]:
+    """사용자가 고른 계산 조건을 응답·저장·요약 시트에 쓸 값으로 (세 곳 모두 이 값만 쓴다).
+    분석 엔진의 normalize_request와 같은 규칙(mask_text, 단위는 앞뒤 공백 제거)으로 가리고, 고른 여부는 따로 둔다.
+    구분의 None(고르지 않음)과 ''(구분 없음)은 그대로 구분된다 (mask_text('') == '')."""
+    return {
+        "variant": None if item.variant is None else mask_text(item.variant),
+        "unit": None if item.unit is None else mask_text(item.unit.strip()),
+        "region_level": item.region_level,
+        "variant_chosen": item.variant is not None,
+        "unit_chosen": item.unit is not None,
+    }
+
+
 def _coverage(included: int, total: int, sheets: list[OutSheet]) -> str:
     unit = "파일" if len({o.file.file_id for o in sheets}) == len(sheets) else "시트"
     return f"{total}개 {unit} 중 {included}개 포함"
@@ -532,14 +545,15 @@ def _summary(
     placed = {(o.file.file_id, sheet_id(o.sheet.index)) for o in sheets}
     for item in summary.items:
         if item.field_key not in MEASURE_FIELDS:
-            raise _bad(f"통계 요약에 쓸 수 없는 항목입니다: {item.field_key} (확정한 수량 항목만)")
+            raise _bad(f"통계 요약에 쓸 수 없는 항목입니다: {mask_text(item.field_key)} (확정한 수량 항목만)")
         if len(set(item.aggregates)) != len(item.aggregates):
             raise _bad("같은 계산 방식을 두 번 골랐습니다.")
         label = label_of(item.field_key)
+        choices = shown_choices(item)
         item_problems: list[str] = []
-        if (item.field_key, item.variant) in seen:
+        if (item.field_key, choices["variant"]) in seen:  # 엔진이 비교하는 가린 구분으로 같은 항목인지 본다
             item_problems.append(f"'{label}' 항목을 두 번 골랐습니다 — 하나로 합쳐 계산 방식을 고르세요.")
-        seen.add((item.field_key, item.variant))
+        seen.add((item.field_key, choices["variant"]))
         links = {(lk.file_id, lk.sheet_id): lk for lk in item.links}
         if len(links) != len(item.links):
             raise _bad(f"'{label}': 같은 시트의 연결을 두 번 보냈습니다.")
@@ -620,8 +634,8 @@ def _summary(
                     "aggregates": list(item.aggregates),
                     "aggregate_labels": [AGG_LABEL[a] for a in item.aggregates],
                     # 사용자가 고른 계산 조건 (고르지 않았으면 None — 엔진이 요구할 때만 화면에서 고른다)
-                    "choices": {"variant": item.variant, "unit": item.unit, "region_level": item.region_level},
-                    "variant": pv["variant"] if pv else item.variant,
+                    "choices": choices,
+                    "variant": pv["variant"] if pv else choices["variant"],
                     "variants": pv["variants"] if pv else [],
                     "unit": pv["unit"] if pv else None,
                     "units": pv["units"] if pv else [],
@@ -768,16 +782,16 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
             line("기준일", ", ".join(f"{k} {v}" for k, v in cond["base_dates"].items()))
         line("포함", o["coverage"]["text"])
         # 사용자가 고른 계산 조건 — 무엇을 골랐는지 그대로 적는다 ('선택한 수준' 같은 말만 남기지 않음)
-        item = plan.item
+        choices = o["choices"]  # 확인 응답과 같은 가린 값 (원래 입력을 다시 쓰지 않음)
         variant = cond.get("variant")
-        if item.variant is not None or variant:
-            chosen = "사용자 선택" if item.variant is not None else "하나뿐이라 그대로"
+        if choices["variant_chosen"] or variant:
+            chosen = "사용자 선택" if choices["variant_chosen"] else "하나뿐이라 그대로"
             line("구분", f"{variant or '구분 없음'} ({chosen})")
-        if item.unit is not None:
-            line("계산 단위", f"{item.unit} (사용자 선택 — 다른 단위 자료는 이 항목에서 뺌, 자동 환산 없음)")
+        if choices["unit_chosen"]:
+            line("계산 단위", f"{choices['unit']} (사용자 선택 — 다른 단위 자료는 이 항목에서 뺌, 자동 환산 없음)")
         conflicts = [level_conflict_text(x) for x in cond.get("level_conflicts") or []]
-        level_text = LEVEL_TEXT.get(item.region_level, LEVEL_TEXT[None])
-        if item.region_level is not None or conflicts:
+        level_text = LEVEL_TEXT.get(choices["region_level"], LEVEL_TEXT[None])
+        if choices["region_level"] is not None or conflicts:
             line("집계 수준", level_text)
             for text in conflicts:
                 line("", f"상위·하위 차이: {text}")
@@ -824,9 +838,10 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
                 "rows_included": res["rows_included"],
                 "rows_excluded": res["rows_excluded"],
                 "variant": variant,
-                "variant_chosen": item.variant is not None,
-                "unit_choice": item.unit,
-                "region_level": item.region_level,
+                "variant_chosen": choices["variant_chosen"],
+                "unit_choice": choices["unit"],
+                "unit_chosen": choices["unit_chosen"],
+                "region_level": choices["region_level"],
                 "region_level_text": level_text,
                 "level_conflicts": conflicts,
                 "records": records,
