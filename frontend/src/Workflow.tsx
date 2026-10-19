@@ -174,7 +174,7 @@ export function Icon({ name, label }: { name: IconName; label?: string }) {
  * (current는 지금 보고 있는 단계 — 완료와 별개) */
 export type StepState = 'done' | 'attention' | 'partial' | 'todo'
 export type Step = {
-  key: 'files' | 'mapping' | 'review' | 'result'
+  key: 'files' | 'mapping' | 'review' | 'result' | 'mode' | 'settings' | 'compose' | 'make'
   state: StepState
   detail?: string // 예: '확인 필요 3 · 미분석 1'
   href?: string // 그 단계로 가는 기존 주소
@@ -186,6 +186,11 @@ const STEP_LABEL: Record<Step['key'], string> = {
   mapping: '열 매핑',
   review: '검사·검토',
   result: '결과',
+  // 파일별 시트로 묶기 (파일 선택 → 취합 방식 → 필요한 설정 → 결과 구성 확인 → 엑셀 만들기)
+  mode: '취합 방식',
+  settings: '필요한 설정',
+  compose: '결과 구성 확인',
+  make: '엑셀 만들기',
 }
 const STATE_TEXT: Record<StepState, string> = { done: '완료', attention: '확인할 것 있음', partial: '일부 확인', todo: '아직' }
 const STATE_ICON: Record<StepState, IconName> = { done: 'check', attention: 'alert', partial: 'info', todo: 'clock' }

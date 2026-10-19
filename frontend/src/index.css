@@ -4958,3 +4958,327 @@ details.automation-files[open] {
     padding: 16px;
   }
 }
+
+/* ---------------------------------------------------------------- 결과 형태 (홈 '검사 시작' 영역)
+   하나의 통합표 · 파일별 시트로 묶기 — 고른 형태에 필요한 설정만 아래에 보인다 */
+.wk-mode {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.wk-mode legend {
+  margin-bottom: 6px;
+  padding: 0;
+  font-weight: 700;
+}
+
+.wk-mode-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--tg-border-strong);
+  border-radius: 10px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.wk-mode-card.is-picked {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.wk-mode-card:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.wk-mode-radio {
+  flex: none;
+  margin-top: 2px;
+}
+
+.wk-mode-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  font-size: 0.875rem;
+  color: var(--text-soft);
+}
+
+.wk-mode-text strong {
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.wk-mode-example {
+  color: var(--tg-muted);
+  font-size: 0.8rem;
+}
+
+.wk-mode-next {
+  display: grid;
+  gap: 6px;
+}
+
+/* ---------------------------------------------------------------- 파일별 시트로 묶기 (/bundle) */
+.bundle {
+  display: grid;
+  gap: 16px;
+}
+
+.bd-step {
+  gap: 12px;
+  padding: 16px;
+  border-color: var(--border-soft);
+  border-radius: 12px;
+}
+
+.bd-files {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bd-files > li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
+.bd-files > li.has-problem {
+  border-color: var(--block-border);
+}
+
+.bd-files > li > .pii-notice {
+  flex-basis: 100%;
+}
+
+.bd-file-name {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.bd-sub {
+  margin: 4px 0 0;
+  font-size: 1rem;
+}
+
+.bd-multi {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
+.bd-multi.needs-pick {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+}
+
+.bd-multi-title {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.bd-multi-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+.bd-multi-list label,
+.bd-aggs label,
+.bd-include {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.bd-summary {
+  display: grid;
+  gap: 12px;
+}
+
+.bd-item {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
+
+.bd-item.needs-fix {
+  border-color: var(--warning-border);
+}
+
+.bd-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: center;
+}
+
+.bd-item-head .wk-danger {
+  margin-left: auto;
+}
+
+.bd-aggs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+ul.bd-item-problems,
+.bd-problems ul,
+.bd-warnings {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.bd-links td,
+.bd-links th {
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.bd-links tr.is-excluded td,
+.bd-links tr.is-needs_input td {
+  background: var(--warning-bg);
+}
+
+.bd-links tr.is-user_excluded td,
+.bd-links tr.is-user_excluded th {
+  color: var(--tg-muted);
+}
+
+.bd-input {
+  width: 100%;
+  min-width: 6em;
+  max-width: 14em;
+  margin-top: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.bd-reason {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-soft);
+  font-size: 0.85rem;
+}
+
+.bd-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: flex-end;
+}
+
+.bd-add label {
+  display: grid;
+  gap: 4px;
+}
+
+.bd-total {
+  margin: 0;
+}
+
+.bd-sheets {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bd-sheets > li {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.bd-sheets > li.is-summary {
+  border-style: dashed;
+  background: var(--surface-soft);
+}
+
+.bd-sheet-no {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.bd-sheet-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.bd-sheet-body p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.bd-sheet-name {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.bd-notes {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--text-soft);
+  font-size: 0.85rem;
+}
+
+.bd-move {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+
+.bd-made p {
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .bd-sheets > li {
+    flex-wrap: wrap;
+  }
+
+  .bd-move {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}

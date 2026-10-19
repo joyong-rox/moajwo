@@ -13,6 +13,7 @@ import {
 import Account from './Account'
 import { AuthContext, isManager, useAuth } from './authContext'
 import Automations from './Automations'
+import Bundle from './Bundle'
 import Dashboard from './Dashboard'
 import Dictionary from './Dictionary'
 import Login from './Login'
@@ -29,7 +30,7 @@ import Reviews from './Reviews'
 import Runs from './Runs'
 import Settings from './Settings'
 import Upload from './Upload'
-import Validation from './Validation'
+import Validation, { type ResultMode } from './Validation'
 import { Banner, Icon, type IconName } from './Workflow'
 
 type Gate = { kind: 'loading' } | { kind: 'signed-out'; setupRequired: boolean } | { kind: 'signed-in'; me: Me }
@@ -101,6 +102,7 @@ function Workspace() {
     return Number.isInteger(id) && id > 0 ? id : null
   })
   const [selected, setSelected] = useState<number[]>([])
+  const [mode, setMode] = useState<ResultMode>('table') // 홈에서 고른 결과 형태 (단계 안내에 씀)
   const onHomeReview = useCallback((review: Review) => {
     if (window.location.pathname === '/') {
       const q = new URLSearchParams(window.location.search)
@@ -148,7 +150,9 @@ function Workspace() {
               <header className="wk-home-head">
                 <div>
                   <h1 className="page-title">홈</h1>
-                  <p className="wk-home-lead">파일을 올리고, 검사할 파일을 고른 뒤 사전 검토를 여세요.</p>
+                  <p className="wk-home-lead">
+                    파일을 올리고 고른 뒤, 결과 형태(하나의 통합표 · 파일별 시트)를 골라 이어서 진행하세요.
+                  </p>
                 </div>
                 <ServerStatus state={state} />
               </header>
@@ -158,7 +162,7 @@ function Workspace() {
                 </Banner>
               )}
               {/* 검토를 열면 검토 화면의 단계 안내를 쓴다 (같은 안내를 두 번 보이지 않음) */}
-              {!reviewRequest && homeReviewId === null && <HomeSteps refreshKey={filesVersion} selected={selected} />}
+              {!reviewRequest && homeReviewId === null && <HomeSteps refreshKey={filesVersion} selected={selected} mode={mode} />}
 
               <Upload onUploaded={refreshFiles} onPiiChanged={refreshFiles} />
               <Validation
@@ -166,6 +170,7 @@ function Workspace() {
                 canManageGlossary={isManager(me.role)}
                 onGlossaryChanged={() => undefined}
                 onSelection={setSelected}
+                onMode={setMode}
                 onOpenReview={(request) => {
                   setHomeReviewId(null)
                   setReviewRequest(request)
@@ -204,6 +209,7 @@ function Workspace() {
               {allowed && path === '/reviews' && <Reviews />}
               {allowed && path === '/mapping' && <MappingWorkspace />}
               {allowed && path === '/mapping/common' && <MappingCommon />}
+              {allowed && path === '/bundle' && <Bundle />}
               {allowed && path === '/analysis' && <Analysis />}
               {allowed && path === '/dictionary' && <Dictionary />}
               {allowed && path === '/promotions' && <Promotions />}

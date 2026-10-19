@@ -66,7 +66,9 @@ function Runs() {
                   <td data-label="방식">
                     {r.trigger === 'automation'
                       ? `자동화 ${r.automation_name ? `'${r.automation_name}'` : '(삭제됨)'}`
-                      : '직접 검토'}
+                      : r.summary.mode === 'sheets'
+                        ? `파일별 시트 묶기${r.summary.stats_summary ? ' + 통계 요약' : ''} (검토 없음)`
+                        : '직접 검토'}
                   </td>
                   <td data-label="입력 파일">{r.input_file_count}개</td>
                   <td data-label="상태">
