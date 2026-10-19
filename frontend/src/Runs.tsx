@@ -71,12 +71,22 @@ function Runs() {
                         : undefined
                     }
                   >
-                    {/* 짧게 적어 표 열 너비를 바꾸지 않는다 (자세한 설명은 title) */}
-                    {r.trigger === 'automation'
-                      ? `자동화 ${r.automation_name ? `'${r.automation_name}'` : '(삭제됨)'}`
-                      : r.summary.mode === 'sheets'
-                        ? `파일별 시트${r.summary.stats_summary ? '·요약' : ''}`
-                        : '직접 검토'}
+                    {/* '직접 검토'와 같은 길이로 적어 표 열 너비를 바꾸지 않는다 (자세한 설명은 title) */}
+                    {r.trigger === 'automation' ? (
+                      `자동화 ${r.automation_name ? `'${r.automation_name}'` : '(삭제됨)'}`
+                    ) : r.summary.mode === 'sheets' ? (
+                      <>
+                        시트 묶기
+                        {r.summary.stats_summary && (
+                          <>
+                            <br />
+                            <span className="mw-muted">+ 요약</span>
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      '직접 검토'
+                    )}
                   </td>
                   <td data-label="입력 파일">{r.input_file_count}개</td>
                   <td data-label="상태">
