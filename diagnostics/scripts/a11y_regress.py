@@ -59,8 +59,24 @@ def starts_and_finish(r: dict) -> bool:
     return sum(x.startswith("파일 ") and "시작" in x for x in t) == 1 and sum(x.startswith("업로드를 마쳤습니다") for x in t) == 1
 
 
+FIX_GROUPS = ("D-01", "D-02", "D-03", "D-04", "D-05", "D-06", "D-07", "A1", "dialog", "inputs", "focus")
+
+
 def judge(data: dict) -> list[Result]:
+    """측정 묶음별로 판정한다. D 항목 측정(a11y_fix_check)이 하나도 없으면 그 기준은 건너뛴다 (이동 측정만 판정할 때 미측정이 섞이지 않게)."""
     out: list[Result] = []
+    if any(g in data for g in FIX_GROUPS):
+        judge_fix(data, out)
+    judge_nav(data, out)
+    # ---- 범위
+    out.append(Result("범위", "진단 주소 밖 요청 0", PASS if not data.get("blocked_out_of_scope") else FAIL, str(data.get("blocked_out_of_scope", []))[:200]))
+    if data.get("error"):
+        out.append(Result("측정", "측정 중 오류 없음", FAIL, str(data["error"])[:220]))
+    return out
+
+
+def judge_fix(data: dict, out: list) -> None:
+    """D-01~D-07·확인창 보완 (a11y_fix_check.py 측정). 묶음 안에서 측정이 빠진 기준은 미측정."""
     # ---- D-01 업로드 이름·조작
     check(out, "D-01", "조작 요소 역할 button, 이름에 보이는 '파일 선택' 포함, 설명에 지원 형식", find(data, "D-01", "업로드 조작 요소"),
           lambda r: r["role"] == "button" and "파일 선택" in (r["name"] or "") and "xlsx" in (r["description"] or ""), lambda r: f"이름 {r['name']!r} · 설명 {r['description']!r}")  # fmt: skip
@@ -165,17 +181,69 @@ def judge(data: dict) -> list[Result]:
         out.append(Result("확인창", f"{d['dialog']}: 다시 열어도 같은 연결", PASS if again.get("describedby") == a.get("describedby") else FAIL, str(again.get("describedby"))))
     cmp_ = find(data, "dialog", "용어사전 삭제 두 건")
     check(out, "확인창", "본문이 다른 두 확인창에서 설명이 섞이지 않음", cmp_, lambda r: len(r["descriptions"]) == 2 and r["descriptions"][0] != r["descriptions"][1], lambda r: r["descriptions"])
-    # ---- 범위
-    out.append(Result("범위", "진단 주소 밖 요청 0", PASS if not data.get("blocked_out_of_scope") else FAIL, str(data.get("blocked_out_of_scope", []))[:200]))
-    if data.get("error"):
-        out.append(Result("측정", "측정 중 오류 없음", FAIL, str(data["error"])[:220]))
-    return out
+
+
+def is_heading(f: dict, level: str, text: str | None = None) -> bool:
+    return f.get("tag") == level and not f.get("in_hidden") and (text is None or f.get("text") == text)
+
+
+def judge_nav(data: dict, out: list) -> None:
+    """화면 이동·초점, 긴 내용, 분석 표 (nav_focus_check.py 측정). 측정 묶음이 없으면 아무것도 더하지 않는다 (fix-check만 판정할 때)."""
+    if "nav" in data:
+        for name in ("홈", "실행 기록"):
+            check(out, "이동", f"본문 바로가기({name}): 첫 Tab, 초점 때 보임, 누르면 지금 화면 제목(숨긴 홈 아님), 주소 그대로", find(data, "nav", f"본문 바로가기 — {name}"),
+                  lambda r, name=name: r["first_tab"].get("cls") == "skip-link" and r["visible_when_focused"] and is_heading(r["after_enter"], "H1", name) and r["after_enter"]["in_main"]
+                  and r["url_unchanged"], lambda r: (r["first_tab"].get("text"), r["after_enter"].get("tag"), r["after_enter"].get("text")))  # fmt: skip
+        for x in [x for x in data["nav"] if str(x.get("what", "")).startswith("메뉴 → ")]:
+            check(out, "이동", f"{x['what']}: 새 화면 제목으로", x, lambda r: is_heading(r["after"], "H1", r["expected_title"]), lambda r: (r["after"].get("tag"), r["after"].get("text")))
+        check(out, "이동", "검토 목록 → 상세: 상세 제목(h2)으로", find(data, "nav", "검토 목록 → 상세 (Enter)"), lambda r: is_heading(r["after"], "H2"), lambda r: r["after"])
+        check(out, "이동", "상세 → 목록('검토 목록으로'): 연 버튼으로", find(data, "nav", "상세 → 목록"), lambda r: r["opener_key"] and r["after"].get("key") == r["opener_key"], lambda r: r["after"])
+        check(out, "이동", "상세에서 브라우저 뒤로: 연 버튼으로", find(data, "nav", "상세에서 브라우저 뒤로"), lambda r: r["opener_key"] and r["after"].get("key") == r["opener_key"], lambda r: r["after"])
+        check(out, "이동", "브라우저 앞으로: 초점이 본문으로 빠지지 않음", find(data, "nav", "브라우저 앞으로"), lambda r: r["after"]["where"] == "element" and not r["after"]["in_hidden"], lambda r: r["after"])
+        check(out, "이동", "다른 화면(실행 기록) → 검토 상세: 상세 제목으로", find(data, "nav", "실행 기록 → 검토 상세"), lambda r: is_heading(r["after"], "H2"), lambda r: r["after"])
+        check(out, "이동", "검토 상세에서 뒤로(실행 기록): 연 버튼으로", find(data, "nav", "검토 상세에서 브라우저 뒤로 (실행"),
+              lambda r: r["opener_key"] and r["after"].get("key") == r["opener_key"], lambda r: r["after"])  # fmt: skip
+        check(out, "이동", "분석 지난 결과 열기: 결과 제목(h2)으로", find(data, "nav", "분석: 지난 결과 열기 →"), lambda r: is_heading(r["after"], "H2"), lambda r: r["after"])
+        check(out, "이동", "분석 결과 → '새 분석': 연 줄('내 분석 결과')로", find(data, "nav", "분석: 결과 →"), lambda r: r["after"].get("key") == "analysis-past", lambda r: r["after"])
+        check(out, "이동", "검색 입력 중 초점 유지", find(data, "nav", "홈 검색 입력"), lambda r: r["after"].get("tag") == "INPUT", lambda r: r["after"])
+        check(out, "이동", "체크(Space)로 고르기: 초점 유지", find(data, "nav", "검증 대상 체크"), lambda r: r["after"].get("tag") == "INPUT", lambda r: r["after"])
+        check(out, "이동", "주소만 고치는 파일 빼기: 화면 제목으로 옮기지 않고 다음 Tab은 다음 버튼", find(data, "nav", "묶기: 파일 빼기"),
+              lambda r: r["after"].get("tag") != "H1" and r["next_tab"].get("in_main") and r["next_tab"].get("cls") != "skip-link", lambda r: (r["after"], r["next_tab"].get("text")))  # fmt: skip
+    if "longtext" in data:
+        w = find(data, "longtext", "검토 위치")
+        if w and not w.get("summary_truncated"):
+            out.append(Result("긴 내용", "검토 위치: 잘린 줄은 펼치면 전체", NONE, "측정 폭에서 잘리지 않음"))
+        else:
+            check(out, "긴 내용", "검토 위치: 접힌 줄에서 잘림 → 펼치면 전체가 잘리지 않고 보임 (툴팁만이 아님)", w,
+                  lambda r: r["full"] and r["full"]["visible"] and not r["full"]["clipped"] and r["full"]["text"] == r["summary_text"], lambda r: r["full"])  # fmt: skip
+        n = find(data, "longtext", "'전체 보기' 이름")
+        if n and n["count"] < 2:
+            out.append(Result("긴 내용", "'전체 보기' 이름이 항목마다 다름", NONE, f"버튼 {n['count']}개"))
+        else:
+            check(out, "긴 내용", "'전체 보기' 이름이 항목마다 다름 (보이는 글자로 시작)", n,
+                  lambda r: r["distinct"] == r["count"] and all(x.startswith("전체 보기") for x in r["names"]), lambda r: r["names"][:3])  # fmt: skip
+        check(out, "긴 내용", "근거 창: 처음 초점 안, Tab이 뒤 화면 요소로 가지 않음, Esc로 닫으면 연 버튼으로", find(data, "longtext", "근거 전체 보기 창"),
+              lambda r: r["first"]["in_dialog"] and all(m["where"] == "(본문)" or m["in_dialog"] for m in r["tab"]) and r["closed"] and r["focus_back_on_opener"])  # fmt: skip
+    for t in data.get("tables", []):
+        ts = t["tables"]
+        out.append(Result("표", f"분석 표({t['viewport']}): 넘치는 영역만 이름·Tab 정지점, 넘치지 않으면 정지점 없음",
+                          PASS if ts and all((x["scrolls"] == (x["tabindex"] == "0" and x["role"] == "region" and bool(x["label"]))) for x in ts) else FAIL,
+                          "; ".join(f"{x['label'] or '-'}:{'넘침' if x['scrolls'] else '안 넘침'}/tabindex={x['tabindex']}" for x in ts)))  # fmt: skip
+        out.append(Result("표", f"분석 표({t['viewport']}): 열 머리글 유지", PASS if ts and all(x["th_col"] > 0 for x in ts) else FAIL, str([x["th_col"] for x in ts])))
+        if any(x["scrolls"] for x in ts):
+            k = t.get("keyboard_scroll")
+            out.append(Result("표", f"분석 표({t['viewport']}): 영역에 초점을 두고 화살표로 스크롤", PASS if k and k["after"] != k["before"] else FAIL, str(k)[:200]))
 
 
 def merge(paths: list[Path]) -> dict:
+    """측정 묶음은 뒤 파일이 앞을 바꾸고, 범위 밖 요청·측정 오류는 이어 붙인다 (한쪽에만 있어도 놓치지 않게)."""
     data: dict = {}
     for p in paths:
-        data.update(json.loads(p.read_text(encoding="utf-8")))
+        for k, v in json.loads(p.read_text(encoding="utf-8")).items():
+            if k in ("blocked_out_of_scope", "error"):
+                data[k] = (data.get(k) or []) + (list(v) if isinstance(v, list) else [])  # 비어 있으면(None·[]) 앞의 기록을 유지
+            else:
+                data[k] = v
     return data
 
 
