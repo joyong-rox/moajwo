@@ -17,6 +17,8 @@ export interface AlertDialogProps extends Omit<
   defaultOpen?: boolean;
   onOpenChange?: (isOpen: boolean) => void;
   children: ReactNode | ((opts: DialogRenderProps) => ReactNode);
+  /** 본문 설명 요소의 id. 바깥 Backdrop이 아니라 role="alertdialog" 요소에 붙인다 (제목은 Heading slot="title"이 연결) */
+  "aria-describedby"?: string;
 }
 
 export function AlertDialog({
@@ -27,6 +29,7 @@ export function AlertDialog({
   className,
   isDismissable = false,
   isKeyboardDismissDisabled = true,
+  "aria-describedby": describedBy,
   ...props
 }: AlertDialogProps) {
   return (
@@ -45,6 +48,7 @@ export function AlertDialog({
             className
           )}
           role="alertdialog"
+          aria-describedby={describedBy}
         >
           {children}
         </AriaDialog>
