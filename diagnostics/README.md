@@ -21,13 +21,15 @@
 | `scripts/a11y_scan.py` | 72개 화면 상태 Nu·axe 검사. `NU_URL=off`면 DOM·서버 문서만 저장 | 사용함 |
 | `scripts/nu_check_dom.py` | 저장한 DOM·서버 문서를 로컬 Nu로 검사해 결과 JSON을 채움 | 2차 추가 |
 | `scripts/a11y_manual.py` | 키보드·확인창·재배치·확대·간격·대상 크기·상태 안내·로그인 보조 기록. 2차에 `authforms`(가입·최초 설정 화면 재배치·확대) 추가 | 사용함. `keyboard`의 '검토 열기' 단계는 판정 조건 오류로 미확인 (1차) |
-| `scripts/a11y_fix_check.py` | D-01~D-07 항목별 전후 기록 (접근 가능한 이름·설명, 상태 영역 변경 기록, 테두리·스위치 대비, 가입 도움말, 지난 검사 점수) | 2차 추가 |
+| `scripts/a11y_fix_check.py` | **측정만 저장:** D-01~D-07 항목별 전후 기록(접근 가능한 이름·설명, 상태 영역 변경 기록, 테두리·스위치 대비, 가입 도움말, 지난 검사 점수). 3차에 추가한 측정: 업로드 중·완료 뒤 조작 요소, A1 규칙, 상태 안내 범위(혼합 형식·목록 갱신·늦은 응답·로그아웃), 분석 표 로딩·실패, 확인창 본문 연결·초점, 화면에 나타난 입력 경계·초점 외곽선 | 2차 추가, 3차 확장 |
+| `scripts/a11y_regress.py` | **판정:** 위 측정 JSON을 읽어 항목별 기준으로 통과·실패·미측정을 정하고, 실패가 있으면 종료 코드 1 (화면 접속 없음) | 3차 추가 |
+| `scripts/a4_split.py` | A4(axe 대비 판정 보류) 대상을 1차 DOM과 대조해 기존 요소와 새로 생긴 요소로 나눔 (저장한 DOM만 읽음) | 3차 추가 |
 | `scripts/flow_check.py` | 업로드 → 검토 → 통합 → 내려받기, 묶기 요약 끔·켬 흐름 | 2차 추가 |
 | `scripts/compare_a11y.py` | 1차 원시 결과와 나중 72개 상태 결과를 같은 원인 분류로 비교 | 2차 추가 |
 | `scripts/scope_selftest.py` | 요청 범위 자체 시험 (루프백 임시 서버만, 진단·운영 주소에 요청 없음) | 2차 추가 |
-| `scripts/scroller_check.py`·`toggle_check.py`·`contrast_check.py`·`contrast_calc.py`·`css_support_check.py` | 개별 확인 (표 스크롤 영역, 스위치 상태 색, 계산 색, 대비 계산, CSS 지원) | 사용함 |
+| `scripts/scroller_check.py`·`toggle_check.py`·`contrast_check.py`·`contrast_calc.py`·`css_support_check.py` | 개별 확인 (표 스크롤 영역, 스위치 상태 색, 계산 색, 대비 계산, CSS 지원) | 사용함. 3차: 대비 계산 경계 0.04045·원시값 판정, CSS 지원에 말줄임 렌더링 비교 추가 |
 | `scripts/summarize_trivy.py`·`summarize_a11y.py` | 원시 결과 재집계 (새 검사 없음) | 사용함 |
-| `tests/` | `diag_scope` 단위 시험 43개 (소켓 연결을 막은 채 실행) | 2차 추가 |
+| `tests/` | `diag_scope` 단위 시험 43개(소켓 연결을 막은 채 실행) + `a11y_regress` 판정 시험 7개 = 50개 | 2차 추가, 3차 확장 |
 | `tools/zoomext/` | 실제 브라우저 확대용 최소 확장 (탭 확대 권한만) | 사용함 |
 | `reports/` | 부록: API 목록, 72개 상태 결과, Trivy HIGH 전체, WCAG 2.2 A·AA 상태 | — |
 | `ruff.toml` | 진단 스크립트 전용 린트 (backend 규칙 상속, JS 문자열 때문에 줄 길이만 완화) | — |
@@ -84,11 +86,12 @@ mkdir -p "$EV/round2"                               # 출력 폴더는 명령마
 | 운영 backend (= 진단 backend) | `moajwo-diag-backend:ee1334ec` | `sha256:ee1334ec349fd5c9e504bde57abff17367ac0cabea58e28081743d928b070f40` |
 | 운영 frontend (수정 전) | `moajwo-diag-frontend:4e943da6` | `sha256:4e943da6b821395de7168dd5c1b85b6e61892139ad9149e3d8830fd68108035a` |
 | 접근성 수정 frontend (`fix/a11y-common-controls` 7b47b21) | `moajwo-diag-frontend:7b47b21` | `sha256:4826cb6978134bf4b4115c208cee65ad3c06d554d14ae5caee4fd4758a34896e` |
-| 접근성 수정 frontend (같은 브랜치 95423ca, 최종 확인) | `moajwo-diag-frontend:95423ca` | `sha256:aed42daddb82b354650afc2d0025ae197bdfceb93fa06410e714b8a8c7b0f3ed` |
+| 접근성 수정 frontend (같은 브랜치 95423ca, 2차 최종 확인) | `moajwo-diag-frontend:95423ca` | `sha256:aed42daddb82b354650afc2d0025ae197bdfceb93fa06410e714b8a8c7b0f3ed` |
+| 접근성 수정 frontend (같은 브랜치 62895ac, 3차 최종 확인) | `moajwo-diag-frontend:62895ac` | `sha256:3179afc1c1de7b883090ba04bc2cf3d539a8358fa1795d48cac357a3ca915d14` |
 
 그 밖의 도구: pip-audit 2.10.1 · npm 11.16.0 · axe-core 4.14.0 · Playwright 1.63.0 · Microsoft Edge 155.0.4283.45.
 
-## 재실행 A — 2차(2026-10-20)에 이 형태로 실행해 확인한 명령
+## 재실행 A — 2차·3차(2026-10-20)에 이 형태로 실행해 확인한 명령
 
 공유 PC에서는 사용 가능 메모리를 먼저 확인하고 도구를 하나씩 띄웁니다. 브라우저 DOM 수집과 Nu 검사는 동시에 돌리지 않고 차례로 합니다.
 
@@ -97,7 +100,7 @@ mkdir -p "$EV/round2"                               # 출력 폴더는 명령마
 
 ```bash
 # A1) 범위 단위 시험·린트 (네트워크 없음)
-$PY -m pytest "$ROOT/diagnostics/tests" -q -p no:cacheprovider        # 43 passed
+$PY -m pytest "$ROOT/diagnostics/tests" -q -p no:cacheprovider        # 50 passed (3차)
 (cd "$ROOT/diagnostics" && $PY -m ruff check .)
 
 # A2) 범위 자체 시험 (루프백 임시 서버 8086·8099만 — 진단 스택을 멈춘 상태에서)
@@ -129,6 +132,9 @@ MSYS_NO_PATHCONV=1 docker compose -f "$ROOT/diagnostics/compose.diag.yml" -p moa
 # A6) 항목별 전후 기록 (수정 전 이미지로 한 번, 수정 후 이미지로 한 번)
 mkdir -p "$EV/round2/fix-check/before" "$EV/round2/fix-check/after-final"
 (cd "$ROOT/diagnostics/scripts" && $PW a11y_fix_check.py "$(cygpath -w "$EV/round2/fix-check/after-final")")   # ONLY_CHECKS=upload,contrast,... 로 골라 실행 가능
+#   3차: AXE_JS를 주면 A1 규칙도 실행. 판정은 따로 (측정 JSON 여러 개를 주면 뒤 파일의 같은 묶음이 앞을 바꿈, 실패 시 종료 코드 1)
+(cd "$ROOT/diagnostics/scripts" && AXE_JS="$AXE_JS" $PW a11y_fix_check.py "$(cygpath -w "$EV/round3/fix-check")" after-62895ac)
+$PY "$ROOT/diagnostics/scripts/a11y_regress.py" "$EV/round3/fix-check/fix-check-after-62895ac.json" --md "$EV/round3/regress-after-62895ac.md"
 
 # A7) 72개 상태: 브라우저 수집(NU_URL=off) → 브라우저를 닫은 뒤 Nu만 띄워 검사 → Nu 내림
 (cd "$ROOT/diagnostics/scripts" && NU_URL=off AXE_JS="$AXE_JS" $PW a11y_scan.py "$(cygpath -w "$EV/round2/a11y-after")")
@@ -137,14 +143,19 @@ MSYS_NO_PATHCONV=1 docker run -d --name moajwo-diag-nu --memory 768m --cpus 1 --
 (cd "$ROOT/diagnostics/scripts" && $PY nu_check_dom.py "$(cygpath -w "$EV/round2/a11y-after")")
 docker rm -f moajwo-diag-nu
 $PY "$ROOT/diagnostics/scripts/compare_a11y.py" "$EV/raw" "$EV/round2/a11y-after" "$EV/round2/compare-a11y.md"
+#   3차: A4 대상을 1차 DOM과 대조 (저장한 DOM만 읽음, 브라우저는 스크립트·네트워크 없이)
+(cd "$ROOT/diagnostics/scripts" && $PW a4_split.py "$(cygpath -w "$EV/raw")" "$(cygpath -w "$EV/round3/a11y-62895ac")" "$(cygpath -w "$EV/round3/a4-split-62895ac.md")")
 
 # A8) 재배치 320 CSS px·실제 200% 확대·가입/최초 설정 화면, 기존 업무 흐름
 (cd "$ROOT/diagnostics/scripts" && $PW a11y_manual.py "$(cygpath -w "$EV/round2/manual-after")" reflow,zoom,authforms)
 (cd "$ROOT/diagnostics/scripts" && $PW flow_check.py "$(cygpath -w "$EV/round2/flow-after")")              # ONLY_FLOWS=bundle 등
 
-# A9) 재집계·대비 계산 (새 검사 없음). 함수로 나눈 뒤에도 1차 출력과 바이트 단위로 같음을 cmp로 확인
+# A9) 재집계·대비 계산 (새 검사 없음). 재집계는 함수로 나눈 뒤에도 1차 출력과 바이트 단위로 같음을 cmp로 확인
 $PY "$ROOT/diagnostics/scripts/summarize_a11y.py" "$EV/raw" "$SCRATCH/a11y-states-check.md" && cmp "$SCRATCH/a11y-states-check.md" "$ROOT/diagnostics/reports/a11y-states-20261020.md"
-$PY "$ROOT/diagnostics/scripts/contrast_calc.py" > "$SCRATCH/contrast-check.txt" && cmp "$SCRATCH/contrast-check.txt" "$EV/raw/contrast-calc.txt"
+#   대비 계산은 3차에 경계값(0.04045)·원시값 판정으로 바꾸고 옛 경계와 나란히 출력한다 — 1차 raw/contrast-calc.txt와는 형식이 다르다
+$PY "$ROOT/diagnostics/scripts/contrast_calc.py" > "$EV/round3/contrast-calc.txt"
+$PY "$ROOT/diagnostics/scripts/contrast_calc.py" "$EV/raw/a11y-manual/contrast.json" > "$EV/round3/contrast-recalc-round1.txt"   # 1차 기록 재계산 (읽기만)
+(cd "$ROOT/diagnostics/scripts" && $PW css_support_check.py "$(cygpath -w "$EV/round3/css-support-edge.json")")   # 빈 페이지, 접속 없음
 
 # A10) 정리 — 진단 프로젝트만 정지 (볼륨·이미지 보존, down·볼륨 삭제 안 함)
 MSYS_NO_PATHCONV=1 docker compose -f "$ROOT/diagnostics/compose.diag.yml" -p moajwo-diag stop
@@ -178,7 +189,10 @@ pip-audit -r "$EV/raw/pip-audit/image-freeze.txt" --no-deps --disable-pip --vuln
 #   --vulnerability-service osv 로 한 번 더. 개발 환경은 backend/.venv의 pip freeze로 같게
 (cd "$SCRATCH/src/frontend" && npm audit --json && npm audit --omit=dev --json)
 
-# B4) 새 볼륨에 합성 자료 만들기 (2차는 1차 볼륨을 그대로 씀)
+# B3-2) contrast_check.py — 3차에 계산식(경계 0.04045, 원시값 ratio_raw)만 바꾸고 다시 실행하지 않음 (1차 기록은 contrast_calc.py로 재계산함)
+(cd "$ROOT/diagnostics/scripts" && $PW contrast_check.py "$(cygpath -w "$EV/round3/contrast-check")")
+
+# B4) 새 볼륨에 합성 자료 만들기 (2차·3차는 1차 볼륨을 그대로 씀)
 (cd "$ROOT/diagnostics/scripts" && $PY seed.py)
 
 # B5) 도구 설치 (2차는 1차에 만든 임시 venv·node 폴더를 그대로 씀)
