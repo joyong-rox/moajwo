@@ -223,9 +223,13 @@ function Validation({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
               />
-              <span className="wk-pickcount" role="status">
-                검증 대상 <strong>{targets.size}</strong>개 (최대 {MAX_TARGETS}) · 전월 자료 <strong>{baseline.size}</strong>개 · 전체{' '}
-                {files.length}개
+              {/* 상태 영역에는 고른 개수만 둔다 (고를 때마다 전달). 전체 파일 수는 같은 줄에 보이기만 한다 —
+                  업로드 뒤 목록이 갱신될 때 바뀌지 않은 고른 개수가 업로드 결과 안내 바로 뒤에 다시 전달되지 않게 */}
+              <span className="wk-pickcount">
+                <span role="status">
+                  검증 대상 <strong>{targets.size}</strong>개 (최대 {MAX_TARGETS}) · 전월 자료 <strong>{baseline.size}</strong>개
+                </span>{' '}
+                · 전체 {files.length}개
               </span>
               {(targets.size > 0 || baseline.size > 0) && (
                 <button
