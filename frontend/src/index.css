@@ -2135,6 +2135,19 @@ body {
   overflow: hidden;
 }
 
+/* 펼친 항목의 위치 전체 (접힌 줄에서는 한 줄로 잘릴 수 있음) */
+.review-where-full {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.review-where-label {
+  margin-right: 4px;
+  font-weight: 600;
+}
+
 .review-reason-more {
   min-height: 28px;
   padding: 2px 10px;
@@ -4043,6 +4056,12 @@ button.wk-card:hover {
 
 /* 작업 화면: 키보드 포커스는 마우스를 올린 모양(테두리·글자 색)과 구분되게 테두리를 더한다 — 기존 버튼 모양은 그대로 */
 :is(.wk, .review-panel, .wk-upload, .wk-validation, .wk-steps, .wk-steps-more) :is(button, a, input, select, summary):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 분석 표: 넘칠 때만 초점을 받는 스크롤 영역 (Analysis.tsx TableRegion) */
+.an .upload-table-wrap[tabindex]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
