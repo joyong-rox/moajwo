@@ -81,7 +81,7 @@
 | SEC2 | 보안 | owner·user | 최고 관리자는 다른 사용자 결과를 바꾸지 못함, 일반 사용자는 관리 API 403 | 직접 | 통과 — 관리자 결정·확정 403, 일반 사용자 관리 API 403 | final |
 | SEC3 | 보안 | 익명·만료 세션 | 보호 자원 401 | 직접 | 통과 | final |
 | SEC4 | 보안 | 권한·가림 회귀 | backend 시험(test_auth 권한·가림 등) | 직접(Q1) | 통과 (Q1) | Q1 |
-| SEC5 | 보안 | 제출 파일 | 이 브랜치 커밋의 비밀정보 검사 (Gitleaks, 네트워크 없음) | 직접 | SEC5_RESULT | logs/sec5-* |
+| SEC5 | 보안 | 제출 파일 | 이 브랜치 커밋의 비밀정보 검사 (Gitleaks, 네트워크 없음) | 직접 | 통과 — 이 브랜치 새 커밋 전부(703fdcb 이후) Gitleaks v8.30.1(네트워크 없음) 찾은 것 0. 첫 실행은 Git Bash 경로 변환으로 저장소를 못 찾은 실행 오류(보존) | logs/sec5-*, sec5/ |
 | SEC6 | 보안 | SonarQube·ZAP·기반 이미지 | 별도 과제 | 미검증 | 미검증 (별도 과제) | — |
 | DOC | 배포 문서 | docs/DEPLOY.md | frontend 단독 반영·롤백 절차 추가 | 직접 | 완료 — 8장 | docs/DEPLOY.md |
 
