@@ -4421,7 +4421,8 @@ button.wk-card:hover {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
-  transition: background-color 0.15s, border-color 0.15s;
+  /* 글자색·배경색은 전환하지 않는다 — 비활성(검증 대상 0개)이 풀릴 때 옅은 회색에서 넘어오는 중간 색이 대비 4.5:1에 못 미침 */
+  transition: border-color 0.15s;
 }
 
 .wk-btn-primary {
@@ -4616,7 +4617,8 @@ button.wk-card:hover {
   min-height: 38px;
   border-radius: 8px;
   box-sizing: border-box;
-  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+  /* 글자색·배경색은 전환하지 않는다 — 비활성(로그인 중 등)이 풀릴 때 옅은 회색에서 넘어오는 중간 색이 대비 4.5:1에 못 미침 */
+  transition: border-color 0.15s;
 }
 
 .mapping-run {
