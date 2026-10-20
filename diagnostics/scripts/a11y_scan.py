@@ -153,6 +153,10 @@ def run_state(pg: Page, vp: str, sid: str, who, path: str, action, desc: str) ->
         rec["nu"] = None if msgs is None else [{"type": m["type"], "sub": m.get("subType"), "msg": m["message"][:220],
                                                  "extract": (m.get("extract") or "")[:120]} for m in msgs]  # fmt: skip
         pg.add_script_tag(path=str(AXE_JS))
+        # 진행 중인 CSS 전환(예: 로그인 실패 직후 버튼이 비활성 → 활성 색으로 0.15초 바뀜)이 끝난 뒤 잰다 — 중간색을 정지 상태로 기록하지 않게.
+        # 끝나지 않는 애니메이션이 있어도 1초 넘게 기다리지 않는다. 규칙은 끄지 않는다 (4차 보완, login_contrast_probe.py로 원인 확인)
+        rec["transitions_waited"] = pg.evaluate("""() => { const ts = document.getAnimations().filter(a => a instanceof CSSTransition && a.playState === 'running');
+            return Promise.race([Promise.all(ts.map(a => a.finished.catch(() => null))), new Promise(r => setTimeout(r, 1000))]).then(() => ts.length) }""")  # fmt: skip
         ax = pg.evaluate("tags => axe.run(document, {runOnly: {type: 'tag', values: tags}, resultTypes: ['violations', 'incomplete']})", AXE_TAGS)
         bp = pg.evaluate("() => axe.run(document, {runOnly: {type: 'tag', values: ['best-practice']}, resultTypes: ['violations']})")
         pick = lambda xs: [{"id": v["id"], "impact": v["impact"], "tags": [t for t in v["tags"] if t.startswith(("wcag", "best"))],  # noqa: E731

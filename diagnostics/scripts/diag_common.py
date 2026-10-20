@@ -103,3 +103,14 @@ def db(sql: str) -> list:
     if p.returncode != 0:
         raise RuntimeError(f"진단 DB 조회 실패: {p.stderr[-400:]}")
     return json.loads(p.stdout)
+
+
+# 측정 결과의 출처 (a11y_regress.py가 출처 표·재사용 판단에 쓴다). 빌드 자산 파일 이름(내용 해시)으로 어떤 빌드를 쟀는지 구분한다
+ASSET_JS = r"() => { const s = [...document.scripts].map(x => x.src).find(x => /\/assets\/index-[^/]+\.js$/.test(x)); return s ? s.split('/').pop() : null }"
+
+
+def run_meta(script: str, label: str, asset: str | None) -> dict:
+    from datetime import datetime
+
+    return {"script": script, "label": label, "started": datetime.now().astimezone().isoformat(timespec="seconds"), "url": URL,
+            "frontend_asset": asset, "frontend_image": os.environ.get("DIAG_FE_IMAGE") or "미기재 (DIAG_FE_IMAGE 없음)"}  # fmt: skip

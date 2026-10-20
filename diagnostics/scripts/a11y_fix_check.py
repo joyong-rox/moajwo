@@ -8,6 +8,7 @@
 이 스크립트는 측정값만 저장한다. 통과·실패 판정은 a11y_regress.py가 이 결과 JSON을 읽어 따로 한다.
 시험에서만 하는 일: 업로드·분석 표 요청을 브라우저에서 잠시 붙잡아 '진행 중' 상태를 관찰, 결과 표 요청에 시험용 500 응답 (앱은 늦추지 않음).
 진단 3차(2026-10-20) 추가 진단 자료: 최고 관리자 계정으로 오타 지역명 합성 파일 업로드·매핑·검증 ('연결 대상' 선택 칸을 띄우려는 것).
+진단 4차(2026-10-20) 추가 진단 자료: 표준 사전 합성 항목 (user1·user2·최고 관리자가 합성 열을 확정 → 최고 관리자가 승격 승인, '빼기' 확인창을 열려는 것).
 """
 
 import io
@@ -21,7 +22,7 @@ import openpyxl
 from contrast_calc import oklab_to_srgb, over, ratio, shown
 from playwright.sync_api import Page, sync_playwright
 
-from diag_common import EV, URL, USERS, Api, creds
+from diag_common import ASSET_JS, EV, URL, USERS, Api, creds, run_meta
 from diag_scope import browser_proxy, route_guard
 
 OUT = Path(sys.argv[1])
@@ -621,6 +622,31 @@ def dialog_probe(pg: Page, trigger, label: str) -> dict:
     return out
 
 
+STD_COL = "진단합성표준확인열"  # 기본 표준 사전에 없는 합성 열 이름 — 서로 다른 사용자 3명이 확정하면 승격 후보가 된다
+
+
+def ensure_standard_term() -> str:
+    """표준 사전 '빼기' 확인창을 열 수 있게 합성 항목을 앱의 승격 절차로 만든다 (user1·user2·최고 관리자가 같은 합성 열을 인구수로 확정 →
+    최고 관리자가 승격 승인). 이미 있으면 그대로 쓴다. 삭제는 하지 않는다. user3은 '자료 없는 사용자' 상태를 지키려고 쓰지 않는다."""
+    owner = Api().login("owner")
+    s, terms, _ = owner.call("GET", "/admin/standard-terms")
+    if s == 200 and any(t["term"] == STD_COL for t in terms):
+        return "이미 있음"
+    for who in ("user1", "user2", "owner"):
+        api = Api().login(who)
+        s, body, _ = api.upload(f"진단_표준사전확인_{who}.xlsx", xlsx_bytes([["주민등록 인구 현황 2026년 9월 (단위: 명)"], ["시도", STD_COL], ["세종특별자치시", 1]]))
+        fid = body[0]["id"]
+        s, pv, _ = api.call("GET", f"/files/{fid}/preview?sheet_id=s0")
+        cols = {x["name"]: x["column_id"] for x in pv["columns"]}
+        api.call("PUT", f"/files/{fid}/mapping/decisions", {"decisions": [{"sheet_id": "s0", "column_id": cols[STD_COL], "field_key": "population"}]})
+    s, pl, _ = owner.call("GET", "/admin/promotions")
+    cand = next((c for c in pl.get("items", []) if c["column_name"] == STD_COL), None) if s == 200 else None
+    if cand is None:
+        return f"승격 후보가 생기지 않음 (조회 {s})"
+    s, _, _ = owner.call("POST", f"/admin/promotions/{cand['id']}/approve", {"note": "진단 합성 항목 (확인창 확인용)"})
+    return f"승격 승인 {s} (후보 #{cand['id']}, 승인자 {cand['approver_count']}명)"
+
+
 def check_dialogs(pg: Page) -> None:
     login(pg, "user1")
     pg.goto(URL + "/automations")
@@ -635,6 +661,7 @@ def check_dialogs(pg: Page) -> None:
     else:
         rec("dialog", {"dialog": "자동화 삭제", "result": "버튼 없음 (측정 안 함)"})
     # 최고 관리자: 용어사전 항목 삭제 두 건(본문이 다름) + 같은 화면의 다른 확인창(표준 사전 빼기)과 id가 섞이지 않는지
+    rec("dialog", {"dialog": "표준 사전 합성 항목 준비", "result": ensure_standard_term()})
     pg.context.clear_cookies()
     login(pg, "owner")
     pg.goto(URL + "/dictionary")
@@ -791,9 +818,18 @@ def check_inputs_focus(pg: Page) -> None:
         pg.locator(".mapping-pick").first.screenshot(path=str(OUT / f"{LABEL}-mapping-pick.png"))
 
 
+META: dict = {}
+
+
 def main() -> None:
     with sync_playwright() as p:
         b = p.chromium.launch(channel="msedge", headless=True, proxy=browser_proxy(URL))
+        cx = b.new_context()
+        cx.route("**/*", route_guard(URL, BLOCKED))
+        pg = cx.new_page()
+        pg.goto(URL + "/")
+        META.update(run_meta("a11y_fix_check.py", LABEL, pg.evaluate(ASSET_JS)))  # 어떤 빌드를 쟀는지 (빌드 자산 파일 이름)
+        cx.close()
         for name, fn in (("upload", check_upload), ("analysis", check_analysis_loading), ("contrast", check_contrast), ("signup", check_signup),
                          ("names", check_names), ("stale", check_stale_and_readonly), ("upload2", check_upload_scope), ("analysis2", check_analysis_tables),
                          ("dialog", check_dialogs), ("inputs", check_inputs_focus)):  # fmt: skip
@@ -810,6 +846,7 @@ def main() -> None:
             cx.close()
         b.close()
     RES["blocked_out_of_scope"] = BLOCKED
+    RES["meta"] = META
     (OUT / f"fix-check-{LABEL}.json").write_text(json.dumps(RES, ensure_ascii=False, indent=1), encoding="utf-8")
 
 

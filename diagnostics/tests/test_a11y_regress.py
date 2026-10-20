@@ -1,148 +1,256 @@
-"""a11y_regress 판정 시험 — 네트워크·브라우저 없이, 측정 JSON 모양의 작은 자료로 판정만 본다."""
+"""a11y_regress 판정 시험 — 네트워크·브라우저·운영 접근 없이, 측정 JSON 모양의 합성 자료로 판정과 CLI 종료 코드를 본다."""
 
 import copy
+import json
+import subprocess
+import sys
+from pathlib import Path
 
 import a11y_regress as ar
+
+SCRIPT = Path(ar.__file__)
+START, DONE = "파일 1개 업로드를 시작했습니다.", "업로드를 마쳤습니다: 이번 요청 1개 중 성공 1개, 실패 0개."
 
 
 def live(*texts, role="status", where="파일 업로드 sr-only"):
     return [{"role": role, "where": where, "text": t} for t in texts]
 
 
-START, DONE = "파일 1개 업로드를 시작했습니다.", "업로드를 마쳤습니다: 이번 요청 1개 중 성공 1개, 실패 0개."
-GOOD = {
-    "D-01": [{"what": "업로드 조작 요소의 계산된 이름·설명", "role": "button", "name": "파일 선택", "description": "… xlsx, xls, csv …"}],
-    "A1": [
-        {"what": "업로드 중 (시험에서 요청을 붙잡음)", "visible_text": "파일 선택", "aria_disabled": "true", "focused": True, "ax": {"name": "파일 선택"}, "describedby": ["업로드·분석 중…"]},
-        {"what": "업로드 중 다시 눌렀을 때 파일 선택 창", "opened": {"click_zone": False, "enter": False}},
-    ],
-    "D-02": [
-        {"what": "① 성공 1개", "live": live(START, DONE), "focus_kept": True},
-        {"what": "⑦ 업로드 중 → 완료", "live": live(START, DONE)},
-        {"what": "⑤ 요청 전체 실패", "live": live(START, "") + live("업로드 실패", role="alert", where="파일 업로드 wk-banner")},
-    ],
-    "inputs": [{"page": "묶기", "rule": ".bd-input", "ratio_vs_outside": 4.21, "ratio_vs_inside": 4.54, "outside_bg": "rgb(255, 248, 197)"}],
-    "dialog": [
-        {"dialog": "자동화 삭제", "attrs": {"describedby": "_r_2_", "description": ["본문"], "ancestors_with_describedby": [], "title": ["제목"]},
-         "ax": {"name": "제목"}, "first_focus": {"name": "취소", "in_dialog": True}, "tab": [{"name": "삭제", "in_dialog": True}],
-         "shift_tab": [{"name": "취소", "in_dialog": True}], "escape": {"closed": True, "focus_on_trigger": True}, "cancel": {"closed": True, "focus_on_trigger": True},
-         "reopen_attrs": {"describedby": "_r_2_"}},
-    ],
-    "blocked_out_of_scope": [],
-}  # fmt: skip
+def el(tag, text=None, key=None, cls="", hidden=False, dialog=False):
+    return {"where": "element", "tag": tag, "text": text, "key": key, "cls": cls, "in_hidden": hidden, "in_main": True, "in_dialog": dialog}
 
 
-def status_of(results, rule_part):
-    return [r.status for r in results if rule_part in r.rule]
+BODY = {"where": "(본문)"}
 
 
-def test_good_record_passes_and_missing_is_not_counted_as_pass():
-    res = ar.judge(GOOD)
-    assert ar.FAIL not in [r.status for r in res]
-    assert status_of(res, "역할 button") == [ar.PASS]
-    assert status_of(res, ".bd-input") == [ar.PASS]
-    assert status_of(res, ".mapping-pick select") == [ar.NONE]  # 화면에 안 나온 규칙은 미측정 (같은 토큰이어도 통과 아님)
-    assert status_of(res, "끌어놓기") == [ar.NONE]
+def probe(name):
+    return {"dialog": name, "attrs": {"describedby": "_r_2_", "description": ["본문"], "ancestors_with_describedby": [], "title": ["제목"]}, "ax": {"name": "제목"},
+            "first_focus": {"name": "취소", "in_dialog": True}, "tab": [{"name": "확인", "in_dialog": True}], "shift_tab": [{"name": "취소", "in_dialog": True}],
+            "escape": {"closed": True, "focus_on_trigger": True}, "cancel": {"closed": True, "focus_on_trigger": True}, "reopen_attrs": {"describedby": "_r_2_"}}  # fmt: skip
 
 
-def test_name_without_visible_label_fails():
-    bad = copy.deepcopy(GOOD)
-    bad["D-01"][0]["name"] = "xlsx, xls, csv 파일을 끌어다 놓거나 눌러서 선택"
-    assert status_of(ar.judge(bad), "역할 button") == [ar.FAIL]
+def full_fix():
+    """fix 묶음의 필수 기준을 모두 통과하는 최소 측정 기록 (합성)."""
+    return {
+        "meta": {"frontend_asset": "index-TEST.js", "label": "fix"},
+        "D-01": [{"what": "업로드 조작 요소의 계산된 이름·설명", "role": "button", "name": "파일 선택", "description": "… xlsx, xls, csv …"},
+                 {"what": "click로 파일 선택 열림", "ok": True}, {"what": "space로 파일 선택 열림", "ok": True}, {"what": "끌어놓기 업로드 동작", "live": live(START, DONE)}],
+        "A1": [{"what": "axe label-content-name-mismatch — 홈 업로드 영역", "violations": []},
+               {"what": "업로드 중 (시험에서 요청을 붙잡음)", "visible_text": "파일 선택", "aria_disabled": "true", "focused": True, "describedby": ["업로드·분석 중…"]},
+               {"what": "업로드 중 다시 눌렀을 때 파일 선택 창", "opened": {"click_zone": False, "enter": False}},
+               {"what": "업로드 완료 뒤", "aria_disabled": None, "describedby": ["xlsx, xls, csv"], "focused": True}],
+        "D-02": [{"what": "업로드 영역의 상태 영역이 메시지 전에 있음", "status_regions_in_upload": ["sr-only"]},
+                 {"what": "① 성공 1개", "live": live(START, DONE), "focus_kept": True}, {"what": "② 같은 성공 반복", "live": live(START, DONE)},
+                 {"what": "③ 일부 실패", "live": live(START, "업로드를 마쳤습니다: 이번 요청 2개 중 성공 1개, 실패 1개.")}, {"what": "④ 다시 그리기만", "live": []},
+                 {"what": "⑤ 요청 전체 실패", "live": live(START, "") + live("업로드 실패", role="alert", where="파일 업로드 wk-banner")},
+                 {"what": "⑥ 지원하지 않는 형식만", "live": live("형식 제외", role="alert", where="파일 업로드 wk-banner")},
+                 {"what": "⑦ 업로드 중 → 완료", "live": live(START, DONE)},
+                 {"what": "⑧ 정상 + 지원하지 않는 형식", "live": live(START) + live("제외: a.pdf", role="alert") + live(DONE)},
+                 {"what": "⑨-2 홈으로 돌아옴", "live": []}, {"what": "⑩ 업로드 중 로그아웃", "status": {"text": ""}, "live": [], "page_errors": []},
+                 {"what": "분석 자료 목록 불러오는 중 → 완료", "while_loading_status": ["분석할 파일 목록을 불러오는 중…"], "live": [{"text": "파일 4개를 불러왔습니다."}]},
+                 {"what": "분석 결과 불러오는 중 → 완료 (같은 상태 요소 유지)", "after": {"same_node": True}},
+                 {"what": "분석 결과: 조건·요약만 왔고", "while_tables_pending": "조건·요약을 불러왔습니다. 표를 불러오는 중…", "after_tables": "불러왔습니다 (조건·요약, 결과·제외·근거 표)."},
+                 {"what": "분석 결과: 결과 표만 실패", "status": "결과 표를 불러오지 못했습니다.", "visible_errors": ["결과 표를 불러오지 못했습니다."]}],
+        "inputs": [{"page": "합성", "rule": r, "rules": [r], "ratio_vs_outside": 4.5, "ratio_vs_inside": 4.5} for r in ar.INPUT_RULES],
+        "D-03": [{"page": p, "ratio_vs_outside": 4.54, "ratio_vs_inside": 4.54} for p in ("로그인", "홈", "내 계정")],
+        "D-04": [{"state": "꺼짐", "track_vs_around": 4.5, "knob_vs_track": 4.5}, {"state": "꺼짐 + 키보드 초점", "ring_vs_around": 5.3},
+                 {"state": "켜짐 + 키보드 초점", "track_vs_around": 5.3, "ring_vs_around": 5.3}, {"state": "꺼짐 (초점 없음)", "track": "rgb(118, 118, 118)"},
+                 {"state": "비활성 (시험용 DOM 변경)", "track": "rgb(243, 244, 246)"}],
+        "focus": [{"what": "취합 방식 라디오 카드 (키보드 초점)", "pass_3_to_1": True, "ratio_vs_around": 5.1}, {"what": "업로드 조작 요소 (키보드 초점)", "pass_3_to_1": True, "ratio_vs_around": 4.8}],
+        "D-05": [{"mode": "로그인 (그대로여야 함)", "fields": [{"describedby": []}]}, {"mode": "회원가입", "fields": [{"describedby": ["a"]}] * 3},
+                 {"mode": "회원가입 — 입력 뒤에도 도움말 보임", "visible": [True]}, {"mode": "회원가입 — 서버 거절(아이디 규칙)", "alert": ["거절"]},
+                 {"mode": "최초 설정 (상태 응답 주입)", "fields": [{"describedby": ["a"]}] * 3}],
+        "D-06": [{"what": "계정 표시", "aria_label_attr": None, "accessible_text": "로그인 계정 합성, 역할 일반"}, {"what": "검토 점수 (완료된 검토)", "aria_label_attr": None, "accessible_text": "데이터 품질 점수 100"},
+                 {"what": "검토 점수 (다시 검사 전)", "accessible_text": "지난 검사 점수"}, {"what": "다른 사용자 검토", "readonly_note": "조회만 할 수 있습니다"}],
+        "D-07": [{"what": "취합 방식 라디오", "after_label_click": ["table:false", "sheets:true"], "after_arrow_up": ["table:true", "sheets:false"], "structure": [{"inner": "SPAN", "wrap": "SPAN"}]},
+                 {"what": "통계 요약 스위치", "htmlFor": "a", "inputId": "a", "children": "SPAN.block", "ax": {"role": "checkbox", "name": "통계 요약 시트 추가"},
+                  "checked_initial": False, "after_label_text_click": True, "after_space": False}],
+        "dialog": [probe(n) for n in ar.DIALOGS] + [{"dialog": "용어사전 삭제 두 건 비교", "descriptions": [["a"], ["b"]]},
+                                                  {"dialog": "같은 화면의 두 확인창 id", "glossary_id": "_r_1_", "standard_id": "_r_2_"}],
+        "blocked_out_of_scope": [],
+    }  # fmt: skip
 
 
-def test_busy_without_disabled_state_or_picker_opening_fails():
-    bad = copy.deepcopy(GOOD)
-    bad["A1"][0]["aria_disabled"] = None
-    bad["A1"][1]["opened"]["enter"] = True
-    res = ar.judge(bad)
-    assert status_of(res, "aria-disabled=true") == [ar.FAIL]
-    assert status_of(res, "열리지 않음") == [ar.FAIL]
+def full_nav():
+    """nav 묶음의 필수 기준을 모두 통과하는 최소 측정 기록 (합성)."""
+    menu = [{"what": f"메뉴 → {t}", "expected_title": t, "after": el("H1", t)} for t in ("실행 기록", "검토 목록", "홈")]
+    return {
+        "meta": {"frontend_asset": "index-TEST.js", "label": "nav"},
+        "nav": [{"what": f"본문 바로가기 — {n}", "first_tab": el("A", "본문으로 바로가기", cls="skip-link"), "visible_when_focused": True, "after_enter": el("H1", n), "url_unchanged": True}
+                for n in ("홈", "실행 기록")] + menu + [
+                {"what": "검토 목록 → 상세 (Enter)", "after": el("H2", "검토 #1")}, {"what": "상세 → 목록 ('검토 목록으로')", "opener_key": "k1", "after": el("BUTTON", key="k1")},
+                {"what": "상세에서 브라우저 뒤로", "opener_key": "k1", "after": el("BUTTON", key="k1")}, {"what": "브라우저 앞으로 (다시 상세)", "after": el("H2", "검토 #1")},
+                {"what": "실행 기록 → 검토 상세", "after": el("H2")}, {"what": "검토 상세에서 브라우저 뒤로 (실행 기록)", "opener_key": "r1", "after": el("BUTTON", key="r1")},
+                {"what": "분석: 지난 결과 열기 → 결과", "after": el("H2")}, {"what": "분석: 결과 → '새 분석'", "after": el("SUMMARY", key="analysis-past")},
+                {"what": "홈 검색 입력", "after": el("INPUT")}, {"what": "검증 대상 체크 (Space)", "after": el("INPUT")},
+                {"what": "묶기: 파일 빼기", "after": BODY, "next_tab": el("BUTTON", "이 파일 빼기")}],
+        "summary": [{"what": "'새 분석'으로 돌아온 직후", "focused": True, "tabindex_attr": None, "tabIndex": 0}, {"what": "Tab으로 벗어난 뒤 Shift+Tab으로 다시", "reached": True},
+                    {"what": "화면 제목에서 Tab으로 다시", "reached": True}, {"what": "Enter·Space로 펼치고 접기", "open_before": False, "after_enter": True, "after_space": False}],
+        "history": [{"what": "번갈아 열기", "b": "k2", "after_back_b": el("BUTTON", key="k2"), "after_forward_b": el("H2"), "after_back_again": el("BUTTON", key="k2")},
+                    {"what": "같은 상세를 실행 기록·검토 목록에서", "runs_key": "r1", "back_to_runs": el("BUTTON", key="r1"), "list_key": "k1", "back_to_list": el("BUTTON", key="k1")},
+                    {"what": "상세 주소 직접 접근(새로고침)", "after_load": BODY, "first_tab": el("A", cls="skip-link")}],
+        "failure": [{"what": "검토 상세를 찾지 못함 (시험용 404)", "after": el("H2"), "alerts": ["찾을 수 없음"]},
+                    {"what": "분석 결과를 불러오지 못함 (시험용 500)", "after_1s": el("P", cls="upload-error"), "after_3_6s": el("P", cls="upload-error"), "alerts": ["오류"]}],
+        "stale": [{"what": "상세 대기 중 다른 화면으로", "after_nav": el("H1", "실행 기록"), "after_3_6s": BODY, "path": "/runs"},
+                  {"what": "상세 대기 중 로그아웃", "valid_before_timeout": True, "relogin_ms_after_wait_start": 700, "after_3_6s": BODY, "page_errors": []},
+                  {"what": "상세 대기 중 사용자가 다른 요소로 이동", "moved_to": el("A", "내 계정"), "after": el("A", "내 계정")},
+                  {"what": "상세 대기 중 확인창", "opened": el("BUTTON", dialog=True), "while_open": el("BUTTON", dialog=True)}],
+        "longtext": [{"what": "검토 위치: 잘림", "summary_truncated": True, "summary_text": "합성.xlsx / 시도", "full": {"text": "합성.xlsx / 시도", "clipped": False, "visible": True}},
+                     {"what": "'전체 보기' 이름", "count": 2, "distinct": 2, "names": ["전체 보기: a", "전체 보기: b"]},
+                     {"what": "근거 전체 보기 창", "first": el("BUTTON", dialog=True), "tab": [BODY], "closed": True, "focus_back_on_opener": True}],
+        "tables": [{"viewport": "desktop", "tables": [{"label": None, "role": None, "tabindex": None, "scrolls": False, "th_col": 8}]},
+                   {"viewport": "mobile", "tables": [{"label": "결과 표", "role": "region", "tabindex": "0", "scrolls": True, "th_col": 8}], "keyboard_scroll": {"before": [0, 0], "after": [40, 0]}}],
+        "blocked_out_of_scope": [],
+    }  # fmt: skip
 
 
-def test_duplicate_or_missing_announcements_fail():
-    bad = copy.deepcopy(GOOD)
-    bad["D-02"][0]["live"] = live(DONE)  # 시작 안내 누락
-    bad["D-02"][1]["live"] = live(START, DONE) + live("검증 대상 0개 · 전체 9개", where="통합 전 검증 wk-pickcount")  # 목록 갱신으로 고른 개수 재전달
-    bad["D-02"][2]["live"] = live(START, DONE) + live("업로드 실패", role="alert")  # 전체 실패인데 결과 안내
-    res = ar.judge(bad)
-    assert status_of(res, "① 성공") == [ar.FAIL]
-    assert status_of(res, "⑦ 완료 뒤") == [ar.FAIL]
-    assert status_of(res, "⑤ 요청 전체 실패") == [ar.FAIL]
+def write(tmp_path, name, data):
+    p = tmp_path / name
+    p.write_text(data if isinstance(data, str) else json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return p
 
 
-def test_low_contrast_input_fails_with_raw_value():
-    bad = copy.deepcopy(GOOD)
-    bad["inputs"][0]["ratio_vs_outside"] = 2.9999  # 소수 둘째 자리 반올림이면 3.00으로 보이는 값
-    assert status_of(ar.judge(bad), ".bd-input") == [ar.FAIL]
+def run_cli(*args):
+    return subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], capture_output=True, text=True, encoding="utf-8", timeout=60)
 
 
-def test_dialog_description_on_backdrop_or_focus_escape_fails():
-    bad = copy.deepcopy(GOOD)
-    bad["dialog"][0]["attrs"]["describedby"] = None
-    bad["dialog"][0]["attrs"]["ancestors_with_describedby"] = ["DIV.fixed"]
-    bad["dialog"][0]["tab"].append({"name": "홈", "in_dialog": False})
-    res = ar.judge(bad)
-    assert status_of(res, "aria-describedby가 본문") == [ar.FAIL]
-    assert status_of(res, "Tab·Shift+Tab") == [ar.FAIL]
+def judged(tmp_path, suites, *datas, partial=None, reason=None):
+    paths = [write(tmp_path, f"in{i}.json", d) for i, d in enumerate(datas)]
+    m = ar.merge(paths)
+    res = ar.judge(m, suites, partial, reason)
+    return res, ar.verdict(res, partial is not None)
 
 
-def test_axe_not_run_is_not_a_pass():
-    data = copy.deepcopy(GOOD)
-    data["A1"].append({"what": "axe label-content-name-mismatch — 홈 업로드 영역", "axe": "미실행 (AXE_JS 없음)"})
-    assert status_of(ar.judge(data), "axe label-content-name-mismatch") == [ar.NONE]
+def statuses(res, prefix):
+    return [r.status for r in res if r.id.startswith(prefix)]
 
 
-def el(tag, text=None, **kw):
-    return {"where": "element", "tag": tag, "text": text, "key": kw.get("key"), "cls": kw.get("cls", ""), "in_hidden": kw.get("hidden", False), "in_main": True, "in_dialog": False}
+# ---------------------------------------------------------------- 함수 시험
 
 
-NAV = {
-    "nav": [
-        {"what": "본문 바로가기 — 홈", "first_tab": el("A", "본문으로 바로가기", cls="skip-link"), "visible_when_focused": True, "after_enter": el("H1", "홈"), "url_unchanged": True},
-        {"what": "상세 → 목록 ('검토 목록으로')", "opener_key": "review-row-9", "after": el("BUTTON", "검토 보기", key="review-row-9")},
-    ],
-    "tables": [{"viewport": "mobile", "tables": [{"label": "결과 표", "role": "region", "tabindex": "0", "scrolls": True, "th_col": 8},
-                                                 {"label": None, "role": None, "tabindex": None, "scrolls": False, "th_col": 4}],
-                "keyboard_scroll": {"before": [0, 0], "after": [40, 0]}}],
-    "blocked_out_of_scope": [],
-}  # fmt: skip
+def test_full_inputs_complete(tmp_path):
+    res, (_, code) = judged(tmp_path, ["fix", "nav"], full_fix(), full_nav())
+    assert code == ar.EXIT_OK, [(r.id, r.status, r.evidence) for r in res if r.status not in (ar.PASS, ar.NA)]
+    assert statuses(res, "NAV.table.desktop.keyboard") == [ar.NA]  # 넘치는 표가 없으면 해당 없음 (통과로 세지 않고 따로 표시)
 
 
-def test_nav_only_record_is_judged_without_fix_check_noise():
-    res = ar.judge(NAV)
-    assert not [r for r in res if r.item.startswith("D-") or r.item == "확인창"]  # D 항목 측정이 없으면 그 기준을 섞지 않는다
-    assert ar.FAIL not in [r.status for r in res]
-    assert status_of(res, "메뉴 → ") == []  # 이동 묶음 안에서 빠진 측정은 판정 줄을 만들지 않거나 미측정 (통과로 세지 않음)
-    assert ar.NONE in [r.status for r in res]  # 예: 검토 목록 → 상세 측정이 없음
+def test_empty_and_empty_group_are_not_success(tmp_path):
+    for data in ({}, {"nav": []}):
+        res, (_, code) = judged(tmp_path, ["nav"], data)
+        assert code == ar.EXIT_INCOMPLETE
+        assert statuses(res, "COMMON.scope") == [ar.NONE]  # 범위 기록 자체가 없으면 '0건'으로 통과시키지 않음
 
 
-def test_skip_link_to_hidden_home_heading_fails():
-    bad = copy.deepcopy(NAV)
-    bad["nav"][0]["after_enter"] = el("H1", "홈", hidden=True)  # 숨긴 홈의 제목을 잡음
-    assert status_of(ar.judge(bad), "본문 바로가기(홈)") == [ar.FAIL]
+def test_suite_is_explicit_not_inferred(tmp_path):
+    res, (_, code) = judged(tmp_path, ["fix", "nav"], full_nav())  # fix 측정이 없는데 fix를 골랐으면 건너뛰지 않고 미측정
+    assert code == ar.EXIT_INCOMPLETE and ar.NONE in statuses(res, "D01.")
 
 
-def test_return_to_list_without_opener_fails():
-    bad = copy.deepcopy(NAV)
-    bad["nav"][1]["after"] = {"where": "(본문)"}
-    assert status_of(ar.judge(bad), "상세 → 목록") == [ar.FAIL]
+def test_missing_required_record_is_incomplete(tmp_path):
+    nav = full_nav()
+    nav["summary"] = [x for x in nav["summary"] if not x["what"].startswith("Enter")]
+    res, (_, code) = judged(tmp_path, ["nav"], nav)
+    assert code == ar.EXIT_INCOMPLETE and statuses(res, "NAV.summary.toggle") == [ar.NONE]
 
 
-def test_table_tab_stop_only_when_scrolling():
-    bad = copy.deepcopy(NAV)
-    bad["tables"][0]["tables"][0]["tabindex"] = None  # 넘치는데 초점 불가
-    bad["tables"][0]["tables"][1]["tabindex"] = "0"  # 넘치지 않는데 정지점
-    assert status_of(ar.judge(bad), "넘치는 영역만") == [ar.FAIL]
+def test_product_failure_wins(tmp_path):
+    nav = full_nav()
+    nav["summary"][0]["tabindex_attr"] = "-1"  # 초점 복귀가 summary를 Tab 순서에서 뺌
+    nav["summary"][0]["tabIndex"] = -1
+    res, (_, code) = judged(tmp_path, ["nav"], nav)
+    assert code == ar.EXIT_FAIL and statuses(res, "NAV.summary.tabindex") == [ar.FAIL]
 
 
-def test_merge_keeps_out_of_scope_requests_and_errors_from_every_file(tmp_path):
-    import json
+def test_measurement_error_is_reported_separately(tmp_path):
+    nav = full_nav()
+    nav["error"] = [{"check": "history", "error": "TimeoutError"}]
+    res, (_, code) = judged(tmp_path, ["nav"], nav)
+    assert code == ar.EXIT_INCOMPLETE and statuses(res, "COMMON.measure_error") == [ar.MERR]
 
-    a, b = tmp_path / "a.json", tmp_path / "b.json"
-    a.write_text(json.dumps({"D-01": [{"what": "x"}], "blocked_out_of_scope": ["http://a.example/"], "error": [{"check": "upload"}]}), encoding="utf-8")
-    b.write_text(json.dumps({"nav": [], "blocked_out_of_scope": [], "error": None}), encoding="utf-8")
-    data = ar.merge([a, b])
-    assert data["blocked_out_of_scope"] == ["http://a.example/"]
-    assert data["error"] == [{"check": "upload"}]
-    assert status_of(ar.judge(data), "진단 주소 밖 요청 0") == [ar.FAIL]
+
+def test_merge_keeps_error_and_blocked_from_earlier_files(tmp_path):
+    a = full_nav()
+    a["error"] = [{"check": "stale", "error": "앞 파일 오류"}]
+    a["blocked_out_of_scope"] = ["http://a.example/"]
+    b = {"meta": a["meta"], "tables": a["tables"], "error": None, "blocked_out_of_scope": []}
+    res, (_, code) = judged(tmp_path, ["nav"], a, b)
+    assert code == ar.EXIT_FAIL  # 범위 밖 요청 1건 = 실패
+    assert any("앞 파일 오류" in r.evidence for r in res) and statuses(res, "COMMON.scope") == [ar.FAIL]
+
+
+def test_string_error_is_preserved_and_flagged(tmp_path):
+    nav = full_nav()
+    nav["error"] = "문자열로 남은 오류"
+    res, (_, code) = judged(tmp_path, ["nav"], nav)
+    assert code == ar.EXIT_INCOMPLETE
+    assert any("문자열로 남은 오류" in r.evidence for r in res if r.status == ar.MERR) and ar.IERR in statuses(res, "COMMON.input")
+
+
+def test_wrong_group_type_is_input_error(tmp_path):
+    nav = full_nav()
+    nav["summary"] = {"what": "객체 하나"}
+    res, (_, code) = judged(tmp_path, ["nav"], nav)
+    assert code == ar.EXIT_INCOMPLETE and ar.IERR in statuses(res, "COMMON.input")
+
+
+def test_sources_need_reuse_reason(tmp_path):
+    a, b = full_fix(), full_nav()
+    b["meta"]["frontend_asset"] = "index-OTHER.js"
+    res, (_, code) = judged(tmp_path, ["fix", "nav"], a, b)
+    assert code == ar.EXIT_INCOMPLETE and statuses(res, "COMMON.sources") == [ar.IERR]
+    res, (_, code) = judged(tmp_path, ["fix", "nav"], a, b, reason="같은 소스, 시험 순서 때문에 이미지가 다름")
+    assert code == ar.EXIT_OK
+
+
+def test_partial_is_distinct_from_full(tmp_path):
+    res, (title, code) = judged(tmp_path, ["nav"], full_nav(), partial=["NAV.summary.tabindex", "NAV.forward"])
+    assert code == ar.EXIT_PARTIAL and "부분" in title and len([r for r in res if r.suite == "nav"]) == 2
+
+
+# ---------------------------------------------------------------- CLI 종료 코드 시험 (실제 명령으로)
+
+
+def test_cli_full(tmp_path):
+    p = run_cli("--suite", "fix,nav", "--md", tmp_path / "r.md", write(tmp_path, "f.json", full_fix()), write(tmp_path, "n.json", full_nav()))
+    assert p.returncode == 0, p.stdout[-800:]
+    assert "전체 완료" in (tmp_path / "r.md").read_text(encoding="utf-8")
+
+
+def test_cli_partial(tmp_path):
+    p = run_cli("--suite", "nav", "--partial", "NAV.forward", write(tmp_path, "n.json", full_nav()))
+    assert p.returncode == 3 and "부분 검사" in p.stdout
+
+
+def test_cli_empty_and_missing(tmp_path):
+    assert run_cli("--suite", "nav", write(tmp_path, "e.json", {})).returncode == 2
+    nav = full_nav()
+    del nav["stale"]
+    assert run_cli("--suite", "nav", write(tmp_path, "m.json", nav)).returncode == 2
+
+
+def test_cli_error_and_bad_json(tmp_path):
+    nav = full_nav()
+    nav["error"] = [{"check": "tables", "error": "Timeout"}]
+    assert run_cli("--suite", "nav", write(tmp_path, "err.json", nav)).returncode == 2
+    assert run_cli("--suite", "nav", write(tmp_path, "bad.json", "{ 깨진 JSON")).returncode == 2
+
+
+def test_cli_failure(tmp_path):
+    nav = full_nav()
+    nav["nav"][0]["after_enter"] = el("H1", "홈", hidden=True)  # 숨긴 홈의 제목을 잡음
+    assert run_cli("--suite", "nav", write(tmp_path, "f.json", nav)).returncode == 1
+
+
+def test_cli_merge_keeps_earlier_error(tmp_path):
+    a = full_nav()
+    a["error"] = [{"check": "summary", "error": "앞 파일 오류"}]
+    b = {"meta": a["meta"], "summary": copy.deepcopy(a["summary"]), "error": [], "blocked_out_of_scope": []}
+    p = run_cli("--suite", "nav", write(tmp_path, "a.json", a), write(tmp_path, "b.json", b))
+    assert p.returncode == 2 and "앞 파일 오류" in p.stdout
+
+
+def test_cli_usage_errors(tmp_path):
+    f = write(tmp_path, "n.json", full_nav())
+    assert run_cli("--suite", "unknown", f).returncode == 5
+    assert run_cli("--suite", "nav", "--partial", "D01.name", f).returncode == 5  # 고른 묶음에 없는 기준
+    assert run_cli(f).returncode == 5  # --suite 없음 (범위를 추정하지 않음)

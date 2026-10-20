@@ -6,17 +6,19 @@
 - 분석 표: 스크롤 영역이 넘칠 때만 이름·Tab 정지점이 있는지, 키보드로 스크롤되는지, 머리글·쪽 이동이 그대로인지
 화면 읽기 프로그램 낭독은 확인하지 않는다 (초점 위치·접근성 속성 기록).
 진단 자료에 쓰는 동작: user1로 긴 합성 지역명 파일 업로드·매핑·검토 생성('전체 보기'를 띄우려는 것, 검토는 완료하지 않음).
-사용법: python nav_focus_check.py <출력 폴더> <라벨>   환경: ONLY_CHECKS=skip,menu,reviews,analysis,keep,longtext,tables
+사용법: python nav_focus_check.py <출력 폴더> <라벨>   환경: ONLY_CHECKS=skip,menu,reviews,analysis,summary,history,failure,stale,keep,longtext,tables
+시험에서만 하는 일: 상세 요청을 붙잡아 '기다리는 중'을 만들거나 시험용 404·500 응답을 준다, 대기 중 확인창은 시험용 <dialog>로 만든다 (앱 동작을 늦추지 않음).
 """
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
 
-from diag_common import EV, URL, USERS, Api, creds, xlsx
+from diag_common import ASSET_JS, EV, URL, USERS, Api, creds, run_meta, xlsx
 from diag_scope import browser_proxy, route_guard
 
 OUT = Path(sys.argv[1])
@@ -160,6 +162,232 @@ def check_analysis(pg: Page) -> None:
     rec("nav", {"what": "분석: 결과 → '새 분석'", "after": focus(pg), "url": pg.evaluate("location.pathname + location.search")})
 
 
+SUMMARY_JS = """() => { const s = document.querySelector('details.an-past > summary'); return s ? {tabindex_attr: s.getAttribute('tabindex'), tabIndex: s.tabIndex,
+  open: s.parentElement.open, focused: document.activeElement === s} : null }"""
+IS_SUMMARY = "e === document.querySelector('details.an-past > summary')"
+
+
+def check_summary(pg: Page) -> None:
+    """'새 분석'으로 돌아와 '내 분석 결과'(summary)에 초점이 온 뒤에도 기본 키보드 동작이 그대로인지 (복귀 직후 + 이후 이동)."""
+    login(pg, "user1")
+    pg.locator(".side-link", has_text="데이터 분석").first.click()
+    settle(pg)
+    if not pg.locator("details.an-past > summary").count():
+        rec("summary", {"what": "summary", "result": "지난 결과 없음 (측정 안 함)"})
+        return
+    rec("summary", {"what": "처음 상태", **pg.evaluate(SUMMARY_JS)})
+    s = pg.locator("details.an-past > summary").first
+    s.focus()
+    pg.keyboard.press("Enter")
+    pg.keyboard.press("Tab")
+    pg.keyboard.press("Enter")
+    pg.locator("section.an h2").first.wait_for(timeout=60000)
+    pg.wait_for_timeout(800)
+    new = pg.get_by_role("link", name="새 분석")
+    new.focus()
+    pg.keyboard.press("Enter")
+    settle(pg, 1500)
+    rec("summary", {"what": "'새 분석'으로 돌아온 직후", **pg.evaluate(SUMMARY_JS), "focus": focus(pg)})
+    # 다른 요소로 옮긴 뒤 Shift+Tab·Tab으로 다시 닿는지
+    pg.keyboard.press("Tab")
+    away = focus(pg)
+    back = tab_to(pg, IS_SUMMARY, n=12, back=True)
+    rec("summary", {"what": "Tab으로 벗어난 뒤 Shift+Tab으로 다시", "moved_to": away, "reached": back, **pg.evaluate(SUMMARY_JS)})
+    pg.evaluate("(() => { const h = [...document.querySelectorAll('main h1')].find(e => !e.closest('[hidden]')); h.setAttribute('tabindex', '-1'); h.focus(); h.removeAttribute('tabindex') })()")
+    fwd = tab_to(pg, IS_SUMMARY, n=40)
+    rec("summary", {"what": "화면 제목에서 Tab으로 다시", "reached": fwd, **pg.evaluate(SUMMARY_JS)})
+    # Enter·Space로 펼치고 접기
+    s.focus()
+    o0 = pg.evaluate(SUMMARY_JS)["open"]
+    pg.keyboard.press("Enter")
+    o1 = pg.evaluate(SUMMARY_JS)["open"]
+    pg.keyboard.press("Space")
+    pg.wait_for_timeout(100)
+    o2 = pg.evaluate(SUMMARY_JS)["open"]
+    rec("summary", {"what": "Enter·Space로 펼치고 접기", "open_before": o0, "after_enter": o1, "after_space": o2})
+
+
+def open_review_row(pg: Page, key: str) -> None:
+    btn = pg.locator(f"button[data-focus-key='{key}']").first
+    btn.focus()
+    pg.keyboard.press("Enter")
+    pg.locator("section.review-panel h2").first.wait_for(timeout=60000)
+    pg.wait_for_timeout(800)
+
+
+def check_history(pg: Page) -> None:
+    """뒤로·앞으로·번갈아 열기·같은 상세를 다른 곳에서 열기·주소 직접 접근."""
+    login(pg, "user1")
+    pg.locator(".side-link", has_text="검토 목록").first.click()
+    settle(pg)
+    keys = pg.evaluate("[...document.querySelectorAll('button[data-focus-key^=\"review-row-\"]')].map(b => b.getAttribute('data-focus-key')).slice(0, 2)")
+    if len(keys) < 2:
+        rec("history", {"what": "번갈아 열기", "result": "검토가 2개 미만 (측정 안 함)"})
+        return
+    a, b = keys
+    open_review_row(pg, a)
+    pg.go_back()
+    settle(pg, 1500)
+    open_review_row(pg, b)
+    detail_b = pg.evaluate("location.search")
+    pg.go_back()
+    settle(pg, 1500)
+    after_back = focus(pg)
+    pg.go_forward()
+    pg.locator("section.review-panel h2").first.wait_for(timeout=60000)
+    settle(pg, 1200)
+    after_fwd = focus(pg)
+    pg.go_back()
+    settle(pg, 1500)
+    rec("history", {"what": "번갈아 열기: A 열고 뒤로 → B 열고 뒤로 → 앞으로 → 뒤로", "a": a, "b": b, "b_url": detail_b, "after_back_b": after_back,
+                    "after_forward_b": after_fwd, "after_back_again": focus(pg)})  # fmt: skip
+    # 같은 상세 주소를 실행 기록과 검토 목록에서 각각 열기
+    pg.locator(".side-link", has_text="실행 기록").first.click()
+    settle(pg)
+    rb = pg.locator("button.wk-run-review").first
+    rkey = rb.get_attribute("data-focus-key")
+    rb.focus()
+    pg.keyboard.press("Enter")
+    pg.locator("section.review-panel h2").first.wait_for(timeout=60000)
+    pg.wait_for_timeout(800)
+    rid = pg.evaluate("new URLSearchParams(location.search).get('review')")
+    pg.go_back()
+    settle(pg, 1500)
+    from_runs = focus(pg)
+    pg.locator(".side-link", has_text="검토 목록").first.click()
+    settle(pg)
+    lkey = f"review-row-{rid}"
+    if pg.locator(f"button[data-focus-key='{lkey}']").count():
+        open_review_row(pg, lkey)
+        pg.go_back()
+        settle(pg, 1500)
+        from_list = focus(pg)
+    else:
+        from_list = {"where": "측정 안 함 (목록에 같은 검토 줄 없음)"}
+    rec("history", {"what": "같은 상세를 실행 기록·검토 목록에서 열고 뒤로", "review": rid, "runs_key": rkey, "back_to_runs": from_runs, "list_key": lkey, "back_to_list": from_list})
+    # 주소 직접 접근·새로고침: 처음 그릴 때는 초점을 옮기지 않는다 (브라우저 기본 — 문서 처음, 첫 Tab은 본문 바로가기)
+    pg.goto(f"{URL}/reviews?review={rid}")
+    pg.locator("section.review-panel h2").first.wait_for(timeout=60000)
+    settle(pg, 1200)
+    first = focus(pg)
+    pg.keyboard.press("Tab")
+    rec("history", {"what": "상세 주소 직접 접근(새로고침)", "after_load": first, "first_tab": focus(pg)})
+
+
+def check_failure(pg: Page) -> None:
+    """상세를 열지 못할 때: 검토 404, 분석 결과 500 (시험용 응답 — 서버에는 보내지 않음)."""
+    login(pg, "user1")
+    pg.locator(".side-link", has_text="검토 목록").first.click()
+    settle(pg)
+    key = pg.locator("button[data-focus-key^='review-row-']").first.get_attribute("data-focus-key")
+    pat = re.compile(r"/api/reviews/\d+$")
+    pg.route(pat, lambda r: r.fulfill(status=404, content_type="application/json", body='{"detail": "검토를 찾을 수 없습니다."}') if r.request.method == "GET" else r.continue_())
+    btn = pg.locator(f"button[data-focus-key='{key}']").first
+    btn.focus()
+    pg.keyboard.press("Enter")
+    pg.wait_for_timeout(1500)
+    rec("failure", {"what": "검토 상세를 찾지 못함 (시험용 404)", "after": focus(pg), "alerts": pg.locator("section.review-panel [role=alert]").all_inner_texts()})
+    pg.unroute(pat)
+    pg.locator(".side-link", has_text="데이터 분석").first.click()
+    settle(pg)
+    if not pg.locator("details.an-past > summary").count():
+        rec("failure", {"what": "분석 결과를 불러오지 못함", "result": "지난 결과 없음 (측정 안 함)"})
+        return
+    apat = re.compile(r"/api/analysis/runs/\d+$")
+    pg.route(apat, lambda r: r.fulfill(status=500, content_type="application/json", body='{"detail": "진단 시험 오류"}'))
+    s = pg.locator("details.an-past > summary").first
+    s.focus()
+    pg.keyboard.press("Enter")
+    pg.keyboard.press("Tab")
+    pg.keyboard.press("Enter")
+    pg.wait_for_timeout(1000)
+    at_1s = focus(pg)
+    pg.wait_for_timeout(2600)
+    rec("failure", {"what": "분석 결과를 불러오지 못함 (시험용 500)", "after_1s": at_1s, "after_3_6s": focus(pg), "alerts": pg.locator("section.an [role=alert]").all_inner_texts()})
+    pg.unroute(apat)
+
+
+def start_held_analysis(pg: Page, held: list):
+    """분석 지난 결과를 열되 상세 응답을 붙잡아 둔다 (시험에서 '기다리는 중'을 만든다). 붙잡은 경로를 돌려준다."""
+    pg.locator(".side-link", has_text="데이터 분석").first.click()
+    settle(pg)
+    apat = re.compile(r"/api/analysis/runs/\d+$")
+    pg.route(apat, lambda r: held.append(r))
+    s = pg.locator("details.an-past > summary").first
+    s.focus()
+    pg.keyboard.press("Enter")
+    pg.keyboard.press("Tab")
+    pg.keyboard.press("Enter")
+    pg.wait_for_timeout(500)
+    return apat
+
+
+def release_held(pg: Page, held: list, apat) -> None:
+    for r in held:
+        try:
+            r.continue_()
+        except Exception:  # noqa: BLE001 — 화면이 바뀌어 요청이 이미 끝난 경우
+            pass
+    held.clear()
+    pg.unroute(apat)
+
+
+def check_stale(pg: Page) -> None:
+    """상세를 기다리는 동안 다른 일이 생겼을 때 이전 대기가 지금 화면의 초점을 빼앗지 않는지 (시간 초과 3초를 넘겨 확인)."""
+    login(pg, "user1")
+    if not (pg.locator(".side-link", has_text="데이터 분석").count()):
+        return
+    held: list = []
+    # A) 기다리는 동안 메뉴로 다른 화면 → 사용자가 글자를 눌러 초점이 본문으로 → 3.6초 뒤
+    apat = start_held_analysis(pg, held)
+    pg.locator(".side-link", has_text="실행 기록").first.click()
+    settle(pg, 600)
+    at_nav = focus(pg)
+    pg.evaluate("document.activeElement && document.activeElement.blur()")  # 글자를 눌러 초점이 본문으로 간 상태
+    release_held(pg, held, apat)
+    pg.wait_for_timeout(3600)
+    rec("stale", {"what": "상세 대기 중 다른 화면으로 → 초점이 본문으로 → 3.6초 뒤", "after_nav": at_nav, "after_3_6s": focus(pg), "path": pg.evaluate("location.pathname")})
+    # B) 기다리는 동안 로그아웃 → 새로 고치지 않고 다시 로그인 → 3.6초 뒤
+    errors: list[str] = []
+    pg.on("pageerror", lambda e: errors.append(str(e)[:200]))
+    apat = start_held_analysis(pg, held)
+    t0 = pg.evaluate("performance.now()")  # 상세 대기가 시작된 뒤 (시간 초과 3초 안에 다시 로그인해야 시험이 성립)
+    pg.locator(".side-logout").click()
+    pg.wait_for_selector(".login-card", timeout=15000)
+    pg.get_by_label("아이디").fill(USERS["user1"])
+    pg.get_by_label("비밀번호", exact=True).fill(creds()["user1"])
+    pg.locator(".login-card button[type=submit]").click()
+    pg.wait_for_selector(".shell", timeout=60000)
+    relogin_ms = round(pg.evaluate("performance.now()") - t0) + 500  # start_held_analysis 안에서 기다린 0.5초 포함
+    release_held(pg, held, apat)
+    after_login = focus(pg)
+    pg.wait_for_timeout(3600)
+    rec("stale", {"what": "상세 대기 중 로그아웃 → 다시 로그인 → 3.6초 뒤", "relogin_ms_after_wait_start": relogin_ms, "valid_before_timeout": relogin_ms < 3000,
+                  "after_login": after_login, "after_3_6s": focus(pg), "page_errors": errors})  # fmt: skip
+    # C) 기다리는 동안 사용자가 다른 요소로 초점을 옮김 → 상세 도착
+    apat = start_held_analysis(pg, held)
+    pg.locator(".side-link", has_text="내 계정").first.focus()
+    moved = focus(pg)
+    release_held(pg, held, apat)
+    pg.locator("section.an h2").first.wait_for(timeout=60000)
+    pg.wait_for_timeout(1200)
+    rec("stale", {"what": "상세 대기 중 사용자가 다른 요소로 이동 → 상세 도착", "moved_to": moved, "after": focus(pg)})
+    # D) 기다리는 동안 확인창이 열림 → 상세 도착 (시험용 <dialog>를 넣어 확인 — 이 화면에는 대기 중 열 수 있는 앱 확인창이 없음)
+    pg.goto(URL + "/")
+    settle(pg)
+    apat = start_held_analysis(pg, held)
+    pg.evaluate("""() => { const d = document.createElement('dialog'); d.id = 'diag-test-dialog'; d.innerHTML = '<p>시험용 확인창</p><button>닫기</button>';
+        document.body.appendChild(d); d.showModal() }""")
+    in_dialog = focus(pg)
+    release_held(pg, held, apat)
+    pg.locator("section.an h2").first.wait_for(timeout=60000)
+    pg.wait_for_timeout(1200)
+    during = focus(pg)
+    pg.evaluate("document.getElementById('diag-test-dialog').close(); document.getElementById('diag-test-dialog').remove()")
+    pg.wait_for_timeout(500)
+    rec("stale", {"what": "상세 대기 중 확인창(시험용 dialog)이 열림 → 상세 도착", "opened": in_dialog, "while_open": during, "after_close": focus(pg)})
+
+
 def check_keep(pg: Page) -> None:
     """주소만 고치는 선택·검색·백그라운드 갱신에서는 초점을 옮기지 않는다."""
     login(pg, "user1")
@@ -281,10 +509,20 @@ def check_tables(pg: Page) -> None:
     pg.set_viewport_size({"width": 1280, "height": 800})
 
 
+META: dict = {}
+
+
 def main() -> None:
     with sync_playwright() as p:
         b = p.chromium.launch(channel="msedge", headless=True, proxy=browser_proxy(URL))
-        for name, fn in (("skip", check_skip), ("menu", check_menu), ("reviews", check_reviews), ("analysis", check_analysis), ("keep", check_keep),
+        cx = b.new_context()
+        cx.route("**/*", route_guard(URL, BLOCKED))
+        pg = cx.new_page()
+        pg.goto(URL + "/")
+        META.update(run_meta("nav_focus_check.py", LABEL, pg.evaluate(ASSET_JS)) | {"browser": f"msedge {b.version}"})
+        cx.close()
+        for name, fn in (("skip", check_skip), ("menu", check_menu), ("reviews", check_reviews), ("analysis", check_analysis), ("summary", check_summary),
+                         ("history", check_history), ("failure", check_failure), ("stale", check_stale), ("keep", check_keep),
                          ("longtext", check_longtext), ("tables", check_tables)):  # fmt: skip
             if os.environ.get("ONLY_CHECKS") and name not in os.environ["ONLY_CHECKS"].split(","):
                 continue
@@ -299,7 +537,7 @@ def main() -> None:
             cx.close()
         b.close()
     RES["blocked_out_of_scope"] = BLOCKED
-    RES["browser"] = "msedge"
+    RES["meta"] = META
     (OUT / f"nav-check-{LABEL}.json").write_text(json.dumps(RES, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
