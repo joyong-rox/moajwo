@@ -22,7 +22,9 @@
 | `scripts/nu_check_dom.py` | 저장한 DOM·서버 문서를 로컬 Nu로 검사해 결과 JSON을 채움 | 2차 추가 |
 | `scripts/a11y_manual.py` | 키보드·확인창·재배치·확대·간격·대상 크기·상태 안내·로그인 보조 기록. 2차에 `authforms`(가입·최초 설정 화면 재배치·확대) 추가 | 사용함. `keyboard`의 '검토 열기' 단계는 판정 조건 오류로 미확인 (1차) |
 | `scripts/a11y_fix_check.py` | **측정만 저장:** D-01~D-07 항목별 전후 기록(접근 가능한 이름·설명, 상태 영역 변경 기록, 테두리·스위치 대비, 가입 도움말, 지난 검사 점수). 3차에 추가한 측정: 업로드 중·완료 뒤 조작 요소, A1 규칙, 상태 안내 범위(혼합 형식·목록 갱신·늦은 응답·로그아웃), 분석 표 로딩·실패, 확인창 본문 연결·초점, 화면에 나타난 입력 경계·초점 외곽선 | 2차 추가, 3차 확장 |
-| `scripts/a11y_regress.py` | **판정:** 측정 JSON을 읽어 `--suite`로 고른 묶음의 필수 기준(ID)을 판정. 통과·실패·미측정·측정 오류·입력 오류·해당 없음을 나누고, 종료 코드 0 전체 완료 / 1 실패 / 2 불완전 / 3 부분 검사 통과 / 5 사용법 오류. 출처가 다른 측정을 합치면 `--reuse-reason` 필요 (화면 접속 없음) | 3차 추가, 4차 재작성 |
+| `scripts/a11y_regress.py` | **판정:** 측정 JSON을 읽어 `--suite`(fix·nav·transition)로 고른 묶음의 필수 기준(ID)을 판정. 통과·실패·미측정·측정 오류·입력 오류·해당 없음을 나누고, 종료 코드 0 전체 완료 / 1 실패 / 2 불완전 / 3 부분 검사 통과 / 4 판정기 자체 오류 / 5 사용법 오류. 출처가 다른 측정을 합치면 `--reuse-reason` 필요 (화면 접속 없음). 5차: `--suite`·`--partial` 목록 규칙(쉼표로 나눔 → 앞뒤 공백 제거 → 빈 항목 버림 → 중복은 처음 것만, 비면 5), 고른 기준 0개는 불완전, 출력은 늘 UTF-8 | 3차 추가, 4차 재작성, 5차 보완 |
+| `scripts/button_transition_check.py` | **측정만 저장:** 버튼이 비활성으로 그려진 뒤 활성이 되는 동안 프레임마다 글자 대비(반올림 전 값)·disabled·hover·초점·글자 크기·굵기·색·투명도. 로그인(시험용 응답·없는 아이디의 실제 응답), 홈 '사전 검토 열기'·'검증 실행', 묶기 '엑셀 만들기'·'위로' — 23개 실행. 틀린 비밀번호를 서버로 보내지 않음 | 5차 추가 |
+| `scripts/run_logged.py` | 명령 하나를 실행하고 표준 출력·오류(받은 바이트 그대로)·종료 코드·명령·대상 SHA·작업 트리 변경 여부·출력 인코딩 환경을 파일로 남김 | 5차 추가 |
 | `scripts/login_contrast_probe.py` | 로그인 실패 직후 로그인 버튼의 상태·색·투명도·전환을 프레임마다 기록하고 axe를 두 시점에 돌림 (틀린 비밀번호 로그인만 — 여러 번 돌리면 진단 계정이 5분 잠김) | 4차 추가 |
 | `scripts/nav_focus_check.py` | **측정만 저장:** 본문 바로가기, 화면 이동 뒤 초점(메뉴·목록↔상세·뒤로/앞으로·주소만 고침), 긴 내용 보기, 분석 표 스크롤 영역. 긴 근거 확인용 합성 검토를 만든다 | 3차 추가 |
 | `scripts/a4_split.py` | A4(axe 대비 판정 보류) 대상을 1차 DOM과 대조해 기존 요소와 새로 생긴 요소로 나눔 (저장한 DOM만 읽음) | 3차 추가 |
@@ -31,7 +33,7 @@
 | `scripts/scope_selftest.py` | 요청 범위 자체 시험 (루프백 임시 서버만, 진단·운영 주소에 요청 없음) | 2차 추가 |
 | `scripts/scroller_check.py`·`toggle_check.py`·`contrast_check.py`·`contrast_calc.py`·`css_support_check.py` | 개별 확인 (표 스크롤 영역, 스위치 상태 색, 계산 색, 대비 계산, CSS 지원) | 사용함. 3차: 대비 계산 경계 0.04045·원시값 판정, CSS 지원에 말줄임 렌더링 비교 추가 |
 | `scripts/summarize_trivy.py`·`summarize_a11y.py` | 원시 결과 재집계 (새 검사 없음) | 사용함 |
-| `tests/` | `diag_scope` 단위 시험 43개(소켓 연결을 막은 채 실행) + `a11y_regress` 판정 시험 18개(그중 CLI 종료 코드 7개) = 61개 | 2차 추가, 3·4차 확장 |
+| `tests/` | `diag_scope` 단위 시험 43개(소켓 연결을 막은 채 실행) + `a11y_regress` 판정 시험 28개(그중 CLI 종료 코드 11개 — 출력 인코딩 환경 변수를 뺀 하위 프로세스) = 71개 | 2차 추가, 3·4·5차 확장 |
 | `tools/zoomext/` | 실제 브라우저 확대용 최소 확장 (탭 확대 권한만) | 사용함 |
 | `reports/` | 부록: API 목록, 72개 상태 결과, Trivy HIGH 전체, WCAG 2.2 A·AA 상태 | — |
 | `ruff.toml` | 진단 스크립트 전용 린트 (backend 규칙 상속, JS 문자열 때문에 줄 길이만 완화) | — |
@@ -65,7 +67,7 @@ PY=$ROOT/backend/.venv/Scripts/python.exe           # Python 3.12.10: openpyxl 3
 PW=<Playwright 파이썬>                             # Python 3.12.10: playwright 1.63.0, openpyxl 3.1.5 (2차는 Git 밖 임시 venv)
 SCRATCH=<Git 밖 임시 폴더>                         # 소스 사본·미러·이미지 tar·axe-core 설치 위치
 AXE_JS="$(cygpath -w "$SCRATCH/diag/tools/node/node_modules/axe-core/axe.min.js")"   # axe-core 4.14.0
-export PYTHONIOENCODING=utf-8                       # 한글 출력 (2차 실행 때 명령마다 붙임 — 대비 계산 출력 비교도 이 상태)
+export PYTHONIOENCODING=utf-8                       # 한글 출력 (2차 실행 때 명령마다 붙임 — 대비 계산 출력 비교도 이 상태). 5차부터 판정기는 이 변수가 없어도 UTF-8로 씀 (없을 때 cp949로 죽어 종료 1이 나던 문제, REPORT 14.3)
 mkdir -p "$EV/round2"                               # 출력 폴더는 명령마다 mkdir -p로 먼저 만든다
 ```
 
@@ -140,11 +142,17 @@ mkdir -p "$EV/round2/fix-check/before" "$EV/round2/fix-check/after-final"
 #   (4차 형태 — 3차에는 --suite 없이 실행했고 판정 기준이 지금과 다름)
 (cd "$ROOT/diagnostics/scripts" && AXE_JS="$AXE_JS" $PW a11y_fix_check.py "$(cygpath -w "$EV/round4/fix-check")" after-16bb926)
 (cd "$ROOT/diagnostics/scripts" && $PW nav_focus_check.py "$(cygpath -w "$EV/round4/nav-check")" after-16bb926)   # ONLY_CHECKS=skip,menu,reviews,analysis,summary,history,failure,stale,keep,longtext,tables
-#   판정: 묶음을 명시한다 (입력으로 범위를 추정하지 않음). 종료 코드 0 전체 완료 / 1 실패 / 2 불완전 / 3 부분 검사 통과 / 5 사용법 오류
+#   판정: 묶음을 명시한다 (입력으로 범위를 추정하지 않음). 종료 코드 0 전체 완료 / 1 실패 / 2 불완전 / 3 부분 검사 통과 / 4 판정기 자체 오류 / 5 사용법 오류
 $PY "$ROOT/diagnostics/scripts/a11y_regress.py" --suite fix,nav --md "$EV/round4/regress-after-16bb926.md" "$EV/round4/fix-check/fix-check-after-16bb926.json" "$EV/round4/nav-check/nav-check-after-16bb926.json"
 #   출처가 다른(또는 출처 기록이 없는) 측정을 합칠 때는 재사용 이유를 적는다 — 보고서 출처 표에 남는다
 $PY "$ROOT/diagnostics/scripts/a11y_regress.py" --suite fix --reuse-reason "<같은 이미지 등 이유>" --md "$EV/round4/regress-62895ac-with-dialog.md" "$EV/round3/fix-check/fix-check-after-62895ac.json" "$EV/round4/fix-check/fix-check-after-62895ac-dialog.json"
-#   로그인 버튼 대비 조사 (4차) — 틀린 비밀번호 로그인을 반복하므로 진단 계정이 잠길 수 있다
+#   5차: 기록하며 실행 (표준 출력·오류·종료 코드·명령·대상 SHA를 $EV/round5/logs/<이름>.* 로) — 시험·판정·측정 모두 이렇게 돌렸다
+#     $PY "$ROOT/diagnostics/scripts/run_logged.py" "$(cygpath -w "$EV/round5/logs")" <이름> --cwd <실행 폴더> --sha-of <대상 작업 트리> -- <명령 ...>
+#     Windows에서 cmd 내장 명령이 아니라 npm.cmd·npx.cmd를 직접 부른다 (Git Bash는 'cmd /c'의 /c를 경로로 바꿔 명령이 실행되지 않음)
+#   5차: 버튼 전환 중 대비 (수정 전·후 이미지마다) → 판정 transition 묶음 (정지 상태·전환 중을 따로, 관측 못 한 실행은 미측정)
+(cd "$ROOT/diagnostics/scripts" && $PW button_transition_check.py "$(cygpath -w "$EV/round5/transition")" after-a55453e-final)   # ONLY_CHECKS=login,review,bundle
+$PY "$ROOT/diagnostics/scripts/a11y_regress.py" --suite fix,nav,transition --md "$EV/round5/regress-after-a55453e-final.md" "$EV/round5/fix-check/fix-check-after-a55453e.json" "$EV/round5/nav-check/nav-check-after-a55453e.json" "$EV/round5/transition/transition-after-a55453e-final.json"
+#   로그인 버튼 대비 조사 (4차) — 틀린 비밀번호 로그인을 반복하므로 진단 계정이 잠길 수 있다 (5차는 이 스크립트 대신 button_transition_check.py를 씀)
 (cd "$ROOT/diagnostics/scripts" && AXE_JS="$AXE_JS" $PW login_contrast_probe.py "$(cygpath -w "$EV/round4/login-contrast-probe.json")" 5)
 
 # A7) 72개 상태: 브라우저 수집(NU_URL=off) → 브라우저를 닫은 뒤 Nu만 띄워 검사 → Nu 내림

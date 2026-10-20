@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -104,6 +105,38 @@ def full_nav():
     }  # fmt: skip
 
 
+# button_transition_check.py의 실행 ID (판정기 목록과 따로 적어 둔다 — 판정기가 이 실행을 모두 요구하는지 함께 본다)
+TR_RUNS = ([f"login.ctl.{vp}.{m}" for vp in ("desktop", "mobile") for m in ("mouse_stay", "mouse_away", "keyboard")]
+           + [f"login.real.{vp}.{i}" for vp in ("desktop", "mobile") for i in (1, 2)]
+           + [f"{b}.{vp}.{m}" for b in ("review", "verify", "bundle_make") for vp in ("desktop", "mobile") for m in ("hover", "away")]
+           + ["bundle_up.desktop.keyboard"])  # fmt: skip
+
+
+def frame(t, disabled, ratio, size="16px", weight="600"):
+    return {"t": t, "disabled": disabled, "hover": False, "focused": False, "font_size": size, "font_weight": weight, "color": "rgb(255, 255, 255)",
+            "bg": "rgb(55, 88, 249)", "opacity": "1", "around": "rgb(255, 255, 255)", "ratio": ratio}  # fmt: skip
+
+
+def tr(run, low=5.349, size="16px", weight="600", observed=True, final_disabled=False):
+    """button_transition_check.summarize()가 남기는 모양의 합성 기록: 비활성 프레임 뒤 활성 프레임, 활성 최저 low."""
+    frames = [frame(0, True, 1.78, size, weight), frame(17, False, low, size, weight)] + [frame(34 + 17 * i, final_disabled, 5.349, size, weight) for i in range(3)]
+    need = 3.0 if float(size.rstrip("px")) >= 24 or (float(size.rstrip("px")) >= 18.66 and int(weight) >= 700) else 4.5
+    enabled = [f for f in frames if observed and not f["disabled"]]
+    lowf = min(enabled, key=lambda f: f["ratio"]) if enabled else None
+    return {"run": run, "button": "합성", "kind": "합성", "observed": observed, "saw_disabled": observed, "enabled_at_ms": 17 if observed else None,
+            "frames_total": len(frames), "need": need, "font": f"{size} {weight}", "min_enabled_ratio": lowf["ratio"] if lowf else None, "min_enabled_frame": lowf,
+            "enabled_below_need": sum(f["ratio"] < need for f in enabled), "final_ratio": frames[-1]["ratio"], "final_disabled": final_disabled,
+            "static_stable": True, "frames": frames}  # fmt: skip
+
+
+def full_transition():
+    """transition 묶음의 필수 기준(실행마다 정지·전환 중)을 모두 통과하는 측정 기록 (합성)."""
+    return {"meta": {"frontend_asset": "index-TEST.js", "label": "transition"}, "transition": [tr(r) for r in TR_RUNS], "blocked_out_of_scope": []}
+
+
+SCOPE_ONLY = {"blocked_out_of_scope": []}  # 측정 묶음 없이 범위 기록만 있는 입력 (5차 재현)
+
+
 def write(tmp_path, name, data):
     p = tmp_path / name
     p.write_text(data if isinstance(data, str) else json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -111,7 +144,9 @@ def write(tmp_path, name, data):
 
 
 def run_cli(*args):
-    return subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    # 출력 인코딩을 정하는 환경 변수를 빼고 실행한다 — 시험을 띄운 방식(PYTHONIOENCODING 유무)과 상관없이 같은 조건으로 본다
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+    return subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], capture_output=True, text=True, encoding="utf-8", timeout=60, env=env)
 
 
 def judged(tmp_path, suites, *datas, partial=None, reason=None):
@@ -202,6 +237,54 @@ def test_sources_need_reuse_reason(tmp_path):
     assert code == ar.EXIT_OK
 
 
+def test_list_rules():
+    assert ar.items(" nav , nav ,,fix ") == ["nav", "fix"]  # 앞뒤 공백 제거, 빈 항목 버림, 중복은 처음 것만
+    for empty in ("", ",", " ", " , ,", ",,"):
+        assert ar.items(empty) == []
+
+
+def test_no_criteria_is_never_complete(tmp_path):
+    # 고른 기준이 0개면 범위 밖 요청 0건만으로 '전체 완료'가 되지 않는다 (함수를 직접 부르는 경우도)
+    for suites, partial in (([], None), (["nav"], [])):
+        res, (_, code) = judged(tmp_path, suites, SCOPE_ONLY, partial=partial)
+        assert code == ar.EXIT_INCOMPLETE, [(r.id, r.status) for r in res]
+        assert statuses(res, "COMMON.no_criteria") == [ar.IERR]
+
+
+def test_transition_full_pass_and_required_runs(tmp_path):
+    res, (_, code) = judged(tmp_path, ["transition"], full_transition())
+    assert code == ar.EXIT_OK, [(r.id, r.status, r.evidence) for r in res if r.status != ar.PASS]
+    assert len([r for r in res if r.suite == "transition"]) == 2 * len(TR_RUNS)  # 실행마다 정지 상태·전환 중 따로
+
+
+def test_transition_active_below_need_fails(tmp_path):
+    d = full_transition()
+    d["transition"][0] = tr(TR_RUNS[0], low=4.4999)  # 반올림하면 4.5지만 원시값은 미달
+    res, (_, code) = judged(tmp_path, ["transition"], d)
+    assert code == ar.EXIT_FAIL
+    assert statuses(res, f"TR.{TR_RUNS[0]}.moving") == [ar.FAIL] and statuses(res, f"TR.{TR_RUNS[0]}.static") == [ar.PASS]
+
+
+def test_transition_large_text_uses_3_to_1(tmp_path):
+    d = full_transition()
+    d["transition"][0] = tr(TR_RUNS[0], low=3.2, size="24px", weight="400")
+    d["transition"][1] = tr(TR_RUNS[1], low=3.2, size="18.66px", weight="600")  # 굵지 않은 18.66px는 일반 글자 (4.5)
+    res, (_, code) = judged(tmp_path, ["transition"], d)
+    assert statuses(res, f"TR.{TR_RUNS[0]}.moving") == [ar.PASS] and statuses(res, f"TR.{TR_RUNS[1]}.moving") == [ar.FAIL]
+
+
+def test_transition_unobserved_or_missing_is_not_pass(tmp_path):
+    d = full_transition()
+    d["transition"][0] = tr(TR_RUNS[0], observed=False)  # 비활성→활성을 관측하지 못함
+    d["transition"][1] = tr(TR_RUNS[1], final_disabled=True)  # 비활성으로 끝남: 정지 상태도 판정 불가
+    del d["transition"][2]
+    res, (_, code) = judged(tmp_path, ["transition"], d)
+    assert code == ar.EXIT_INCOMPLETE
+    assert statuses(res, f"TR.{TR_RUNS[0]}.moving") == [ar.NONE] and statuses(res, f"TR.{TR_RUNS[0]}.static") == [ar.PASS]
+    assert statuses(res, f"TR.{TR_RUNS[1]}.static") == [ar.NONE]
+    assert statuses(res, f"TR.{TR_RUNS[2]}.") == [ar.NONE, ar.NONE]
+
+
 def test_partial_is_distinct_from_full(tmp_path):
     res, (title, code) = judged(tmp_path, ["nav"], full_nav(), partial=["NAV.summary.tabindex", "NAV.forward"])
     assert code == ar.EXIT_PARTIAL and "부분" in title and len([r for r in res if r.suite == "nav"]) == 2
@@ -238,7 +321,13 @@ def test_cli_error_and_bad_json(tmp_path):
 def test_cli_failure(tmp_path):
     nav = full_nav()
     nav["nav"][0]["after_enter"] = el("H1", "홈", hidden=True)  # 숨긴 홈의 제목을 잡음
-    assert run_cli("--suite", "nav", write(tmp_path, "f.json", nav)).returncode == 1
+    p = run_cli("--suite", "nav", write(tmp_path, "f.json", nav))
+    assert p.returncode == 1 and "실패(제품 결함) 있음" in p.stdout  # 1은 판정 결과여야 한다 (판정기가 죽어서 나온 1이 아님)
+
+
+def test_cli_tool_error_is_not_product_failure(tmp_path):
+    p = run_cli("--suite", "nav", "--md", tmp_path, write(tmp_path, "n.json", full_nav()))  # 보고서 경로가 폴더 → 쓰기 실패
+    assert p.returncode == 4 and "Traceback" in p.stderr
 
 
 def test_cli_merge_keeps_earlier_error(tmp_path):
@@ -247,6 +336,35 @@ def test_cli_merge_keeps_earlier_error(tmp_path):
     b = {"meta": a["meta"], "summary": copy.deepcopy(a["summary"]), "error": [], "blocked_out_of_scope": []}
     p = run_cli("--suite", "nav", write(tmp_path, "a.json", a), write(tmp_path, "b.json", b))
     assert p.returncode == 2 and "앞 파일 오류" in p.stdout
+
+
+def test_cli_empty_suite_is_usage_error(tmp_path):
+    f = write(tmp_path, "scope.json", SCOPE_ONLY)
+    for value in ("", ",", " ", " , ,"):
+        p = run_cli("--suite", value, f)
+        assert p.returncode == 5, (value, p.returncode, p.stdout[-300:])
+    for value in ("", ","):
+        assert run_cli("--suite", "nav", "--partial", value, f).returncode == 5
+
+
+def test_cli_suite_list_is_normalized(tmp_path):
+    fx, nv = write(tmp_path, "f.json", full_fix()), write(tmp_path, "n.json", full_nav())
+    assert run_cli("--suite", " nav , nav ", nv).returncode == 0  # = nav
+    assert run_cli("--suite", "fix,,nav,", fx, nv).returncode == 0  # = fix,nav
+    assert run_cli("--suite", "nav", "--partial", " NAV.forward ,NAV.forward", nv).returncode == 3
+    assert run_cli("--suite", "nav", write(tmp_path, "s.json", SCOPE_ONLY)).returncode == 2  # 측정 묶음 없음 → 불완전
+
+
+def test_cli_transition(tmp_path):
+    assert run_cli("--suite", "transition", write(tmp_path, "t.json", full_transition())).returncode == 0
+    low = full_transition()
+    low["transition"][3] = tr(TR_RUNS[3], low=1.022)
+    assert run_cli("--suite", "transition", write(tmp_path, "low.json", low)).returncode == 1
+    unseen = full_transition()
+    unseen["transition"][3] = tr(TR_RUNS[3], observed=False)
+    assert run_cli("--suite", "transition", write(tmp_path, "unseen.json", unseen)).returncode == 2
+    p = run_cli("--suite", "fix,nav,transition", write(tmp_path, "f.json", full_fix()), write(tmp_path, "n.json", full_nav()), write(tmp_path, "t2.json", full_transition()))
+    assert p.returncode == 0, p.stdout[-800:]
 
 
 def test_cli_usage_errors(tmp_path):

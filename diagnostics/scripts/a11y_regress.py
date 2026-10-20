@@ -1,32 +1,48 @@
-"""접근성 회귀 판정 — 측정 스크립트(a11y_fix_check.py·nav_focus_check.py)가 저장한 JSON을 읽어 정해 둔 기준으로 판정한다.
+"""접근성 회귀 판정 — 측정 스크립트(a11y_fix_check.py·nav_focus_check.py·button_transition_check.py)가 저장한 JSON을 읽어 정해 둔 기준으로 판정한다.
 
 - 화면에 접속하지 않는다 (측정과 판정을 나눈다). 도구 심각도와 상관없이 항목마다 기준을 정해 둔다.
 - 검사 범위는 --suite로 명시한다. 입력에 들어 있는 항목만 보고 범위를 추정하지 않는다. 고른 묶음의 기준은 모두 필수다.
 - 결과: 통과 / 실패(제품 결함) / 미측정 / 측정 오류 / 입력 오류 / 해당 없음(사유를 남기는 경우만). 미측정·오류는 통과로 세지 않는다.
 - 상태 안내 기준은 DOM 변경 기록, 초점 기준은 document.activeElement 기록이다 (실제 낭독이 아님).
+- transition 묶음: 버튼마다 '정지 상태'(전환이 끝난 마지막 프레임)와 '전환 중'(다시 활성이 된 뒤의 모든 프레임)을 따로 판정한다.
+  활성 프레임이 하나라도 기준(일반 글자 4.5:1, 큰 글자 3:1, 반올림 전 값) 미만이면 실패, 비활성→활성 전환을 관측하지 못했으면 미측정.
 - 여러 파일: 측정 묶음은 뒤 파일이 앞을 바꾸고(출처 표에 남김), 범위 밖 요청·측정 오류는 모두 이어 붙인다.
   출처(빌드 자산·이미지)가 다른 파일을 합치면 --reuse-reason으로 재사용 이유를 적어야 전체 완료가 된다.
 
-사용법: python a11y_regress.py --suite fix[,nav] [--partial ID,ID...] [--reuse-reason 글] [--md 결과.md] <JSON> [<JSON> ...]
+사용법: python a11y_regress.py --suite fix[,nav][,transition] [--partial ID,ID...] [--reuse-reason 글] [--md 결과.md] <JSON> [<JSON> ...]
+  --suite·--partial 목록 규칙: 쉼표로 나누고 각 항목의 앞뒤 공백을 지운다, 빈 항목은 버린다, 같은 항목은 처음 것만 남긴다.
+  그렇게 정리한 목록이 비면(빈 문자열·쉼표만·공백만) 사용법 오류(5). 판정 단계에서도 고른 기준이 0개면 전체 완료가 될 수 없다.
 종료 코드: 0 전체 완료(고른 묶음의 필수 기준이 모두 측정되어 통과, 측정·입력 오류 없음, 범위 밖 요청 0건 기록)
-          1 실패(제품 결함) 있음   2 불완전(미측정·측정 오류·입력 오류)   3 부분 검사 통과(--partial, 전체 완료 아님)   5 사용법 오류
+          1 실패(제품 결함) 있음   2 불완전(미측정·측정 오류·입력 오류)   3 부분 검사 통과(--partial, 전체 완료 아님)
+          4 판정기 자체 오류(예외 — 파이썬 기본 1이 '실패'로 읽히지 않게 따로 둠)   5 사용법 오류
+출력: 표준 출력은 늘 UTF-8로 쓴다 (Windows 파이프 기본 cp949에서 '—' 같은 글자로 판정기가 죽지 않게).
 """
 
 import argparse
 import json
 import sys
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 PASS, FAIL, NONE, MERR, IERR, NA = "통과", "실패", "미측정", "측정 오류", "입력 오류", "해당 없음"
 INCOMPLETE = (NONE, MERR, IERR)
-EXIT_OK, EXIT_FAIL, EXIT_INCOMPLETE, EXIT_PARTIAL, EXIT_USAGE = 0, 1, 2, 3, 5
-SUITES = ("fix", "nav")
+EXIT_OK, EXIT_FAIL, EXIT_INCOMPLETE, EXIT_PARTIAL, EXIT_TOOL, EXIT_USAGE = 0, 1, 2, 3, 4, 5
+SUITES = ("fix", "nav", "transition")
 INPUT_RULES = [".mapping-pick select", ".validation-form input", ".validation-form select", ".validation-form textarea", ".glossary-search input",
                ".glossary-search select", ".review-controls select", ".review-replace-row select", ".automation-period input", ".integration-automation input",
                ".login-card input", ".admin-form input", ".admin-actions input", ".wk-home input", ".wk-home select", ".wk-home textarea", ".bd-input", ".bd-choice select"]  # fmt: skip
 DIALOGS = ["자동화 삭제", "용어사전 삭제 1", "용어사전 삭제 2", "표준 사전 빼기"]
+# button_transition_check.py의 실행 — (실행 ID 앞부분, 버튼, 구분, 조건들). 조건마다 하나씩 모두 필수다.
+TRANSITION_RUNS = [
+    ("login.ctl", "로그인", "시험용 응답 (0.5초 뒤 401)", [f"{vp}.{m}" for vp in ("desktop", "mobile") for m in ("mouse_stay", "mouse_away", "keyboard")]),
+    ("login.real", "로그인", "실제 서버 응답 (없는 아이디)", [f"{vp}.{i}" for vp in ("desktop", "mobile") for i in (1, 2)]),
+    ("review", "사전 검토 열기", "실제 화면", [f"{vp}.{m}" for vp in ("desktop", "mobile") for m in ("hover", "away")]),
+    ("verify", "검증 실행", "실제 화면", [f"{vp}.{m}" for vp in ("desktop", "mobile") for m in ("hover", "away")]),
+    ("bundle_make", "묶기 엑셀 만들기", "실제 서버 응답 (구성 확인만 0.6초 붙잡음)", [f"{vp}.{m}" for vp in ("desktop", "mobile") for m in ("hover", "away")]),
+    ("bundle_up", "묶기 위로", "실제 화면", ["desktop.keyboard"]),
+]
 
 
 class FormatError(Exception):
@@ -128,7 +144,7 @@ def source_key(src: dict) -> str | None:
 
 def label(x: dict) -> str:
     """측정 기록의 이름: 스크립트마다 what·mode·state·dialog·page 중 하나를 쓴다."""
-    return str(next((x[k] for k in ("what", "mode", "state", "dialog", "page") if k in x), ""))
+    return str(next((x[k] for k in ("what", "mode", "state", "dialog", "page", "run") if k in x), ""))
 
 
 def find(data: dict, group: str, prefix: str) -> dict | None:
@@ -427,6 +443,48 @@ def crit_list() -> list[Crit]:
         add(f"NAV.table.{vp}.region", "nav", "표", f"분석 표({vp}): 넘치는 영역만 이름·Tab 정지점", tables(vp, "region"))
         add(f"NAV.table.{vp}.headers", "nav", "표", f"분석 표({vp}): 열 머리글 유지", tables(vp, "headers"))
         add(f"NAV.table.{vp}.keyboard", "nav", "표", f"분석 표({vp}): 넘치는 영역은 화살표로 스크롤", tables(vp, "keyboard"))
+
+    # ---- transition: 비활성 → 활성 전환 중 글자 대비 (정지 상태와 따로)
+    def need(f: dict) -> float:
+        px, w = float(str(f["font_size"]).rstrip("px")), int(float(f["font_weight"]))
+        return 3.0 if px >= 24 or (px >= 18.66 and w >= 700) else 4.5
+
+    def run_rec(data: dict, run: str) -> dict | None:
+        return next((x for x in data.get("transition", []) if x.get("run") == run), None)
+
+    def static(run: str):
+        def fn(data: dict) -> tuple[str, str]:
+            r = run_rec(data, run)
+            if r is None:
+                return NONE, f"측정 기록 없음 ({run})"
+            f = r["frames"][-1] if r["frames"] else None
+            if f is None or r["final_disabled"] or not r["static_stable"]:
+                return NONE, f"마지막 프레임이 활성·안정 상태가 아님 (비활성 {r['final_disabled']}, 안정 {r['static_stable']})"
+            n = need(f)
+            return (PASS if r["final_ratio"] >= n else FAIL), f"{r['final_ratio']:.4f} (기준 {n}, {r['font']})"
+
+        return fn
+
+    def moving(run: str):
+        def fn(data: dict) -> tuple[str, str]:
+            r = run_rec(data, run)
+            if r is None:
+                return NONE, f"측정 기록 없음 ({run})"
+            if not r["observed"] or r["min_enabled_frame"] is None:
+                return NONE, f"비활성→활성 전환을 관측하지 못함 (비활성 그려짐 {r['saw_disabled']}, 활성 시각 {r['enabled_at_ms']}) — 통과로 세지 않음"
+            low = r["min_enabled_frame"]
+            n = need(low)
+            ok = r["min_enabled_ratio"] >= n and r["enabled_below_need"] == 0
+            return (PASS if ok else FAIL), (f"활성 최저 {r['min_enabled_ratio']:.4f} (기준 {n}, {low['font_size']} {low['font_weight']}, {low['t']}ms) · "
+                                            f"미달 프레임 {r['enabled_below_need']} · 활성 {r['enabled_at_ms']}ms")  # fmt: skip
+
+        return fn
+
+    for head, button, kind, conds in TRANSITION_RUNS:
+        for cond in conds:
+            run = f"{head}.{cond}"
+            add(f"TR.{run}.static", "transition", f"{button} ({kind})", f"{cond}: 정지 상태(전환 끝) 글자 대비", static(run))
+            add(f"TR.{run}.moving", "transition", f"{button} ({kind})", f"{cond}: 활성이 된 뒤 전환 중 모든 프레임 글자 대비", moving(run))
     return C
 
 
@@ -436,9 +494,20 @@ CRITS = crit_list()
 # ---------------------------------------------------------------- 판정
 
 
+def items(value: str) -> list[str]:
+    """'a, b,,a ' → ['a', 'b']: 쉼표로 나누고 앞뒤 공백을 지우고, 빈 항목은 버리고, 중복은 처음 것만 남긴다."""
+    out: list[str] = []
+    for x in (v.strip() for v in value.split(",")):
+        if x and x not in out:
+            out.append(x)
+    return out
+
+
 def judge(m: Merged, suites: list[str], partial: list[str] | None = None, reuse_reason: str | None = None) -> list[Result]:
     out: list[Result] = []
     chosen = [c for c in CRITS if c.suite in suites and (partial is None or c.id in partial)]
+    if not chosen:  # 고른 기준이 없으면 공통 기준(범위 밖 요청 등)만으로 '전체 완료'가 되지 않게 막는다
+        out.append(Result("COMMON.no_criteria", "공통", "범위", "판정할 기준이 1개 이상 선택됨", IERR, f"선택된 기준 0개 (묶음 {suites}, 부분 {partial})"))
     for c in chosen:
         try:
             status, ev = c.fn(m.data)
@@ -501,20 +570,26 @@ class Parser(argparse.ArgumentParser):
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
     ap = Parser(description="접근성 회귀 판정")
-    ap.add_argument("--suite", required=True, type=lambda s: [x for x in s.split(",") if x], help="fix, nav (쉼표로 여럿)")
-    ap.add_argument("--partial", type=lambda s: [x for x in s.split(",") if x], default=None, help="이 기준 ID만 판정 (부분 검사)")
+    ap.add_argument("--suite", required=True, type=items, help="fix, nav, transition (쉼표로 여럿 — 공백·빈 항목·중복은 정리)")
+    ap.add_argument("--partial", type=items, default=None, help="이 기준 ID만 판정 (부분 검사)")
     ap.add_argument("--reuse-reason", default=None)
     ap.add_argument("--md", type=Path, default=None)
     ap.add_argument("files", nargs="+", type=Path)
     args = ap.parse_args(argv)
+    if not args.suite:
+        ap.error("--suite에 실제 묶음이 없음 (빈 값·쉼표만·공백만은 받지 않음)")
     bad = [s for s in args.suite if s not in SUITES]
     if bad:
         ap.error(f"알 수 없는 묶음 {bad} (가능: {', '.join(SUITES)})")
     if args.partial is not None:
         known = {c.id for c in CRITS if c.suite in args.suite}
         unknown = [x for x in args.partial if x not in known]
-        if unknown or not args.partial:
+        if not args.partial:
+            ap.error("--partial에 실제 기준 ID가 없음 (빈 값·쉼표만·공백만은 받지 않음)")
+        if unknown:
             ap.error(f"고른 묶음에 없는 기준 ID {unknown}")
     m = merge(args.files)
     res = judge(m, args.suite, args.partial, args.reuse_reason)
@@ -527,4 +602,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception:  # noqa: BLE001 — 판정기 자체 오류는 4로 (판정 결과 1·2와 섞이지 않게)
+        traceback.print_exc()
+        sys.exit(EXIT_TOOL)
