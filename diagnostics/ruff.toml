@@ -9,5 +9,6 @@ known-first-party = ["diag_common", "diag_scope", "seed"]
 [lint.per-file-ignores]
 # 한 줄짜리 JavaScript 식을 그대로 넘기는 파일 (쪼개면 브라우저에서 평가되는 식이 바뀔 수 있음)
 "scripts/a11y_manual.py" = ["E501"]
+"scripts/a11y_fix_check.py" = ["E501"]
 "scripts/contrast_check.py" = ["E501"]
 "scripts/toggle_check.py" = ["E501"]

@@ -204,6 +204,9 @@ def main() -> None:
     docs = server_documents()
     (OUT / "nu-server-documents.json").write_text(json.dumps(docs, ensure_ascii=False, indent=1), encoding="utf-8")
     for k, v in docs.items():
+        if v is None:
+            print("서버 문서", k, "저장만 함 (Nu 검사는 nu_check_dom.py)")
+            continue
         print("서버 문서", k, {t: sum(1 for m in v if m["type"] == t) for t in ("error", "info", "non-document-error")})
     t0 = time.time()
     with sync_playwright() as p:

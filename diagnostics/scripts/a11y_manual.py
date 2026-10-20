@@ -1,7 +1,7 @@
 """접근성 수동 확인 보조 — 실제 브라우저(Edge)에서 키보드만으로 조작하고 초점·재배치·확대·간격·대상 크기·상태 메시지를 기록한다.
 
 판정은 기록과 캡처를 사람이(이번에는 검토자가 캡처·기록을 보고) 내린다. 스크린리더 낭독 확인은 이 스크립트로 대신하지 않는다.
-사용법: python a11y_manual.py <출력 폴더> [검사 이름,...]   (검사: keyboard, dialog, analysis, bundle, upload, reflow, zoom, spacing, target, status, login)
+사용법: python a11y_manual.py <출력 폴더> [검사 이름,...]   (검사: keyboard, dialog, analysis, bundle, upload, reflow, zoom, authforms, spacing, target, status, login)
 """
 
 import io
@@ -385,6 +385,55 @@ def check_zoom(p) -> None:
     cx.close()
 
 
+SETUP_STATUS = '{"setup_required": true, "user": null}'
+
+
+def open_auth_form(pg: Page, mode: str) -> None:
+    """회원가입 또는 최초 설정 화면을 띄운다. 최초 설정은 상태 응답만 브라우저에서 바꾼다 (서버에 쓰지 않음)."""
+    pg.unroute("**/api/auth/status")
+    if mode == "setup":
+        pg.route("**/api/auth/status", lambda r: r.fulfill(status=200, content_type="application/json", body=SETUP_STATUS))
+    pg.goto(URL + "/")
+    if mode == "signup":
+        pg.get_by_role("button", name=re.compile("회원가입")).first.click()
+    pg.locator(".login-help").first.wait_for(timeout=15000)
+    settle(pg)
+
+
+def check_authforms(p) -> None:
+    """도움말이 붙은 회원가입·최초 설정 화면: 320 CSS px 재배치(확대 100%)와 실제 브라우저 확대 200% (1280×800 창, check_zoom과 같은 확장)."""
+    import base64
+    import tempfile
+
+    cx = p.chromium.launch_persistent_context(tempfile.mkdtemp(), channel="msedge", headless=True, viewport={"width": 1280, "height": 800}, proxy=browser_proxy(URL),
+                                              args=[f"--disable-extensions-except={ZOOMEXT}", f"--load-extension={ZOOMEXT}"])  # fmt: skip
+    guard_ctx(cx)
+    pg = cx.pages[0] if cx.pages else cx.new_page()
+    pg.goto(URL + "/")
+    sw = cx.service_workers[0] if cx.service_workers else cx.wait_for_event("serviceworker", timeout=15000)
+    set_zoom = "z => chrome.tabs.query({}).then(ts => Promise.all(ts.map(t => chrome.tabs.setZoom(t.id, z))))"
+    for mode in ("signup", "setup"):
+        sw.evaluate(set_zoom, 1.0)
+        pg.set_viewport_size({"width": 320, "height": 640})
+        open_auth_form(pg, mode)
+        o = pg.evaluate(OVERFLOW_JS)
+        pg.screenshot(path=str(OUT / f"reflow320-{mode}.png"), full_page=True)
+        rec("auth-reflow320", {"page": mode, "css_width_dpr": pg.evaluate("[innerWidth, devicePixelRatio]"), "help": pg.locator(".login-help").count(), **o})
+        pg.set_viewport_size({"width": 1280, "height": 800})
+        open_auth_form(pg, mode)
+        sw.evaluate(set_zoom, 2.0)
+        pg.wait_for_timeout(800)
+        settle(pg)
+        o = pg.evaluate(OVERFLOW_JS)
+        cdp = cx.new_cdp_session(pg)
+        cs = cdp.send("Page.getLayoutMetrics")["contentSize"]
+        shot = cdp.send("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True,
+                                                   "clip": {"x": 0, "y": 0, "width": cs["width"], "height": min(cs["height"], 6000), "scale": 1}})  # fmt: skip
+        (OUT / f"zoom200-{mode}.png").write_bytes(base64.b64decode(shot["data"]))
+        rec("auth-zoom200", {"page": mode, "css_width_dpr": pg.evaluate("[innerWidth, devicePixelRatio]"), "help": pg.locator(".login-help").count(), **o})
+    cx.close()
+
+
 SPACING_CSS = "* { line-height: 1.5 !important; letter-spacing: 0.12em !important; word-spacing: 0.16em !important; } p { margin-bottom: 2em !important; }"
 CLIP_JS = """() => [...document.querySelectorAll('body *')].filter(e => { const cs = getComputedStyle(e); if (!e.innerText || e.children.length > 3) return false;
   const hid = (cs.overflow + cs.overflowX + cs.overflowY).includes('hidden') || cs.textOverflow === 'ellipsis' || cs.webkitLineClamp !== 'none'
@@ -498,7 +547,7 @@ def main() -> None:
                 rec("error", {"check": name, "error": f"{type(e).__name__}: {str(e)[:300]}"})
                 pg.screenshot(path=str(OUT / f"error-{name}.png"), full_page=True)
             cx.close()
-        for name, fn, arg in (("reflow", check_reflow, b), ("zoom", check_zoom, p), ("spacing", check_spacing, b),
+        for name, fn, arg in (("reflow", check_reflow, b), ("zoom", check_zoom, p), ("authforms", check_authforms, p), ("spacing", check_spacing, b),
                               ("target", check_target, b), ("status", check_status, b), ("login", check_login, b)):  # fmt: skip
             if ONLY and name not in ONLY:
                 continue
@@ -509,7 +558,7 @@ def main() -> None:
         b.close()
     path = OUT / "manual-records.json"
     old = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    old.update(REC)
+    old.update(REC)  # 그룹 단위로 통째로 바꾼다 — 검사마다 그룹 이름을 따로 둘 것 (같은 이름을 쓰면 다른 검사의 기록이 지워짐)
     path.write_text(json.dumps(old, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
