@@ -18,11 +18,12 @@
 | `scripts/seed.py` | 합성 계정·자료 생성 | 1차에 사용 (2차는 기존 볼륨 재사용) |
 | `scripts/monitor.py` | 공유 PC 사용 가능 메모리·운영 health 감시 | 2차에 `127.0.0.1`로 바꿈. **바꾼 뒤 미실행** |
 | `scripts/health_timing.py` | 운영 health를 `localhost`·`127.0.0.1`로 단계별 비교 (직렬 소수 요청) | 1차에 사용. 2차는 운영 전용 opener만 정리, **미실행** |
-| `scripts/a11y_scan.py` | 72개 화면 상태 Nu·axe 검사. `NU_URL=off`면 DOM·서버 문서만 저장 | 사용함 |
+| `scripts/a11y_scan.py` | 72개 화면 상태 Nu·axe 검사. `NU_URL=off`면 DOM·서버 문서만 저장. 4차: 진행 중인 CSS 전환이 끝난 뒤(최대 1초) axe, `ONLY_STATES=`로 상태를 골라 실행 | 사용함 |
 | `scripts/nu_check_dom.py` | 저장한 DOM·서버 문서를 로컬 Nu로 검사해 결과 JSON을 채움 | 2차 추가 |
 | `scripts/a11y_manual.py` | 키보드·확인창·재배치·확대·간격·대상 크기·상태 안내·로그인 보조 기록. 2차에 `authforms`(가입·최초 설정 화면 재배치·확대) 추가 | 사용함. `keyboard`의 '검토 열기' 단계는 판정 조건 오류로 미확인 (1차) |
 | `scripts/a11y_fix_check.py` | **측정만 저장:** D-01~D-07 항목별 전후 기록(접근 가능한 이름·설명, 상태 영역 변경 기록, 테두리·스위치 대비, 가입 도움말, 지난 검사 점수). 3차에 추가한 측정: 업로드 중·완료 뒤 조작 요소, A1 규칙, 상태 안내 범위(혼합 형식·목록 갱신·늦은 응답·로그아웃), 분석 표 로딩·실패, 확인창 본문 연결·초점, 화면에 나타난 입력 경계·초점 외곽선 | 2차 추가, 3차 확장 |
-| `scripts/a11y_regress.py` | **판정:** 위 측정 JSON을 읽어 항목별 기준으로 통과·실패·미측정을 정하고, 실패가 있으면 종료 코드 1 (화면 접속 없음) | 3차 추가 |
+| `scripts/a11y_regress.py` | **판정:** 측정 JSON을 읽어 `--suite`로 고른 묶음의 필수 기준(ID)을 판정. 통과·실패·미측정·측정 오류·입력 오류·해당 없음을 나누고, 종료 코드 0 전체 완료 / 1 실패 / 2 불완전 / 3 부분 검사 통과 / 5 사용법 오류. 출처가 다른 측정을 합치면 `--reuse-reason` 필요 (화면 접속 없음) | 3차 추가, 4차 재작성 |
+| `scripts/login_contrast_probe.py` | 로그인 실패 직후 로그인 버튼의 상태·색·투명도·전환을 프레임마다 기록하고 axe를 두 시점에 돌림 (틀린 비밀번호 로그인만 — 여러 번 돌리면 진단 계정이 5분 잠김) | 4차 추가 |
 | `scripts/nav_focus_check.py` | **측정만 저장:** 본문 바로가기, 화면 이동 뒤 초점(메뉴·목록↔상세·뒤로/앞으로·주소만 고침), 긴 내용 보기, 분석 표 스크롤 영역. 긴 근거 확인용 합성 검토를 만든다 | 3차 추가 |
 | `scripts/a4_split.py` | A4(axe 대비 판정 보류) 대상을 1차 DOM과 대조해 기존 요소와 새로 생긴 요소로 나눔 (저장한 DOM만 읽음) | 3차 추가 |
 | `scripts/flow_check.py` | 업로드 → 검토 → 통합 → 내려받기, 묶기 요약 끔·켬 흐름 | 2차 추가 |
@@ -30,7 +31,7 @@
 | `scripts/scope_selftest.py` | 요청 범위 자체 시험 (루프백 임시 서버만, 진단·운영 주소에 요청 없음) | 2차 추가 |
 | `scripts/scroller_check.py`·`toggle_check.py`·`contrast_check.py`·`contrast_calc.py`·`css_support_check.py` | 개별 확인 (표 스크롤 영역, 스위치 상태 색, 계산 색, 대비 계산, CSS 지원) | 사용함. 3차: 대비 계산 경계 0.04045·원시값 판정, CSS 지원에 말줄임 렌더링 비교 추가 |
 | `scripts/summarize_trivy.py`·`summarize_a11y.py` | 원시 결과 재집계 (새 검사 없음) | 사용함 |
-| `tests/` | `diag_scope` 단위 시험 43개(소켓 연결을 막은 채 실행) + `a11y_regress` 판정 시험 12개 = 55개 | 2차 추가, 3차 확장 |
+| `tests/` | `diag_scope` 단위 시험 43개(소켓 연결을 막은 채 실행) + `a11y_regress` 판정 시험 18개(그중 CLI 종료 코드 7개) = 61개 | 2차 추가, 3·4차 확장 |
 | `tools/zoomext/` | 실제 브라우저 확대용 최소 확장 (탭 확대 권한만) | 사용함 |
 | `reports/` | 부록: API 목록, 72개 상태 결과, Trivy HIGH 전체, WCAG 2.2 A·AA 상태 | — |
 | `ruff.toml` | 진단 스크립트 전용 린트 (backend 규칙 상속, JS 문자열 때문에 줄 길이만 완화) | — |
@@ -90,6 +91,7 @@ mkdir -p "$EV/round2"                               # 출력 폴더는 명령마
 | 접근성 수정 frontend (같은 브랜치 95423ca, 2차 최종 확인) | `moajwo-diag-frontend:95423ca` | `sha256:aed42daddb82b354650afc2d0025ae197bdfceb93fa06410e714b8a8c7b0f3ed` |
 | 접근성 수정 frontend (같은 브랜치 62895ac, 3차 최종 확인) | `moajwo-diag-frontend:62895ac` | `sha256:3179afc1c1de7b883090ba04bc2cf3d539a8358fa1795d48cac357a3ca915d14` |
 | 화면 이동·표 탐색 개선 frontend (`fix/a11y-navigation-focus` bf22d4d, PR #16 위) | `moajwo-diag-frontend:bf22d4d` | `sha256:9c85a73f4ddc4522a946854edac0698c5bc1b9f5ae7e586c49d7c2018c09e724` |
+| 같은 브랜치 16bb926 (4차 최종 확인) | `moajwo-diag-frontend:16bb926` | `sha256:7b13efef2676e644fc54126bb560af14e99ff32feb3b18159e7e6482a916b569` |
 
 그 밖의 도구: pip-audit 2.10.1 · npm 11.16.0 · axe-core 4.14.0 · Playwright 1.63.0 · Microsoft Edge 155.0.4283.45.
 
@@ -102,7 +104,7 @@ mkdir -p "$EV/round2"                               # 출력 폴더는 명령마
 
 ```bash
 # A1) 범위 단위 시험·린트 (네트워크 없음)
-$PY -m pytest "$ROOT/diagnostics/tests" -q -p no:cacheprovider        # 55 passed (3차)
+$PY -m pytest "$ROOT/diagnostics/tests" -q -p no:cacheprovider        # 61 passed (4차, CLI 종료 코드 시험 포함)
 (cd "$ROOT/diagnostics" && $PY -m ruff check .)
 
 # A2) 범위 자체 시험 (루프백 임시 서버 8086·8099만 — 진단 스택을 멈춘 상태에서)
@@ -134,12 +136,16 @@ MSYS_NO_PATHCONV=1 docker compose -f "$ROOT/diagnostics/compose.diag.yml" -p moa
 # A6) 항목별 전후 기록 (수정 전 이미지로 한 번, 수정 후 이미지로 한 번)
 mkdir -p "$EV/round2/fix-check/before" "$EV/round2/fix-check/after-final"
 (cd "$ROOT/diagnostics/scripts" && $PW a11y_fix_check.py "$(cygpath -w "$EV/round2/fix-check/after-final")")   # ONLY_CHECKS=upload,contrast,... 로 골라 실행 가능
-#   3차: AXE_JS를 주면 A1 규칙도 실행. 판정은 따로 (측정 JSON 여러 개를 주면 뒤 파일의 같은 묶음이 앞을 바꿈, 실패 시 종료 코드 1)
-(cd "$ROOT/diagnostics/scripts" && AXE_JS="$AXE_JS" $PW a11y_fix_check.py "$(cygpath -w "$EV/round3/fix-check")" after-62895ac)
-$PY "$ROOT/diagnostics/scripts/a11y_regress.py" "$EV/round3/fix-check/fix-check-after-62895ac.json" --md "$EV/round3/regress-after-62895ac.md"
-#   화면 이동·표 탐색 (UI 브랜치 이미지): 측정 → D 항목 측정과 합쳐 판정 (범위 밖 요청·측정 오류는 이어 붙임)
-(cd "$ROOT/diagnostics/scripts" && $PW nav_focus_check.py "$(cygpath -w "$EV/round3/nav-check")" after-bf22d4d)   # ONLY_CHECKS=skip,menu,reviews,analysis,keep,longtext,tables
-$PY "$ROOT/diagnostics/scripts/a11y_regress.py" "$EV/round3/fix-check/fix-check-after-bf22d4d.json" "$EV/round3/nav-check/nav-check-after-bf22d4d.json" --md "$EV/round3/regress-after-bf22d4d.md"
+#   AXE_JS를 주면 A1 규칙도 실행. 측정 결과에는 출처(meta: 빌드 자산·DIAG_FE_IMAGE·라벨·시각)가 남는다
+#   (4차 형태 — 3차에는 --suite 없이 실행했고 판정 기준이 지금과 다름)
+(cd "$ROOT/diagnostics/scripts" && AXE_JS="$AXE_JS" $PW a11y_fix_check.py "$(cygpath -w "$EV/round4/fix-check")" after-16bb926)
+(cd "$ROOT/diagnostics/scripts" && $PW nav_focus_check.py "$(cygpath -w "$EV/round4/nav-check")" after-16bb926)   # ONLY_CHECKS=skip,menu,reviews,analysis,summary,history,failure,stale,keep,longtext,tables
+#   판정: 묶음을 명시한다 (입력으로 범위를 추정하지 않음). 종료 코드 0 전체 완료 / 1 실패 / 2 불완전 / 3 부분 검사 통과 / 5 사용법 오류
+$PY "$ROOT/diagnostics/scripts/a11y_regress.py" --suite fix,nav --md "$EV/round4/regress-after-16bb926.md" "$EV/round4/fix-check/fix-check-after-16bb926.json" "$EV/round4/nav-check/nav-check-after-16bb926.json"
+#   출처가 다른(또는 출처 기록이 없는) 측정을 합칠 때는 재사용 이유를 적는다 — 보고서 출처 표에 남는다
+$PY "$ROOT/diagnostics/scripts/a11y_regress.py" --suite fix --reuse-reason "<같은 이미지 등 이유>" --md "$EV/round4/regress-62895ac-with-dialog.md" "$EV/round3/fix-check/fix-check-after-62895ac.json" "$EV/round4/fix-check/fix-check-after-62895ac-dialog.json"
+#   로그인 버튼 대비 조사 (4차) — 틀린 비밀번호 로그인을 반복하므로 진단 계정이 잠길 수 있다
+(cd "$ROOT/diagnostics/scripts" && AXE_JS="$AXE_JS" $PW login_contrast_probe.py "$(cygpath -w "$EV/round4/login-contrast-probe.json")" 5)
 
 # A7) 72개 상태: 브라우저 수집(NU_URL=off) → 브라우저를 닫은 뒤 Nu만 띄워 검사 → Nu 내림
 (cd "$ROOT/diagnostics/scripts" && NU_URL=off AXE_JS="$AXE_JS" $PW a11y_scan.py "$(cygpath -w "$EV/round2/a11y-after")")
