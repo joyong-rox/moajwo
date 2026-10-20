@@ -1609,6 +1609,28 @@ body {
   min-height: 100vh;
 }
 
+/* 본문 바로가기: 평소에는 화면 밖, 키보드 초점을 받으면 왼쪽 위에 보인다 (절대 위치라 grid 칸을 차지하지 않음) */
+.skip-link {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1000;
+  padding: 8px 14px;
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+  transform: translateY(-200%);
+}
+
+.skip-link:focus {
+  transform: none;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .shell-main {
   min-width: 0;
 }

@@ -197,7 +197,7 @@ function MappingCommon() {
             type="button"
             className="mapping-confirm"
             disabled={picked.size === 0}
-            onClick={() => navigate(`/analysis?files=${[...picked].join(',')}`)}
+            onClick={() => navigate(`/analysis?files=${[...picked].join(',')}`, { focus: { to: 'page' } })}
           >
             선택한 파일로 분석
           </button>
@@ -228,7 +228,7 @@ function MappingCommon() {
                   href={`/mapping?file=${m.file_id}`}
                   onClick={(e) => {
                     e.preventDefault()
-                    navigate(`/mapping?file=${m.file_id}`)
+                    navigate(`/mapping?file=${m.file_id}`, { focus: { to: 'page' } })
                   }}
                 >
                   #{m.file_id} {m.name}
@@ -426,7 +426,7 @@ function GroupDetail({
                         href={`/mapping?file=${m.file_id}&sheet=${m.sheet_id}&col=${m.column_id}`}
                         onClick={(e) => {
                           e.preventDefault()
-                          navigate(`/mapping?file=${m.file_id}&sheet=${m.sheet_id}&col=${m.column_id}`)
+                          navigate(`/mapping?file=${m.file_id}&sheet=${m.sheet_id}&col=${m.column_id}`, { focus: { to: 'page' } })
                         }}
                       >
                         파일 화면에서 보기

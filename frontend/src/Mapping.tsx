@@ -37,7 +37,7 @@ function Mapping({ fileId }: { fileId: number }) {
           href={href}
           onClick={(e) => {
             e.preventDefault()
-            navigate(href)
+            navigate(href, { focus: { to: 'page' } })
           }}
         >
           열 매핑 화면에서 확인·확정

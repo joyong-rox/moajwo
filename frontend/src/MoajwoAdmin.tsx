@@ -172,7 +172,7 @@ function Overview() {
                   href={`${ADMIN_BASE}/users?status=pending`}
                   onClick={(e) => {
                     e.preventDefault();
-                    navigate(`${ADMIN_BASE}/users?status=pending`);
+                    navigate(`${ADMIN_BASE}/users?status=pending`, { focus: { to: "page" } });
                   }}
                 >
                   가입 신청 처리하기

@@ -132,13 +132,13 @@ function Reviews() {
     return (
       <section className="wk wk-reviews" aria-label="검토">
         {/* 검색 조건(?review=)을 지우고 목록으로 — 같은 경로라도 이동한다 */}
-        <button type="button" className="mapping-confirm" onClick={() => navigate('/reviews', { clearSearch: true })}>
+        <button type="button" className="mapping-confirm" onClick={() => navigate('/reviews', { clearSearch: true, focus: { to: 'return' } })}>
           ← 검토 목록으로
         </button>
         <ReviewPanel
           key={openId}
           reviewId={openId}
-          onClose={() => navigate('/reviews', { clearSearch: true })}
+          onClose={() => navigate('/reviews', { clearSearch: true, focus: { to: 'return' } })}
           onLoaded={onLoaded}
         />
       </section>
@@ -242,7 +242,12 @@ function Reviews() {
                       )}
                     </td>
                     <td data-label="열기">
-                      <button type="button" className="mapping-confirm" onClick={() => navigate(`/reviews?review=${target}`)}>
+                      <button
+                        type="button"
+                        className="mapping-confirm"
+                        data-focus-key={`review-row-${r.id}`}
+                        onClick={() => navigate(`/reviews?review=${target}`, { focus: { to: 'target', selector: 'section.review-panel h2', returnKey: `review-row-${r.id}` } })}
+                      >
                         {r.status === 'superseded'
                           ? `최신 #${r.latest_id} 열기`
                           : r.can_edit && r.status === 'in_review'

@@ -360,7 +360,7 @@ function Validation({
                   className="wk-btn-primary"
                   aria-describedby="wk-hint-bundle"
                   disabled={targets.size === 0}
-                  onClick={() => navigate(`/bundle?files=${[...targets].join(',')}`)}
+                  onClick={() => navigate(`/bundle?files=${[...targets].join(',')}`, { focus: { to: 'page' } })}
                 >
                   다음: 시트·통계 요약 설정 ({targets.size}개 파일)
                 </button>

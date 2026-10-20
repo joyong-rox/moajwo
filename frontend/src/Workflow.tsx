@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { pageIntentFor } from './pageFocus'
 import { navigate } from './router'
 
 /** 작업 화면 공용 부품: 단계 안내 · 상태 카드 · 안내 띠 · 아이콘. 상태는 색만으로 구별하지 않고 아이콘과 문구를 함께 쓴다. */
@@ -199,7 +200,7 @@ function go(href: string) {
   return (e: React.MouseEvent<HTMLAnchorElement>) => {
     if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
     e.preventDefault()
-    navigate(href)
+    navigate(href, { focus: pageIntentFor(href) }) // 다른 화면이면 새 화면 제목으로, 같은 화면이면 초점 그대로
   }
 }
 

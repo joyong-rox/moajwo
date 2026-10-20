@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   authStatus,
   fetchHealth,
@@ -24,7 +24,8 @@ import MoajwoAdmin from './MoajwoAdmin'
 import Promotions from './Promotions'
 import ReviewPanel from './ReviewPanel'
 import HomeSteps from './HomeSteps'
-import { navigate, replaceSearch, usePath } from './router'
+import { afterRouteChange, focusPageStart } from './pageFocus'
+import { navigate, replaceSearch, usePath, useSearch } from './router'
 import { ADMIN_BASE, findRoute, isActiveMenu, ROUTES } from './routes'
 import Reviews from './Reviews'
 import Runs from './Runs'
@@ -87,8 +88,18 @@ type HealthState = { kind: 'loading' } | { kind: 'ok'; health: Health } | { kind
 function Workspace() {
   const { me } = useAuth()
   const path = usePath()
+  const search = useSearch()
   const route = findRoute(path)
   const allowed = route !== undefined && route.roles.includes(me.role)
+  // 주소가 바뀌어 화면이 그려진 뒤 한 번 초점을 정한다 (이동 의도가 있을 때만 옮기고, 없으면 사라진 초점만 되살림 — pageFocus.ts)
+  const lastUrl = useRef(`${window.location.pathname}${window.location.search}`)
+  useEffect(() => {
+    const now = `${window.location.pathname}${window.location.search}`
+    if (now === lastUrl.current) return
+    const left = lastUrl.current
+    lastUrl.current = now
+    afterRouteChange(left)
+  }, [path, search])
 
   const [state, setState] = useState<HealthState>({ kind: 'loading' })
   // 업로드·개인정보 확인 후 검증 섹션의 파일 목록을 다시 불러온다
@@ -140,9 +151,20 @@ function Workspace() {
 
   return (
     <div className="shell">
+      {/* 반복 메뉴를 건너뛰어 지금 화면의 제목(없으면 본문 시작)으로 — 숨긴 홈·다른 화면의 제목은 잡지 않는다 */}
+      <a
+        className="skip-link"
+        href="#main"
+        onClick={(e) => {
+          e.preventDefault() // 주소에 #main을 남기지 않는다 (화면 주소·검색 조건 그대로)
+          focusPageStart()
+        }}
+      >
+        본문으로 바로가기
+      </a>
       <Sidebar path={path} />
       <div className="shell-main">
-        <main className={`app${NARROW_PAGES.has(path) ? ' app-narrow' : ''}`}>
+        <main id="main" className={`app${NARROW_PAGES.has(path) ? ' app-narrow' : ''}`}>
           {/* 홈(취합 작업)은 다른 메뉴로 옮겨도 진행 중인 검토가 사라지지 않도록 숨기기만 한다 */}
           <div id="home" hidden={path !== '/'}>
             {/* 홈 작업 영역: 넓은 화면을 쓰고 '올리기 → 고르기 → 검토 시작' 순서로 보인다 (대시보드는 아래) */}
@@ -270,7 +292,7 @@ function MenuLink({ to, label, active, icon }: { to: string; label: string; acti
       onClick={(e) => {
         if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return // 새 탭 열기는 브라우저에 맡김
         e.preventDefault()
-        navigate(to)
+        navigate(to, { focus: { to: 'page' } }) // 다른 화면으로: 새 화면의 제목으로 초점
       }}
     >
       {icon && <Icon name={icon} />}

@@ -302,7 +302,7 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
     setProblems([])
     try {
       const { id } = await runAnalysis(checked.body, preview.fingerprint)
-      navigate(`/analysis?id=${id}`)
+      navigate(`/analysis?id=${id}`, { focus: { to: 'target', selector: 'section.an h2' } }) // 실행 뒤 결과의 제목으로
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       if (err instanceof AnalysisProblemError) {
@@ -942,7 +942,7 @@ function PastRuns() {
   if (!runs || runs.length === 0) return null
   return (
     <details className="an-past">
-      <summary>내 분석 결과 ({runs.length})</summary>
+      <summary data-focus-key="analysis-past">내 분석 결과 ({runs.length})</summary>
       <ul>
         {runs.map((r) => (
           <li key={r.id}>
@@ -950,7 +950,7 @@ function PastRuns() {
               href={`/analysis?id=${r.id}`}
               onClick={(e) => {
                 e.preventDefault()
-                navigate(`/analysis?id=${r.id}`)
+                navigate(`/analysis?id=${r.id}`, { focus: { to: 'target', selector: 'section.an h2', returnKey: 'analysis-past' } })
               }}
             >
               #{r.id} {r.field_label}
@@ -1208,7 +1208,7 @@ function AnalysisResult({ id }: { id: number }) {
           href="/analysis"
           onClick={(e) => {
             e.preventDefault()
-            navigate('/analysis', { clearSearch: true }) // 보던 결과(?id=)를 닫고 새 분석으로
+            navigate('/analysis', { clearSearch: true, focus: { to: 'return' } }) // 보던 결과(?id=)를 닫고 새 분석으로 — 연 줄(없으면 화면 제목)로 초점
           }}
         >
           새 분석
