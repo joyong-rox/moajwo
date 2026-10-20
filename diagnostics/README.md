@@ -24,6 +24,10 @@
 | `scripts/a11y_fix_check.py` | **측정만 저장:** D-01~D-07 항목별 전후 기록(접근 가능한 이름·설명, 상태 영역 변경 기록, 테두리·스위치 대비, 가입 도움말, 지난 검사 점수). 3차에 추가한 측정: 업로드 중·완료 뒤 조작 요소, A1 규칙, 상태 안내 범위(혼합 형식·목록 갱신·늦은 응답·로그아웃), 분석 표 로딩·실패, 확인창 본문 연결·초점, 화면에 나타난 입력 경계·초점 외곽선 | 2차 추가, 3차 확장 |
 | `scripts/a11y_regress.py` | **판정:** 측정 JSON을 읽어 `--suite`(fix·nav·transition)로 고른 묶음의 필수 기준(ID)을 판정. 통과·실패·미측정·측정 오류·입력 오류·해당 없음을 나누고, 종료 코드 0 전체 완료 / 1 실패 / 2 불완전 / 3 부분 검사 통과 / 4 판정기 자체 오류 / 5 사용법 오류. 출처가 다른 측정을 합치면 `--reuse-reason` 필요 (화면 접속 없음). 5차: `--suite`·`--partial` 목록 규칙(쉼표로 나눔 → 앞뒤 공백 제거 → 빈 항목 버림 → 중복은 처음 것만, 비면 5), 고른 기준 0개는 불완전, 출력은 늘 UTF-8. 6차: 전환 중 기준은 저장된 전체 프레임을 첫 활성 인덱스부터 다시 계산(전체 프레임·인덱스가 없는 5차 판 기록은 미측정) | 3차 추가, 4차 재작성, 5·6차 보완 |
 | `scripts/button_transition_check.py` | **측정만 저장:** 버튼이 비활성으로 그려진 뒤 활성이 되는 동안 프레임마다 글자 대비(반올림 전 값)·disabled·hover·초점·글자 크기·굵기·색·투명도. 로그인(시험용 응답·없는 아이디의 실제 응답), 홈 '사전 검토 열기'·'검증 실행', 묶기 '엑셀 만들기'·'위로' — 23개 실행. 틀린 비밀번호를 서버로 보내지 않음. 6차: 첫 활성 프레임의 인덱스와 반올림하지 않은 시각(`t_raw`)을 남기고 프레임을 모두 저장 | 5차 추가, 6차 보완 |
+| `scripts/final_regress_check.py` | **최종 main 종합 회귀 (7차):** API·실제 브라우저로 업로드·매핑·검토·통합·분석·묶기·가림·세션·특수 경로(늦은 응답·거절된 선택·입력 중 재확인)·접근 통제. 목록 ID별 기대·실제 기록. 모델 호출 없음, 합성 계정만 | 7차 추가 |
+| `scripts/diag_snapshot.py` | 진단 볼륨 보존 확인: 표마다 행 해시·원본·결과 파일 sha256 (`snap`), 전후 비교 (`diff`) — 내용은 남기지 않음 | 7차 추가 |
+| `scripts/guarded_run.py` | 공유 PC 보호: 시작 전 사용 가능 메모리 기준, 실행 중 바닥값 아래 연속이면 그 단계를 멈춤(종료 99, 측정 미완료) | 7차 추가 |
+| `scripts/filechooser_probe.py` | '파일 선택' 창이 가끔 열리지 않는 원인 조사 — 버튼·숨긴 입력의 처리기 기록과 창 이벤트를 반복 기록 | 7차 추가 |
 | `scripts/transition_summary.py` | 전환 기록 집계 (첫 활성 프레임 인덱스부터 활성 프레임 모두 — 시각 반올림과 무관). 측정 스크립트와 시험이 같은 함수를 씀 | 6차 추가 |
 | `scripts/run_logged.py` | 명령 하나를 실행하고 표준 출력·오류(받은 바이트 그대로)·종료 코드·명령·대상 SHA·작업 트리 변경 여부·출력 인코딩 환경을 파일로 남김 | 5차 추가 |
 | `scripts/login_contrast_probe.py` | 로그인 실패 직후 로그인 버튼의 상태·색·투명도·전환을 프레임마다 기록하고 axe를 두 시점에 돌림 (틀린 비밀번호 로그인만 — 여러 번 돌리면 진단 계정이 5분 잠김) | 4차 추가 |
@@ -34,7 +38,7 @@
 | `scripts/scope_selftest.py` | 요청 범위 자체 시험 (루프백 임시 서버만, 진단·운영 주소에 요청 없음) | 2차 추가 |
 | `scripts/scroller_check.py`·`toggle_check.py`·`contrast_check.py`·`contrast_calc.py`·`css_support_check.py` | 개별 확인 (표 스크롤 영역, 스위치 상태 색, 계산 색, 대비 계산, CSS 지원) | 사용함. 3차: 대비 계산 경계 0.04045·원시값 판정, CSS 지원에 말줄임 렌더링 비교 추가 |
 | `scripts/summarize_trivy.py`·`summarize_a11y.py` | 원시 결과 재집계 (새 검사 없음) | 사용함 |
-| `tests/` | `diag_scope` 단위 시험 43개(소켓 연결을 막은 채 실행) + `a11y_regress` 판정 시험 30개(그중 CLI 종료 코드 11개 — 출력 인코딩 환경 변수를 뺀 하위 프로세스) + `transition_summary` 집계 시험 6개 = 79개 | 2차 추가, 3·4·5·6차 확장 |
+| `tests/` | `diag_scope` 단위 시험 43개(소켓 연결을 막은 채 실행) + `a11y_regress` 판정 시험 30개(그중 CLI 종료 코드 11개 — 출력 인코딩 환경 변수를 뺀 하위 프로세스) + `transition_summary` 집계 시험 6개 = 79개. 7차: 전환 실행 목록에 묶기 응답 대기 경로 4개 추가 | 2차 추가, 3·4·5·6·7차 확장 |
 | `tools/zoomext/` | 실제 브라우저 확대용 최소 확장 (탭 확대 권한만) | 사용함 |
 | `reports/` | 부록: API 목록, 72개 상태 결과, Trivy HIGH 전체, WCAG 2.2 A·AA 상태 | — |
 | `ruff.toml` | 진단 스크립트 전용 린트 (backend 규칙 상속, JS 문자열 때문에 줄 길이만 완화) | — |
@@ -154,6 +158,11 @@ $PY "$ROOT/diagnostics/scripts/a11y_regress.py" --suite fix --reuse-reason "<같
 #   6차: 첫 활성 프레임 인덱스·전체 프레임을 남기는 판으로 다시 잼 (5차 판 기록은 판정기가 전환 중 기준을 미측정으로 봄)
 (cd "$ROOT/diagnostics/scripts" && $PW button_transition_check.py "$(cygpath -w "$EV/round6/transition")" after-a55453e-r6)   # ONLY_CHECKS=login,review,bundle
 $PY "$ROOT/diagnostics/scripts/a11y_regress.py" --suite fix,nav,transition --md "$EV/round6/regress-after-a55453e-r6.md" "$EV/round5/fix-check/fix-check-after-a55453e.json" "$EV/round5/nav-check/nav-check-after-a55453e.json" "$EV/round6/transition/transition-after-a55453e-r6.json"
+#   7차 종합 회귀 (REGRESSION-20261020.md): 무거운 단계는 메모리 보호 실행기 안에서, 하나씩
+#     G="$PY $ROOT/diagnostics/scripts/guarded_run.py --start-mb 800 --floor-mb 400 --wait-s 900 --"
+(cd "$ROOT/diagnostics/scripts" && $PY diag_snapshot.py snap "$(cygpath -w "$EV/round7/snapshot-before.json")")
+(cd "$ROOT/diagnostics/scripts" && $G $PW final_regress_check.py "$(cygpath -w "$EV/round7/final")" 703fdcb)   # ONLY_PARTS=api,browser
+(cd "$ROOT/diagnostics/scripts" && $PY diag_snapshot.py snap "$(cygpath -w "$EV/round7/snapshot-after.json")" && $PY diag_snapshot.py diff "$(cygpath -w "$EV/round7/snapshot-before.json")" "$(cygpath -w "$EV/round7/snapshot-after.json")")
 #   로그인 버튼 대비 조사 (4차) — 틀린 비밀번호 로그인을 반복하므로 진단 계정이 잠길 수 있다 (5차는 이 스크립트 대신 button_transition_check.py를 씀)
 (cd "$ROOT/diagnostics/scripts" && AXE_JS="$AXE_JS" $PW login_contrast_probe.py "$(cygpath -w "$EV/round4/login-contrast-probe.json")" 5)
 

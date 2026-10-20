@@ -285,6 +285,68 @@ docker inspect moajwo-backend-1 --format '{{.Image}}'          # = $OLD_B
 
 격리 검증 (2026-10-15, 합성 자료 `moajwo-feat` 볼륨): 0018 → 0019 기존 테이블 그대로 · 분석 결과가 있는 0019 → 새 이미지 one-off downgrade 0018: `analysis_runs`만 삭제, 나머지 19개 테이블 행 수·내용 해시 그대로 · 이전(0018) 코드 기동·로그인·확정값 정상, 분석 API 없음 · 다시 0019: 빈 `analysis_runs`, 다시 실행 가능.
 
+## 8. frontend 단독 반영 (frontend만 바뀐 경우) — 확인 항목과 롤백
+
+1~3장의 `scripts/deploy.sh`는 backend·frontend를 함께 멈추고 DB를 백업한 뒤 둘 다 새로 만듭니다. 승인한 변경이 **frontend 정적 파일뿐**이면 backend·DB를 건드리지 않고 frontend 컨테이너만 바꿀 수 있습니다. 2026-10-20 PR #15·#16·#17 반영(19:35 KST)을 이 절차로 했습니다(기록 `backups/deploy-frontend-20261020-193230/`, README.md).
+
+**적용 조건** (하나라도 다르면 이 절차를 쓰지 않고 1~3장 절차로):
+- 승인한 커밋과 지금 운영 소스 사이에서 `backend/`, `docker-compose.yml`, `scripts/`, API가 같다. 바뀐 것은 `frontend/`와 이미지에 들어가지 않는 파일(`diagnostics/`·문서)뿐이다.
+- DB 리비전이 바뀌지 않는다(마이그레이션 없음).
+- 사용자 작업을 확인해 반영 시점을 정했다. frontend를 바꾸는 동안에도 backend는 계속 요청을 받는다.
+
+```bash
+cd /c/Users/juho/Documents/Moajwo
+git fetch origin && git checkout main && git pull --ff-only
+APPROVED=<승인한 PR HEAD SHA>      # frontend 변경을 담은 PR의 HEAD
+PROD_SRC=<지금 운영 소스 SHA>      # 마지막 배포 로그의 '배포 단위' 줄 '대상'
+# 0) 확인 (서비스 그대로) — 하나라도 다르면 멈춘다
+test "$(git rev-parse $APPROVED:frontend)" = "$(git rev-parse HEAD:frontend)"     # frontend = 승인 내용
+test "$(git rev-parse $PROD_SRC:backend)" = "$(git rev-parse HEAD:backend)"       # backend = 운영 소스
+git diff --quiet $PROD_SRC HEAD -- docker-compose.yml scripts && test -z "$(git status --porcelain frontend)"
+docker compose exec -T backend alembic current                                    # 바뀌지 않음 (기록)
+# 1) 운영 frontend의 실제 이미지 ID에 롤백 태그, backend 기준값 기록 (서비스 그대로)
+TS=$(date +%Y%m%d-%H%M%S)
+docker tag "$(docker inspect moajwo-frontend-1 --format '{{.Image}}')" moajwo-frontend:rollback-$TS
+B_BEFORE=$(docker inspect moajwo-backend-1 --format '{{.Id}} {{.Image}} {{.State.StartedAt}} {{.RestartCount}}')
+# 2) 빌드 (서비스 그대로). 기반 이미지·의존성 갱신을 섞지 않는다 (--pull 없이)
+docker compose build frontend
+# 3) 빌드한 이미지의 정적 파일·Nginx 설정 sha256을 격리 검증한 이미지와 대조 (네트워크 없는 일회용 컨테이너)
+H='cd /usr/share/nginx/html && find . -type f | sort | xargs sha256sum; sha256sum /etc/nginx/conf.d/default.conf /etc/nginx/nginx.conf'
+MSYS_NO_PATHCONV=1 docker run --rm --network none --entrypoint sh moajwo-frontend:latest -c "$H" > new.txt
+MSYS_NO_PATHCONV=1 docker run --rm --network none --entrypoint sh <격리 검증 이미지> -c "$H" > verified.txt
+diff new.txt verified.txt        # 달라지면 전환하지 않고 원인 확인
+# 4) 전환 — frontend만 다시 만든다 (backend·DB·볼륨 그대로)
+docker compose up -d --no-deps --no-build --wait frontend
+test "$(docker inspect moajwo-frontend-1 --format '{{.Image}}')" = "$(docker image inspect moajwo-frontend:latest --format '{{.Id}}')"
+test "$(docker inspect moajwo-backend-1 --format '{{.Id}} {{.Image}} {{.State.StartedAt}} {{.RestartCount}}')" = "$B_BEFORE"
+```
+
+**점검** (조회만 — 업로드·확정·승인·삭제·분석 실행·통합·묶기 생성은 하지 않음):
+1. `curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/` → 200
+2. `curl -s http://127.0.0.1:8080/api/health` → `{"status":"ok","database":"ok"}` (웹 경유)
+3. 브라우저가 받은 index JS·CSS의 sha256 = 3)의 새 이미지 파일
+4. 로그인 → 새로고침 뒤 세션 유지 → 로그아웃, 바뀐 화면의 주요 탐색(목록 → 상세 → 목록, 뒤로·앞으로, 확인창 열기·취소)
+5. 기존 결과 조회·내려받기, 좁은 화면, 콘솔 오류·4xx·5xx 없음
+6. backend 기준값 그대로(위 마지막 `test`), `docker compose logs backend --since 10m`에 오류 없음
+
+**롤백** (새 화면이 열리지 않거나 핵심 탐색·로그인·내려받기가 실패할 때 — backend·DB는 그대로):
+
+```bash
+docker tag moajwo-frontend:rollback-$TS moajwo-frontend:latest
+docker compose up -d --no-deps --no-build --wait --force-recreate frontend
+docker inspect moajwo-frontend-1 --format '{{.Image}}'     # 롤백 태그의 이미지 ID
+curl -s http://127.0.0.1:8080/api/health
+```
+
+- 롤백 뒤 index JS·CSS sha256이 이전 이미지 파일과 같은지 확인합니다(1)의 롤백 태그 이미지에서 3)과 같은 방법).
+- DB 복원·downgrade·자료 삭제는 하지 않습니다(정적 파일만 되돌림).
+- **운영 롤백과 Git 되돌림은 다릅니다.** 운영 롤백은 실행 이미지만 이전 것으로 바꾸고 main은 그대로 둡니다. 저장소를 되돌리려면 별도 되돌림 커밋·PR이 필요하고, 그 뒤 다시 반영할 때 이 장의 조건을 다시 확인합니다.
+
+**알아 둘 점**
+- **이미지 ID가 검증 이미지와 다를 수 있습니다.** 2026-10-20 반영에서 운영 빌드 `b01c0ea6…`와 격리 검증 빌드 `6a95bcda…`는 레이어(압축 레이어 포함)가 모두 같았습니다. 그러나 `docker compose build`가 이미지 설정에 라벨 3개(`com.docker.compose.project`·`service`·`version`)를 붙여 설정 digest가 달라졌고, 그래서 이미지 ID가 달랐습니다(확인 기록 `backups/diag-20261020/round7/image-id/`의 index·manifest·config). 그래서 이미지 ID가 아니라 3)의 파일·설정 sha256으로 같은 내용인지 봅니다.
+- **중단 시간은 환경과 시점에 따라 다릅니다.** 2026-10-20 반영에서 `127.0.0.1:8080/`을 0.2초 간격·요청 제한 1초로 쟀을 때 0.81~1.22초 끊겼습니다(격리 연습은 약 0.7초). 표본 간격보다 짧은 변동은 알 수 없고, 다른 PC 부하·이미지 크기에서는 달라집니다.
+- `index.html`은 `no-cache`, 해시 이름 정적 파일은 장기 캐시라, 열려 있던 화면은 새로고침해야 새 화면이 됩니다.
+
 ## 리허설 결과
 
 ### 1차 — 수동 명령 (2026-10-11, 운영 볼륨 복제본, 격리 프로젝트 `moajwo-rehearsal`, 소스 `24d2fc4`)

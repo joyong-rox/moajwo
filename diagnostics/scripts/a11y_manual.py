@@ -59,7 +59,10 @@ OVERFLOW_JS = """() => {
 
 TARGET_JS = """() => {
   const sel = 'a[href],button,input:not([type=hidden]),select,textarea,[role=button],[role=tab],[role=checkbox],[role=radio],[role=switch],summary,[tabindex]:not([tabindex="-1"])'
-  const els = [...document.querySelectorAll(sel)].filter(e => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width && r.height && cs.visibility !== 'hidden' && !e.closest('[hidden]') })
+  // 스크롤·잘림 영역(overflow가 visible이 아닌 조상) 밖으로 가려 보이지 않는 대상은 세지 않는다 (7차: 긴 파일 표의 가려진 행이 표 밖 요소와 겹쳐 잡히던 측정 오류)
+  const clipped = e => { const r = e.getBoundingClientRect(); for (let p = e.parentElement; p && p !== document.body; p = p.parentElement) { const s = getComputedStyle(p);
+    if (s.overflowX !== 'visible' || s.overflowY !== 'visible') { const q = p.getBoundingClientRect(); if (r.bottom <= q.top || r.top >= q.bottom || r.right <= q.left || r.left >= q.right) return true } } return false }
+  const els = [...document.querySelectorAll(sel)].filter(e => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return r.width && r.height && cs.visibility !== 'hidden' && !e.closest('[hidden]') && !clipped(e) })
   const rects = els.map(e => e.getBoundingClientRect())
   const small = []
   els.forEach((e, i) => {
