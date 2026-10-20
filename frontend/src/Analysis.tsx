@@ -302,7 +302,7 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
     setProblems([])
     try {
       const { id } = await runAnalysis(checked.body, preview.fingerprint)
-      navigate(`/analysis?id=${id}`, { focus: { to: 'target', selector: 'section.an h2' } }) // 실행 뒤 결과의 제목으로
+      navigate(`/analysis?id=${id}`, { focus: { to: 'detail' } }) // 실행 뒤 결과의 제목(열지 못하면 오류 안내)으로
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       if (err instanceof AnalysisProblemError) {
@@ -950,7 +950,7 @@ function PastRuns() {
               href={`/analysis?id=${r.id}`}
               onClick={(e) => {
                 e.preventDefault()
-                navigate(`/analysis?id=${r.id}`, { focus: { to: 'target', selector: 'section.an h2', returnKey: 'analysis-past' } })
+                navigate(`/analysis?id=${r.id}`, { focus: { to: 'detail', returnKey: 'analysis-past' } })
               }}
             >
               #{r.id} {r.field_label}

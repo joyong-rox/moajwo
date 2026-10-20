@@ -246,7 +246,7 @@ function Reviews() {
                         type="button"
                         className="mapping-confirm"
                         data-focus-key={`review-row-${r.id}`}
-                        onClick={() => navigate(`/reviews?review=${target}`, { focus: { to: 'target', selector: 'section.review-panel h2', returnKey: `review-row-${r.id}` } })}
+                        onClick={() => navigate(`/reviews?review=${target}`, { focus: { to: 'detail', returnKey: `review-row-${r.id}` } })}
                       >
                         {r.status === 'superseded'
                           ? `최신 #${r.latest_id} 열기`

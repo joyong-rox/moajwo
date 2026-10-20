@@ -24,7 +24,7 @@ import MoajwoAdmin from './MoajwoAdmin'
 import Promotions from './Promotions'
 import ReviewPanel from './ReviewPanel'
 import HomeSteps from './HomeSteps'
-import { afterRouteChange, focusPageStart } from './pageFocus'
+import { afterRouteChange, cancelFocusWaits, focusPageStart } from './pageFocus'
 import { navigate, replaceSearch, usePath, useSearch } from './router'
 import { ADMIN_BASE, findRoute, isActiveMenu, ROUTES } from './routes'
 import Reviews from './Reviews'
@@ -100,6 +100,7 @@ function Workspace() {
     lastUrl.current = now
     afterRouteChange(left)
   }, [path, search])
+  useEffect(() => cancelFocusWaits, []) // 화면이 내려가면(로그아웃·계정 바꿈) 기다리던 초점 이동을 무효로
 
   const [state, setState] = useState<HealthState>({ kind: 'loading' })
   // 업로드·개인정보 확인 후 검증 섹션의 파일 목록을 다시 불러온다

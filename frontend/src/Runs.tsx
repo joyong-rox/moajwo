@@ -116,7 +116,7 @@ function Runs() {
                         data-focus-key={`run-review-${r.id}`}
                         onClick={() =>
                           navigate(`/reviews?review=${r.review_session_id}`, {
-                            focus: { to: 'target', selector: 'section.review-panel h2', returnKey: `run-review-${r.id}` },
+                            focus: { to: 'detail', returnKey: `run-review-${r.id}` },
                           })
                         }
                       >
