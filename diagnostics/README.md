@@ -23,13 +23,14 @@
 | `scripts/a11y_manual.py` | 키보드·확인창·재배치·확대·간격·대상 크기·상태 안내·로그인 보조 기록. 2차에 `authforms`(가입·최초 설정 화면 재배치·확대) 추가 | 사용함. `keyboard`의 '검토 열기' 단계는 판정 조건 오류로 미확인 (1차) |
 | `scripts/a11y_fix_check.py` | **측정만 저장:** D-01~D-07 항목별 전후 기록(접근 가능한 이름·설명, 상태 영역 변경 기록, 테두리·스위치 대비, 가입 도움말, 지난 검사 점수). 3차에 추가한 측정: 업로드 중·완료 뒤 조작 요소, A1 규칙, 상태 안내 범위(혼합 형식·목록 갱신·늦은 응답·로그아웃), 분석 표 로딩·실패, 확인창 본문 연결·초점, 화면에 나타난 입력 경계·초점 외곽선 | 2차 추가, 3차 확장 |
 | `scripts/a11y_regress.py` | **판정:** 위 측정 JSON을 읽어 항목별 기준으로 통과·실패·미측정을 정하고, 실패가 있으면 종료 코드 1 (화면 접속 없음) | 3차 추가 |
+| `scripts/nav_focus_check.py` | **측정만 저장:** 본문 바로가기, 화면 이동 뒤 초점(메뉴·목록↔상세·뒤로/앞으로·주소만 고침), 긴 내용 보기, 분석 표 스크롤 영역. 긴 근거 확인용 합성 검토를 만든다 | 3차 추가 |
 | `scripts/a4_split.py` | A4(axe 대비 판정 보류) 대상을 1차 DOM과 대조해 기존 요소와 새로 생긴 요소로 나눔 (저장한 DOM만 읽음) | 3차 추가 |
 | `scripts/flow_check.py` | 업로드 → 검토 → 통합 → 내려받기, 묶기 요약 끔·켬 흐름 | 2차 추가 |
 | `scripts/compare_a11y.py` | 1차 원시 결과와 나중 72개 상태 결과를 같은 원인 분류로 비교 | 2차 추가 |
 | `scripts/scope_selftest.py` | 요청 범위 자체 시험 (루프백 임시 서버만, 진단·운영 주소에 요청 없음) | 2차 추가 |
 | `scripts/scroller_check.py`·`toggle_check.py`·`contrast_check.py`·`contrast_calc.py`·`css_support_check.py` | 개별 확인 (표 스크롤 영역, 스위치 상태 색, 계산 색, 대비 계산, CSS 지원) | 사용함. 3차: 대비 계산 경계 0.04045·원시값 판정, CSS 지원에 말줄임 렌더링 비교 추가 |
 | `scripts/summarize_trivy.py`·`summarize_a11y.py` | 원시 결과 재집계 (새 검사 없음) | 사용함 |
-| `tests/` | `diag_scope` 단위 시험 43개(소켓 연결을 막은 채 실행) + `a11y_regress` 판정 시험 7개 = 50개 | 2차 추가, 3차 확장 |
+| `tests/` | `diag_scope` 단위 시험 43개(소켓 연결을 막은 채 실행) + `a11y_regress` 판정 시험 12개 = 55개 | 2차 추가, 3차 확장 |
 | `tools/zoomext/` | 실제 브라우저 확대용 최소 확장 (탭 확대 권한만) | 사용함 |
 | `reports/` | 부록: API 목록, 72개 상태 결과, Trivy HIGH 전체, WCAG 2.2 A·AA 상태 | — |
 | `ruff.toml` | 진단 스크립트 전용 린트 (backend 규칙 상속, JS 문자열 때문에 줄 길이만 완화) | — |
@@ -88,6 +89,7 @@ mkdir -p "$EV/round2"                               # 출력 폴더는 명령마
 | 접근성 수정 frontend (`fix/a11y-common-controls` 7b47b21) | `moajwo-diag-frontend:7b47b21` | `sha256:4826cb6978134bf4b4115c208cee65ad3c06d554d14ae5caee4fd4758a34896e` |
 | 접근성 수정 frontend (같은 브랜치 95423ca, 2차 최종 확인) | `moajwo-diag-frontend:95423ca` | `sha256:aed42daddb82b354650afc2d0025ae197bdfceb93fa06410e714b8a8c7b0f3ed` |
 | 접근성 수정 frontend (같은 브랜치 62895ac, 3차 최종 확인) | `moajwo-diag-frontend:62895ac` | `sha256:3179afc1c1de7b883090ba04bc2cf3d539a8358fa1795d48cac357a3ca915d14` |
+| 화면 이동·표 탐색 개선 frontend (`fix/a11y-navigation-focus` bf22d4d, PR #16 위) | `moajwo-diag-frontend:bf22d4d` | `sha256:9c85a73f4ddc4522a946854edac0698c5bc1b9f5ae7e586c49d7c2018c09e724` |
 
 그 밖의 도구: pip-audit 2.10.1 · npm 11.16.0 · axe-core 4.14.0 · Playwright 1.63.0 · Microsoft Edge 155.0.4283.45.
 
@@ -100,7 +102,7 @@ mkdir -p "$EV/round2"                               # 출력 폴더는 명령마
 
 ```bash
 # A1) 범위 단위 시험·린트 (네트워크 없음)
-$PY -m pytest "$ROOT/diagnostics/tests" -q -p no:cacheprovider        # 50 passed (3차)
+$PY -m pytest "$ROOT/diagnostics/tests" -q -p no:cacheprovider        # 55 passed (3차)
 (cd "$ROOT/diagnostics" && $PY -m ruff check .)
 
 # A2) 범위 자체 시험 (루프백 임시 서버 8086·8099만 — 진단 스택을 멈춘 상태에서)
@@ -135,6 +137,9 @@ mkdir -p "$EV/round2/fix-check/before" "$EV/round2/fix-check/after-final"
 #   3차: AXE_JS를 주면 A1 규칙도 실행. 판정은 따로 (측정 JSON 여러 개를 주면 뒤 파일의 같은 묶음이 앞을 바꿈, 실패 시 종료 코드 1)
 (cd "$ROOT/diagnostics/scripts" && AXE_JS="$AXE_JS" $PW a11y_fix_check.py "$(cygpath -w "$EV/round3/fix-check")" after-62895ac)
 $PY "$ROOT/diagnostics/scripts/a11y_regress.py" "$EV/round3/fix-check/fix-check-after-62895ac.json" --md "$EV/round3/regress-after-62895ac.md"
+#   화면 이동·표 탐색 (UI 브랜치 이미지): 측정 → D 항목 측정과 합쳐 판정 (범위 밖 요청·측정 오류는 이어 붙임)
+(cd "$ROOT/diagnostics/scripts" && $PW nav_focus_check.py "$(cygpath -w "$EV/round3/nav-check")" after-bf22d4d)   # ONLY_CHECKS=skip,menu,reviews,analysis,keep,longtext,tables
+$PY "$ROOT/diagnostics/scripts/a11y_regress.py" "$EV/round3/fix-check/fix-check-after-bf22d4d.json" "$EV/round3/nav-check/nav-check-after-bf22d4d.json" --md "$EV/round3/regress-after-bf22d4d.md"
 
 # A7) 72개 상태: 브라우저 수집(NU_URL=off) → 브라우저를 닫은 뒤 Nu만 띄워 검사 → Nu 내림
 (cd "$ROOT/diagnostics/scripts" && NU_URL=off AXE_JS="$AXE_JS" $PW a11y_scan.py "$(cygpath -w "$EV/round2/a11y-after")")
