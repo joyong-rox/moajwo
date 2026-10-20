@@ -357,9 +357,16 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
         {fields?.length === 0 && (
           <p className="mw-muted">확정한 수량 항목이 없습니다. 열 매핑 화면에서 열을 먼저 확정하세요.</p>
         )}
+        {/* 자료 목록 불러오기 상태: 영역은 처음부터 두고 내용만 바꾼다 (화면에는 불러오는 동안만 보임) */}
+        <p role="status" className={field && sources === null && !error ? 'mw-muted' : 'sr-only'}>
+          {!field || error
+            ? ''
+            : sources === null
+              ? '분석할 파일 목록을 불러오는 중…'
+              : `분석할 수 있는 파일 ${sources.length}개를 불러왔습니다.`}
+        </p>
         {field && (
           <div className="an-files" role="group" aria-label="분석할 파일">
-            {sources === null && <p className="mw-muted">불러오는 중…</p>}
             {sources?.map((s) => (
               <label key={s.file_id} className="an-file">
                 <input
@@ -993,18 +1000,30 @@ function Pager({
   )
 }
 
+/** 표 한 쪽을 불러온다. [쪽, 마지막 요청 실패 여부] — 실패를 숨기지 않고 상태 안내·화면에 알린다 */
 function usePage<T>(id: number, kind: 'groups' | 'excluded' | 'detail', offset: number) {
   const [page, setPage] = useState<AnalysisPage<T> | null>(null)
+  const [failed, setFailed] = useState(false)
   useEffect(() => {
     let alive = true
     fetchAnalysisPage<T>(id, kind, offset, PAGE)
-      .then((p) => alive && setPage(p))
-      .catch(() => undefined)
+      .then((p) => {
+        if (!alive) return
+        setPage(p)
+        setFailed(false)
+      })
+      .catch(() => alive && setFailed(true))
     return () => {
       alive = false
     }
   }, [id, kind, offset])
-  return page
+  return [page, failed] as const
+}
+
+/** 표를 불러오지 못했을 때 그 자리에 남기는 글자 (상태 안내도 같은 내용을 전한다) */
+function PageError({ failed, what }: { failed: boolean; what: string }) {
+  if (!failed) return null
+  return <p className="upload-error">{what} 표를 불러오지 못했습니다. 화면을 다시 열어 보세요.</p>
 }
 
 function AnalysisResult({ id }: { id: number }) {
@@ -1014,9 +1033,13 @@ function AnalysisResult({ id }: { id: number }) {
   const [gOffset, setGOffset] = useState(0)
   const [eOffset, setEOffset] = useState(0)
   const [rOffset, setROffset] = useState(0)
-  const groups = usePage<AnalysisGroup>(id, 'groups', gOffset)
-  const excluded = usePage<AnalysisRowRef & { reason: string; value: number | string | null }>(id, 'excluded', eOffset)
-  const rows = usePage<AnalysisRowRef & { keys: string[]; value: number }>(id, 'detail', rOffset)
+  const [groups, groupsFailed] = usePage<AnalysisGroup>(id, 'groups', gOffset)
+  const [excluded, excludedFailed] = usePage<AnalysisRowRef & { reason: string; value: number | string | null }>(
+    id,
+    'excluded',
+    eOffset,
+  )
+  const [rows, rowsFailed] = usePage<AnalysisRowRef & { keys: string[]; value: number }>(id, 'detail', rOffset)
 
   useEffect(() => {
     fetchAnalysisRun(id)
@@ -1027,15 +1050,41 @@ function AnalysisResult({ id }: { id: number }) {
       .catch(() => undefined)
   }, [id])
 
+  // 불러오기 상태: 같은 자리의 같은 요소를 계속 두고 내용만 바꾼다. 조건·요약(상세)과 결과·제외·근거 표는 따로 불러오므로
+  // 안내는 실제로 불러온 범위만 말한다 (표가 남았거나 실패했는데 다 불러온 것처럼 말하지 않음). 상세 오류는 아래 alert가 전한다
+  const tables = [
+    ['결과', groups, groupsFailed],
+    ['제외', excluded, excludedFailed],
+    ['근거 행', rows, rowsFailed],
+  ] as const
+  const tablesFailed = tables.filter(([, , failed]) => failed).map(([what]) => what)
+  const tablesWaiting = tables.some(([, page, failed]) => !page && !failed)
+  const loadMessage = error
+    ? ''
+    : !detail
+      ? '분석 결과를 불러오는 중…'
+      : tablesFailed.length
+        ? `분석 결과 #${detail.id}의 조건·요약을 불러왔습니다. ${tablesFailed.join('·')} 표를 불러오지 못했습니다.`
+        : tablesWaiting
+          ? `분석 결과 #${detail.id}의 조건·요약을 불러왔습니다. 결과·제외·근거 표를 불러오는 중…`
+          : `분석 결과 #${detail.id}을(를) 불러왔습니다 (조건·요약, 결과·제외·근거 표).`
+  const loadStatus = (
+    <p role="status" className={!detail && !error ? 'mw-muted' : 'sr-only'}>
+      {loadMessage}
+    </p>
+  )
   if (error)
     return (
-      <section className="an" aria-label="분석 결과">
-        <p className="upload-error" role="alert">
-          {error}
-        </p>
-      </section>
+      <>
+        {loadStatus}
+        <section className="an" aria-label="분석 결과">
+          <p className="upload-error" role="alert">
+            {error}
+          </p>
+        </section>
+      </>
     )
-  if (!detail) return <p className="mw-muted">불러오는 중…</p>
+  if (!detail) return <>{loadStatus}</>
   const c = detail.conditions
   const r = detail.result
   const reasons = c.reason_labels
@@ -1045,7 +1094,9 @@ function AnalysisResult({ id }: { id: number }) {
     .map(([k, v]) => `${labels[k] ?? k}: ${v.join(', ')}`)
     .join('; ')
   return (
-    <section className="an" aria-label="분석 결과">
+    <>
+      {loadStatus}
+      <section className="an" aria-label="분석 결과">
       <h2>
         분석 결과 #{detail.id}{' '}
         <span className={`upload-tag ${r.partial || r.level_mismatch ? 'an-status-needs_input' : 'an-status-ok'}`}>
@@ -1211,6 +1262,7 @@ function AnalysisResult({ id }: { id: number }) {
           </tbody>
         </table>
       </div>
+      <PageError failed={groupsFailed} what="결과" />
       <Pager page={groups} offset={gOffset} setOffset={setGOffset} />
       {r.bins && <p className="mw-muted">구간별 그룹 수: {r.bins.map((b) => `${b.label} ${b.groups}`).join(' · ')}</p>}
 
@@ -1258,6 +1310,7 @@ function AnalysisResult({ id }: { id: number }) {
           목록은 처음 {excluded.total.toLocaleString('ko-KR')}행만 보관합니다 (사유별 행 수는 위).
         </p>
       )}
+      <PageError failed={excludedFailed} what="제외" />
       <Pager page={excluded} offset={eOffset} setOffset={setEOffset} />
 
       <h3>근거 행 ({r.detail_total.toLocaleString('ko-KR')}행 — 계산에 들어간 원본 행)</h3>
@@ -1302,6 +1355,7 @@ function AnalysisResult({ id }: { id: number }) {
           목록은 처음 {rows.total.toLocaleString('ko-KR')}행만 보관합니다 (계산은 전체 행으로 함).
         </p>
       )}
+      <PageError failed={rowsFailed} what="근거 행" />
       <Pager page={rows} offset={rOffset} setOffset={setROffset} />
 
       <h3>사용한 자료</h3>
@@ -1339,6 +1393,7 @@ function AnalysisResult({ id }: { id: number }) {
         </table>
       </div>
     </section>
+    </>
   )
 }
 

@@ -443,7 +443,7 @@
   --color-hero-gradient-shade-2: #ffffff;
 
   /* ======== Toggle Color =========*/
-  --color-toggle-default-background: #e5e7eb;
+  --color-toggle-default-background: #767676; /* 꺼짐 트랙: 흰 바탕·흰 손잡이 대비 4.542:1 (원래 #e5e7eb 1.238:1, WCAG 1.4.11) */
   --color-toggle-disabled-foreground: #ffffff;
   --color-toggle-disabled-background: #f3f4f6;
   --color-toggle-active-background: #3758f9;

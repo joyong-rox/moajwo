@@ -8,15 +8,18 @@ const CAP = 95 // 서버 응답 전에는 95%를 넘기지 않는다
  * 진행 상태 막대. 서버는 한 번의 요청으로 처리하므로 단계 문구와 막대는 예상 시간에 맞춘 추정치다.
  * 화면에 있는 동안만 시간이 흐른다 (끝나면 부모가 내린다).
  * uploadFraction: 0~1 실제 업로드 진행률 (주면 첫 단계는 실제 바이트 기준)
+ * live: 상태 영역(role=status)으로 둘지. 부모가 시작·결과를 따로 알리면 false (진행률이 0.2초마다 바뀌어 겹쳐 읽히지 않게)
  */
 export function ProgressPanel({
   stages,
   uploadFraction,
   title,
+  live = true,
 }: {
   stages: Stage[]
   uploadFraction?: number
   title?: string
+  live?: boolean
 }) {
   const uploading = uploadFraction !== undefined && uploadFraction < 1
   const startRef = useRef<number | null>(null)
@@ -48,7 +51,7 @@ export function ProgressPanel({
   const current = uploading ? 0 : index + (uploadFraction !== undefined ? 1 : 0)
 
   return (
-    <div className="progress" role="status" aria-live="polite">
+    <div className="progress" role={live ? 'status' : undefined} aria-live={live ? 'polite' : undefined}>
       {title && <p className="progress-title">{title}</p>}
       <div
         className="progress-bar"

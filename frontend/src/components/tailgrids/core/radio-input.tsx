@@ -42,8 +42,9 @@ export function RadioInput({
   disabled,
   ...inputProps
 }: PropsType) {
+  // label 안에 놓이므로 div 대신 span (래퍼 inline-block, 원 grid, 점 absolute — 표시 방식은 클래스가 정함)
   return (
-    <div className={cn("relative inline-block", className)}>
+    <span className={cn("relative inline-block", className)}>
       <input
         type="radio"
         id={inputId}
@@ -52,9 +53,9 @@ export function RadioInput({
         {...inputProps}
       />
 
-      <div className={radioStyles({ size })} />
+      <span className={radioStyles({ size })} />
 
-      <div className={dotStyles({ size })} />
-    </div>
+      <span className={dotStyles({ size })} />
+    </span>
   );
 }

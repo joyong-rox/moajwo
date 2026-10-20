@@ -2,7 +2,8 @@
   --bg: #ffffff;
   --text: #1f2937;
   --muted: #5b6472; /* 흰·회색·옅은 파랑 바탕 모두 대비 5.4:1 이상 */
-  --border: #d1d5db; /* 입력칸 테두리 (이전보다 대비가 낮아지지 않게) */
+  --border: #d1d5db; /* 카드·표·구분선 같은 장식용 테두리 (입력칸 경계는 --input-border) */
+  --input-border: #767676; /* 입력칸 경계: 흰·#f9fafb·#f3f4f6·#eff3ff 바탕 대비 4.095~4.542:1 (WCAG 1.4.11 3:1 이상) */
   --ok: #1a7f37;
   --fail: #cf222e;
   --accent: #3758f9;
@@ -126,8 +127,9 @@ body {
   transition: border-color 0.15s, background-color 0.15s;
 }
 
+/* 키보드 초점은 안의 '파일 선택' 버튼이 받는다 — 그때도 영역을 마우스를 올린 모양으로 강조 (버튼 자체 외곽선은 공통 규칙) */
 .upload-drop:hover,
-.upload-drop:focus-visible,
+.upload-drop:has(.wk-drop-button:focus-visible),
 .upload-drop.is-dragging {
   border-color: var(--accent);
   background: var(--accent-bg);
@@ -450,7 +452,7 @@ body {
 .mapping-pick select {
   min-height: 32px;
   max-width: 140px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   background: var(--bg);
   color: var(--text);
@@ -527,7 +529,7 @@ body {
 .validation-form textarea {
   min-height: 36px;
   padding: 4px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   background: var(--bg);
   color: var(--text);
@@ -647,14 +649,14 @@ body {
   flex: 1 1 200px;
   min-height: 36px;
   padding: 4px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   font: inherit;
 }
 
 .glossary-search select {
   min-height: 36px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   background: var(--bg);
   font: inherit;
@@ -995,7 +997,7 @@ body {
 .review-controls select {
   min-height: 32px;
   max-width: 220px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   background: var(--bg);
   font: inherit;
@@ -1168,7 +1170,7 @@ body {
 .review-replace-row select {
   min-height: 32px;
   max-width: 100%;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   background: var(--bg);
   font: inherit;
@@ -1356,7 +1358,7 @@ body {
   width: 160px;
   min-height: 32px;
   padding: 2px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
 }
 
@@ -1407,7 +1409,7 @@ body {
 .integration-automation input {
   min-height: 32px;
   padding: 2px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   font: inherit;
 }
@@ -1572,13 +1574,23 @@ body {
   font-size: 0.875rem;
 }
 
+/* 입력 칸과 그 도움말(새 계정 만들 때 규칙 안내)을 한 묶음으로 */
+.login-field {
+  display: grid;
+  gap: 4px;
+}
+
+.login-help {
+  margin: 0;
+}
+
 .login-card input,
 .admin-form input,
 .admin-form select,
 .admin-actions input {
   min-height: 36px;
   padding: 4px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   font: inherit;
   box-sizing: border-box;
@@ -4183,7 +4195,7 @@ button.wk-card:hover {
 }
 
 .wk-home .upload-drop:hover,
-.wk-home .upload-drop:focus-visible,
+.wk-home .upload-drop:has(.wk-drop-button:focus-visible),
 .wk-home .upload-drop.is-dragging {
   border-color: var(--tg-primary);
   background: var(--tg-primary-soft);
@@ -4218,8 +4230,14 @@ button.wk-card:hover {
   border-radius: 8px;
   background: #fff;
   color: var(--tg-title);
+  font: inherit;
   font-size: 0.875rem;
   font-weight: 500;
+  cursor: pointer;
+}
+
+.wk-drop-button[aria-disabled='true'] {
+  cursor: progress;
 }
 
 /* 검사할 파일: 왼쪽 표, 오른쪽 '검사 시작' 패널 */
@@ -4246,7 +4264,7 @@ button.wk-card:hover {
   box-sizing: border-box;
   min-height: 38px;
   padding: 7px 12px;
-  border: 1px solid var(--tg-border-strong);
+  border: 1px solid var(--input-border);
   border-radius: 8px;
   background: #fff;
   color: var(--tg-text);
@@ -4403,7 +4421,8 @@ button.wk-card:hover {
   font: inherit;
   font-weight: 600;
   cursor: pointer;
-  transition: background-color 0.15s, border-color 0.15s;
+  /* 글자색·배경색은 전환하지 않는다 — 비활성(검증 대상 0개)이 풀릴 때 옅은 회색에서 넘어오는 중간 색이 대비 4.5:1에 못 미침 */
+  transition: border-color 0.15s;
 }
 
 .wk-btn-primary {
@@ -4598,7 +4617,8 @@ button.wk-card:hover {
   min-height: 38px;
   border-radius: 8px;
   box-sizing: border-box;
-  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+  /* 글자색·배경색은 전환하지 않는다 — 비활성(로그인 중 등)이 풀릴 때 옅은 회색에서 넘어오는 중간 색이 대비 4.5:1에 못 미침 */
+  transition: border-color 0.15s;
 }
 
 .mapping-run {
@@ -5174,7 +5194,7 @@ ul.bd-item-problems,
   max-width: 14em;
   margin-top: 4px;
   padding: 4px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   font: inherit;
 }
@@ -5306,7 +5326,7 @@ ul.bd-item-problems,
   justify-self: start;
   max-width: 100%;
   padding: 4px 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--input-border);
   border-radius: 6px;
   font: inherit;
 }
