@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import {
   analysisDownloadUrl,
   AnalysisProblemError,
@@ -302,7 +302,7 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
     setProblems([])
     try {
       const { id } = await runAnalysis(checked.body, preview.fingerprint)
-      navigate(`/analysis?id=${id}`)
+      navigate(`/analysis?id=${id}`, { focus: { to: 'detail' } }) // 실행 뒤 결과의 제목(열지 못하면 오류 안내)으로
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
       if (err instanceof AnalysisProblemError) {
@@ -942,7 +942,7 @@ function PastRuns() {
   if (!runs || runs.length === 0) return null
   return (
     <details className="an-past">
-      <summary>내 분석 결과 ({runs.length})</summary>
+      <summary data-focus-key="analysis-past">내 분석 결과 ({runs.length})</summary>
       <ul>
         {runs.map((r) => (
           <li key={r.id}>
@@ -950,7 +950,7 @@ function PastRuns() {
               href={`/analysis?id=${r.id}`}
               onClick={(e) => {
                 e.preventDefault()
-                navigate(`/analysis?id=${r.id}`)
+                navigate(`/analysis?id=${r.id}`, { focus: { to: 'detail', returnKey: 'analysis-past' } })
               }}
             >
               #{r.id} {r.field_label}
@@ -1018,6 +1018,34 @@ function usePage<T>(id: number, kind: 'groups' | 'excluded' | 'detail', offset: 
     }
   }, [id, kind, offset])
   return [page, failed] as const
+}
+
+/** 분석 표의 가로·세로 스크롤 영역. 내용이 실제로 넘칠 때만 이름(region)과 Tab 정지점을 준다 —
+ * 칸 안에 조작 요소가 없는 표라 키보드로 스크롤하려면 영역에 초점이 필요하다. 넘치지 않으면(모바일 카드 모양 등) Tab 정지점을 더하지 않는다. */
+function TableRegion({ label, children }: { label: string; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [scrolls, setScrolls] = useState(false)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const check = () => setScrolls(el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1)
+    check()
+    const observer = new ResizeObserver(check) // 화면 폭·쪽 이동으로 표 크기가 바뀌면 다시 본다
+    observer.observe(el)
+    if (el.firstElementChild) observer.observe(el.firstElementChild)
+    return () => observer.disconnect()
+  }, [])
+  return (
+    <div
+      ref={ref}
+      className="upload-table-wrap"
+      role={scrolls ? 'region' : undefined}
+      aria-label={scrolls ? label : undefined}
+      tabIndex={scrolls ? 0 : undefined}
+    >
+      {children}
+    </div>
+  )
 }
 
 /** 표를 불러오지 못했을 때 그 자리에 남기는 글자 (상태 안내도 같은 내용을 전한다) */
@@ -1208,7 +1236,7 @@ function AnalysisResult({ id }: { id: number }) {
           href="/analysis"
           onClick={(e) => {
             e.preventDefault()
-            navigate('/analysis', { clearSearch: true }) // 보던 결과(?id=)를 닫고 새 분석으로
+            navigate('/analysis', { clearSearch: true, focus: { to: 'return' } }) // 보던 결과(?id=)를 닫고 새 분석으로 — 연 줄(없으면 화면 제목)로 초점
           }}
         >
           새 분석
@@ -1216,7 +1244,7 @@ function AnalysisResult({ id }: { id: number }) {
       </div>
 
       <h3>결과 ({r.groups_total.toLocaleString('ko-KR')}개)</h3>
-      <div className="upload-table-wrap">
+      <TableRegion label="결과 표">
         <table className="upload-table an-result">
           <thead>
             <tr>
@@ -1261,7 +1289,7 @@ function AnalysisResult({ id }: { id: number }) {
             )}
           </tbody>
         </table>
-      </div>
+      </TableRegion>
       <PageError failed={groupsFailed} what="결과" />
       <Pager page={groups} offset={gOffset} setOffset={setGOffset} />
       {r.bins && <p className="mw-muted">구간별 그룹 수: {r.bins.map((b) => `${b.label} ${b.groups}`).join(' · ')}</p>}
@@ -1280,7 +1308,7 @@ function AnalysisResult({ id }: { id: number }) {
         ))}
       </ul>
       {excluded && excluded.items.length > 0 && (
-        <div className="upload-table-wrap">
+        <TableRegion label="제외 행 표">
           <table className="upload-table an-rows">
             <thead>
               <tr>
@@ -1303,7 +1331,7 @@ function AnalysisResult({ id }: { id: number }) {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableRegion>
       )}
       {excluded && excluded.all !== undefined && excluded.all > excluded.total && (
         <p className="mw-muted">
@@ -1315,7 +1343,7 @@ function AnalysisResult({ id }: { id: number }) {
 
       <h3>근거 행 ({r.detail_total.toLocaleString('ko-KR')}행 — 계산에 들어간 원본 행)</h3>
       {rows && rows.items.length > 0 && (
-        <div className="upload-table-wrap">
+        <TableRegion label="근거 행 표">
           <table className="upload-table an-rows">
             <thead>
               <tr>
@@ -1348,7 +1376,7 @@ function AnalysisResult({ id }: { id: number }) {
               ))}
             </tbody>
           </table>
-        </div>
+        </TableRegion>
       )}
       {rows && rows.all !== undefined && rows.all > rows.total && (
         <p className="mw-muted">
@@ -1359,7 +1387,7 @@ function AnalysisResult({ id }: { id: number }) {
       <Pager page={rows} offset={rOffset} setOffset={setROffset} />
 
       <h3>사용한 자료</h3>
-      <div className="upload-table-wrap">
+      <TableRegion label="사용한 자료 표">
         <table className="upload-table an-rows">
           <thead>
             <tr>
@@ -1391,7 +1419,7 @@ function AnalysisResult({ id }: { id: number }) {
             ))}
           </tbody>
         </table>
-      </div>
+      </TableRegion>
     </section>
     </>
   )

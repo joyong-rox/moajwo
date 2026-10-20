@@ -807,12 +807,22 @@ function ItemRow({ item, disabled, busy, waiting, onDecide, onOpenReason, fields
           )}
         </summary>
         <div className="review-reason">
+          {/* 접힌 줄의 위치는 한 줄로 잘려 보일 수 있다 (마우스를 올린 툴팁만으로 전하지 않음) — 펼치면 전체를 보인다 */}
+          <p className="review-where-full">
+            <span className="review-where-label">위치</span> {where}
+          </p>
           <span className={`review-source is-${item.reason_source}`}>
             {item.reason_source === 'llm' ? 'LLM 생성 문장' : '규칙 문장'}
           </span>{' '}
           <span className={`review-reason-text${long ? ' is-clamped' : ''}`}>{item.reason}</span>
           {long && onOpenReason && (
-            <button type="button" className="review-reason-more" onClick={() => onOpenReason(item)}>
+            <button
+              type="button"
+              className="review-reason-more"
+              // 같은 '전체 보기'가 여러 줄에 있으므로 어느 항목인지 이름에 붙인다 (보이는 글자로 시작 — 화면에 보이는 가린 값 그대로)
+              aria-label={`전체 보기: ${item.before ?? '-'} → ${item.after ?? '-'} 근거`}
+              onClick={() => onOpenReason(item)}
+            >
               전체 보기
             </button>
           )}
@@ -827,7 +837,15 @@ function ReasonDialog({ item, onClose }: { item: ReviewItem; onClose: () => void
   const ref = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     const dialog = ref.current
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null // 연 '전체 보기' 버튼
     if (dialog && !dialog.open) dialog.showModal()
+    return () => {
+      // 닫힌 뒤 초점이 본문으로 빠졌으면 연 버튼으로 돌려준다 (브라우저가 이미 돌려줬으면 그대로)
+      requestAnimationFrame(() => {
+        const now = document.activeElement
+        if (opener?.isConnected && (!now || now === document.body)) opener.focus()
+      })
+    }
   }, [])
   return (
     <dialog

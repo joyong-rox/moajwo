@@ -607,7 +607,7 @@ function Bundle() {
                   href="/runs"
                   onClick={(e) => {
                     e.preventDefault()
-                    navigate('/runs')
+                    navigate('/runs', { focus: { to: 'page' } })
                   }}
                 >
                   실행 기록에서 보기

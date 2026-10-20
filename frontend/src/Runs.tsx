@@ -113,7 +113,12 @@ function Runs() {
                       <button
                         type="button"
                         className="mapping-confirm wk-run-review"
-                        onClick={() => navigate(`/reviews?review=${r.review_session_id}`)}
+                        data-focus-key={`run-review-${r.id}`}
+                        onClick={() =>
+                          navigate(`/reviews?review=${r.review_session_id}`, {
+                            focus: { to: 'detail', returnKey: `run-review-${r.id}` },
+                          })
+                        }
                       >
                         {r.status === 'review' && r.user_id === me.id ? '검토 이어서 하기' : '검토 보기'}
                       </button>
