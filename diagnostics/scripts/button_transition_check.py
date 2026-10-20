@@ -2,7 +2,8 @@
 
 a11y_scan.py는 CSS 전환이 끝난 뒤 재는 '정지 상태' 검사다. 이 스크립트는 그 대기 때문에 전환 중 결함이 가려지지 않도록,
 버튼이 실제로 비활성으로 그려진 뒤 다시 활성으로 바뀌는 과정을 프레임마다 기록한다.
-- 기록: 시각(ms), disabled, hover·초점·focus-visible, 글자 크기·굵기, 글자색·배경색·투명도, 뒤 배경, 계산된 대비(반올림 전 원시값)
+- 기록: 시각(표시용 반올림 ms `t`, 판정·재계산용 원시값 `t_raw`), disabled, hover·초점·focus-visible, 글자 크기·굵기, 글자색·배경색·투명도, 뒤 배경,
+  계산된 대비(반올림 전 원시값), 첫 활성 프레임의 인덱스. 프레임은 모두 저장한다 (집계는 transition_summary.py).
 - 기준: 일반 크기 글자 4.5:1, 큰 글자(24px 이상, 또는 18.66px 이상 굵게) 3:1. 비활성 프레임은 예외라 판정에 넣지 않는다.
 - 활성 전환을 관측하지 못한 실행(비활성이 한 번도 그려지지 않았거나 다시 활성이 되지 않음)은 통과로 세지 않는다.
 로그인: 시험용 응답(로그인 요청을 브라우저에서 0.5초 붙잡았다가 서버와 같은 모양의 401을 돌려줌 — 서버에 보내지 않아 계정 잠금과 무관)과
@@ -14,12 +15,11 @@ a11y_scan.py는 CSS 전환이 끝난 뒤 재는 '정지 상태' 검사다. 이 �
 
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
-from contrast_calc import oklab_to_srgb, over, ratio
 from playwright.sync_api import Page, sync_playwright
+from transition_summary import summarize
 
 from diag_common import ASSET_JS, EV, URL, USERS, creds, run_meta
 from diag_scope import browser_proxy, route_guard
@@ -37,17 +37,17 @@ LOGIN_FAIL = '{"detail": "아이디 또는 비밀번호가 올바르지 않습�
 SAMPLER_JS = """sels => { window.__bt = new Promise(resolve => {
   const t0 = performance.now(), out = {}
   const back = el => { for (let p = el.parentElement; p; p = p.parentElement) { const c = getComputedStyle(p).backgroundColor; if (c && !/rgba\\(0, 0, 0, 0\\)|transparent/.test(c)) return c } return 'rgb(255, 255, 255)' }
-  for (const s of sels) out[s] = {frames: [], saw_disabled: false, enabled_at: null}
+  for (const s of sels) out[s] = {frames: [], saw_disabled: false, enabled_at: null, enabled_index: null}
   const tick = () => {
     const now = performance.now() - t0
     let done = true
     for (const s of sels) {
       const b = document.querySelector(s), o = out[s]
       if (b) { const cs = getComputedStyle(b)
-        o.frames.push({t: Math.round(now), disabled: b.disabled, hover: b.matches(':hover'), focused: document.activeElement === b, focus_visible: b.matches(':focus-visible'),
+        o.frames.push({t: Math.round(now), t_raw: now, disabled: b.disabled, hover: b.matches(':hover'), focused: document.activeElement === b, focus_visible: b.matches(':focus-visible'),
           font_size: cs.fontSize, font_weight: cs.fontWeight, color: cs.color, bg: cs.backgroundColor, opacity: cs.opacity, around: back(b), text: b.textContent.trim().slice(0, 30)})
         if (b.disabled) o.saw_disabled = true
-        if (o.saw_disabled && !b.disabled && o.enabled_at === null) o.enabled_at = now }
+        if (o.saw_disabled && !b.disabled && o.enabled_at === null) { o.enabled_at = now; o.enabled_index = o.frames.length - 1 } }
       if (!(o.enabled_at !== null && now - o.enabled_at > 600)) done = false
     }
     if (done || now > 8000) return resolve(out)
@@ -55,38 +55,6 @@ SAMPLER_JS = """sels => { window.__bt = new Promise(resolve => {
   }
   tick()  // 설치하는 순간 첫 프레임을 바로 찍는다 (곧바로 이어지는 키 입력보다 먼저 — 비활성 상태를 놓치지 않게)
 }) }"""
-
-
-def color(s: str):
-    p = [float(x) for x in re.findall(r"-?[\d.]+", s)]
-    rgb = oklab_to_srgb(*p[:3]) if s.startswith("oklab") else tuple(p[:3])
-    return rgb, (p[3] if len(p) > 3 else 1.0)
-
-
-def need_of(f: dict) -> float:
-    px, w = float(f["font_size"].rstrip("px")), int(float(f["font_weight"]))
-    return 3.0 if px >= 24 or (px >= 18.66 and w >= 700) else 4.5
-
-
-def summarize(run_id: str, button: str, kind: str, vp: str, method: str, data: dict) -> dict:
-    frames = data["frames"]
-    for f in frames:
-        (fg, fa), (bg, ba), (around, _) = color(f["color"]), color(f["bg"]), color(f["around"])
-        op = float(f["opacity"])
-        bg_on = over(bg, ba * op, around)  # 요소 투명도까지 뒤 배경과 합성
-        f["ratio"] = ratio(over(fg, fa * op, bg_on), bg_on)
-    observed = data["saw_disabled"] and data["enabled_at"] is not None
-    enabled = [f for f in frames if observed and f["t"] >= data["enabled_at"] and not f["disabled"]]
-    low = min(enabled, key=lambda f: f["ratio"]) if enabled else None
-    last = frames[-3:] if len(frames) >= 3 else frames
-    stable = len({(f["color"], f["bg"], f["opacity"]) for f in last}) == 1 and bool(last)
-    final = frames[-1] if frames else None
-    return {"run": run_id, "button": button, "kind": kind, "viewport": vp, "method": method, "observed": observed, "saw_disabled": data["saw_disabled"],
-            "enabled_at_ms": None if data["enabled_at"] is None else round(data["enabled_at"]), "frames_total": len(frames),
-            "need": need_of(final) if final else None, "font": f"{final['font_size']} {final['font_weight']}" if final else None,
-            "min_enabled_ratio": low["ratio"] if low else None, "min_enabled_frame": low, "enabled_below_need": sum(1 for f in enabled if f["ratio"] < need_of(f)),
-            "first_enabled": enabled[0] if enabled else None, "final_ratio": final["ratio"] if final else None, "final_disabled": final["disabled"] if final else None,
-            "static_stable": stable, "frames": frames[:40]}  # fmt: skip
 
 
 def rec(item: dict) -> None:

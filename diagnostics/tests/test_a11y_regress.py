@@ -123,10 +123,10 @@ def tr(run, low=5.349, size="16px", weight="600", observed=True, final_disabled=
     need = 3.0 if float(size.rstrip("px")) >= 24 or (float(size.rstrip("px")) >= 18.66 and int(weight) >= 700) else 4.5
     enabled = [f for f in frames if observed and not f["disabled"]]
     lowf = min(enabled, key=lambda f: f["ratio"]) if enabled else None
-    return {"run": run, "button": "합성", "kind": "합성", "observed": observed, "saw_disabled": observed, "enabled_at_ms": 17 if observed else None,
-            "frames_total": len(frames), "need": need, "font": f"{size} {weight}", "min_enabled_ratio": lowf["ratio"] if lowf else None, "min_enabled_frame": lowf,
-            "enabled_below_need": sum(f["ratio"] < need for f in enabled), "final_ratio": frames[-1]["ratio"], "final_disabled": final_disabled,
-            "static_stable": True, "frames": frames}  # fmt: skip
+    return {"run": run, "button": "합성", "kind": "합성", "observed": observed, "saw_disabled": observed, "enabled_index": 1 if observed else None,
+            "enabled_at_ms": 17 if observed else None, "frames_total": len(frames), "need": need, "font": f"{size} {weight}",
+            "min_enabled_ratio": lowf["ratio"] if lowf else None, "min_enabled_frame": lowf, "enabled_below_need": sum(f["ratio"] < need for f in enabled),
+            "final_ratio": frames[-1]["ratio"], "final_disabled": final_disabled, "static_stable": True, "frames_complete": True, "frames": frames}  # fmt: skip
 
 
 def full_transition():
@@ -283,6 +283,27 @@ def test_transition_unobserved_or_missing_is_not_pass(tmp_path):
     assert statuses(res, f"TR.{TR_RUNS[0]}.moving") == [ar.NONE] and statuses(res, f"TR.{TR_RUNS[0]}.static") == [ar.PASS]
     assert statuses(res, f"TR.{TR_RUNS[1]}.static") == [ar.NONE]
     assert statuses(res, f"TR.{TR_RUNS[2]}.") == [ar.NONE, ar.NONE]
+
+
+def test_transition_old_format_is_not_judged(tmp_path):
+    d = full_transition()
+    old = d["transition"][0]
+    del old["enabled_index"], old["frames_complete"]  # 5차 판 기록: 앞 40프레임만, 첫 활성 인덱스 없음
+    d["transition"][1]["frames"] = d["transition"][1]["frames"][:2]  # 저장된 프레임 수가 frames_total과 다름
+    res, (_, code) = judged(tmp_path, ["transition"], d)
+    assert code == ar.EXIT_INCOMPLETE
+    for r in TR_RUNS[:2]:
+        assert statuses(res, f"TR.{r}.moving") == [ar.NONE]
+    assert statuses(res, f"TR.{TR_RUNS[0]}.static") == [ar.PASS]  # 정지 상태는 마지막 프레임 값이라 그대로 판정
+
+
+def test_transition_inconsistent_record_is_input_error(tmp_path):
+    d = full_transition()
+    d["transition"][0]["enabled_index"] = 0  # 첫 프레임은 비활성 — 인덱스가 기록과 맞지 않음
+    d["transition"][1]["enabled_below_need"] = 3  # 요약과 프레임 재계산이 다름
+    res, (_, code) = judged(tmp_path, ["transition"], d)
+    assert code == ar.EXIT_INCOMPLETE
+    assert statuses(res, f"TR.{TR_RUNS[0]}.moving") == [ar.IERR] and statuses(res, f"TR.{TR_RUNS[1]}.moving") == [ar.IERR]
 
 
 def test_partial_is_distinct_from_full(tmp_path):

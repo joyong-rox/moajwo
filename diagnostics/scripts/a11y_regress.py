@@ -6,6 +6,7 @@
 - 상태 안내 기준은 DOM 변경 기록, 초점 기준은 document.activeElement 기록이다 (실제 낭독이 아님).
 - transition 묶음: 버튼마다 '정지 상태'(전환이 끝난 마지막 프레임)와 '전환 중'(다시 활성이 된 뒤의 모든 프레임)을 따로 판정한다.
   활성 프레임이 하나라도 기준(일반 글자 4.5:1, 큰 글자 3:1, 반올림 전 값) 미만이면 실패, 비활성→활성 전환을 관측하지 못했으면 미측정.
+  전환 중 기준은 저장된 전체 프레임을 첫 활성 프레임의 인덱스부터 다시 계산한다. 전체 프레임·인덱스가 없는 기록(5차 판)은 미측정.
 - 여러 파일: 측정 묶음은 뒤 파일이 앞을 바꾸고(출처 표에 남김), 범위 밖 요청·측정 오류는 모두 이어 붙인다.
   출처(빌드 자산·이미지)가 다른 파일을 합치면 --reuse-reason으로 재사용 이유를 적어야 전체 완료가 된다.
 
@@ -470,13 +471,22 @@ def crit_list() -> list[Crit]:
             r = run_rec(data, run)
             if r is None:
                 return NONE, f"측정 기록 없음 ({run})"
-            if not r["observed"] or r["min_enabled_frame"] is None:
-                return NONE, f"비활성→활성 전환을 관측하지 못함 (비활성 그려짐 {r['saw_disabled']}, 활성 시각 {r['enabled_at_ms']}) — 통과로 세지 않음"
-            low = r["min_enabled_frame"]
-            n = need(low)
-            ok = r["min_enabled_ratio"] >= n and r["enabled_below_need"] == 0
-            return (PASS if ok else FAIL), (f"활성 최저 {r['min_enabled_ratio']:.4f} (기준 {n}, {low['font_size']} {low['font_weight']}, {low['t']}ms) · "
-                                            f"미달 프레임 {r['enabled_below_need']} · 활성 {r['enabled_at_ms']}ms")  # fmt: skip
+            frames = r["frames"]
+            if not r.get("frames_complete") or "enabled_index" not in r or len(frames) != r.get("frames_total"):
+                return NONE, "전체 프레임·첫 활성 인덱스가 없는 기록 (5차 판은 첫 활성 프레임이 빠질 수 있었음) — 다시 측정해야 판정"
+            idx = r["enabled_index"]
+            if idx is None:
+                return NONE, f"비활성→활성 전환을 관측하지 못함 (비활성 그려짐 {r['saw_disabled']}) — 통과로 세지 않음"
+            if not 0 < idx < len(frames) or frames[idx]["disabled"] or not any(f["disabled"] for f in frames[:idx]):
+                return IERR, f"첫 활성 인덱스 {idx}가 프레임 기록과 맞지 않음"
+            # 저장된 프레임으로 다시 계산한다: 첫 활성 프레임부터 활성인 프레임 모두 (요약값을 그대로 믿지 않음)
+            enabled = [f for f in frames[idx:] if not f["disabled"]]
+            below = [f for f in enabled if f["ratio"] < need(f)]
+            if len(below) != r.get("enabled_below_need"):
+                return IERR, f"요약의 미달 프레임 {r.get('enabled_below_need')}과 다시 계산한 {len(below)}이 다름"
+            low, first = min(enabled, key=lambda f: f["ratio"]), frames[idx]
+            return (FAIL if below else PASS), (f"활성 최저 {low['ratio']:.4f} (기준 {need(low)}, {low['font_size']} {low['font_weight']}, {low['t']}ms) · "
+                                               f"미달 프레임 {len(below)}/{len(enabled)} · 첫 활성 프레임 {first['ratio']:.4f} ({first['t']}ms)")  # fmt: skip
 
         return fn
 
