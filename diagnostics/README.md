@@ -1,11 +1,11 @@
-# 진단 설정·재실행 방법 (1차 진단 2026-10-20)
+# 진단 설정·재실행 방법 (1차 진단 2026-10-20, 같은 날 2차 보완)
 
-결과 보고서: [REPORT-20261020.md](REPORT-20261020.md) — **1차 진단·미수행 항목 포함**.
+결과 보고서: [REPORT-20261020.md](REPORT-20261020.md) — **1차 진단·미수행 항목 포함**. 정정 이력은 보고서 11장에 있습니다.
 
 이 폴더에는 비밀번호·토큰·쿠키·실제 개인정보·DB 사본이 없습니다.
 - 시험 계정 비밀번호는 실행 때 무작위로 만들어 Git 밖 증거 폴더의 `creds.json`에만 둡니다.
 - `scripts/seed.py`의 개인정보 형식 값은 합성 값입니다(`example.com`, `010-0000-000x`).
-- 스크립트에 있는 비밀번호 같은 글자는 실제 계정에 쓰지 않는 값입니다. 로그인 실패를 만들거나, 틀린 현재 비밀번호로 변경을 시도해 거절되게 하는 데만 씁니다.
+- 스크립트에 있는 비밀번호 같은 글자는 실제 계정에 쓰지 않는 값입니다. 로그인 실패, 확인란 불일치, 서버 규칙 위반 거절, 틀린 현재 비밀번호로 변경 시도처럼 **거절되는 입력**에만 씁니다.
 
 ## 구성
 
@@ -13,80 +13,179 @@
 |---|---|---|
 | `compose.diag.yml` | 진단 격리 스택 `moajwo-diag` (127.0.0.1:8086, 볼륨 `moajwo-diag-data`, 메모리·CPU 상한, 외부 이름 조회 차단, 모델 호출 차단) | 사용함 |
 | `compose.diag.yml`의 `zap` 서비스 | 실행 중 보안 검사용 준비 설정 | **미실행·미검증** |
-| `scripts/diag_common.py` | 공용 (진단 주소만 허용, 계정·업로드·읽기 전용 DB 조회) | 사용함 |
-| `scripts/seed.py` | 합성 계정·자료 생성 | 사용함 |
-| `scripts/monitor.py` | 공유 PC 사용 가능 메모리·운영 health 감시 | 사용함. `localhost`를 써서 IPv6 연결 대기가 섞일 수 있음 → `127.0.0.1` 권장 (REPORT M-11) |
-| `scripts/a11y_scan.py` | 72개 화면 상태 Nu·axe 검사 | 사용함 |
-| `scripts/a11y_manual.py` | 키보드·확인창·재배치·확대·간격·대상 크기·상태 안내·로그인 보조 기록 | 사용함. `keyboard`의 '검토 열기' 단계는 판정 조건 오류로 미확인 |
+| `scripts/diag_scope.py` | 진단 요청 허용 범위 (아래 '요청 범위') | 2차 추가 |
+| `scripts/diag_common.py` | 공용 (계정·업로드·읽기 전용 DB 조회). 요청은 `diag_scope`를 거침 | 사용함 |
+| `scripts/seed.py` | 합성 계정·자료 생성 | 1차에 사용 (2차는 기존 볼륨 재사용) |
+| `scripts/monitor.py` | 공유 PC 사용 가능 메모리·운영 health 감시 | 2차에 `127.0.0.1`로 바꿈. **바꾼 뒤 미실행** |
+| `scripts/health_timing.py` | 운영 health를 `localhost`·`127.0.0.1`로 단계별 비교 (직렬 소수 요청) | 1차에 사용. 2차는 운영 전용 opener만 정리, **미실행** |
+| `scripts/a11y_scan.py` | 72개 화면 상태 Nu·axe 검사. `NU_URL=off`면 DOM·서버 문서만 저장 | 사용함 |
+| `scripts/nu_check_dom.py` | 저장한 DOM·서버 문서를 로컬 Nu로 검사해 결과 JSON을 채움 | 2차 추가 |
+| `scripts/a11y_manual.py` | 키보드·확인창·재배치·확대·간격·대상 크기·상태 안내·로그인 보조 기록. 2차에 `authforms`(가입·최초 설정 화면 재배치·확대) 추가 | 사용함. `keyboard`의 '검토 열기' 단계는 판정 조건 오류로 미확인 (1차) |
+| `scripts/a11y_fix_check.py` | D-01~D-07 항목별 전후 기록 (접근 가능한 이름·설명, 상태 영역 변경 기록, 테두리·스위치 대비, 가입 도움말, 지난 검사 점수) | 2차 추가 |
+| `scripts/flow_check.py` | 업로드 → 검토 → 통합 → 내려받기, 묶기 요약 끔·켬 흐름 | 2차 추가 |
+| `scripts/compare_a11y.py` | 1차 원시 결과와 나중 72개 상태 결과를 같은 원인 분류로 비교 | 2차 추가 |
+| `scripts/scope_selftest.py` | 요청 범위 자체 시험 (루프백 임시 서버만, 진단·운영 주소에 요청 없음) | 2차 추가 |
 | `scripts/scroller_check.py`·`toggle_check.py`·`contrast_check.py`·`contrast_calc.py`·`css_support_check.py` | 개별 확인 (표 스크롤 영역, 스위치 상태 색, 계산 색, 대비 계산, CSS 지원) | 사용함 |
-| `scripts/health_timing.py` | 운영 health를 `localhost`·`127.0.0.1`로 단계별 비교 (직렬 소수 요청) | 사용함 |
 | `scripts/summarize_trivy.py`·`summarize_a11y.py` | 원시 결과 재집계 (새 검사 없음) | 사용함 |
+| `tests/` | `diag_scope` 단위 시험 43개 (소켓 연결을 막은 채 실행) | 2차 추가 |
 | `tools/zoomext/` | 실제 브라우저 확대용 최소 확장 (탭 확대 권한만) | 사용함 |
 | `reports/` | 부록: API 목록, 72개 상태 결과, Trivy HIGH 전체, WCAG 2.2 A·AA 상태 | — |
 | `ruff.toml` | 진단 스크립트 전용 린트 (backend 규칙 상속, JS 문자열 때문에 줄 길이만 완화) | — |
 
 실행 중 권한·보안 확인 스크립트는 없습니다. 작성 중 응답이 안전 분류기에 의해 중단돼 파일이 만들어지지 않았고, 다시 작성하지 않았습니다(REPORT 6장).
 
-## 재실행 (Git Bash, 저장소 루트)
+## 요청 범위 (`scripts/diag_scope.py`)
 
-공유 PC에서는 사용 가능 메모리를 먼저 확인하고, 도구를 하나씩 띄웁니다.
+- `DIAG_URL`은 `http://127.0.0.1:8086`(진단 격리 스택)만 허용합니다. 비우면 그 주소를 씁니다.
+  - 문자열 접두어가 아니라 파싱해서 scheme·hostname·port를 정확히 비교합니다. 사용자 정보(`user@`), 경로, 쿼리, 조각이 붙으면 거절합니다.
+  - 허용 밖이면 `assert`가 아니라 `ScopeError`로 멈춥니다(최적화 실행에서도 그대로).
+- `NU_URL`은 `http://127.0.0.1:8888`(로컬 Nu)만 허용합니다. `off`면 Nu에 보내지 않습니다.
+- Python 요청은 환경 프록시를 쓰지 않습니다. 리다이렉트는 이어지는 주소가 같은 범위일 때만 따르고, 밖이면 `ScopeError`로 멈춥니다.
+- 브라우저는 같은 범위를 씁니다.
+  - 첫 요청은 `page.route`로 막습니다.
+  - 리다이렉트 이후 요청은 아무것도 듣지 않는 프록시(`127.0.0.1:9`)로 보내 실패시킵니다. 예외는 `<-loopback>,127.0.0.1:8086` 하나입니다.
+  - `<-loopback>`은 **맨 앞**에 둡니다. Playwright가 뒤에 덧붙이게 두면 허용 규칙까지 무력화됩니다(Edge 155, `scope_selftest.py`로 확인).
+- 운영(8080)은 어느 쪽에도 허용하지 않습니다. 시드 생성·업로드 같은 진단용 쓰기 요청은 운영 주소로 보낼 수 없습니다.
+- 운영 health 감시는 `monitor.py`·`health_timing.py`의 별도 경로입니다.
+  - 고정된 `http://127.0.0.1:8080/api/health`에 GET만 보냅니다.
+  - 프록시를 쓰지 않고 리다이렉트를 따르지 않습니다. 진단 모듈을 가져오지 않습니다(단위 시험의 AST 검사로 확인).
+- 단위 시험은 운영 주소에 실제 요청을 보내 거절 여부를 시험하지 않습니다.
+
+## 경로 (Git Bash 기준)
 
 ```bash
-EV=backups/diag-20261020            # Git 밖 증거 폴더 (DIAG_EVIDENCE로 바꿀 수 있음)
-PY=backend/.venv/Scripts/python.exe  # 표준 라이브러리·openpyxl만 쓰는 스크립트
-PW=<playwright가 설치된 파이썬>      # a11y·브라우저 스크립트 (Playwright 1.63, Edge)
-
-# 0) 감시 (선택) — 운영에는 health GET만
-$PY diagnostics/scripts/monitor.py $EV/monitor.jsonl $EV/monitor.stop 240 &
-
-# 1) 소스 사본 (작업 폴더의 backups/·.venv·node_modules를 읽지 않게)
-git archive 183dad3f867956b1bf9112d1d84491a8266e20be | tar -x -C <스크래치>/src
-git clone --mirror . <스크래치>/mirror.git
-
-# 2) 비밀정보 (네트워크 없음, 값 가림)
-MSYS_NO_PATHCONV=1 docker run --rm --network none -v "<스크래치>/mirror.git:/repo:ro" -v "$EV/raw/gitleaks:/out" \
-  zricethezav/gitleaks:latest git /repo --redact --report-format json --report-path /out/history.json
-MSYS_NO_PATHCONV=1 docker run --rm --network none -v "<스크래치>/src:/src:ro" -v "$EV/raw/gitleaks:/out" \
-  zricethezav/gitleaks:latest dir /src --redact --report-format json --report-path /out/current.json
-
-# 3) 이미지 (운영 이미지 ID에 진단 태그 → tar → DB만 내려받고 검사는 네트워크 없이)
-docker tag sha256:ee1334ec… moajwo-diag-backend:ee1334ec && docker tag sha256:4e943da6… moajwo-diag-frontend:4e943da6
-docker save moajwo-diag-backend:ee1334ec -o <스크래치>/images/backend.tar   # frontend도 같게
-MSYS_NO_PATHCONV=1 docker run --rm -v trivy-diag-cache:/root/.cache aquasec/trivy:latest image --download-db-only
-MSYS_NO_PATHCONV=1 docker run --rm --network none -v trivy-diag-cache:/root/.cache -v "<스크래치>/images:/img:ro" -v "$EV/raw/trivy:/out" \
-  aquasec/trivy:latest image --input /img/backend.tar --skip-db-update --skip-java-db-update --offline-scan --scanners vuln,secret --format json -o /out/image-backend.json
-#   config: trivy config /src · fs: trivy fs /src --scanners vuln,secret,misconfig --include-dev-deps
-$PY diagnostics/scripts/summarize_trivy.py $EV/raw/trivy diagnostics/reports/trivy-high-<날짜>.md
-
-# 4) 의존성 (외부 통신: PyPI·OSV / npm 레지스트리 — 패키지 이름·버전)
-MSYS_NO_PATHCONV=1 docker run --rm --network none --entrypoint pip moajwo-diag-backend:ee1334ec freeze --all > $EV/raw/pip-audit/image-freeze.txt
-pip-audit -r $EV/raw/pip-audit/image-freeze.txt --no-deps --disable-pip --vulnerability-service pypi --format json -o $EV/raw/pip-audit/image-pypi.json
-#   --vulnerability-service osv 로 한 번 더. 개발 환경은 backend/.venv의 pip freeze로 같게
-(cd <스크래치>/src/frontend && npm audit --json && npm audit --omit=dev --json)
-
-# 5) 진단 스택 + 합성 자료
-export DIAG_BE_IMAGE=moajwo-diag-backend:ee1334ec DIAG_FE_IMAGE=moajwo-diag-frontend:4e943da6
-MSYS_NO_PATHCONV=1 docker compose -f diagnostics/compose.diag.yml up -d --wait
-(cd diagnostics/scripts && $PY seed.py)
-
-# 6) 웹 표준·접근성 (Nu는 로컬 컨테이너, axe는 npm 패키지의 axe.min.js)
-MSYS_NO_PATHCONV=1 docker run -d --name moajwo-diag-nu --memory 768m --cpus 1 -e JAVA_TOOL_OPTIONS=-Xmx512m -p 127.0.0.1:8888:8888 ghcr.io/validator/validator:latest
-(cd diagnostics/scripts && AXE_JS=<axe-core>/axe.min.js $PW a11y_scan.py $EV/raw/a11y)
-(cd diagnostics/scripts && $PW a11y_manual.py $EV/raw/a11y-manual)      # 검사 이름을 쉼표로 골라 실행 가능
-$PY diagnostics/scripts/summarize_a11y.py $EV/raw diagnostics/reports/a11y-states-<날짜>.md
-$PY diagnostics/scripts/contrast_calc.py
-
-# 7) 정리 — 진단 프로젝트만 정지 (볼륨·이미지 보존)
-MSYS_NO_PATHCONV=1 docker compose -f diagnostics/compose.diag.yml -p moajwo-diag stop
-docker rm -f moajwo-diag-nu
-touch $EV/monitor.stop
+ROOT=/c/Users/juho/Documents/Moajwo                # 저장소 루트 (자기 환경에 맞게)
+EV=$ROOT/backups/diag-20261020                     # Git 밖 증거 폴더 (.gitignore의 backups/)
+export DIAG_EVIDENCE="$(cygpath -w "$EV")"         # 스크립트도 같은 폴더를 쓰게 (기본값과 같지만 명시)
+PY=$ROOT/backend/.venv/Scripts/python.exe           # Python 3.12.10: openpyxl 3.1.5, pytest 9.1.1, ruff 0.16.10
+PW=<Playwright 파이썬>                             # Python 3.12.10: playwright 1.63.0, openpyxl 3.1.5 (2차는 Git 밖 임시 venv)
+SCRATCH=<Git 밖 임시 폴더>                         # 소스 사본·미러·이미지 tar·axe-core 설치 위치
+AXE_JS="$(cygpath -w "$SCRATCH/diag/tools/node/node_modules/axe-core/axe.min.js")"   # axe-core 4.14.0
+export PYTHONIOENCODING=utf-8                       # 한글 출력 (2차 실행 때 명령마다 붙임 — 대비 계산 출력 비교도 이 상태)
+mkdir -p "$EV/round2"                               # 출력 폴더는 명령마다 mkdir -p로 먼저 만든다
 ```
 
-## 도구 버전 (1차 진단에 쓴 것)
+- `diag_common.py`는 `DIAG_EVIDENCE`가 없으면 `<저장소>/backups/diag-20261020`을 씁니다. 셸의 `$EV`와 스크립트가 다른 폴더를 보지 않게 `DIAG_EVIDENCE`를 같은 값으로 내보냅니다.
+- 브라우저 스크립트는 `PW`로, 표준 라이브러리·openpyxl만 쓰는 스크립트(`nu_check_dom`·`compare_a11y`·`summarize_*`·`contrast_calc`)와 시험·린트는 `PY`로 실행합니다.
+- Docker에 넘기는 호스트 경로는 `cygpath -w`로 바꾸고, `MSYS_NO_PATHCONV=1`을 붙입니다.
 
-- Gitleaks v8.30.1 · Trivy 0.76.0 (DB UpdatedAt 2026-10-19 19:08:34Z)
-- pip-audit 2.10.1 · npm 11.16.0
-- Nu Html Checker 26.10.12 (0a70d65) · axe-core 4.14.0
-- Playwright 1.63.0 · Edge 155.0.4283.45
+## 도구 이미지 (태그 대신 다이제스트로 받기)
 
-이미지 다이제스트는 REPORT 1장에 있습니다. `latest` 태그로 받으면 버전이 바뀔 수 있으니, 재현할 때는 다이제스트로 받으세요.
+| 도구 | 받는 이름 | 버전 | 이미지 ID |
+|---|---|---|---|
+| Gitleaks | `zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f` | v8.30.1 | `sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f` |
+| Trivy | `aquasec/trivy@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222` | 0.76.0 (DB v2 UpdatedAt 2026-10-19 19:08:34Z, 볼륨 `trivy-diag-cache`) | `sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222` |
+| Nu Html Checker | `ghcr.io/validator/validator@sha256:8f21030474e68e06905cfa801b37376e99c0e37867c653c5b6cd7e2dcaf3f503` | 26.10.12 (0a70d65) | `sha256:8f21030474e68e06905cfa801b37376e99c0e37867c653c5b6cd7e2dcaf3f503` |
+
+- 이 PC의 Docker Desktop(containerd 이미지 저장소)에서는 이미지 ID가 받은 다이제스트와 같습니다.
+
+| 검사 대상 | 진단 태그 | 이미지 ID |
+|---|---|---|
+| 운영 backend (= 진단 backend) | `moajwo-diag-backend:ee1334ec` | `sha256:ee1334ec349fd5c9e504bde57abff17367ac0cabea58e28081743d928b070f40` |
+| 운영 frontend (수정 전) | `moajwo-diag-frontend:4e943da6` | `sha256:4e943da6b821395de7168dd5c1b85b6e61892139ad9149e3d8830fd68108035a` |
+| 접근성 수정 frontend (`fix/a11y-common-controls` 7b47b21) | `moajwo-diag-frontend:7b47b21` | `sha256:4826cb6978134bf4b4115c208cee65ad3c06d554d14ae5caee4fd4758a34896e` |
+| 접근성 수정 frontend (같은 브랜치 95423ca, 최종 확인) | `moajwo-diag-frontend:95423ca` | `sha256:aed42daddb82b354650afc2d0025ae197bdfceb93fa06410e714b8a8c7b0f3ed` |
+
+그 밖의 도구: pip-audit 2.10.1 · npm 11.16.0 · axe-core 4.14.0 · Playwright 1.63.0 · Microsoft Edge 155.0.4283.45.
+
+## 재실행 A — 2차(2026-10-20)에 이 형태로 실행해 확인한 명령
+
+공유 PC에서는 사용 가능 메모리를 먼저 확인하고 도구를 하나씩 띄웁니다. 브라우저 DOM 수집과 Nu 검사는 동시에 돌리지 않고 차례로 합니다.
+
+- 2차 실행 때는 경로를 변수 대신 절대 경로로 적었습니다. 아래는 같은 명령을 위 변수로 바꿔 적은 것입니다.
+- `DIAG_EVIDENCE`는 2차 실행 때 내보내지 않았습니다(기본값과 같은 폴더). 내보낸 값이 그대로 쓰이는지는 따로 확인했습니다(`import diag_common; print(diag_common.EV)` — 기본값, 같은 값, 다른 값 세 경우).
+
+```bash
+# A1) 범위 단위 시험·린트 (네트워크 없음)
+$PY -m pytest "$ROOT/diagnostics/tests" -q -p no:cacheprovider        # 43 passed
+(cd "$ROOT/diagnostics" && $PY -m ruff check .)
+
+# A2) 범위 자체 시험 (루프백 임시 서버 8086·8099만 — 진단 스택을 멈춘 상태에서)
+(cd "$ROOT/diagnostics/scripts" && $PW scope_selftest.py "$(cygpath -w "$EV/round2/scope-selftest.json")")
+
+# A3) 비밀정보 (네트워크 없음, 값 가림)
+GL=zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+mkdir -p "$EV/round2/gitleaks" "$SCRATCH/src2"
+git clone -q --mirror "$ROOT" "$SCRATCH/mirror2.git"
+git -C "$ROOT" archive 183dad3f867956b1bf9112d1d84491a8266e20be | tar -x -C "$SCRATCH/src2"
+MSYS_NO_PATHCONV=1 docker run --rm --network none --memory 512m -v "$(cygpath -w "$SCRATCH/mirror2.git"):/repo:ro" -v "$(cygpath -w "$EV/round2/gitleaks"):/out" \
+  $GL git /repo --redact --report-format json --report-path /out/history.json --no-banner
+MSYS_NO_PATHCONV=1 docker run --rm --network none --memory 512m -v "$(cygpath -w "$SCRATCH/src2"):/src:ro" -v "$(cygpath -w "$EV/round2/gitleaks"):/out" \
+  $GL dir /src --redact --report-format json --report-path /out/current.json --no-banner
+# 검사 범위 확인: 병합 커밋은 Gitleaks가 건너뛴다 — 병합의 결합 diff가 비어 있는지(충돌 해결로 새로 들어간 내용이 없는지) 따로 본다
+for m in $(git -C "$ROOT" rev-list --all --merges); do [ -n "$(git -C "$ROOT" diff-tree --cc -r --no-commit-id "$m")" ] && echo "결합 diff 있음 $m"; done
+
+# A4) 이미지 (DB는 기존 캐시 볼륨, 검사는 네트워크 없이) — 2차는 frontend tar만 다시 검사해 1차와 같음을 확인
+TV=aquasec/trivy@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222
+mkdir -p "$EV/round2/trivy"
+MSYS_NO_PATHCONV=1 docker run --rm --network none --memory 1g --cpus 2 -v trivy-diag-cache:/root/.cache -v "$(cygpath -w "$SCRATCH/images"):/img:ro" -v "$(cygpath -w "$EV/round2/trivy"):/out" \
+  $TV image --input /img/frontend.tar --skip-db-update --skip-java-db-update --offline-scan --scanners vuln,secret --format json -o /out/image-frontend.json -q
+
+# A5) 진단 스택 (기존 볼륨의 합성 자료 재사용). 이미지만 바꿔 수정 전·후를 같은 자료로 본다
+export DIAG_BE_IMAGE=moajwo-diag-backend:ee1334ec DIAG_FE_IMAGE=moajwo-diag-frontend:4e943da6   # 수정 후: moajwo-diag-frontend:95423ca
+MSYS_NO_PATHCONV=1 docker compose -f "$ROOT/diagnostics/compose.diag.yml" -p moajwo-diag up -d --wait
+#   수정 브랜치 frontend 이미지 만들기 (브랜치 작업 트리에서): docker build -q -t moajwo-diag-frontend:<커밋> "$(cygpath -w "<작업 트리>/frontend")"
+
+# A6) 항목별 전후 기록 (수정 전 이미지로 한 번, 수정 후 이미지로 한 번)
+mkdir -p "$EV/round2/fix-check/before" "$EV/round2/fix-check/after-final"
+(cd "$ROOT/diagnostics/scripts" && $PW a11y_fix_check.py "$(cygpath -w "$EV/round2/fix-check/after-final")")   # ONLY_CHECKS=upload,contrast,... 로 골라 실행 가능
+
+# A7) 72개 상태: 브라우저 수집(NU_URL=off) → 브라우저를 닫은 뒤 Nu만 띄워 검사 → Nu 내림
+(cd "$ROOT/diagnostics/scripts" && NU_URL=off AXE_JS="$AXE_JS" $PW a11y_scan.py "$(cygpath -w "$EV/round2/a11y-after")")
+MSYS_NO_PATHCONV=1 docker run -d --name moajwo-diag-nu --memory 768m --cpus 1 --dns 127.0.0.1 -e JAVA_TOOL_OPTIONS=-Xmx512m -p 127.0.0.1:8888:8888 \
+  ghcr.io/validator/validator@sha256:8f21030474e68e06905cfa801b37376e99c0e37867c653c5b6cd7e2dcaf3f503
+(cd "$ROOT/diagnostics/scripts" && $PY nu_check_dom.py "$(cygpath -w "$EV/round2/a11y-after")")
+docker rm -f moajwo-diag-nu
+$PY "$ROOT/diagnostics/scripts/compare_a11y.py" "$EV/raw" "$EV/round2/a11y-after" "$EV/round2/compare-a11y.md"
+
+# A8) 재배치 320 CSS px·실제 200% 확대·가입/최초 설정 화면, 기존 업무 흐름
+(cd "$ROOT/diagnostics/scripts" && $PW a11y_manual.py "$(cygpath -w "$EV/round2/manual-after")" reflow,zoom,authforms)
+(cd "$ROOT/diagnostics/scripts" && $PW flow_check.py "$(cygpath -w "$EV/round2/flow-after")")              # ONLY_FLOWS=bundle 등
+
+# A9) 재집계·대비 계산 (새 검사 없음). 함수로 나눈 뒤에도 1차 출력과 바이트 단위로 같음을 cmp로 확인
+$PY "$ROOT/diagnostics/scripts/summarize_a11y.py" "$EV/raw" "$SCRATCH/a11y-states-check.md" && cmp "$SCRATCH/a11y-states-check.md" "$ROOT/diagnostics/reports/a11y-states-20261020.md"
+$PY "$ROOT/diagnostics/scripts/contrast_calc.py" > "$SCRATCH/contrast-check.txt" && cmp "$SCRATCH/contrast-check.txt" "$EV/raw/contrast-calc.txt"
+
+# A10) 정리 — 진단 프로젝트만 정지 (볼륨·이미지 보존, down·볼륨 삭제 안 함)
+MSYS_NO_PATHCONV=1 docker compose -f "$ROOT/diagnostics/compose.diag.yml" -p moajwo-diag stop
+docker ps -a --filter name=moajwo-diag-nu --format '{{.Names}}'   # 비어 있어야 함
+```
+
+## 재실행 B — 이 문서의 형태로는 다시 실행하지 않은 명령 (미검증)
+
+1차에는 비슷한 명령으로 실행했지만, 다이제스트·경로 변수를 쓴 아래 형태로는 다시 실행하지 않았습니다.
+
+```bash
+# B1) 감시 (운영에는 health GET만, 127.0.0.1) — 127.0.0.1로 바꾼 뒤 실행하지 않음
+$PY "$ROOT/diagnostics/scripts/monitor.py" "$EV/monitor.jsonl" "$EV/monitor.stop" 240 &
+touch "$EV/monitor.stop"                                                    # 끝낼 때
+
+# B2) 이미지 tar·Trivy DB·backend 이미지·config·fs (외부 통신: DB 내려받기만)
+mkdir -p "$SCRATCH/images" "$EV/raw/trivy"
+docker tag sha256:ee1334ec349fd5c9e504bde57abff17367ac0cabea58e28081743d928b070f40 moajwo-diag-backend:ee1334ec
+docker tag sha256:4e943da6b821395de7168dd5c1b85b6e61892139ad9149e3d8830fd68108035a moajwo-diag-frontend:4e943da6
+docker save moajwo-diag-backend:ee1334ec -o "$(cygpath -w "$SCRATCH/images/backend.tar")"     # frontend도 같게
+MSYS_NO_PATHCONV=1 docker run --rm -v trivy-diag-cache:/root/.cache $TV image --download-db-only
+MSYS_NO_PATHCONV=1 docker run --rm --network none -v trivy-diag-cache:/root/.cache -v "$(cygpath -w "$SCRATCH/images"):/img:ro" -v "$(cygpath -w "$EV/raw/trivy"):/out" \
+  $TV image --input /img/backend.tar --skip-db-update --skip-java-db-update --offline-scan --scanners vuln,secret --format json -o /out/image-backend.json
+#   config: $TV config /src · fs: $TV fs /src --scanners vuln,secret,misconfig --include-dev-deps (소스 사본을 /src로)
+$PY "$ROOT/diagnostics/scripts/summarize_trivy.py" "$EV/raw/trivy" "$ROOT/diagnostics/reports/trivy-high-<날짜>.md"
+
+# B3) 의존성 (외부 통신: PyPI·OSV / npm 레지스트리 — 패키지 이름·버전만)
+mkdir -p "$EV/raw/pip-audit"
+MSYS_NO_PATHCONV=1 docker run --rm --network none --entrypoint pip moajwo-diag-backend:ee1334ec freeze --all > "$EV/raw/pip-audit/image-freeze.txt"
+pip-audit -r "$EV/raw/pip-audit/image-freeze.txt" --no-deps --disable-pip --vulnerability-service pypi --format json -o "$EV/raw/pip-audit/image-pypi.json"
+#   --vulnerability-service osv 로 한 번 더. 개발 환경은 backend/.venv의 pip freeze로 같게
+(cd "$SCRATCH/src/frontend" && npm audit --json && npm audit --omit=dev --json)
+
+# B4) 새 볼륨에 합성 자료 만들기 (2차는 1차 볼륨을 그대로 씀)
+(cd "$ROOT/diagnostics/scripts" && $PY seed.py)
+
+# B5) 도구 설치 (2차는 1차에 만든 임시 venv·node 폴더를 그대로 씀)
+python -m venv "$SCRATCH/pwvenv" && "$SCRATCH/pwvenv/Scripts/python.exe" -m pip install playwright==1.63.0 openpyxl==3.1.5
+(mkdir -p "$SCRATCH/diag/tools/node" && cd "$SCRATCH/diag/tools/node" && npm install axe-core@4.14.0)
+```
+
+## 재실행 C — 미수행 (이번에 실행하지 않음)
+
+- SonarQube, ZAP(`compose.diag.yml`의 `zap` 서비스 포함), 실행 중 권한·보안 확인, 스크린리더 실제 낭독 확인. 사유와 범위는 REPORT 6장에 있습니다.
