@@ -127,8 +127,9 @@ body {
   transition: border-color 0.15s, background-color 0.15s;
 }
 
+/* 키보드 초점은 안의 '파일 선택' 버튼이 받는다 — 그때도 영역을 마우스를 올린 모양으로 강조 (버튼 자체 외곽선은 공통 규칙) */
 .upload-drop:hover,
-.upload-drop:focus-visible,
+.upload-drop:has(.wk-drop-button:focus-visible),
 .upload-drop.is-dragging {
   border-color: var(--accent);
   background: var(--accent-bg);
@@ -4194,7 +4195,7 @@ button.wk-card:hover {
 }
 
 .wk-home .upload-drop:hover,
-.wk-home .upload-drop:focus-visible,
+.wk-home .upload-drop:has(.wk-drop-button:focus-visible),
 .wk-home .upload-drop.is-dragging {
   border-color: var(--tg-primary);
   background: var(--tg-primary-soft);
@@ -4229,8 +4230,14 @@ button.wk-card:hover {
   border-radius: 8px;
   background: #fff;
   color: var(--tg-title);
+  font: inherit;
   font-size: 0.875rem;
   font-weight: 500;
+  cursor: pointer;
+}
+
+.wk-drop-button[aria-disabled='true'] {
+  cursor: progress;
 }
 
 /* 검사할 파일: 왼쪽 표, 오른쪽 '검사 시작' 패널 */

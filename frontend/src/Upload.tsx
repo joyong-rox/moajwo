@@ -90,6 +90,11 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
     void handleFiles(e.dataTransfer.files)
   }
 
+  // 업로드 중에는 파일 선택 창을 열지 않는다 (열어도 고른 파일은 처리되지 않음)
+  function openPicker() {
+    if (!busy) inputRef.current?.click()
+  }
+
   const okIds = results.filter((r) => r.id !== null && !r.error).map((r) => r.id as number)
   const failed = results.filter((r) => r.error).length
 
@@ -100,18 +105,12 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
       <p className="sr-only" role="status">
         {announcement}
       </p>
+      {/* 조작 요소는 안의 '파일 선택' 버튼 하나다 (이름 = 보이는 글자, 사용 방법·형식은 설명으로 연결).
+          둘레 영역은 끌어놓기와 마우스·터치로 아무 곳이나 눌러 여는 편의만 맡는다 — 키보드 초점은 받지 않는다 */}
       <div
         className={`upload-drop${dragging ? ' is-dragging' : ''}${busy ? ' is-busy' : ''}`}
-        role="button"
-        tabIndex={0}
-        aria-label="파일 선택"
-        aria-describedby={`${titleId} ${hintId}`}
-        onClick={() => inputRef.current?.click()}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault()
-            inputRef.current?.click()
-          }
+        onClick={(e) => {
+          if (e.target !== inputRef.current) openPicker()
         }}
         onDragOver={(e) => {
           e.preventDefault()
@@ -131,11 +130,19 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
             또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능 · 파일당 최대 50MB
           </p>
         </div>
-        {!busy && (
-          <span className="wk-drop-button" aria-hidden="true">
-            파일 선택
-          </span>
-        )}
+        {/* 업로드 중에도 그대로 두고 aria-disabled로만 막는다 — disabled로 바꾸면 누른 직후 키보드 초점이 사라진다 */}
+        <button
+          type="button"
+          className="wk-drop-button"
+          aria-disabled={busy || undefined}
+          aria-describedby={busy ? titleId : `${titleId} ${hintId}`}
+          onClick={(e) => {
+            e.stopPropagation() // 둘레 영역의 클릭으로 한 번 더 열지 않게
+            openPicker()
+          }}
+        >
+          파일 선택
+        </button>
         <input
           ref={inputRef}
           type="file"
