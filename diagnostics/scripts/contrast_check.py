@@ -2,6 +2,8 @@
 
 글자: 글자색 vs 가장 가까운 불투명 배경. 비텍스트: 입력 테두리·스위치·초점 표시 vs 인접 배경.
 반투명·그라데이션·이미지 배경은 '측정 불가'로 남긴다. 사용법: python contrast_check.py <출력 폴더>
+계산은 contrast_calc.py와 같다 (sRGB 경계 0.04045, 판정은 원시값 ratio_raw, 보이는 ratio는 소수 셋째 자리 내림).
+2026-10-20 진단 3차 보완 전에는 경계 0.03928, 소수 둘째 자리 반올림이었다 (1차 원시 결과 raw/는 그 방식 그대로 보존).
 """
 
 import json
@@ -19,8 +21,8 @@ OUT = Path(sys.argv[1])
 IDS = json.loads((EV / "seed-ids.json").read_text(encoding="utf-8"))
 JS = """([sel, prop]) => {
   const parse = s => { const m = s.match(/rgba?\\(([^)]+)\\)/); if (!m) return null; const p = m[1].split(/[ ,\\/]+/).filter(Boolean).map(Number); return {r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1} }
-  const lum = c => { const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }; return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b) }
-  const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return Math.round((x + 0.05) / (y + 0.05) * 100) / 100 }
+  const lum = c => { const f = v => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }; return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b) }
+  const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05) }
   const bgOf = e => { let p = e; while (p) { const cs = getComputedStyle(p); if (cs.backgroundImage !== 'none') return 'image'; const c = parse(cs.backgroundColor); if (c && c.a === 1) return c; if (c && c.a > 0) return 'translucent'; p = p.parentElement } return {r: 255, g: 255, b: 255, a: 1} }
   return [...document.querySelectorAll(sel)].filter(e => e.offsetWidth).slice(0, 8).map(e => {
     const cs = getComputedStyle(e)
@@ -30,7 +32,7 @@ JS = """([sel, prop]) => {
     if (!fg) return {...out, result: '측정 불가(색 없음)'}
     if (typeof bg === 'string') return {...out, result: '측정 불가(' + bg + ' 배경)'}
     if (fg.a < 1) return {...out, result: '측정 불가(반투명 색)', fg}
-    return {...out, ratio: ratio(fg, bg), fg: `rgb(${fg.r},${fg.g},${fg.b})`, bg: `rgb(${bg.r},${bg.g},${bg.b})`}
+    return {...out, ratio_raw: ratio(fg, bg), ratio: Math.floor(ratio(fg, bg) * 1000) / 1000, fg: `rgb(${fg.r},${fg.g},${fg.b})`, bg: `rgb(${bg.r},${bg.g},${bg.b})`}
   })
 }"""
 

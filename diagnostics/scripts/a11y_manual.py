@@ -295,7 +295,7 @@ def check_bundle(pg: Page) -> None:
 
 def check_upload(pg: Page) -> None:
     kb_login(pg, "user1")
-    f = press_until(pg, lambda f: f["role"] == "button" and "파일" in f["name"], 60)
+    f = press_until(pg, lambda f: (f["role"] == "button" or f["tag"] == "button") and "파일" in f["name"], 60)  # 영역(role=button) 또는 실제 버튼
     rec("upload", {"dropzone": f})
     if not f:
         return

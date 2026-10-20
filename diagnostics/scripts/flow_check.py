@@ -74,7 +74,8 @@ def flow_integrate(b) -> None:
         wb.active.append(r)
     buf = io.BytesIO()
     wb.save(buf)
-    drop = pg.locator(".wk-home .upload-drop")
+    # 키보드 조작 요소: 수정 전은 영역(role=button), 접근성 보완 뒤는 영역 안의 '파일 선택' 버튼
+    drop = pg.locator(".wk-home .upload-drop[role=button], .wk-home .upload-drop .wk-drop-button").first
     drop.focus()
     with pg.expect_file_chooser() as fc:
         pg.keyboard.press("Enter")

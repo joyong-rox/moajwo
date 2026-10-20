@@ -3,7 +3,11 @@
 판정 근거는 브라우저(Edge)의 계산된 접근성 이름·설명(CDP), 상태 영역의 글자 변화(MutationObserver),
 계산된 색과 대비(contrast_calc), DOM 속성이다. 스크린리더 낭독은 확인하지 않는다 (코드·접근성 속성 확인).
 진단 자료에 쓰는 동작: 합성 파일 업로드, 사용자2 매핑을 잠시 바꿨다 되돌림, 서버가 거절하는 가입·설정 요청(계정 안 생김).
-사용법: python a11y_fix_check.py <출력 폴더> <라벨(before|after)>   환경: ONLY_CHECKS=upload,analysis,contrast,signup,names,stale
+사용법: python a11y_fix_check.py <출력 폴더> <라벨(before|after)>
+환경: ONLY_CHECKS=upload,analysis,contrast,signup,names,stale,upload2,analysis2,dialog,inputs (비우면 전부), AXE_JS=axe.min.js 경로(있으면 A1 규칙도 실행)
+이 스크립트는 측정값만 저장한다. 통과·실패 판정은 a11y_regress.py가 이 결과 JSON을 읽어 따로 한다.
+시험에서만 하는 일: 업로드·분석 표 요청을 브라우저에서 잠시 붙잡아 '진행 중' 상태를 관찰, 결과 표 요청에 시험용 500 응답 (앱은 늦추지 않음).
+진단 3차(2026-10-20) 추가 진단 자료: 최고 관리자 계정으로 오타 지역명 합성 파일 업로드·매핑·검증 ('연결 대상' 선택 칸을 띄우려는 것).
 """
 
 import io
@@ -14,7 +18,7 @@ import sys
 from pathlib import Path
 
 import openpyxl
-from contrast_calc import oklab_to_srgb, over, ratio
+from contrast_calc import oklab_to_srgb, over, ratio, shown
 from playwright.sync_api import Page, sync_playwright
 
 from diag_common import EV, URL, USERS, Api, creds
@@ -31,7 +35,7 @@ WHITE = (255, 255, 255)
 LIVE_JS = """() => {
   window.__live = []
   const find = n => (n && n.nodeType === 3 ? n.parentElement : n)
-  const tag = el => { const sec = el.closest('section'); const h = sec && sec.querySelector('h2'); return (h ? h.innerText.trim().slice(0, 20) : '') + ' ' + (el.className || el.tagName).toString().split(' ')[0] }
+  const tag = el => { const sec = el.closest('section'); const h = sec && sec.querySelector('h2'); return (h ? h.innerText.trim().slice(0, 20) : '') + ' ' + (el.className || (el.parentElement && el.parentElement.className) || el.tagName).toString().split(' ')[0] }
   const push = (el, how) => window.__live.push({t: Math.round(performance.now()), role: el.getAttribute('role'), live: el.getAttribute('aria-live'), where: tag(el), how, text: el.innerText.trim().slice(0, 140)})
   new MutationObserver(ms => { for (const m of ms) {
     for (const a of m.addedNodes) { if (a.nodeType === 1 && a.matches && a.matches('[role=alert],[role=status],[aria-live]')) push(a, '새 영역') }
@@ -98,8 +102,16 @@ def wait_upload_done(pg: Page) -> None:
     pg.wait_for_timeout(600)
 
 
+# 업로드 조작 요소: 수정 전은 영역 전체(div role=button), 수정 후는 영역 안의 '파일 선택' 버튼 — 같은 스크립트로 둘 다 잰다
+CONTROL_JS = "() => document.querySelector('.wk-home .upload-drop[role=button]') ? '.wk-home .upload-drop' : '.wk-home .upload-drop .wk-drop-button'"
+
+
+def control(pg: Page) -> str:
+    return pg.evaluate(CONTROL_JS)
+
+
 def choose(pg: Page, files: list[dict], how: str = "enter") -> None:
-    drop = pg.locator(".wk-home .upload-drop")
+    drop = pg.locator(control(pg))
     drop.focus()
     with pg.expect_file_chooser(timeout=15000) as fc:
         pg.keyboard.press("Enter" if how == "enter" else "Space")
@@ -111,9 +123,10 @@ def choose(pg: Page, files: list[dict], how: str = "enter") -> None:
 
 def check_upload(pg: Page) -> None:
     login(pg, "user1")
-    drop = pg.locator(".wk-home .upload-drop")
-    rec("D-01", {"what": "업로드 조작 요소의 계산된 이름·설명", **ax(pg, ".wk-home .upload-drop"),
-                 "visible_text": drop.inner_text().replace("\n", " / ")[:160]})  # fmt: skip
+    sel = control(pg)
+    drop = pg.locator(sel)
+    rec("D-01", {"what": "업로드 조작 요소의 계산된 이름·설명", "selector": sel, **ax(pg, sel), "visible_text": drop.inner_text().replace("\n", " / ")[:160],
+                 "zone_text": pg.locator(".wk-home .upload-drop").inner_text().replace("\n", " / ")[:160]})  # fmt: skip
     rec("D-01", {"what": "역할 button 이름 '파일 선택'으로 찾기", "found": pg.get_by_role("button", name="파일 선택", exact=False).count()})
     # 클릭·Space도 파일 선택을 여는지 (선택은 취소)
     for how in ("click", "space"):
@@ -237,10 +250,10 @@ def border_case(pg: Page, page: str, selector: str) -> None:
     fg, a = parse_color(color)
     bg, _ = parse_color(around)
     ib, ia = parse_color(own_bg)
-    r_out = ratio(over(fg, a, bg), bg)
+    r_out = ratio(over(fg, a, bg), bg)  # 원시 값 — 판정은 이 값으로, 보이는 값은 shown()
     r_in = ratio(over(fg, a, over(ib, ia, bg)), over(ib, ia, bg))
     rec("D-03", {"page": page, "selector": selector, "border": f"{width} {color}", "outside_bg": around, "inside_bg": own_bg,
-                 "ratio_vs_outside": r_out, "ratio_vs_inside": r_in, "pass_3_to_1": min(r_out, r_in) >= 3.0})  # fmt: skip
+                 "ratio_vs_outside": r_out, "ratio_vs_inside": r_in, "shown": [shown(r_out), shown(r_in)], "pass_3_to_1": min(r_out, r_in) >= 3.0})  # fmt: skip
 
 
 def check_contrast(pg: Page) -> None:
@@ -429,11 +442,361 @@ def check_stale_and_readonly(pg: Page) -> None:
     ctx2.close()
 
 
+# ---------------------------------------------------------------- PR #16 2차 보완 확인 (진단 3차, 2026-10-20): A1 판정 근거, 업로드 중·완료 뒤, 상태 안내 범위
+
+AXE_JS = os.environ.get("AXE_JS")  # 있으면 axe 규칙을 그 자리에서 돌려 판정 근거를 남긴다 (없으면 '미실행'으로 기록)
+STATUS_JS = """() => { const s = document.querySelector('.wk-upload p[role=status]'); return s ? {text: s.innerText.trim(), in_hidden: !!s.closest('[hidden]')} : null }"""
+PICK_JS = "() => { const e = document.querySelector('.wk-pickcount'); return e ? e.innerText.trim() : null }"
+FOCUS_JS = """() => { const e = document.activeElement; if (!e || e === document.body) return {name: '(본문)', in_dialog: false};
+    return {name: (e.getAttribute('aria-label') || e.innerText || e.value || '').trim().slice(0, 30), tag: e.tagName, in_dialog: !!e.closest('[role=alertdialog]')} }"""
+
+
+def axe_rule(pg: Page, rule: str, selector: str | None = None) -> dict:
+    """axe 규칙 하나만 돌린 결과 (위반·판정 보류·통과 노드). a11y_scan.py와 같은 axe.min.js."""
+    if not AXE_JS:
+        return {"axe": "미실행 (AXE_JS 없음)"}
+    if not pg.evaluate("() => !!window.axe"):
+        pg.add_script_tag(path=AXE_JS)
+    return pg.evaluate("""async ([rule, sel]) => { const r = await axe.run(sel ? document.querySelector(sel) : document, {runOnly: {type: 'rule', values: [rule]}});
+        const pick = xs => xs.flatMap(v => v.nodes.map(n => ({target: n.target, html: n.html.slice(0, 200), summary: (n.failureSummary || '').slice(0, 240)})));
+        return {rule, axe_version: axe.version, violations: pick(r.violations), incomplete: pick(r.incomplete), passes: pick(r.passes), inapplicable: r.inapplicable.length > 0} }""", [rule, selector])  # fmt: skip
+
+
+def control_state(pg: Page, what: str) -> None:
+    sel = control(pg)
+    st = pg.evaluate("""s => { const e = document.querySelector(s); if (!e) return null; return {tag: e.tagName, role: e.getAttribute('role'), aria_label: e.getAttribute('aria-label'),
+        aria_disabled: e.getAttribute('aria-disabled'), disabled: !!e.disabled, focused: document.activeElement === e, visible_text: e.innerText.trim().replace(/\\n+/g, ' / '),
+        describedby: (e.getAttribute('aria-describedby') || '').split(' ').filter(Boolean).map(id => document.getElementById(id)?.innerText.trim() ?? '(없는 id)'),
+        hidden_input_inside_button_role: !!(e.getAttribute('role') === 'button' && e.querySelector('input[type=file]'))} }""", sel)  # fmt: skip
+    rec("A1", {"what": what, "selector": sel, **(st or {"found": False}), "ax": ax(pg, sel)})
+
+
+def hold_upload(pg: Page, held: list) -> None:
+    """업로드 요청(POST /api/files)을 브라우저에서 잠시 붙잡는다 — 시험에서 '업로드 중' 상태를 관찰하려는 것 (앱은 늦추지 않음)."""
+    pg.route("**/api/files", lambda r: held.append(r) if r.request.method == "POST" else r.continue_())
+
+
+def release(pg: Page, held: list, pattern) -> None:
+    for r in held:
+        r.continue_()
+    held.clear()
+    pg.unroute(pattern)
+
+
+def login_inplace(pg: Page, who: str) -> None:
+    """새로 고치지 않고 로그인 화면에서 바로 로그인 (화면이 다시 마운트되는지 보려고)."""
+    pg.get_by_label("아이디").fill(USERS[who])
+    pg.get_by_label("비밀번호", exact=True).fill(creds()[who])
+    pg.locator(".login-card button[type=submit]").click()
+    pg.wait_for_selector(".shell", timeout=60000)
+
+
+def check_upload_scope(pg: Page) -> None:
+    login(pg, "user1")
+    control_state(pg, "평상시")
+    rec("A1", {"what": "axe label-content-name-mismatch — 홈 업로드 영역", **axe_rule(pg, "label-content-name-mismatch", ".wk-home .wk-upload")})
+    held: list = []
+    # ⑦ 업로드 중: 이름·상태·설명, 다시 누르면 파일 선택 창이 열리는지
+    pg.evaluate(LIVE_JS)
+    hold_upload(pg, held)
+    choose(pg, [{"name": "진단_범위_업로드중.xlsx", "mimeType": XLSX, "buffer": VALID}], "enter")
+    pg.wait_for_selector(".upload-drop.is-busy", timeout=15000)
+    control_state(pg, "업로드 중 (시험에서 요청을 붙잡음)")
+    opened = {}
+    for how in ("click_zone", "enter"):  # 영역 클릭(초점이 본문으로 빠짐)을 먼저, 버튼 Enter를 나중에 — 완료 뒤 초점을 버튼 기준으로 본다
+        try:
+            with pg.expect_file_chooser(timeout=2500) as fc:
+                if how == "enter":
+                    pg.locator(control(pg)).focus()
+                    pg.keyboard.press("Enter")
+                else:
+                    pg.locator(".wk-home .upload-drop-title").click()
+            fc.value.set_files(files=[])
+            opened[how] = True
+        except Exception:  # noqa: BLE001 — 열리지 않음
+            opened[how] = False
+    rec("A1", {"what": "업로드 중 다시 눌렀을 때 파일 선택 창", "opened": opened})
+    release(pg, held, "**/api/files")
+    wait_upload_done(pg)
+    control_state(pg, "업로드 완료 뒤")
+    rec("D-02", {"what": "⑦ 업로드 중 → 완료 (목록 갱신이 이어짐)", "live": live_log(pg), "pickcount": pg.evaluate(PICK_JS)})
+    # ⑧ 정상 + 지원하지 않는 형식
+    choose(pg, [{"name": "진단_범위_혼합.xlsx", "mimeType": XLSX, "buffer": VALID}, {"name": "진단_범위_혼합.pdf", "mimeType": "application/pdf", "buffer": b"%PDF-1.4 diag"}])
+    wait_upload_done(pg)
+    rec("D-02", {"what": "⑧ 정상 + 지원하지 않는 형식 함께", "live": live_log(pg),
+                 "alerts_visible": pg.evaluate("[...document.querySelectorAll('.wk-upload [role=alert]')].filter(e => e.offsetWidth).map(e => e.innerText.trim().slice(0, 100))")})  # fmt: skip
+    # ⑨ 다른 화면으로 옮긴 뒤 늦게 끝난 응답 (홈은 숨긴 채 마운트 유지 — M-10)
+    hold_upload(pg, held)
+    choose(pg, [{"name": "진단_범위_늦은응답.xlsx", "mimeType": XLSX, "buffer": VALID}])
+    pg.wait_for_selector(".upload-drop.is-busy", timeout=15000)
+    pg.locator(".side-link", has_text="실행 기록").first.click()
+    pg.wait_for_timeout(800)
+    live_log(pg)  # 화면 이동으로 생긴 기록은 버림
+    release(pg, held, "**/api/files")
+    pg.wait_for_function("() => !document.querySelector('.upload-drop.is-busy')", timeout=120000)
+    pg.wait_for_timeout(1000)
+    rec("D-02", {"what": "⑨ 다른 화면에 있는 동안 늦게 끝난 응답", "path": pg.evaluate("location.pathname"), "status": pg.evaluate(STATUS_JS),
+                 "live": [x for x in live_log(pg) if "파일 업로드" in x["where"] or "검증" in x["where"]]})  # fmt: skip
+    pg.locator(".side-link", has_text=re.compile(r"^\s*홈\s*$")).first.click()
+    pg.wait_for_timeout(1200)
+    rec("D-02", {"what": "⑨-2 홈으로 돌아옴 (지난 안내가 다시 바뀌는지)", "status": pg.evaluate(STATUS_JS), "live": [x for x in live_log(pg) if "파일 업로드" in x["where"]]})
+    # ⑩ 업로드 중 로그아웃 (업로드 화면이 내려감) → 늦은 응답 → 새로 고치지 않고 다시 로그인
+    errors: list[str] = []
+    pg.on("pageerror", lambda e: errors.append(str(e)[:200]))
+    hold_upload(pg, held)
+    choose(pg, [{"name": "진단_범위_로그아웃.xlsx", "mimeType": XLSX, "buffer": VALID}])
+    pg.wait_for_selector(".upload-drop.is-busy", timeout=15000)
+    pg.locator(".side-logout").click()
+    pg.wait_for_selector(".login-card", timeout=15000)
+    release(pg, held, "**/api/files")
+    pg.wait_for_timeout(1500)
+    login_inplace(pg, "user1")
+    pg.evaluate(LIVE_JS)
+    pg.wait_for_timeout(1500)
+    rec("D-02", {"what": "⑩ 업로드 중 로그아웃 → 늦은 응답 → 다시 로그인 (다시 마운트)", "status": pg.evaluate(STATUS_JS),
+                 "live": [x for x in live_log(pg) if "파일 업로드" in x["where"]], "page_errors": errors})  # fmt: skip
+
+
+def check_analysis_tables(pg: Page) -> None:
+    """상세(조건·요약)와 결과·제외·근거 표를 따로 불러올 때, 안내가 실제로 불러온 범위만 말하는지."""
+    login(pg, "user1")
+    rid = IDS["user1_analysis"]
+    st_js = "() => { const s = document.querySelector('section.an') ? document.querySelector('section.an').previousElementSibling : null; return s && s.getAttribute('role') === 'status' ? s.innerText.trim() : null }"
+    pages = re.compile(rf"/api/analysis/runs/{rid}/(groups|excluded|detail)\?")
+    held: list = []
+    pg.route(pages, lambda r: held.append(r))
+    pg.goto(f"{URL}/analysis?id={rid}")
+    pg.locator("section.an h2").wait_for(timeout=60000)
+    pg.evaluate(LIVE_JS)
+    pg.wait_for_timeout(600)
+    pending = pg.evaluate(st_js)
+    release(pg, held, pages)
+    pg.locator("table.an-result tbody tr").first.wait_for(timeout=60000)
+    pg.wait_for_timeout(800)
+    rec("D-02", {"what": "분석 결과: 조건·요약만 왔고 표 3개는 아직 (시험에서 표 요청을 붙잡음) → 표 도착", "while_tables_pending": pending, "after_tables": pg.evaluate(st_js),
+                 "live": live_log(pg)})  # fmt: skip
+    groups = re.compile(rf"/api/analysis/runs/{rid}/groups\?")
+    pg.route(groups, lambda r: r.fulfill(status=500, content_type="application/json", body='{"detail": "diag"}'))
+    pg.goto(f"{URL}/analysis?id={rid}")
+    pg.locator("section.an h2").wait_for(timeout=60000)
+    pg.wait_for_timeout(2000)
+    rec("D-02", {"what": "분석 결과: 결과 표만 실패 (시험용 500 응답)", "status": pg.evaluate(st_js),
+                 "visible_errors": pg.locator("section.an p.upload-error").all_inner_texts()})  # fmt: skip
+    pg.unroute(groups)
+
+
+DIALOG_JS = """() => { const d = document.querySelector('[role=alertdialog]'); if (!d) return null;
+  const txt = ids => (ids || '').split(' ').filter(Boolean).map(id => { const e = document.getElementById(id); return e ? e.innerText.trim().slice(0, 140) : '(없는 id)' });
+  const anc = []; for (let p = d.parentElement; p; p = p.parentElement) if (p.hasAttribute('aria-describedby')) anc.push(p.tagName + '.' + (p.className || '').toString().split(' ')[0]);
+  return {count: document.querySelectorAll('[role=alertdialog]').length, labelledby: d.getAttribute('aria-labelledby'), title: txt(d.getAttribute('aria-labelledby')),
+          describedby: d.getAttribute('aria-describedby'), description: txt(d.getAttribute('aria-describedby')), ancestors_with_describedby: anc} }"""
+
+
+def dialog_probe(pg: Page, trigger, label: str) -> dict:
+    """확인창 하나: 제목·본문 연결, 처음 초점, Tab·Shift+Tab 범위, Esc, 취소 뒤 초점 복귀. 확인 버튼은 누르지 않는다."""
+    trigger.focus()
+    pg.keyboard.press("Enter")
+    pg.get_by_role("alertdialog").wait_for(timeout=15000)
+    pg.wait_for_timeout(300)
+    info, axn, first = pg.evaluate(DIALOG_JS), ax(pg, "[role=alertdialog]"), pg.evaluate(FOCUS_JS)
+    tabs, shift = [], []
+    for _ in range(4):
+        pg.keyboard.press("Tab")
+        tabs.append(pg.evaluate(FOCUS_JS))
+    for _ in range(4):
+        pg.keyboard.press("Shift+Tab")
+        shift.append(pg.evaluate(FOCUS_JS))
+    pg.keyboard.press("Escape")
+    pg.wait_for_timeout(500)
+    esc = {"closed": pg.get_by_role("alertdialog").count() == 0, "focus_on_trigger": trigger.evaluate("e => document.activeElement === e")}
+    pg.keyboard.press("Enter")  # 같은 버튼으로 다시 열기
+    pg.get_by_role("alertdialog").wait_for(timeout=15000)
+    pg.wait_for_timeout(300)
+    again = pg.evaluate(DIALOG_JS)
+    pg.keyboard.press("Enter")  # 처음 초점 = 취소
+    pg.wait_for_timeout(500)
+    cancel = {"closed": pg.get_by_role("alertdialog").count() == 0, "focus_on_trigger": trigger.evaluate("e => document.activeElement === e")}
+    out = {"dialog": label, "attrs": info, "ax": axn, "first_focus": first, "tab": tabs, "shift_tab": shift, "escape": esc, "reopen_attrs": again, "cancel": cancel}
+    rec("dialog", out)
+    return out
+
+
+def check_dialogs(pg: Page) -> None:
+    login(pg, "user1")
+    pg.goto(URL + "/automations")
+    pg.wait_for_load_state("networkidle")
+    item = pg.get_by_text("월간 인구 취합").first
+    if item.count():
+        item.click()
+        pg.wait_for_timeout(600)
+    trig = pg.get_by_role("button", name="자동화 삭제")
+    if trig.count():
+        dialog_probe(pg, trig.first, "자동화 삭제")
+    else:
+        rec("dialog", {"dialog": "자동화 삭제", "result": "버튼 없음 (측정 안 함)"})
+    # 최고 관리자: 용어사전 항목 삭제 두 건(본문이 다름) + 같은 화면의 다른 확인창(표준 사전 빼기)과 id가 섞이지 않는지
+    pg.context.clear_cookies()
+    login(pg, "owner")
+    pg.goto(URL + "/dictionary")
+    pg.wait_for_load_state("networkidle")
+    pg.wait_for_timeout(800)
+    dels = pg.locator(".glossary-table button.wk-danger, table button.wk-danger", has_text="삭제")
+    seen = []
+    for i in range(min(2, dels.count())):
+        seen.append(dialog_probe(pg, dels.nth(i), f"용어사전 삭제 {i + 1}"))
+    rec("dialog", {"dialog": "용어사전 삭제 두 건 비교", "descriptions": [s["attrs"]["description"] if s["attrs"] else None for s in seen],
+                   "describedby_ids": [s["attrs"]["describedby"] if s["attrs"] else None for s in seen]})  # fmt: skip
+    std = pg.get_by_role("button", name="빼기")
+    if std.count():
+        s = dialog_probe(pg, std.first, "표준 사전 빼기")
+        rec("dialog", {"dialog": "같은 화면의 두 확인창 id", "glossary_id": seen[0]["attrs"]["describedby"] if seen and seen[0]["attrs"] else None,
+                       "standard_id": s["attrs"]["describedby"] if s["attrs"] else None})  # fmt: skip
+    else:
+        rec("dialog", {"dialog": "표준 사전 빼기", "result": "표준 사전 항목 없음 (측정 안 함)"})
+
+
+# ---------------------------------------------------------------- 진단 3차: 화면에 실제로 나타난 입력 경계·초점 표시 대비
+
+INPUTS_JS = """() => {
+  const RULES = [['.mapping-pick', 'select'], ['.validation-form', 'input,select,textarea'], ['.glossary-search', 'input,select'], ['.review-controls', 'select'],
+    ['.review-replace-row', 'select'], ['.automation-period', 'input'], ['.integration-automation', 'input'], ['.login-card', 'input'], ['.admin-form', 'input,select'],
+    ['.admin-actions', 'input'], ['.wk-home', 'input,select,textarea'], ['.bd-choice', 'select']]
+  const bgOf = e => { for (let p = e.parentElement; p; p = p.parentElement) { const c = getComputedStyle(p).backgroundColor; if (c && !/rgba\\(0, 0, 0, 0\\)|transparent/.test(c)) return c } return 'rgb(255, 255, 255)' }
+  return [...document.querySelectorAll('input, select, textarea')].filter(e => !['hidden', 'radio', 'checkbox', 'file'].includes(e.type) && !e.classList.contains('sr-only') && e.offsetWidth && !e.closest('[hidden]')).map(e => {
+    const rules = e.classList.contains('bd-input') ? ['.bd-input'] : []  // 이 요소에 적용되는 입력 규칙 모두 (예: 검증 양식은 .validation-form과 .wk-home 둘 다)
+    for (const [box, tags] of RULES) if (e.closest(box) && e.matches(tags)) rules.push(box + ' ' + e.tagName.toLowerCase())
+    const rule = rules[0] || null
+    const cs = getComputedStyle(e)
+    return {rule, rules, tag: e.tagName.toLowerCase(), type: e.type, name: (e.getAttribute('aria-label') || e.labels?.[0]?.innerText.split('\\n')[0] || e.name || '').trim().slice(0, 30),
+            border: cs.borderTopStyle + ' ' + cs.borderTopWidth + ' ' + cs.borderTopColor, color: cs.borderTopColor, width: cs.borderTopWidth, style: cs.borderTopStyle,
+            inside_bg: cs.backgroundColor, outside_bg: bgOf(e), disabled: e.disabled}
+  })
+}"""
+
+
+def inputs_case(pg: Page, page: str) -> None:
+    for it in pg.evaluate(INPUTS_JS):
+        fg, a = parse_color(it["color"])
+        bg, _ = parse_color(it["outside_bg"])
+        ib, ia = parse_color(it["inside_bg"])
+        if it["style"] == "none" or it["width"] in ("0px", "") or fg is None or bg is None:
+            rec("inputs", {"page": page, **{k: it[k] for k in ("rule", "rules", "tag", "type", "name", "border")}, "result": "테두리 없음 또는 색 해석 불가"})
+            continue
+        inner = over(ib, ia, bg)
+        r_out, r_in = ratio(over(fg, a, bg), bg), ratio(over(fg, a, inner), inner)
+        rec("inputs", {"page": page, **{k: it[k] for k in ("rule", "rules", "tag", "type", "name", "border", "inside_bg", "outside_bg", "disabled")},
+                       "ratio_vs_outside": r_out, "ratio_vs_inside": r_in, "shown": [shown(r_out), shown(r_in)], "pass_3_to_1": min(r_out, r_in) >= 3.0})  # fmt: skip
+
+
+def outline_case(pg: Page, what: str, element_js: str) -> None:
+    """키보드 초점 외곽선(outline) vs 외곽선이 놓인 곳의 배경 (outline-offset 바깥 = 부모 배경)."""
+    pg.wait_for_timeout(400)  # 배경·테두리 전환(0.15초)이 끝난 뒤 계산된 색을 읽는다
+    o = pg.evaluate("""js => { const e = eval(js); if (!e) return null; const cs = getComputedStyle(e);
+        let bg = 'rgb(255, 255, 255)'; for (let p = e.parentElement; p; p = p.parentElement) { const c = getComputedStyle(p).backgroundColor; if (c && !/rgba\\(0, 0, 0, 0\\)|transparent/.test(c)) { bg = c; break } }
+        return {outline: cs.outlineStyle + ' ' + cs.outlineWidth + ' ' + cs.outlineColor, color: cs.outlineColor, style: cs.outlineStyle, offset: cs.outlineOffset, around: bg,
+                own_bg: cs.backgroundColor, focus_within: e.matches(':focus-within'), focus_visible_inside: !!e.querySelector(':focus-visible') || e.matches(':focus-visible')} }""", element_js)  # fmt: skip
+    if not o or o["style"] == "none":
+        rec("focus", {"what": what, "result": "외곽선 없음" if o else "요소 없음", **(o or {})})
+        return
+    fg, a = parse_color(o["color"])
+    bg, _ = parse_color(o["around"])
+    r = ratio(over(fg, a, bg), bg)
+    rec("focus", {"what": what, **o, "ratio_vs_around": r, "shown": shown(r), "pass_3_to_1": r >= 3.0})
+
+
+def check_inputs_focus(pg: Page) -> None:
+    pg.goto(URL + "/")
+    pg.wait_for_selector(".login-card")
+    inputs_case(pg, "로그인")
+    pg.get_by_role("button", name=re.compile("회원가입")).first.click()
+    pg.wait_for_timeout(400)
+    inputs_case(pg, "회원가입")
+    login(pg, "user1")
+    inputs_case(pg, "홈 (user1)")
+    # 취합 방식 라디오 카드: 화살표 키로 옮겨 키보드 초점 상태를 만든다
+    pg.locator("input[name=wk-result-mode]:checked").focus()
+    pg.keyboard.press("ArrowDown")
+    pg.wait_for_timeout(200)
+    outline_case(pg, "취합 방식 라디오 카드 (키보드 초점)", "document.activeElement.closest('.wk-mode-card')")
+    rec("focus", {"what": "라디오 원 자체의 링 (box-shadow)", "shadow": pg.evaluate("getComputedStyle(document.activeElement.nextElementSibling).boxShadow")})
+    pg.keyboard.press("ArrowUp")
+    shot = pg.locator(".wk-mode-card").first
+    shot.screenshot(path=str(OUT / f"{LABEL}-radio-card-focus.png"))
+    # 업로드 '파일 선택' 조작 요소의 키보드 초점 외곽선
+    pg.locator(".wk-home input[type=search]").first.focus()
+    for _ in range(40):
+        if pg.evaluate(f"(() => {{ const e = document.querySelector({json.dumps(control(pg))}); return document.activeElement === e }})()"):
+            break
+        pg.keyboard.press("Shift+Tab")
+    outline_case(pg, "업로드 조작 요소 (키보드 초점)", f"document.querySelector({json.dumps(control(pg))})")
+    pg.locator(".wk-home .upload-drop").screenshot(path=str(OUT / f"{LABEL}-upload-focus.png"))
+    for path, name in (("/account", "내 계정"), ("/automations", "자동화"), (f"/reviews?review={IDS['user1_review']}", "검토 상세"),
+                       (f"/mapping?file={IDS['user1']['basic']}", "열 매핑")):  # fmt: skip
+        pg.goto(URL + path)
+        pg.wait_for_load_state("networkidle")
+        pg.wait_for_timeout(700)
+        inputs_case(pg, name)
+    # 묶기 요약 켬 + 항목 1개 → .bd-input(단위·기간을 확인할 수 없는 파일)·.bd-choice select(파일마다 단위가 다름)가 나타나는 상태
+    u1 = Api().login("user1")
+    extra = []
+    for name, title in (("진단_묶기_단위기간없음.xlsx", "인구 현황"), ("진단_묶기_천명.xlsx", "주민등록 인구 현황 2026년 9월 (단위: 천명)")):
+        s, body, _ = u1.upload(name, xlsx_bytes([[title], ["시도", "인구수"], ["세종특별자치시", 3], ["제주특별자치도", 4]]))
+        fid = body[0]["id"]
+        s, pv, _ = u1.call("GET", f"/files/{fid}/preview?sheet_id=s0")
+        cols = {x["name"]: x["column_id"] for x in pv["columns"]}
+        u1.call("PUT", f"/files/{fid}/mapping/decisions", {"decisions": [{"sheet_id": "s0", "column_id": cols["시도"], "field_key": "sido"},
+                                                                          {"sheet_id": "s0", "column_id": cols["인구수"], "field_key": "population"}]})  # fmt: skip
+        extra.append(fid)
+    pg.goto(f"{URL}/bundle?files={IDS['user1']['basic']},{extra[0]},{extra[1]}")
+    pg.wait_for_load_state("networkidle")
+    pg.wait_for_timeout(700)
+    sw = pg.locator("label:has(input.peer.sr-only[type=checkbox]) input[type=checkbox]").first
+    if not sw.is_checked():
+        sw.focus()
+        pg.keyboard.press("Space")
+        pg.wait_for_timeout(800)
+    add = pg.get_by_role("button", name="항목 추가", exact=True)
+    if add.count():
+        add.click()
+        pg.wait_for_timeout(1500)
+    inputs_case(pg, "묶기 (요약 켬·항목 1개)")
+    pg.locator(".bd-summary").first.screenshot(path=str(OUT / f"{LABEL}-bundle-summary-inputs.png")) if pg.locator(".bd-summary").count() else None
+    # 최고 관리자: 설정·사용자·사전, 그리고 오타 지역명 파일을 검증해 '연결 대상'(.mapping-pick select)이 나타나는 상태
+    pg.context.clear_cookies()
+    login(pg, "owner")
+    for path, name in (("/settings", "설정"), ("/moajwoAdmin/users", "사용자 관리"), ("/dictionary", "사전 관리")):
+        pg.goto(URL + path)
+        pg.wait_for_load_state("networkidle")
+        pg.wait_for_timeout(700)
+        inputs_case(pg, name)
+    api = Api().login("owner")
+    s, body, _ = api.upload("진단_후보지역.xlsx", xlsx_bytes([["주민등록 인구 현황 2026년 9월 (단위: 명)"], ["시도", "인구수"], ["강원특별자치", 7], ["충청북도", 8]]))
+    fid = body[0]["id"] if isinstance(body, list) else body.get("id")
+    s, pv, _ = api.call("GET", f"/files/{fid}/preview?sheet_id=s0")
+    cols = {x["name"]: x["column_id"] for x in pv["columns"]}
+    api.call("PUT", f"/files/{fid}/mapping/decisions", {"decisions": [{"sheet_id": "s0", "column_id": cols["시도"], "field_key": "sido"},
+                                                                       {"sheet_id": "s0", "column_id": cols["인구수"], "field_key": "population"}]})  # fmt: skip
+    pg.goto(f"{URL}/?files={fid}")
+    pg.wait_for_load_state("networkidle")
+    pg.wait_for_timeout(800)
+    start = pg.get_by_role("button", name=re.compile(r"^검증 실행"))
+    if start.count() and start.first.is_enabled():
+        start.first.click()
+        try:
+            pg.locator(".mapping-pick select").first.wait_for(timeout=60000)
+        except Exception:  # noqa: BLE001 — 나타나지 않으면 기록에 남는다
+            pass
+    inputs_case(pg, "홈 검증 결과 (최고 관리자, 후보 있는 지역명)")
+    if pg.locator(".mapping-pick select").count():
+        pg.locator(".mapping-pick").first.screenshot(path=str(OUT / f"{LABEL}-mapping-pick.png"))
+
+
 def main() -> None:
     with sync_playwright() as p:
         b = p.chromium.launch(channel="msedge", headless=True, proxy=browser_proxy(URL))
         for name, fn in (("upload", check_upload), ("analysis", check_analysis_loading), ("contrast", check_contrast), ("signup", check_signup),
-                         ("names", check_names), ("stale", check_stale_and_readonly)):  # fmt: skip
+                         ("names", check_names), ("stale", check_stale_and_readonly), ("upload2", check_upload_scope), ("analysis2", check_analysis_tables),
+                         ("dialog", check_dialogs), ("inputs", check_inputs_focus)):  # fmt: skip
             if os.environ.get("ONLY_CHECKS") and name not in os.environ["ONLY_CHECKS"].split(","):
                 continue
             cx = b.new_context(viewport={"width": 1280, "height": 800}, locale="ko-KR", accept_downloads=True)
