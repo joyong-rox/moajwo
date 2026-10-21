@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from app.mail_fields import MAIL_MEASURE_FIELDS
 from app.mapping import ColumnMapping
 from app.parsing import Cell, SheetResult, is_missing, to_number
 
@@ -27,7 +28,7 @@ QUANTITY_FIELDS = frozenset({
     "amount", "count", "ratio", "change_rate", "headcount", "vehicles_total", "passenger_car", "van", "truck",
     "special_vehicle", "motorcycle", "eco_friendly_car", "electric_car", "hydrogen_car", "hybrid_car",
     "government_use", "private_use", "commercial_use", "total", "registration_count",
-})  # fmt: skip
+}) | MAIL_MEASURE_FIELDS  # fmt: skip
 
 
 def confirmed_quantity_indexes(mappings: list[ColumnMapping]) -> frozenset[int]:

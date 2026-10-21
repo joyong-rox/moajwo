@@ -22,6 +22,7 @@ from functools import lru_cache
 from typing import Any, Literal
 
 from app.glossary import Glossary, Resolution, parse_date_value, period_end, prefer_for_field
+from app.mail_fields import MAIL_STOCK_FIELDS
 from app.mapping import load_dictionary
 from app.parsing import Cell, SheetResult, is_missing, is_subtotal_label
 from app.pii import mask_cell
@@ -46,7 +47,10 @@ WARNING_LABEL: dict[str, str] = {
 
 # 합산하면 안 되는 항목 (비율·연월·코드·연락처)
 NON_ADDITIVE_FIELDS = frozenset(
-    {"execution_rate", "ratio", "change_rate", "year", "month", "base_date", "region_code", "org_code", "phone"}
+    {
+        "execution_rate", "ratio", "change_rate", "year", "month", "base_date", "region_code",
+        "org_code", "organization_code", "organization_name", "phone",
+    }
 )
 _RATE_NAME = re.compile(r"(률|율|%|비율|비중|구성비|평균|지수)")
 ENTITY_FIELDS = ("org_name", "sido", "sigungu", "region", "region_code")
@@ -270,7 +274,7 @@ STOCK_FIELDS = frozenset(
         "eco_friendly_car", "electric_car", "hydrogen_car", "hybrid_car",
         "government_use", "private_use", "commercial_use",
     }
-)  # fmt: skip
+) | MAIL_STOCK_FIELDS  # fmt: skip
 PERIOD_FIELDS = frozenset({"year", "month", "base_date"})  # 기간 검사·기관 이름 해석 기준일의 근거
 # 검사가 표준 항목 key로 읽는 항목 — 열을 이 항목으로 연결하거나 바꾸면 검사 결과가 달라질 수 있다
 # (기간 / 기관·지역 / 합산 제외·시점 값·합계 / 수량·금액). 새 검사에서 항목 key를 읽으면 여기에도 넣는다.
