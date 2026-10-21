@@ -54,6 +54,7 @@ from app.auth import CurrentUser
 from app.decisions import load_decisions
 from app.files import column_id, get_file_for
 from app.glossary import parse_date_value
+from app.mail_fields import MAIL_MEASURE_FIELDS
 from app.mapping import TOTAL_WORDS, load_dictionary, normalize, split_column_name
 from app.mapping_review import SheetView, declared_units, file_view, sheet_id
 from app.parsing import is_missing
@@ -61,7 +62,7 @@ from app.pii import mask_text
 from app.quantity import quantity_value
 from app.validation import STOCK_FIELDS, _month_of, _text_periods, _year_of
 
-POLICY = "analysis-policy-6"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
+POLICY = "analysis-policy-7"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
 MAX_TARGETS = 20  # 한 번에 고를 수 있는 파일·시트
 MAX_ROWS = 300_000  # 고른 시트의 데이터 행 합계 상한
 MAX_GROUPS = 5_000
@@ -92,9 +93,12 @@ MEASURE_FIELDS = frozenset(
         "hydrogen_car",
         "hybrid_car",
     }
-)
+) | MAIL_MEASURE_FIELDS
 REGION_FIELDS = ("sido", "sigungu", "region", "region_code")
-IDENTITY_FIELDS = (*REGION_FIELDS, "org_name", "org_code", "department", "vehicle_type", "vehicle_use", "fuel_type")
+IDENTITY_FIELDS = (
+    *REGION_FIELDS, "org_name", "org_code", "organization_code", "organization_name",
+    "department", "vehicle_type", "vehicle_use", "fuel_type",
+)
 PERIOD_FIELDS = ("year", "month", "base_date")
 GROUP_FIELDS = (*IDENTITY_FIELDS, "period")
 AGGREGATES = ("sum", "mean", "min", "max", "count")
@@ -106,7 +110,10 @@ NATION = frozenset({"전국", "전국계"})
 # 숫자 칸에 적힌 비공개·해당 없음 낱말 (파서의 결측 표기 '-'·'x'·'…'와 같은 사유로 뺀다)
 NOT_DISCLOSED = frozenset({"비공개", "미공개", "해당없음", "자료없음", "집계중", "미집계", "없음"})
 # 열 이름 괄호 안의 단위 ('인구(명)'). 사전 단어가 아닌 괄호만 단위로 본다
-_COLUMN_UNIT = re.compile(r"\(\s*((?:천|만|백만|억|조)?(?:명|대|원|건|개|개소|곳|가구|세대|회|톤|일)|%|㎡|km|ha)\s*\)")
+_COLUMN_UNIT = re.compile(
+    r"\(\s*((?:천|만|백만|억|조)?(?:명|대|원|건|개|개소|곳|가구|세대|회|톤|일)"
+    r"|%|㎡|km|ha|KB|MB|GB|TB|KiB|MiB|GiB|TiB)\s*\)"
+)
 
 # 제외 사유: (설명, 자료 문제 여부). 자료 문제로 뺀 값이 있으면 그 결과는 '부분 집계'
 REASONS: dict[str, tuple[str, bool]] = {
