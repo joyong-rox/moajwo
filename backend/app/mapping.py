@@ -25,6 +25,7 @@ from rapidfuzz import fuzz
 
 from app import admin_codes, llm, ollama
 from app.glossary import parse_date_value
+from app.mail_fields import MAIL_MB_FIELDS
 from app.parsing import Cell
 from app.pii import mask_text
 
@@ -754,6 +755,17 @@ class MappingEngine:
                     for _, rest in pending[idx:]:
                         rest.reason = "LLM을 사용할 수 없어 미해결로 남김"
                     break
+
+        # 괄호를 제거한 이름 일치만으로 GB·MiB 또는 단위 없는 용량을 MB로 연결하지 않는다.
+        # 명시적인 파일별 사용자 확정은 보존하며, 분석에서는 원본 단위를 별도로 검사한다.
+        for name, result in zip(names, results, strict=True):
+            if result.status != "confirmed" and result.field_key in MAIL_MB_FIELDS:
+                units = {b.strip() for b in name.bracketed}
+                if units != {"MB"}:
+                    result.field_key = result.field_label = result.score = None
+                    result.status, result.method = "unresolved", "none"
+                    result.candidates = []
+                    result.reason = "MB 단위 용량 항목입니다 — 원본 단위를 확인하세요 (자동 환산하지 않음)"
 
         # 기관코드 검사로 바꾼 내용은 이후 단계의 사유에도 남긴다 (행정구역코드 패턴으로 정해진 열은 그 사유만)
         for result in results:
