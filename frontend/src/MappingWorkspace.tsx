@@ -459,13 +459,14 @@ function MappingWorkspace() {
                     type="button"
                     className="wk-rowpick"
                     aria-pressed={active}
-                    aria-label={`${pc.letter}열 ${pc.name} 선택`}
                     disabled={!aligned}
                     onClick={() => pickColumn(pc.column_id)}
                   >
+                    {/* 이름은 보이는 글자에서 만든다 (WCAG 2.5.3 — 음성 입력은 보이는 글자로 부른다). 뒤에 용도만 덧붙인다 */}
                     <span className="mw-letter">{pc.letter}</span>
                     <span className="wk-colname">{pc.name}</span>
                     {m?.qualifier && <span className="upload-tag">{m.qualifier}</span>}
+                    <span className="sr-only"> 열 선택</span>
                   </button>
                 </th>
                 <td className="wk-samples">{m ? m.samples.slice(0, 3).map(formatCell).join(' · ') || '—' : '—'}</td>
@@ -497,13 +498,13 @@ function MappingWorkspace() {
                     type="button"
                     className="mw-colhead"
                     aria-pressed={active}
-                    aria-label={`${pc.letter}열 ${pc.name} 선택`}
                     disabled={!aligned}
                     onClick={() => pickColumn(pc.column_id)}
                   >
                     <span className="mw-letter">{pc.letter}</span>
                     <span className="mw-colname">{pc.name}</span>
                     {m && <StatusChip status={m.status} text={fieldText(m)} />}
+                    <span className="sr-only"> 열 선택</span>
                   </button>
                 </th>
               )
