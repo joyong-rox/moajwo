@@ -12,3 +12,7 @@ DATABASE_URL = os.environ.get("DATABASE_URL", f"sqlite:///{(DATA_DIR / 'moajwo.d
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "bge-m3")
 OLLAMA_LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:7b")
+
+# API 문서(/docs·/redoc)와 스키마(/openapi.json)는 로그인 없이 열리는 경로라 운영에서는 끈다 (S-03).
+# 개발·진단에서만 MOAJWO_API_DOCS=1로 켠다.
+API_DOCS = os.environ.get("MOAJWO_API_DOCS", "") == "1"

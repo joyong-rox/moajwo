@@ -1,7 +1,10 @@
 import logging
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Response, status
+from fastapi import Depends, FastAPI, Request, Response, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -22,11 +25,44 @@ from app import (
     validation_api,
 )
 from app.auth import current_user
+from app.config import API_DOCS
 from app.db import get_session
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Moajwo", version="0.1.0")
+
+class QueryValueMask(logging.Filter):
+    """접근 기록(uvicorn.access)의 주소에서 쿼리 값을 뺀다 — 이름 검색어(q) 등이 기록에 남지 않게 (키는 남긴다)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str) and "?" in args[2]:
+            path, _, query = args[2].partition("?")
+            keys = [part.split("=", 1)[0] for part in query.split("&") if part]
+            record.args = (args[0], args[1], f"{path}?" + "&".join(f"{k}=…" for k in keys), *args[3:])
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(QueryValueMask())
+
+app = FastAPI(
+    title="Moajwo",
+    version="0.1.0",
+    # 운영에서는 문서·스키마를 열지 않는다 (config.API_DOCS)
+    docs_url="/docs" if API_DOCS else None,
+    redoc_url="/redoc" if API_DOCS else None,
+    openapi_url="/openapi.json" if API_DOCS else None,
+)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    """요청 형식 오류(422): 필드 위치·오류 종류·안내는 그대로 두고, 보낸 값(input)은 되돌려 보내지 않는다
+    (기본 응답은 본문 전체를 담아 비밀번호·이메일·전화번호가 응답·중간 기록에 남았다)."""
+    errors = [{k: v for k, v in e.items() if k != "input"} for e in exc.errors()]
+    return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, content={"detail": jsonable_encoder(errors)})
+
+
 # 로그인 없이 열리는 것은 /health 와 로그인 API(/auth/status·setup·login·logout)뿐이다
 app.include_router(auth_api.router)
 LOGIN_REQUIRED = [Depends(current_user)]
