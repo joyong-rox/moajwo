@@ -60,6 +60,7 @@ def test_validation_warns_only_where_the_formula_differs(tmp_path: Path) -> None
     found = [w for w in result.warnings if w.code == "formula_mismatch"]
     assert [w.file_id for w in found] == [1]  # 산식이 맞는 자료는 경고하지 않는다
     assert "2행이 다릅니다" in found[0].message and "'발신전체건수합계'(으)로 확정할지" in found[0].message
+    assert (found[0].expected, found[0].actual) == (1080, 1098)  # 구성 항목 합 → 합계 열 값 (차이 18)
     assert result.status != "blocked"  # 경고일 뿐 통합을 막지 않는다
 
 

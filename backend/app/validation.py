@@ -1111,7 +1111,7 @@ def check_formulas(file: FileInput, sheet: SheetInput) -> list[WarningIssue]:
         issues.append(
             WarningIssue(
                 "formula_mismatch", message, file.file_id, file.file_name, sheet.sheet.name, check.differ[0][0], name,
-                actual=len(check.differ),
+                expected=check.parts_sum, actual=check.total_sum,  # 검토 목록: 구성 항목 합 → 합계 열 값
             )
         )  # fmt: skip
     return issues

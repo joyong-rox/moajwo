@@ -37,6 +37,8 @@ class FormulaCheck:
     total: str  # 합계 항목 key
     column: int  # 합계 열 번호
     checked: int  # 모든 칸이 숫자라 비교한 행 수
+    total_sum: float = 0  # 비교한 행의 합계 열 값의 합
+    parts_sum: float = 0  # 비교한 행의 구성 항목 합의 합 (산식대로라면 total_sum과 같다)
     differ: list[tuple[int, float]] = field(default_factory=list)  # (원본 행, 합계 - 구성 항목 합) — 다른 행
     # 다른 행이 있을 때, 같은 시트의 열로 만들 수 있는 다른 산식 중 가장 많이 맞는 것: (항목 key, 맞는 행 수)
     alternative: tuple[str, int] | None = None
@@ -77,6 +79,8 @@ def check_totals(rows: Sequence[tuple[int, Sequence[Any]]], columns: dict[str, i
             continue
         compared = _rows(rows, columns[total], [columns[p] for p in parts])
         check = FormulaCheck(total, columns[total], len(compared))
+        check.total_sum = sum(t for _, t, _ in compared)
+        check.parts_sum = sum(s for _, _, s in compared)
         check.differ = [(row_no, t - s) for row_no, t, s in compared if not _same(t, s)]
         if check.differ:
             best: tuple[str, int] | None = None

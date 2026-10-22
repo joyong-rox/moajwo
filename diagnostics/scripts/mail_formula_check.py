@@ -64,7 +64,7 @@ def main() -> None:
     # 2) 통합 전 검사 (API)
     s, review, _ = u.call("POST", "/reviews", {"file_ids": fids})
     found = [i for i in review.get("items", []) if i["kind"] == "formula_mismatch"]
-    rec("review-api", {"status": s, "id": review.get("id"), "formula_items": [(i["file_name"], i["column"], i["message"]) for i in found],
+    rec("review-api", {"status": s, "id": review.get("id"), "formula_items": [(i["file_name"], i["column"], i["reason"]) for i in found],
                        "kinds": sorted({i["kind"] for i in review.get("items", [])})})  # fmt: skip
     links = [{"file_id": f, "sheet_id": "s0", "unit": "건"} for f in fids]
 
@@ -105,8 +105,10 @@ def main() -> None:
         # 2) 검토 화면의 산식 경고
         if review.get("id"):
             pg.goto(f"{URL}/reviews?review={review['id']}")
-            pg.get_by_text("합계 산식 확인 필요").first.wait_for(timeout=60000)
-            item = pg.locator("li, tr, div.review-item", has_text="합계 산식 확인 필요").last
+            pg.locator("details.review-warnings > summary").first.wait_for(timeout=60000)
+            pg.locator("details.review-warnings > summary").first.click()  # 검증 경고는 접힌 목록 (기존 표시 방식)
+            item = pg.locator("details.review-warnings li", has_text="합계 산식 확인 필요").first
+            item.wait_for(timeout=30000)
             rec("review-screen", {"label_count": pg.get_by_text("합계 산식 확인 필요").count(), "item": text(item)[:400]})
             pg.screenshot(path=str(OUT / f"{LABEL}-1-review.png"), full_page=True)
         # 3) 데이터 통계 분석 화면: 항목 정의와 대상 확인의 산식 주의
