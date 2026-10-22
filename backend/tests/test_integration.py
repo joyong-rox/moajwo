@@ -284,3 +284,26 @@ def test_sigungu_full_name_kept_without_sido_column(client: TestClient) -> None:
     assert [data.cell(row=r, column=j).value for r in (2, 3)] == ["서울특별시 강서구", "부산광역시 강서구"]
     assert [data.cell(row=r, column=header.index("시군구 코드") + 1).value for r in (2, 3)] == ["3150000", "3360000"]
     assert "entity" not in run["summary"]["change_counts"]
+
+
+def test_text_cells_that_look_like_formulas_stay_text(client: TestClient) -> None:
+    """원본의 글자 칸이 '='로 시작해도 통합 결과에는 수식이 아니라 글자로 들어간다 (Excel로 열 때 실행되지 않게)."""
+    texts = ["=1+1", '=HYPERLINK("http://127.0.0.1:9/","x")']
+    quoted = [t.replace('"', '""') for t in texts]  # CSV 안의 큰따옴표
+    lines = ["기관명,집행액,비고", *[f'행안부,{1000 + i},"{q}"' for i, q in enumerate(quoted)]]
+    fid = client.post("/files", files=[("files", ("formula.csv", "\r\n".join(lines).encode("utf-8"), "text/csv"))])
+    fid = fid.json()[0]["id"]
+    review = client.post("/reviews", json={"file_ids": [fid]}).json()
+    for item in [i for i in review["items"] if i["category"] == "pending"]:
+        candidates = item["payload"].get("candidates") or []
+        choice = candidates[0].get("code") if candidates and item["kind"] != "mapping" else None
+        body = {"decision": "approved", "choice": choice} if choice else {"decision": "rejected"}
+        assert client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json=body).status_code == 200
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = client.post(f"/reviews/{review['id']}/integrate", json={"include_unmapped": True})
+    assert run.status_code == 201, run.text
+    wb = openpyxl.load_workbook(io.BytesIO(client.get(f"/runs/{run.json()['id']}/download").content))
+    found = [c for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.value in texts]
+    assert sorted(c.value for c in found) == sorted(texts)
+    assert {c.data_type for c in found} == {"s"}  # 글자 칸 — 수식(f) 아님
+    assert not [c for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.data_type == "f"]
