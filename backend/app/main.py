@@ -25,6 +25,7 @@ from app import (
     validation_api,
 )
 from app.auth import current_user
+from app.config import API_DOCS
 from app.db import get_session
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,14 @@ class QueryValueMask(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(QueryValueMask())
 
-app = FastAPI(title="Moajwo", version="0.1.0")
+app = FastAPI(
+    title="Moajwo",
+    version="0.1.0",
+    # 운영에서는 문서·스키마를 열지 않는다 (config.API_DOCS)
+    docs_url="/docs" if API_DOCS else None,
+    redoc_url="/redoc" if API_DOCS else None,
+    openapi_url="/openapi.json" if API_DOCS else None,
+)
 
 
 @app.exception_handler(RequestValidationError)
