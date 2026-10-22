@@ -9,6 +9,7 @@
 
 import io
 import json
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -81,13 +82,18 @@ def main() -> None:
         pg.get_by_role("button", name="항목 추가").click()
         head = pg.locator(".bd-item-head").first
         head.wait_for(timeout=60000)
-        pg.wait_for_function("() => [...document.querySelectorAll('.bd-item-head')].some(h => h.innerText.includes('원본 열') || h.innerText.includes('포함'))", timeout=60000)
+        pg.wait_for_function("() => [...document.querySelectorAll('.bd-item-head')].some(h => h.innerText.includes('포함'))", timeout=60000)
         pg.wait_for_timeout(800)
-        rec("bundle-plan", {"item_head": text(head), "warns": [text(x) for x in pg.locator(".bd-item .mapping-warn").all()]})
+        rec("bundle-plan", {"step": "항목 추가 직후", "item_head": text(head), "warns": [text(x) for x in pg.locator(".bd-item .mapping-warn").all()]})
+        for box in pg.locator("table.bd-links input[aria-label$=' 단위']").all():  # 시연처럼 단위 표기가 없는 시트에 '건'을 적는다
+            box.fill("건")
+        pg.wait_for_timeout(3000)  # 바꾼 구성을 화면이 다시 확인한다
+        rec("bundle-plan", {"step": "단위 입력 뒤", "item_head": text(head)})
         for box in pg.get_by_label("반복 행 모두 더함").all():  # 시연처럼 같은 대상이 반복되는 시트만 확인 (화면에 보이는 것만)
             if not box.is_checked():
                 box.check()
-        pg.wait_for_timeout(1500)
+        pg.wait_for_timeout(3000)
+        rec("bundle-plan", {"step": "반복 확인 뒤", "item_head": text(head), "warns": [text(x) for x in pg.locator(".bd-item .mapping-warn").all()]})
         make = pg.get_by_role("button", name="엑셀 만들기")
         pg.wait_for_function("() => [...document.querySelectorAll('button')].some(b => b.innerText.startsWith('엑셀 만들기') && !b.disabled)", timeout=60000)
         compose = pg.locator(".bd-step li.is-summary")
@@ -102,7 +108,8 @@ def main() -> None:
         wb = openpyxl.load_workbook(io.BytesIO(content))
         rows = [[c for c in r] for r in wb["통계 요약"].iter_rows(values_only=True)]
         at = next(i for i, r in enumerate(rows) if isinstance(r[0], str) and r[0].startswith("항목: "))
-        table_at = next(i for i in range(at, len(rows)) if rows[i][0] in ("범위", "기간"))
+        aggs = ("합계", "평균", "최솟값", "최댓값", "유효 숫자 개수")  # 결과 표 머리 (같은 이름의 '기간' 설명 줄과 구분)
+        table_at = next(i for i in range(at, len(rows)) if rows[i][0] in ("범위", "기간") and rows[i][1] in aggs)
         rec("bundle-excel", {"sheets": wb.sheetnames, "item": rows[at][0], "source_row": rows[at + 1][:2],
                              "table": [r[:6] for r in rows[table_at : table_at + 3]]})  # fmt: skip
 
@@ -121,19 +128,24 @@ def main() -> None:
         pg.get_by_role("button", name="대상 확인 (계산 안 함)").click()
         pg.locator("fieldset.an-step legend", has_text="2. 대상").wait_for(timeout=60000)
         summary = pg.locator("fieldset.an-step", has_text="2. 대상").locator("p.mw-muted").first
-        rec("analysis-preview", {"summary": text(summary)})
+        rec("analysis-preview", {"step": "대상 확인", "summary": text(summary)})
+        again = pg.get_by_role("button", name="다시 확인 (계산 안 함)")
+        for box in pg.locator("table.an-targets input[aria-label$=' 단위 확인']").all():  # 단위 표기가 없는 시트에 '건'
+            box.fill("건")
+        again.click()
+        pg.wait_for_timeout(2500)
         for box in pg.get_by_label("반복 행은 서로 다른 기록").all():  # 같은 대상이 반복되는 시트에만 보인다
             if not box.is_checked():
                 box.check()
-        if pg.get_by_role("button", name="다시 확인 (계산 안 함)").is_enabled():
-            pg.get_by_role("button", name="다시 확인 (계산 안 함)").click()
-            pg.wait_for_timeout(1500)
-        run_btn = pg.get_by_role("button", name="통계 분석 실행")
+        again.click()
+        pg.wait_for_timeout(2500)
+        rec("analysis-preview", {"step": "단위·반복 확인 뒤", "summary": text(summary)})
+        run_btn = pg.get_by_role("button", name=re.compile(r"분석 실행$"))  # 수정 전 이름 '분석 실행'에서도 같은 단계를 잰다
         rec("analysis-run-button", {"enabled": run_btn.is_enabled()})
         pg.screenshot(path=str(OUT / f"{LABEL}-3-analysis-preview.png"), full_page=True)
         if run_btn.is_enabled():
             run_btn.click()
-            pg.locator("section.an[aria-label='통계 분석 결과'] h2").wait_for(timeout=120000)
+            pg.locator("section.an h2", has_text="분석 결과 #").wait_for(timeout=120000)
             pg.locator("table.an-result tbody tr").first.wait_for(timeout=60000)
             dl = pg.locator("section.an dl.an-conditions")
             terms = [text(x) for x in dl.locator("dt").all()]
