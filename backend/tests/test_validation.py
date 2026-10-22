@@ -146,7 +146,8 @@ def test_rounding_tolerance_and_suppressed_values(tmp_path: Path) -> None:
     assert validate([make_input(make_xlsx(tmp_path / "r.xlsx", rows))], ValidationParams()).blocks == []
     rows = [["시도", "인구"], ["서울", 100], ["부산", "x"], ["합계", 500]]
     result = validate([make_input(make_xlsx(tmp_path / "x.xlsx", rows))], ValidationParams())
-    assert result.blocks == [] and any("비공개" in n for n in result.notes)
+    # 막지는 않지만 검사를 건너뛴 사실을 참고 메모가 아니라 경고로 알린다 (C-03 — 통과로 보이지 않게)
+    assert result.blocks == [] and any(w.code == "sum_incomplete" and "비공개" in w.message for w in result.warnings)
 
 
 # ---------------------------------------------------------------- 차단: 필수 기관 / 기간
@@ -236,6 +237,7 @@ def test_block_and_warning_codes_are_disjoint() -> None:
         "header_missing",
         "quantity_not_number",
         "formula_mismatch",
+        "sum_incomplete",
     }
 
 
