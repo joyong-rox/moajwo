@@ -47,6 +47,7 @@ from app.auth import CurrentUser
 from app.config import DATA_DIR
 from app.decisions import load_decisions
 from app.files import get_file_for, load_parsed
+from app.formulas import TOTAL_FORMULAS
 from app.integration import KST, OUTPUT_DIR
 from app.mapping_review import sheet_id
 from app.models import IntegrationRun, SourceFile
@@ -504,9 +505,28 @@ def build_plan(db: Session, user: CurrentUser, req: BundleIn) -> Plan:
     decisions = {fid: load_decisions(db, fid) for fid in per_file}
     fields = _fields(out_sheets, decisions)
     items = None if req.summary is None else _summary(db, user, req.summary, out_sheets, problems)
+    if req.summary is not None:
+        warnings.extend(double_count_notes(req.summary))
     plan = Plan(req, files_out, out_sheets, items, fields, problems, warnings)
     plan.basis = _basis(plan, records)
     return plan
+
+
+def double_count_notes(summary: SummaryIn) -> list[str]:
+    """요약에 합계 항목과 그 구성 항목(또는 그 안에 든 다른 합계)을 함께 고르면, 항목끼리 더할 때 같은 수량을 두 번
+    센다는 것을 알린다. 계산은 항목마다 따로 하므로 막지 않는다 (app.formulas.TOTAL_FORMULAS)."""
+    chosen = [i.field_key for i in summary.items]
+    notes = []
+    for total, parts in TOTAL_FORMULAS.items():
+        inner = [k for k, ps in TOTAL_FORMULAS.items() if k != total and set(ps) < set(parts)]
+        both = [k for k in chosen if k in parts or k in inner]
+        if total in chosen and both:
+            names = ", ".join(f"'{label_of(k)}'" for k in both)
+            notes.append(
+                f"'{label_of(total)}'은(는) {' + '.join(label_of(p) for p in parts)}의 합계입니다 — "
+                f"요약의 '{label_of(total)}'과(와) {names}을(를) 서로 더하면 같은 수량을 두 번 셉니다."
+            )
+    return notes
 
 
 def _fields(sheets: list[OutSheet], decisions: dict[int, dict[str, dict[str, str | None]]]) -> list[dict[str, Any]]:
@@ -748,7 +768,9 @@ def _plain(v: Any) -> Any:
     return int(v) if isinstance(v, float) and v.is_integer() and abs(v) < 2**53 else v
 
 
-def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], processed_at: str) -> list[dict[str, Any]]:
+def _write_summary(
+    ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], processed_at: str, notes: list[str]
+) -> list[dict[str, Any]]:
     row = 1
 
     def line(*values: Any, bold: bool = False, size: int | None = None) -> None:
@@ -773,6 +795,8 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
         "숫자는 계산해 넣은 값입니다 (엑셀 수식 아님). "
         "계산은 배정밀도 실수로 해 매우 큰 값의 합계는 끝자리가 다를 수 있습니다."
     )
+    for note in notes:  # 항목끼리의 관계 (합계와 그 구성 항목을 함께 고름 등)
+        line("주의", note)
     saved = []
     for plan, res in items:
         o = plan.out
@@ -807,6 +831,8 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
         if res.get("level_mismatch"):
             state += f" · 집계 수준 {level_text} (하위 지역 합계가 상위 지역 값과 다른 곳 {res['level_mismatch']}곳)"
         line("상태", state)
+        for w in cond.get("warnings") or []:  # 산식 확인·가림 구분 번호 등 계산 엔진의 주의 (화면과 같은 문장)
+            line("주의", w)
         line("계산한 행", f"{res['rows_included']:,}행 포함 · {res['rows_excluded']:,}행 제외")
         labels = o["reason_labels"]
         for k, n in sorted(res["reason_counts"].items()):
@@ -921,7 +947,11 @@ def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
                 parsed[fid] = (record, result, formula_cells(_file_path(record)))
             _, result, formulas = parsed[fid]
             sheets_out.append(_write_sheet(wb.create_sheet(o.name), o, result, formulas))
-        summary_items = _write_summary(wb.create_sheet(SUMMARY_SHEET), results, processed_at) if plan.items else []
+        summary_items = (
+            _write_summary(wb.create_sheet(SUMMARY_SHEET), results, processed_at, double_count_notes(plan.req.summary))
+            if plan.items and plan.req.summary
+            else []
+        )
         with tempfile.NamedTemporaryFile(dir=OUTPUT_DIR, suffix=".xlsx.tmp", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         wb.save(tmp_path)

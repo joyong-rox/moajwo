@@ -21,6 +21,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Any, Literal
 
+from app.formulas import TOTAL_FORMULAS, check_totals, unique_columns
 from app.glossary import Glossary, Resolution, parse_date_value, period_end, prefer_for_field
 from app.mail_fields import MAIL_STOCK_FIELDS
 from app.mapping import load_dictionary
@@ -29,7 +30,9 @@ from app.pii import mask_cell
 from app.quantity import QUANTITY_FIELDS, quantity_value
 
 BlockCode = Literal["sum_mismatch", "required_entity_missing", "period_mismatch"]
-WarningCode = Literal["mom_outlier", "blank_value", "unit_estimate", "header_missing", "quantity_not_number"]
+WarningCode = Literal[
+    "mom_outlier", "blank_value", "unit_estimate", "header_missing", "quantity_not_number", "formula_mismatch"
+]
 Status = Literal["blocked", "pii_confirmation_required", "passed_with_warnings", "passed"]
 
 BLOCK_LABEL: dict[str, str] = {
@@ -43,6 +46,7 @@ WARNING_LABEL: dict[str, str] = {
     "unit_estimate": "단위 추정",
     "header_missing": "헤더 확인 필요",
     "quantity_not_number": "수량으로 계산하지 못한 값",
+    "formula_mismatch": "합계 산식 확인 필요",
 }
 
 # 합산하면 안 되는 항목 (비율·연월·코드·연락처)
@@ -1071,6 +1075,48 @@ def check_quantity_text(file: FileInput, sheet: SheetInput) -> list[WarningIssue
     return issues
 
 
+# ---------------------------------------------------------------- 경고: 합계 산식
+
+
+def check_formulas(file: FileInput, sheet: SheetInput) -> list[WarningIssue]:
+    """합계 항목 열(발신건수합계 등)이 구성 항목의 합과 다른 행을 알린다 (app.formulas — 입력 오류로 단정하지 않음).
+
+    같은 이름이라도 자료마다 산식이 다를 수 있어(시스템·대용량 발신까지 더한 합계 등), 같은 시트의 열로 만든 다른 산식과
+    맞으면 그 항목을 함께 적어 사용자가 원본 산식을 확인한 뒤 확정하게 한다. 구성 항목 열이 없으면 확인하지 못하므로
+    경고하지 않는다. 데이터 행만 본다 (합계·소계 행은 합계 검사가 본다).
+    """
+    labels = _field_labels()
+    columns = unique_columns((c.field_key, c.index) for c in sheet.columns)
+    rows = [(r["row"], r["cells"]) for r in sheet.sheet.body if r["kind"] == "data"]
+    issues = []
+    for check in check_totals(rows, columns):
+        if not check.differ:
+            continue
+        name = sheet.sheet.columns[check.column]
+        parts = " + ".join(labels.get(p, p) for p in TOTAL_FORMULAS[check.total])
+        where = ", ".join(f"{row}행" for row, _ in check.differ[:3]) + (" …" if len(check.differ) > 3 else "")
+        message = (
+            f"'{name}' 열({labels.get(check.total, check.total)})은 {parts}의 합계인데 비교한 {check.checked}행 중 "
+            f"{len(check.differ)}행이 다릅니다 (차이 합계 {_fmt(check.difference)}: {where})"
+        )
+        if check.alternative:
+            alt, matched = check.alternative
+            alt_parts = " + ".join(labels.get(p, p) for p in TOTAL_FORMULAS[alt])
+            message += (
+                f". {alt_parts}(으)로 보면 {matched}/{check.checked}행이 맞습니다 — 원본 산식이 다른 합계일 수 있으니 "
+                f"'{labels.get(alt, alt)}'(으)로 확정할지 확인하세요"
+            )
+        else:
+            message += ". 입력 오류로 단정하지 말고 원본의 산식·포함 범위를 확인하세요"
+        issues.append(
+            WarningIssue(
+                "formula_mismatch", message, file.file_id, file.file_name, sheet.sheet.name, check.differ[0][0], name,
+                actual=len(check.differ),
+            )
+        )  # fmt: skip
+    return issues
+
+
 # ---------------------------------------------------------------- 경고: 단위 추정
 
 UNIT_SCALE: dict[str, tuple[str, float]] = {
@@ -1227,6 +1273,7 @@ def validate(
             warnings.extend(check_header(f, s))
             warnings.extend(check_blanks(f, s))
             warnings.extend(check_quantity_text(f, s))
+            warnings.extend(check_formulas(f, s))
     warnings.extend(check_units(files))
 
     pii = [

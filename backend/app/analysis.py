@@ -58,6 +58,7 @@ from app.admin_codes import infer_region_codes
 from app.auth import CurrentUser
 from app.decisions import load_decisions
 from app.files import column_id, get_file_for
+from app.formulas import TOTAL_FORMULAS, check_totals, unique_columns
 from app.glossary import parse_date_value
 from app.mail_fields import MAIL_MEASURE_FIELDS
 from app.mapping import TOTAL_WORDS, load_dictionary, normalize, split_column_name
@@ -65,7 +66,7 @@ from app.mapping_review import SheetView, declared_units, file_view, raw_mark, s
 from app.parsing import is_missing
 from app.pii import mask_text
 from app.quantity import quantity_value
-from app.validation import STOCK_FIELDS, _month_of, _text_periods, _year_of
+from app.validation import STOCK_FIELDS, _fmt, _month_of, _text_periods, _year_of
 
 # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음).
 # 7: 메일 지표·용량 단위 구분 (PR #21) · 8: 가린 값이 같아도 원문이 다르면 다른 대상 (F-1)
@@ -153,6 +154,18 @@ def field_labels() -> dict[str, str]:
 @lru_cache(maxsize=1)
 def _dictionary_words() -> frozenset[str]:
     return frozenset(normalize(t) for f in load_dictionary() for t in (f.label, *f.aliases))
+
+
+@lru_cache(maxsize=1)
+def _identity_names() -> dict[str, str]:
+    """구분 항목(지역·기관·조직·부서 등)의 사전 이름·동의어 → 항목 key.
+    반복 안내에서 쓰지 않은 구분 열을 찾는 데만 쓴다."""
+    names: dict[str, str] = {}
+    for f in load_dictionary():
+        if f.key in IDENTITY_FIELDS:
+            for name in (f.label, *f.aliases):
+                names.setdefault(normalize(name), f.key)
+    return names
 
 
 def label_of(key: str) -> str:
@@ -1004,6 +1017,39 @@ def _read_rows(ev: Evaluation) -> None:
     _overlaps(ev)
     _base_dates(ev)  # 범위(_date_scope)가 자동 제외와 무관해 순서에 기대지 않지만, 근거를 먼저 확인한다
     _region_levels(ev)
+    _formula_warnings(ev)
+
+
+def _formula_warnings(ev: Evaluation) -> None:
+    """고른 항목이 합계 항목(발신건수합계 등)이면 시트마다 산식(구성 항목의 합)과 맞는지 보고, 다르면 근거와 함께
+    알린다 (app.formulas). 계산은 막지 않는다 — 확정한 열의 값 그대로 계산하되, 산식이 다른 합계를 함께 더하지 않게
+    확인을 돕는다. 구성 항목도 사용자가 확정한 시트만 본다 (분석은 확정한 매핑만 쓴다)."""
+    if ev.req.field_key not in TOTAL_FORMULAS:
+        return
+    for t in ev.ok:
+        if t.column_id is None:
+            continue
+        sv: SheetView = t._view  # type: ignore[attr-defined]
+        columns = unique_columns((t.decisions.get(name), j) for j, name in enumerate(sv.columns))
+        columns[ev.req.field_key] = int(t.column_id[1:])  # 이 결과가 계산하는 열
+        rows = [(row_no, cells) for row_no, kind, cells in sv.rows if kind == "data"]
+        for check in check_totals(rows, columns):
+            if check.total != ev.req.field_key or not check.differ:
+                continue
+            parts = " + ".join(label_of(p) for p in TOTAL_FORMULAS[check.total])
+            text = (
+                f"'{label_of(check.total)}' #{t.file_id} {t.sheet}: '{t.column}' 열이 {parts}의 합과 "
+                f"{len(check.differ)}/{check.checked}행에서 다릅니다 (차이 합계 {_fmt(check.difference)})"
+            )
+            if check.alternative:
+                alt, matched = check.alternative
+                text += (
+                    f" — {' + '.join(label_of(p) for p in TOTAL_FORMULAS[alt])}(으)로는 {matched}행이 맞습니다. "
+                    f"산식이 다른 합계일 수 있으니 '{label_of(alt)}'(으)로 확정할지 확인하세요"
+                )
+            else:
+                text += " — 입력 오류로 단정하지 말고 원본의 산식·포함 범위를 확인하세요"
+            ev.warnings.append(text + " (산식이 다른 합계를 함께 더하면 뜻이 섞입니다)")
 
 
 def _candidate(r: RowRec) -> bool:
@@ -1071,14 +1117,41 @@ def _repeated(ev: Evaluation) -> None:
             ],
         }
         if t.records:
-            continue  # 사용자가 서로 다른 기록이라고 확인함 → 모두 더한다 (확인 사실은 결과 조건에 남김)
+            continue  # 사용자가 서로 다른 기록이라고 확인함 → 모두 더한다 (확인 사실·근거는 결과 조건에 남김)
         t.status = "needs_input"
+        unused = _unused_identity(t)
         t.reasons.append(
             f"같은 대상(기간·지역·기관·구분)의 행이 반복됩니다 — {len(rep)}개 대상 {t.repeated['rows']}행 "
             f"(값 같음 {same}, 다름 {len(rep) - same}). "
             "중복된 통계인지 서로 다른 기록인지 알 수 없어 계산하지 않습니다 — "
             "서로 다른 기록이면 '반복 행 모두 더함'을 고르고, 아니면 자료나 구분 열 매핑을 확인하세요"
+            + (
+                f". 이 시트에서 대상 구분에 쓰지 않은 열: {', '.join(unused)} — 그 항목으로 확정하면 따로 판정합니다"
+                if unused
+                else ""
+            )
         )
+
+
+def _unused_identity(t: TargetEval) -> list[str]:
+    """대상 구분에 쓰지 않은 구분 열 — 이름이 사전의 구분 항목(조직코드 등)과 정확히 같은데 그 항목으로 확정하지
+    않은 열. 반복 행 안내에 적어 그 열을 확정하면 따로 판정된다는 것을 알린다 (그 열을 자동으로 구분에 쓰지는 않음)."""
+    sv: SheetView = t._view  # type: ignore[attr-defined]
+    found = []
+    for col in sv.columns:
+        key = _identity_names().get(normalize(col))
+        if key and key not in t.dims and t.decisions.get(col) != key:
+            found.append(f"'{mask_text(col)}' 열 → '{label_of(key)}'")
+    return found
+
+
+def records_text(t: TargetEval) -> str:
+    """'반복 행은 서로 다른 기록' 확인과 그 근거 (반복된 대상·행 수·값이 같은 대상 수) — 결과 조건·Excel에 남긴다."""
+    rep = t.repeated or {}
+    return (
+        f"#{t.file_id} {t.sheet} (같은 대상 {rep.get('keys', 0)}개 {rep.get('rows', 0)}행 — "
+        f"값 같음 {rep.get('same_value', 0)}, 다름 {rep.get('different_value', 0)})"
+    )
 
 
 def _overlaps(ev: Evaluation) -> None:
@@ -1465,7 +1538,7 @@ def conditions(ev: Evaluation) -> dict[str, Any]:
         "region_level": req.region_level,
         "level_conflicts": ev.level_conflicts,  # 하위 합계가 상위 값과 다르거나 확인할 수 없는 곳 (차이 포함)
         "base_dates": ev.base_dates,
-        "records": [f"#{t.file_id} {t.sheet}" for t in ev.ok if t.records and t.repeated],
+        "records": [records_text(t) for t in ev.ok if t.records and t.repeated],
         "mean_denominator": "그룹마다 유효한 숫자의 개수 (빈칸·비공개·숫자가 아닌 값은 분모에 넣지 않음)",
         "reason_labels": {k: v[0] for k, v in REASONS.items()},
         "warnings": ev.warnings,

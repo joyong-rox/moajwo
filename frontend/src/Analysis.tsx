@@ -109,6 +109,7 @@ function binOverlap(a: BinDraft, b: BinDraft): boolean {
 function AnalysisBuilder({ initialField, initialFiles }: { initialField: string; initialFiles: number[] }) {
   const [fields, setFields] = useState<AnalysisField[] | null>(null)
   const [labels, setLabels] = useState<Record<string, string>>({ period: '기간' })
+  const [descriptions, setDescriptions] = useState<Record<string, string>>({}) // 항목 정의 (단위·산식)
   const [field, setField] = useState(initialField)
   const [sources, setSources] = useState<AnalysisSource[] | null>(null)
   const [chosen, setChosen] = useState<Set<number>>(() => new Set(initialFiles))
@@ -152,7 +153,10 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
       .then(setFields)
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
     loadFields()
-      .then((fs) => setLabels(Object.fromEntries([['period', '기간'], ...fs.map((f) => [f.key, f.label])])))
+      .then((fs) => {
+        setLabels(Object.fromEntries([['period', '기간'], ...fs.map((f) => [f.key, f.label])]))
+        setDescriptions(Object.fromEntries(fs.map((f) => [f.key, f.description])))
+      })
       .catch(() => undefined)
   }, [])
 
@@ -353,7 +357,12 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
         <legend>1. 분석할 항목과 자료</legend>
         <label className="an-field">
           분석할 항목 (사용자가 확정한 수량 항목)
-          <select value={field} onChange={(e) => pickField(e.target.value)} aria-label="분석할 항목">
+          <select
+            value={field}
+            onChange={(e) => pickField(e.target.value)}
+            aria-label="분석할 항목"
+            aria-describedby={field && descriptions[field] ? 'an-field-help' : undefined}
+          >
             <option value="">— 항목 고르기 —</option>
             {(fields ?? []).map((f) => (
               <option key={f.key} value={f.key}>
@@ -365,6 +374,11 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
             )}
           </select>
         </label>
+        {field && descriptions[field] && (
+          <p id="an-field-help" className="mw-muted">
+            항목 정의 — {descriptions[field]}
+          </p>
+        )}
         {fields?.length === 0 && (
           <p className="mw-muted">확정한 수량 항목이 없습니다. 열 매핑 화면에서 열을 먼저 확정하세요.</p>
         )}
