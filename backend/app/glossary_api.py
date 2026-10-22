@@ -1,6 +1,8 @@
 """용어사전 API: 항목(7자리 코드)·별칭 관리, 일괄 업로드, 이름 해석."""
 
+import hashlib
 import tempfile
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path, PurePath
 from typing import Annotated, Literal
@@ -31,13 +33,41 @@ def _entry(e: GlossaryEntry) -> Entry:
     return Entry(e.code, e.name, e.type_label or "", e.sido_code, e.sigungu_code, e.valid_from, e.valid_to, previous)
 
 
+def _rows(session: Session) -> tuple[list[Entry], list[tuple[str, AliasEntry]]]:
+    aliases = [
+        (a.normalized, AliasEntry(a.target_code, a.valid_from, a.valid_to, base=a.source == "base"))
+        for a in session.scalars(select(GlossaryAlias))
+    ]
+    return [_entry(e) for e in session.scalars(select(GlossaryEntry))], aliases
+
+
+def _build(entries: list[Entry], aliases: list[tuple[str, AliasEntry]]) -> Glossary:
+    grouped: dict[str, list[AliasEntry]] = {}
+    for normalized, alias in aliases:
+        grouped.setdefault(normalized, []).append(alias)
+    return Glossary(entries, grouped)
+
+
 def get_glossary(session: Session) -> Glossary:
-    aliases: dict[str, list[AliasEntry]] = {}
-    for a in session.scalars(select(GlossaryAlias)):
-        aliases.setdefault(a.normalized, []).append(
-            AliasEntry(a.target_code, a.valid_from, a.valid_to, base=a.source == "base")
-        )
-    return Glossary([_entry(e) for e in session.scalars(select(GlossaryEntry))], aliases)
+    return _build(*_rows(session))
+
+
+def glossary_state(session: Session) -> tuple[str, Callable[[], Glossary]]:
+    """지금 용어사전의 지문과, 필요할 때만 만드는 용어사전 — 같은 행에서 만든다 (지문과 해석이 다른 때를 보지 않게).
+
+    지문은 해석에 쓰는 값(항목의 코드·이름·유형·시도·시군구 코드·유효기간·이전 코드, 별칭의 이름·대상·유효기간·기본
+    여부)으로 만든다. 지문이 검사 때와 같으면 이름을 다시 해석하지 않아도 된다 (check_basis.entity_changes).
+    """
+    entries, aliases = _rows(session)
+    text = "\n".join([*sorted(map(repr, entries)), "|", *sorted(map(repr, aliases))])
+    built: list[Glossary] = []
+
+    def glossary() -> Glossary:
+        if not built:
+            built.append(_build(entries, aliases))
+        return built[0]
+
+    return hashlib.sha256(text.encode()).hexdigest(), glossary
 
 
 # ---------------------------------------------------------------- 현황

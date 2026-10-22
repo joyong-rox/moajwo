@@ -26,12 +26,20 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.check_basis import BASIS_VERSION, CHECK_BASIS_KEY, LEGACY_REASON, applied_drift, basis_changes
+from app.check_basis import (
+    BASIS_VERSION,
+    CHECK_BASIS_KEY,
+    LEGACY_REASON,
+    applied_drift,
+    approved_links,
+    basis_changes,
+    entity_changes,
+)
 from app.config import DATA_DIR
 from app.decisions import load_decisions, load_learned, load_org_codes
 from app.files import load_parsed
 from app.glossary import EntityRef, Resolution, entity_ref, normalize_name
-from app.glossary_api import get_glossary
+from app.glossary_api import glossary_state
 from app.mapping import ColumnMapping, get_engine
 from app.models import Automation, IntegrationRun, ReviewSession, RunChange
 from app.parsing import Cell, is_missing
@@ -250,8 +258,19 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
             f"검사한 뒤 열 매핑이 바뀌어 이 검토 결과로 통합할 수 없습니다 — 검토에서 다시 검사하세요 "
             f"({_few(changed)})."
         )
-    glossary = get_glossary(db)
+    # 검사가 해석한 기관·지역 이름도 지금 용어사전에서 같아야 그 검사 결과로 만든다 — 한 번 읽어 비교한 이 용어사전으로
+    # 결과를 만든다 (비교한 뒤 다른 요청이 바꿔도 이 실행은 비교한 값으로 — 바뀐 값은 다음 요청에서 거절됨)
+    digest, load_glossary = glossary_state(db)
+    glossary = load_glossary()
     items = session_items(db, session)
+    record = basis.get("entities")
+    if changed := entity_changes(record, digest, load_glossary, lambda: approved_links(items)):
+        if record is None:
+            raise IntegrationError(f"{changed[0]} — 검토에서 다시 검사하세요.")
+        raise IntegrationError(
+            f"검사한 뒤 기관·지역 용어사전이 바뀌어 이 검토 결과로 통합할 수 없습니다 — 검토에서 다시 검사하세요 "
+            f"({_few(changed)})."
+        )
     choices = {
         i.before: i.choice for i in items if i.kind == "entity" and i.decision == "approved" and i.choice and i.before
     }
