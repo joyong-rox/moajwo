@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+import zipfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
@@ -170,7 +171,32 @@ def normalize_cell(value: Any) -> Cell:
 Filled = dict[str, set[tuple[int, int]]]  # 시트 → 병합 채움으로 값이 들어간 칸 (0-based 행, 열)
 
 
+# xlsx는 압축 파일이라 업로드 한도(압축된 크기)로는 읽을 때의 메모리를 막지 못한다 — 압축을 풀면 수백 배가 될 수
+# 있다. 측정(2026-10-22, 일반 모드 읽기): 압축을 푼 1MB당 메모리 약 9.5MB, 칸 하나에 약 16µs.
+# 100MB면 약 1GB·약 200만 칸.
+MAX_XLSX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+
+
+def _check_xlsx_size(path: Path) -> None:
+    """압축을 푼 크기(중앙 디렉터리의 크기 합)가 한도를 넘으면 읽기 전에 멈춘다.
+
+    zipfile은 적힌 크기보다 많이 풀지 않는다 (넘으면 CRC 오류) — 적힌 크기 합이 실제로 풀리는 양의 상한이다.
+    """
+    try:
+        with zipfile.ZipFile(path) as archive:
+            total = sum(info.file_size for info in archive.infolist())
+    except zipfile.BadZipFile:
+        return  # 손상 파일은 아래 openpyxl이 알린다 (기존 안내)
+    if total > MAX_XLSX_UNCOMPRESSED_BYTES:
+        limit = MAX_XLSX_UNCOMPRESSED_BYTES / 2**20
+        raise ParseError(
+            f"압축을 풀면 {total / 2**20:,.1f}MB라 읽지 않았습니다 (한도 {limit:,.1f}MB). "
+            "시트를 나누거나 필요한 범위만 저장해 다시 올리세요."
+        )
+
+
 def _read_xlsx(path: Path) -> tuple[dict[str, list[list[Any]]], Filled]:
+    _check_xlsx_size(path)
     # read_only 모드에서는 병합 셀 정보를 얻을 수 없어 일반 모드로 연다 (파일은 읽기만 함).
     wb = openpyxl.load_workbook(path, data_only=True)
     try:
