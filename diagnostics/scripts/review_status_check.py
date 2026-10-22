@@ -1,7 +1,8 @@
 """U-01·U-02 확인: 공통 항목 검토의 단계 표시(대상·처리·제외)와 '데이터 통계 분석'으로 가는 버튼 (격리 서버, 새 계정, 측정만 저장).
 
 사례: 선택 0개 → 고른 5개 모두 분석 기록 없음 → 버튼으로 이동 → 2개만 분석(일부 처리) → 5개 모두 분석 → 조회 실패(이 화면 요청만 500 주입)
-→ 열어 둔 뒤 선택 변경. 단계 안내·적용 대상·안내 상자·상태 카드·버튼의 이름과 설명·도착 화면을 그대로 적는다 (판정하지 않음).
+→ 열어 둔 뒤 선택 변경 → 되돌리기 → 응답을 기다리는 동안 선택 변경(늦은 응답) → 키보드(Space)로 변경·되돌리기 → 390px 폭.
+단계 안내·적용 대상·안내 상자·상태 카드·버튼의 이름과 설명·도착 화면을 그대로 적는다 (판정하지 않음).
 계정은 새로 만든다 (첫 사용). 비밀번호는 무작위로 만들어 출력 폴더의 creds 파일에만 둔다 (Git 밖).
 사용법: python review_status_check.py <출력 폴더> <라벨> <새 계정 이름> <입력 파일 폴더> [파일 이름 ...]
 """
@@ -135,6 +136,46 @@ def main() -> None:
         open_review()
         pick(fids[-1:], on=False)
         shot("6-selection-changed")
+        pick(fids[-1:], on=True)  # 되돌리기 — 연 때와 같은 선택이면 그 결과가 다시 지금 선택의 결과
+        shot("7-selection-reverted")
+
+        held: list = []  # 늦은 응답: 요청을 잡아 둔 채 선택을 바꾼 뒤 보낸다
+
+        def hold(route) -> None:  # noqa: ANN001
+            held.append(route)
+
+        pg.route("**/api/mapping/common", hold)
+        pg.get_by_role("button", name="공통 검토 열기").click()
+        pg.wait_for_function("() => [...document.querySelectorAll('button')].some(b => b.innerText.includes('모으는 중'))")
+        pick(fids[:1], on=False)
+        shot("8-changed-while-loading")
+        for _ in range(100):  # 요청이 잡힐 때까지 (route 처리는 Playwright가 이벤트를 돌릴 때 일어난다)
+            if held:
+                break
+            pg.wait_for_timeout(100)
+        held.pop().continue_()
+        pg.unroute("**/api/mapping/common", hold)
+        pg.wait_for_function("() => ![...document.querySelectorAll('button')].some(b => b.innerText.includes('모으는 중'))", timeout=60000)
+        shot("9-late-response-after-change")
+
+        # 키보드: 체크 상자에 초점을 두고 Space로 바꾼다 — 초점이 그대로인지와 알림 문구
+        open_review()
+        box = pg.locator("label.mw-file-option", has_text=f"#{fids[1]} ").locator("input[type=checkbox]")
+        box.focus()
+        pg.keyboard.press("Space")
+        focus = pg.evaluate("() => document.activeElement && document.activeElement.closest('label')?.innerText.trim()")
+        rec("keyboard", {"focused_label": focus, "checked": box.is_checked(),
+                         "pickcount": pg.locator(".mw-common .wk-pickcount").inner_text().strip()})  # fmt: skip
+        shot("10-keyboard-changed")
+        pg.keyboard.press("Space")
+        shot("11-keyboard-reverted")
+
+        # 모바일 폭: 바뀐 선택 상태에서 단계 카드 문구와 가로 넘침
+        pick(fids[-1:], on=False)
+        pg.set_viewport_size({"width": 390, "height": 844})
+        pg.wait_for_timeout(400)
+        rec("mobile", {"overflow_px": pg.evaluate("() => document.documentElement.scrollWidth - window.innerWidth")})
+        shot("12-mobile-390-changed")
         REC["meta"] = [run_meta("review_status_check.py", LABEL, asset)]
         br.close()
     REC["blocked_out_of_scope"] = BLOCKED
