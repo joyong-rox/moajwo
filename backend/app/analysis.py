@@ -70,7 +70,8 @@ from app.validation import STOCK_FIELDS, _fmt, _month_of, _text_periods, _year_o
 
 # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음).
 # 7: 메일 지표·용량 단위 구분 (PR #21) · 8: 가린 값이 같아도 원문이 다르면 다른 대상 (F-1)
-POLICY = "analysis-policy-8"
+# 9: 합계·최솟값·최댓값을 정확한 수로 (C-02 — 0.1 + 0.2 = 0.3, 큰 정수도 끝자리까지)
+POLICY = "analysis-policy-9"
 MASKED_NO = "가림 구분"  # 가린 표시가 같은 서로 다른 값에 붙이는 번호의 이름 ('가팀 k***@example.com (가림 구분 2)')
 MAX_TARGETS = 20  # 한 번에 고를 수 있는 파일·시트
 MAX_ROWS = 300_000  # 고른 시트의 데이터 행 합계 상한
