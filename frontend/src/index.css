@@ -971,6 +971,11 @@ body {
   text-decoration-color: var(--muted);
 }
 
+/* 경고는 값을 고치지 않는다 — '기대값 → 실제값'을 보여 줄 뿐이라 앞 값에 취소선을 긋지 않는다 */
+.review-item.is-warning .review-before {
+  text-decoration: none;
+}
+
 .review-arrow {
   color: var(--muted);
 }
