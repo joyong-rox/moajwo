@@ -14,7 +14,7 @@ import BatchConfirm from './BatchConfirm'
 import FieldPicker from './FieldPicker'
 import { formatCell, loadFields, NONE, NONE_HELP, STATUS_TEXT, VALUE_KIND_LABEL } from './mappingText'
 import { navigate } from './router'
-import { Banner, Icon, StatusCards, WorkflowSteps, type IconName, type Tone } from './Workflow'
+import { Banner, Icon, StatusCards, WorkflowSteps, type IconName, type Step, type Tone } from './Workflow'
 
 const CATEGORY: Record<CommonCategory, { label: string; help: string }> = {
   common: {
@@ -55,6 +55,7 @@ function MappingCommon() {
   const [groupId, setGroupId] = useState<string | null>(null)
   const [fields, setFields] = useState<StandardFieldInfo[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [failed, setFailed] = useState(false) // 공통 검토를 불러오지 못함 (파일 목록 오류와 따로)
   const [message, setMessage] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [query, setQuery] = useState('')
@@ -75,6 +76,7 @@ function MappingCommon() {
       .then((r) => {
         if (!alive) return
         setReview(r)
+        setFailed(false)
         setLoading(false)
         // 묶음이 있는 첫 구분을 연다 (빈 구분부터 보이지 않게, 사용자가 고른 구분에 묶음이 있으면 그대로)
         setCategory((prev) =>
@@ -84,6 +86,7 @@ function MappingCommon() {
       .catch((err: unknown) => {
         if (!alive) return
         setError(err instanceof Error ? err.message : String(err))
+        setFailed(true)
         setLoading(false)
       })
     return () => {
@@ -107,10 +110,39 @@ function MappingCommon() {
   const nameOf = (id: number) => files?.find((f) => f.id === id)?.display_name ?? `#${id}`
   const scope = requested ?? []
 
+  // 대상·처리·제외는 서버가 돌려준 파일 상태로 센다: 분석 기록 없음(missing)·파일 구성이 바뀜(stale)은 묶지 않은 파일
+  const staleCount = review?.files.filter((f) => f.stale).length ?? 0
+  const missingCount = review?.missing.length ?? 0
+  const processed = (review?.files.length ?? 0) - staleCount
+  const excluded = missingCount + staleCount
+  const tally = `대상 ${processed + excluded}개 / 처리 ${processed}개 / 제외 ${excluded}개`
+  const whyExcluded = [
+    missingCount > 0 && `분석 기록 없음 ${missingCount}개`,
+    staleCount > 0 && `파일 구성이 분석 때와 달라 다시 분석 필요 ${staleCount}개`,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+
+  /** 열 매핑 단계: 처리한 파일이 없으면 완료가 아니다 (건수 0은 '확인할 것 없음'이 아니라 '비교한 자료 없음') */
+  function mappingStep(): Pick<Step, 'state' | 'detail'> {
+    if (loading) return { state: 'todo', detail: '모으는 중…' }
+    if (failed) {
+      return { state: 'attention', detail: review ? '다시 불러오지 못함 — 아래는 이전 결과' : '불러오지 못함 — 다시 여세요' }
+    }
+    if (!review) return { state: 'todo', detail: picked.size ? '공통 검토를 열면 확인' : '검토할 파일을 고르세요' }
+    if (processed === 0) return { state: 'attention', detail: `${tally} — 비교한 파일 없음` }
+    const groupText = `공통 후보 ${counts.common ?? 0} · 판단이 다름 ${counts.divergent ?? 0} · 미해결 ${counts.unresolved ?? 0}`
+    if (excluded > 0) return { state: 'partial', detail: `${tally} · ${groupText}` }
+    const left = (counts.divergent ?? 0) + (counts.unresolved ?? 0)
+    return { state: left > 0 ? 'attention' : 'done', detail: `${tally} · ${groupText}` }
+  }
+
   function open() {
     setError(null)
     setMessage(null)
     setGroupId(null)
+    setReview(null) // 새 대상의 응답이 오기 전에 이전 결과를 지금 대상의 결과처럼 보이지 않게
+    setFailed(false)
     setLoading(true)
     setRequested([...picked])
   }
@@ -120,14 +152,7 @@ function MappingCommon() {
       <WorkflowSteps
         steps={[
           { key: 'files', state: picked.size ? 'done' : 'todo', detail: `고른 파일 ${picked.size}개`, href: '/' },
-          {
-            key: 'mapping',
-            current: true,
-            state: !review ? 'todo' : (counts.divergent ?? 0) + (counts.unresolved ?? 0) > 0 ? 'attention' : 'done',
-            detail: review
-              ? `공통 후보 ${counts.common ?? 0} · 판단이 다름 ${counts.divergent ?? 0} · 미해결 ${counts.unresolved ?? 0}`
-              : '공통 검토를 열면 확인',
-          },
+          { key: 'mapping', current: true, ...mappingStep() },
           { key: 'review', state: 'todo', detail: '고른 파일로 검사', href: picked.size ? `/?files=${[...picked].join(',')}` : '/' },
           { key: 'result', state: 'todo', detail: '실행 기록', href: '/runs' },
         ]}
@@ -192,16 +217,21 @@ function MappingCommon() {
           <button type="button" className="mapping-run" disabled={picked.size === 0 || loading} onClick={open}>
             {loading ? '모으는 중…' : `공통 검토 열기 (${picked.size}개 파일)`}
           </button>
-          {/* 선택값만 넘긴다 — 분석 화면에서 대상 확인·실행을 따로 눌러야 계산한다 */}
+          {/* 선택값만 넘긴다 — 데이터 통계 분석 화면에서 대상 확인·실행을 따로 눌러야 계산한다 */}
           <button
             type="button"
             className="mapping-confirm"
             disabled={picked.size === 0}
+            aria-describedby="wk-common-stats-note"
             onClick={() => navigate(`/analysis?files=${[...picked].join(',')}`, { focus: { to: 'page' } })}
           >
-            선택한 파일로 분석
+            고른 파일로 데이터 통계 분석
           </button>
         </div>
+        <p id="wk-common-stats-note" className="mw-muted">
+          &lsquo;데이터 통계 분석&rsquo;은 &lsquo;열 매핑 분석&rsquo;과 다른 화면입니다 — 확정한 수량 열로 합계·평균 등을
+          계산합니다. 고른 파일만 넘기고, 계산은 그 화면에서 실행합니다.
+        </p>
         {picked.size === 0 && (
           <p className="wk-why" role="note">
             <strong>누를 수 없음</strong> 위 목록에서 검토할 파일을 하나 이상 고르세요.
@@ -255,66 +285,86 @@ function MappingCommon() {
           <div className="wk-scope" role="region" aria-label="적용 대상">
             <Icon name="file" />
             <span>
-              <strong>적용 대상</strong> 공통 검토를 연 파일 {scope.length}개:{' '}
+              <strong>적용 대상</strong> {tally} — 공통 검토를 연 파일:{' '}
               <span className="wk-scope-names">{scope.map((id) => `#${id} ${nameOf(id)}`).join(', ')}</span>
             </span>
             {[...picked].sort().join(',') !== [...scope].sort().join(',') && (
               <span className="mapping-warn wk-scope-note">파일 선택이 바뀌었습니다 — '공통 검토 열기'를 다시 눌러야 반영됩니다.</span>
             )}
           </div>
-          <StatusCards
-            label="검토 구분 (누르면 그 구분만 보기)"
-            picked={category}
-            onPick={(key) => {
-              setCategory(key as CommonCategory)
-              setGroupId(null)
-            }}
-            cards={ORDER.map((c) => ({
-              key: c,
-              label: CATEGORY[c].label,
-              count: counts[c] ?? 0,
-              tone: CATEGORY_LOOK[c].tone,
-              icon: CATEGORY_LOOK[c].icon,
-            }))}
-          />
-          <p className="mw-muted">{CATEGORY[category].help}</p>
-          <div className={`mw-common-main${group ? ' has-detail' : ''}`}>
-            <ul className="mw-groups" aria-label={CATEGORY[category].label}>
-              {groups.length === 0 && <li className="mw-muted">해당 항목이 없습니다.</li>}
-              {groups.map((g) => (
-                <li key={g.group_id}>
-                  <button
-                    type="button"
-                    className={`mw-group${g.group_id === groupId ? ' is-selected' : ''}`}
-                    aria-pressed={g.group_id === groupId}
-                    onClick={() => setGroupId(g.group_id)}
-                  >
-                    <strong className="mw-colname">
-                      <Icon name={CATEGORY_LOOK[g.category].icon} /> {g.name}
-                    </strong>
-                    <span className="mw-muted">
-                      파일 {g.files}개 · 열 {g.members.length}개{g.field_label ? ` · ${g.field_label}` : ''}
-                    </span>
-                    {g.reasons.length > 0 && <span className="mw-reason-line">{g.reasons[0]}</span>}
-                  </button>
-                </li>
-              ))}
-            </ul>
-            {group && (
-              <GroupDetail
-                key={group.group_id}
-                group={group}
-                scopeCount={scope.length}
-                fields={fields}
-                onDone={(text) => {
-                  setMessage(text)
-                  setLoading(true)
-                  setRequested((prev) => (prev ? [...prev] : prev))
+          {processed === 0 ? (
+            <Banner tone="warn" icon="alert" title="비교한 파일이 없습니다 — 열 매핑이 끝난 것이 아닙니다" live="status">
+              <p>
+                고른 {excluded}개 파일을 모두 비교에서 뺐습니다 ({whyExcluded}). 공통 후보·미해결이 0인 것은 확인할 것이
+                없어서가 아니라 비교한 자료가 없어서입니다.
+              </p>
+              <p>다음: 위에 적은 파일마다 &lsquo;열 매핑 분석&rsquo;을 실행한 뒤 &lsquo;공통 검토 열기&rsquo;를 다시 누르세요.</p>
+            </Banner>
+          ) : (
+            <>
+              {excluded > 0 && (
+                <Banner tone="info" icon="info" title="일부 파일만 비교했습니다" live="status">
+                  <p>
+                    대상 {processed + excluded}개 중 {processed}개만 비교했고 {excluded}개는 뺐습니다 ({whyExcluded}). 아래
+                    구분과 건수는 비교한 {processed}개 파일 기준입니다.
+                  </p>
+                </Banner>
+              )}
+              <StatusCards
+                label="검토 구분 (누르면 그 구분만 보기)"
+                picked={category}
+                onPick={(key) => {
+                  setCategory(key as CommonCategory)
+                  setGroupId(null)
                 }}
-                onClose={() => setGroupId(null)}
+                cards={ORDER.map((c) => ({
+                  key: c,
+                  label: CATEGORY[c].label,
+                  count: counts[c] ?? 0,
+                  tone: CATEGORY_LOOK[c].tone,
+                  icon: CATEGORY_LOOK[c].icon,
+                }))}
               />
-            )}
-          </div>
+              <p className="mw-muted">{CATEGORY[category].help}</p>
+              <div className={`mw-common-main${group ? ' has-detail' : ''}`}>
+                <ul className="mw-groups" aria-label={CATEGORY[category].label}>
+                  {groups.length === 0 && <li className="mw-muted">해당 항목이 없습니다.</li>}
+                  {groups.map((g) => (
+                    <li key={g.group_id}>
+                      <button
+                        type="button"
+                        className={`mw-group${g.group_id === groupId ? ' is-selected' : ''}`}
+                        aria-pressed={g.group_id === groupId}
+                        onClick={() => setGroupId(g.group_id)}
+                      >
+                        <strong className="mw-colname">
+                          <Icon name={CATEGORY_LOOK[g.category].icon} /> {g.name}
+                        </strong>
+                        <span className="mw-muted">
+                          파일 {g.files}개 · 열 {g.members.length}개{g.field_label ? ` · ${g.field_label}` : ''}
+                        </span>
+                        {g.reasons.length > 0 && <span className="mw-reason-line">{g.reasons[0]}</span>}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                {group && (
+                  <GroupDetail
+                    key={group.group_id}
+                    group={group}
+                    scopeCount={scope.length}
+                    fields={fields}
+                    onDone={(text) => {
+                      setMessage(text)
+                      setLoading(true)
+                      setRequested((prev) => (prev ? [...prev] : prev))
+                    }}
+                    onClose={() => setGroupId(null)}
+                  />
+                )}
+              </div>
+            </>
+          )}
         </>
       )}
     </section>
