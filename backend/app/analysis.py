@@ -405,6 +405,22 @@ def exact_number(value: object) -> Decimal | None:
     return None
 
 
+SAFE_INTEGER = 2**53  # 브라우저(JavaScript)·배정밀도가 정수를 끝자리까지 정확히 담는 한계
+EXCEL_DIGITS = 15  # Excel 숫자 칸이 정확히 담는 유효 숫자 자릿수
+
+
+def _beyond_safe(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and abs(value) > SAFE_INTEGER
+
+
+def excel_number(value: object) -> object:
+    """Excel 칸에 쓸 값: 16자리 이상 정수는 글자로 (Excel 숫자 칸은 15자리까지만 정확 — 자릿수를 지킨다).
+    그 밖의 수는 숫자 칸 그대로."""
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= 10**EXCEL_DIGITS:
+        return str(value)
+    return value
+
+
 def _plain(d: Decimal | None) -> int | float | None:
     """정확한 값을 화면·저장용 숫자로 (정수면 정수, 아니면 소수)."""
     if d is None:
@@ -1435,7 +1451,7 @@ def compute(ev: Evaluation) -> dict[str, Any]:
             if r.reason is None:
                 included.append(r)
                 g = groups.setdefault(key_of(r), {"values": [], "problem": 0, "files": set()})
-                g["values"].append(r.value)
+                g["values"].append(r.exact if r.exact is not None else exact_number(r.value))
                 g["files"].add(t.file_id)
             else:
                 excluded.append(r)
@@ -1457,11 +1473,13 @@ def compute(ev: Evaluation) -> dict[str, Any]:
             "partial": g["problem"] > 0,
             "files": len(g["files"]),
         }
-        total = math.fsum(vals) if n else None
-        row["sum"] = total
-        row["mean"] = total / n if n else None
-        row["min"] = min(vals) if n else None
-        row["max"] = max(vals) if n else None
+        # 정확한 수로 더한다 (C-02): 정수는 2^53을 넘어도 끝자리까지, 소수는 이진 표현 오차 없이 (0.1 + 0.2 = 0.3).
+        # 평균은 정확한 합을 개수로 나눈 뒤 배정밀도로 (화면 자릿수만 줄이지 않는다 — docs/NUMBERS.md)
+        total = sum(vals, Decimal(0)) if n else None
+        row["sum"] = _plain(total)
+        row["mean"] = float(total / n) if total is not None else None
+        row["min"] = _plain(min(vals)) if n else None
+        row["max"] = _plain(max(vals)) if n else None
         if req.bins is not None:
             # 구간은 번호로 정한다 (보여 주는 이름이 같아도 다른 구간끼리 합치지 않음)
             x = row[req.bins.on]
@@ -1485,7 +1503,19 @@ def compute(ev: Evaluation) -> dict[str, Any]:
         t = targets[r.t]
         return {"file_id": t.file_id, "file_name": t.file_name, "sheet": t.sheet, "row": r.row, "period": r.period}
 
-    detail = [{**ref(r), "keys": list(key_of(r)), "value": r.value} for r in included[:KEEP_ROWS]]
+    detail = [
+        {**ref(r), "keys": list(key_of(r)), "value": _plain(r.exact) if r.exact is not None else r.value}
+        for r in included[:KEEP_ROWS]
+    ]
+    if any(_beyond_safe(g[a]) for g in out_groups for a in ("sum", "min", "max")) or any(
+        _beyond_safe(d["value"]) for d in detail
+    ):
+        note = (
+            f"절댓값이 {SAFE_INTEGER:,}(2^53)를 넘는 정수가 있습니다 — 계산은 정수로 정확히 했고 Excel에는 "
+            "16자리 이상을 글자로 적어 자릿수를 지키지만, 화면(브라우저)은 끝자리를 정확히 보이지 못할 수 있습니다"
+        )
+        if note not in ev.warnings:
+            ev.warnings.append(note)
     excluded_out = [
         {**ref(r), "reason": r.reason, "value": r.value if r.value is not None else r.shown}
         for r in sorted(excluded, key=lambda r: (r.t, r.row))[:KEEP_ROWS]

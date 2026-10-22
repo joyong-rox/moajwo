@@ -765,7 +765,8 @@ def _write_sheet(ws: Any, o: OutSheet, parsed: FileResult, formulas: dict[str, s
 def _plain(v: Any) -> Any:
     if v is None:
         return NO_VALUE
-    return int(v) if isinstance(v, float) and v.is_integer() and abs(v) < 2**53 else v
+    # 16자리 이상 정수는 글자로 (Excel 숫자 칸은 15자리까지만 정확 — analysis.excel_number)
+    return analysis.excel_number(int(v) if isinstance(v, float) and v.is_integer() and abs(v) < 2**53 else v)
 
 
 def _write_summary(
@@ -793,7 +794,8 @@ def _write_summary(
     )
     line(
         "숫자는 계산해 넣은 값입니다 (엑셀 수식 아님). "
-        "계산은 배정밀도 실수로 해 매우 큰 값의 합계는 끝자리가 다를 수 있습니다."
+        "합계는 정확한 수로 계산합니다 (0.1 + 0.2 = 0.3, 큰 정수도 끝자리까지). "
+        "16자리 이상 정수는 Excel 숫자 칸이 담지 못해 자릿수를 지키려고 글자 칸으로 적습니다."
     )
     for note in notes:  # 항목끼리의 관계 (합계와 그 구성 항목을 함께 고름 등)
         line("주의", note)
