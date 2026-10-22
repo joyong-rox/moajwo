@@ -12,8 +12,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import re
+import secrets
 import threading
 import unicodedata
 from collections import OrderedDict
@@ -78,11 +81,26 @@ class SheetView:
     title_texts: list[str]
     note_texts: list[str]
     samples: list[list[Any]] = field(default_factory=list)  # 열별 값 예시 (파서가 가린 값)
+    # 가림으로 글자가 바뀐 칸만: rows의 순번 → {열 번호: 원문 구분 표지}. 가린 표시가 같아도 원문이 다른 값을
+    # 서버 안에서 구별하는 데만 쓴다 (분석의 같은 대상·그룹 비교). 원문·원문 해시는 두지 않는다 — raw_mark 참고
+    marks: dict[int, dict[int, str]] = field(default_factory=dict)
 
 
 @dataclass
 class FileView:
     sheets: list[SheetView]
+
+
+# 원문 구분 표지의 키: 프로세스가 시작할 때 만들고 저장·출력하지 않는다. 같은 프로세스 안에서만 같은 원문 → 같은 표지라,
+# 표지는 한 요청 안의 비교에만 쓰고 응답·저장값·확인 기준(fingerprint)에는 넣지 않는다.
+_MARK_KEY = secrets.token_bytes(32)
+
+
+def raw_mark(value: Any) -> str:
+    """원문을 구별하는 표지 (HMAC — 키가 없으면 원문을 되짚을 수 없음). 공백·전각 차이는 같은 값으로 본다
+    (분석의 기존 비교 규칙 compact와 같음)."""
+    text = "".join(unicodedata.normalize("NFKC", str(value)).split())
+    return hmac.new(_MARK_KEY, text.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
 
 
 _VIEWS: OrderedDict[tuple[int, str], FileView] = OrderedDict()
@@ -116,7 +134,14 @@ def _build_view(db: Session, record: SourceFile, key: tuple[int, str]) -> FileVi
     for s in parsed.sheets:
         # 주민등록번호가 탐지된 시트는 13자리 숫자 형태도 가린다 (금액 전체를 가리지 않도록 그 시트에만)
         mask = mask_rrn_number if s.pii.counts.get("rrn") else mask_cell
-        rows = [(r["row"], r["kind"], [mask(c) for c in r["cells"]]) for r in s.body]
+        rows = []
+        marks: dict[int, dict[int, str]] = {}
+        for i, r in enumerate(s.body):
+            shown = [mask(c) for c in r["cells"]]
+            changed = {j: raw_mark(c) for j, (c, m) in enumerate(zip(r["cells"], shown, strict=True)) if m != c}
+            if changed:
+                marks[i] = changed
+            rows.append((r["row"], r["kind"], shown))
         cells += len(rows) * max(1, len(s.columns))
         sheets.append(
             SheetView(
@@ -131,6 +156,7 @@ def _build_view(db: Session, record: SourceFile, key: tuple[int, str]) -> FileVi
                 title_texts=list(s.title_texts),
                 note_texts=list(s.note_texts),
                 samples=[[mask(c) for c in col[:SAMPLES_SHOWN]] for col in s.samples],
+                marks=marks,
             )
         )
     view = FileView(sheets=sheets)

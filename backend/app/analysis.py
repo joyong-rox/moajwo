@@ -30,6 +30,11 @@
 - 결측: 빈칸·비공개 표기·숫자가 아닌 값·가린 개인정보는 0으로 바꾸지 않고 사유와 함께 뺀다 (뺀 값이 있으면 '부분 집계').
 - 평균 = 유효한 숫자의 합 ÷ 그 개수 (파일별 평균을 다시 평균하지 않음). 유효한 숫자가 없으면 '계산할 값 없음'.
 - 사용자가 적은 글자(구간 이름·필터 값·단위·구분)는 저장·표시·다운로드 전에 기존 개인정보 마스킹(mask_text)으로 가린다.
+- 가린 값과 대상의 동일성은 따로 본다 (analysis-policy-8): 표의 값은 가린 보기에서 읽지만, 가림으로 글자가 바뀐 칸은
+  원문 구분 표지(mapping_review.raw_mark — 서버 안에서만 쓰는 키의 HMAC)를 함께 읽어, 가린 표시가 같아도 원문이 다르면
+  다른 대상·다른 그룹으로 본다. 화면·저장·Excel에는 원문 대신 가린 값에 '(가림 구분 n)' 번호를 붙인다
+  (번호는 이 결과 안에서 같은 원문을 가리키고, 목록·쪽·근거 행·Excel에서 같다). 번호 없는 가린 값으로 고른 필터처럼
+  구분할 수 없는 조건과, 가린 뒤 같아지는 서로 다른 열 이름 구분은 계산하지 않고 막는다.
 """
 
 import decimal
@@ -56,13 +61,16 @@ from app.files import column_id, get_file_for
 from app.glossary import parse_date_value
 from app.mail_fields import MAIL_MEASURE_FIELDS
 from app.mapping import TOTAL_WORDS, load_dictionary, normalize, split_column_name
-from app.mapping_review import SheetView, declared_units, file_view, sheet_id
+from app.mapping_review import SheetView, declared_units, file_view, raw_mark, sheet_id
 from app.parsing import is_missing
 from app.pii import mask_text
 from app.quantity import quantity_value
 from app.validation import STOCK_FIELDS, _month_of, _text_periods, _year_of
 
-POLICY = "analysis-policy-7"  # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음)
+# 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음).
+# 7: 메일 지표·용량 단위 구분 (PR #21) · 8: 가린 값이 같아도 원문이 다르면 다른 대상 (F-1)
+POLICY = "analysis-policy-8"
+MASKED_NO = "가림 구분"  # 가린 표시가 같은 서로 다른 값에 붙이는 번호의 이름 ('가팀 k***@example.com (가림 구분 2)')
 MAX_TARGETS = 20  # 한 번에 고를 수 있는 파일·시트
 MAX_ROWS = 300_000  # 고른 시트의 데이터 행 합계 상한
 MAX_GROUPS = 5_000
@@ -284,7 +292,8 @@ def _shown(text: str) -> str:
 
 def normalize_request(req: AnalysisIn) -> None:
     """사용자가 적은 글자를 저장·표시·비교 전에 가린다 (기존 마스킹 정책과 같은 mask_text).
-    표의 값(지역·기관 등)은 이미 가린 보기에서 읽으므로, 필터 값도 같은 규칙으로 가려야 서로 맞춰 볼 수 있다."""
+    표의 값(지역·기관 등)은 가린 보기의 표시(가린 뒤 같아진 값은 '(가림 구분 n)' 번호를 붙인 것)와 맞춰 보므로,
+    필터 값도 같은 규칙으로 가린다 (번호가 붙은 값은 다시 가려도 그대로)."""
     if req.variant is not None:
         req.variant = mask_text(req.variant)
     if req.unit is not None:
@@ -400,8 +409,13 @@ def variant_of(column: str) -> str:
     """같은 표준 항목이라도 따로 계산할 구분. 열 이름의 연도, 2단 머리글 'A_B'의 모든 부분(보수적), 괄호 안의 사전 단어.
 
     '인구수'와 '주민등록인구'는 구분이 없어 함께 계산할 수 있고,
-    '인구_남'·'인구_여'·'승용(관용)'·'2024년 인구'는 따로다.
+    '인구_남'·'인구_여'·'승용(관용)'·'2024년 인구'는 따로다. 보여 주고 저장하는 값이라 가린다.
     """
+    return mask_text(_variant_words(column))
+
+
+def _variant_words(column: str) -> str:
+    """variant_of의 가리기 전 글자 (서버 안에서 가린 뒤 같아진 구분을 가려내는 데만 쓴다)."""
     name = split_column_name(column)
     words: list[str] = []
     if name.qualifier:
@@ -409,7 +423,7 @@ def variant_of(column: str) -> str:
     if name.parts:
         words.extend(p.strip() for p in name.raw_parts)
     words.extend(b for b in name.bracketed if normalize(b) in _dictionary_words())
-    return mask_text(" · ".join(dict.fromkeys(w for w in words if w)))
+    return " · ".join(dict.fromkeys(w for w in words if w))
 
 
 def _cell_time(value: object) -> tuple[str, str, str | None] | None:
@@ -490,6 +504,10 @@ class RowRec:
     # 사용자 조건(지역·기관·구분 필터, 기간, 숫자 범위) 밖인가. 시스템 제외 사유(reason)와 따로 정한다 —
     # 합계·소계 행처럼 시스템이 뺀 행에도 같은 조건을 적용해, 사용자가 뺀 행은 기준일 근거에서도 빠지게 한다.
     user_out: bool = False
+    # 가림으로 글자가 바뀐 구분 값의 원문 구분 표지 (항목 → 표지). 같은 대상 비교에만 쓰고 내보내지 않는다
+    marks: dict[str, str] = field(default_factory=dict)
+    # 필터·그룹·근거 행에 쓰는 표시 (가린 값, 가린 뒤 같아진 서로 다른 값은 '(가림 구분 n)'). dims와 같은 항목
+    keys: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -561,6 +579,8 @@ class Evaluation:
     level_mismatch: int = 0  # 하위 합계가 상위 값과 다르거나 확인할 수 없는 상위 지역 수
     date_conflict: bool = False  # 시점 값의 기준일 충돌로 실행을 막음 (_base_dates)
     base_dates: dict[str, str] = field(default_factory=dict)  # 기간 → 기준일 (시점 값, 날짜가 적힌 경우)
+    # (항목, 가린 표시, 원문 표지) → 번호 붙인 표시 — 가린 뒤 같아진 서로 다른 값에만 (_value_labels)
+    labels: dict[tuple[str, str, str], str] = field(default_factory=dict)
     fingerprint: str = ""
 
     @property
@@ -786,6 +806,19 @@ def evaluate(db: Session, user: CurrentUser, req: AnalysisIn) -> Evaluation:
         elif len(cands) == 1:
             t.column_id, t.column, t.variant = cands[0]["column_id"], cands[0]["column"], cands[0]["variant"]
             _resolve_units(t, tin or TargetIn(file_id=t.file_id), t._view)  # type: ignore[attr-defined]
+    # 열 이름의 구분: 가린 뒤 같아진 서로 다른 구분(열 이름에 개인정보 형식)은 한 구분으로 계산하지 않는다
+    raw_variants: dict[str, set[str]] = defaultdict(set)
+    for t in ev.ok:
+        if t.column_id is not None:
+            words = _variant_words(t._view.columns[int(t.column_id[1:])])  # type: ignore[attr-defined]
+            raw_variants[t.variant or ""].add(raw_mark(words) if mask_text(words) != words else "")
+    for shown, found in sorted(raw_variants.items()):
+        if len(found) > 1:
+            ev.problems.append(
+                f"열 이름의 구분 '{shown or '구분 없음'}'이(가) 가린 뒤 같아진 서로 다른 구분 {len(found)}개입니다 "
+                "(열 이름에 개인정보 형식이 있음) — 한 구분으로 계산하지 않습니다. "
+                "그 열의 매핑이나 자료의 열 이름을 확인하세요"
+            )
     # 단위: 확인된 같은 단위끼리만
     ev.units = sorted({t.unit for t in targets if t.status == "ok" and t.unit})
     if req.unit is not None:
@@ -858,27 +891,70 @@ def _outside_conditions(
     )
 
 
+def _value_labels(ev: Evaluation) -> dict[tuple[str, str], int]:
+    """가린 표시가 같은데 원문이 다른 구분 값에 이 결과 안에서 일관된 번호를 붙인다 (ev.labels).
+    번호는 자료 순서(고른 순서 → 행 순서)에서 처음 나온 순서라, 같은 자료·같은 요청이면 미리보기와 실행에서 같다.
+    가림으로 바뀐 칸이 없으면 아무것도 하지 않는다.
+    돌려주는 값: (항목, 가린 표시) → 그 표시를 쓰는 서로 다른 값의 수."""
+    if not any(t._view.marks for t in ev.ok):  # type: ignore[attr-defined]
+        return {}
+    seen: dict[tuple[str, str], list[str]] = defaultdict(list)
+    for t in ev.ok:
+        sv: SheetView = t._view  # type: ignore[attr-defined]
+        dims = [(k, j) for k, j in t.dims.items() if k in IDENTITY_FIELDS]
+        for pos, (_, kind, cells) in enumerate(sv.rows):
+            if kind not in ("data", "subtotal"):
+                continue
+            marks = sv.marks.get(pos, {})
+            for k, j in dims:
+                found = seen[(k, dim_value(cells[j]))]
+                if (mark := marks.get(j, "")) not in found:
+                    found.append(mark)
+    for (k, shown), found in seen.items():
+        if len(found) > 1:
+            for n, mark in enumerate(found, 1):
+                ev.labels[(k, shown, mark)] = f"{shown} ({MASKED_NO} {n})"
+    return {key: len(found) for key, found in seen.items() if len(found) > 1}
+
+
 def _read_rows(ev: Evaluation) -> None:
     req = ev.req
     f = req.filters
     wanted = {k: {dim_value(v) for v in vals} for k, vals in f.dims.items() if vals}
+    shared = _value_labels(ev)
+    if shared:
+        ev.warnings.append(
+            f"가린 뒤 표시가 같아진 서로 다른 구분 값이 있어 '({MASKED_NO} n)' 번호를 붙여 따로 판정·계산했습니다 "
+            f"({len(shared)}개 표시, 값 {sum(shared.values())}개) — 원문은 보여 주지 않고, "
+            "번호는 이 결과 안에서만 같은 값을 가리킵니다"
+        )
+    for k, vals in wanted.items():
+        for v in sorted(vals):
+            if (k, v) in shared:
+                ev.problems.append(
+                    f"필터 '{label_of(k)}: {v}'은(는) 가린 뒤 같아진 서로 다른 값 {shared[(k, v)]}개를 가리킵니다 — "
+                    f"구분할 수 없어 계산하지 않습니다. 목록에서 '({MASKED_NO} n)' 번호가 붙은 값으로 고르세요"
+                )
     values: dict[str, set[str]] = defaultdict(set)
     periods: set[str] = set()
     clashes: dict[int, list[tuple[int, str]]] = defaultdict(list)
     for t in ev.ok:
         sv: SheetView = t._view  # type: ignore[attr-defined]
         col = int(t.column_id[1:]) if t.column_id else None
-        for row_no, kind, cells in sv.rows:
+        for pos, (row_no, kind, cells) in enumerate(sv.rows):
             if kind not in ("data", "subtotal"):
                 continue
             dims = {k: dim_value(cells[j]) for k, j in t.dims.items() if k in IDENTITY_FIELDS}
             period, day, clash = _row_period(t, cells)
             rec = RowRec(t.index, row_no, period, dims, day=day)
+            if raw := sv.marks.get(pos):
+                rec.marks = {k: raw[j] for k, j in t.dims.items() if k in IDENTITY_FIELDS and j in raw}
+            rec.keys = {k: ev.labels.get((k, v, rec.marks.get(k, "")), v) for k, v in dims.items()}
             t.rows.append(rec)
             # 측정 열은 사용자가 확정한 수량 열 — 숫자로 읽을 수 있는 글자는 수량으로 (캐시의 셀은 바꾸지 않음)
             value = quantity_value(cells[col]) if col is not None else None
             measured = classify_value(value) if col is not None else (None, "blank", None)
-            rec.user_out = _outside_conditions(dims, period, measured[0], wanted, f)
+            rec.user_out = _outside_conditions(rec.keys, period, measured[0], wanted, f)
             if kind == "subtotal":
                 rec.reason = "subtotal"
                 continue
@@ -896,10 +972,10 @@ def _read_rows(ev: Evaluation) -> None:
                 rec.reason = "no_identity"
                 continue
             periods.add(rec.period)
-            for k, v in dims.items():
+            for k, v in rec.keys.items():
                 if v and len(values[k]) < MAX_FILTER_VALUES:
                     values[k].add(v)
-            if any(dims.get(k, "") not in vals for k, vals in wanted.items()):
+            if any(rec.keys.get(k, "") not in vals for k, vals in wanted.items()):
                 rec.reason = "filtered"
                 continue
             if (f.period_from and rec.period < f.period_from) or (
@@ -938,20 +1014,24 @@ def _candidate(r: RowRec) -> bool:
     return r.reason is None or (REASONS[r.reason][1] and r.reason not in UNPLACED)
 
 
-def other_key(r: RowRec) -> tuple[tuple[str, str], ...]:
-    """지역 말고 행이 무엇인지 정하는 값 (기관·부서·차종·용도·연료). 확정한 항목 이름과 값으로 비교한다."""
-    return tuple((k, compact(r.dims[k])) for k in OTHER_IDENTITY if k in r.dims)
+def other_key(r: RowRec) -> tuple[tuple[str, str, str], ...]:
+    """지역 말고 행이 무엇인지 정하는 값 (기관·부서·차종·용도·연료). 확정한 항목 이름과 값으로 비교한다
+    (가림으로 바뀐 값은 원문 구분 표지까지 — 가린 표시가 같아도 원문이 다르면 다른 대상)."""
+    return tuple((k, compact(r.dims[k]), r.marks.get(k, "")) for k in OTHER_IDENTITY if k in r.dims)
 
 
 def target_key(r: RowRec) -> tuple[Any, ...]:
     """같은 대상인지 비교하는 키: 기간 + 지역(매핑 구조와 관계없는 행정구역 키) + 그 밖의 구분.
-    한 시트 안의 반복과 자료 사이의 중복을 같은 키로 본다."""
+    한 시트 안의 반복과 자료 사이의 중복을 같은 키로 본다. 지역 칸에 가림으로 바뀐 값이 있으면 그 원문 구분 표지를
+    더한다 (지역 이름이든 지역 코드 칸이든 — 가린 표시가 같아도 원문이 다르면 다른 대상)."""
     region = region_key(r.dims) if any(k in r.dims for k in REGION_FIELDS) else None
+    if region is not None and any(k in r.marks for k in REGION_FIELDS):
+        region = (*region, tuple(r.marks.get(k, "") for k in REGION_FIELDS))
     return (r.period, region, other_key(r))
 
 
 def _target_text(r: RowRec) -> str:
-    return " · ".join(v for v in r.dims.values() if v) or "(구분 없음)"
+    return " · ".join(v for v in r.keys.values() if v) or "(구분 없음)"
 
 
 def _value_of(r: RowRec) -> float | str | None:
@@ -1271,7 +1351,8 @@ def compute(ev: Evaluation) -> dict[str, Any]:
     labels = bin_labels(req.bins) if req.bins is not None else []
 
     def key_of(r: RowRec) -> tuple[str, ...]:
-        return tuple((r.period or "") if k == "period" else (r.dims.get(k) or "(값 없음)") for k in group_fields)
+        # 표시(keys)로 묶는다 — 가린 뒤 같아진 서로 다른 값은 '(가림 구분 n)'으로 이미 다르다 (먼저 합친 뒤 나누지 않음)
+        return tuple((r.period or "") if k == "period" else (r.keys.get(k) or "(값 없음)") for k in group_fields)
 
     included: list[RowRec] = []
     excluded: list[RowRec] = []
