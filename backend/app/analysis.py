@@ -70,34 +70,44 @@ MAX_FILTER_VALUES = 500  # 필터 선택지로 보여 주는 값 (차원마다)
 KEEP_ROWS = 20_000  # 저장·표시하는 근거 행·제외 행 목록의 상한 (계산은 전체 행으로 한다)
 
 # 1차 범위: 더해서 의미가 있는 수량 항목. 비율·증감률·집행률은 합계·평균이 맞지 않아 후속 기능으로 둔다.
-MEASURE_FIELDS = frozenset(
-    {
-        "population",
-        "population_male",
-        "population_female",
-        "households",
-        "headcount",
-        "budget",
-        "expenditure",
-        "amount",
-        "count",
-        "registration_count",
-        "vehicles_total",
-        "passenger_car",
-        "van",
-        "truck",
-        "special_vehicle",
-        "motorcycle",
-        "eco_friendly_car",
-        "electric_car",
-        "hydrogen_car",
-        "hybrid_car",
-    }
-) | MAIL_MEASURE_FIELDS
+MEASURE_FIELDS = (
+    frozenset(
+        {
+            "population",
+            "population_male",
+            "population_female",
+            "households",
+            "headcount",
+            "budget",
+            "expenditure",
+            "amount",
+            "count",
+            "registration_count",
+            "vehicles_total",
+            "passenger_car",
+            "van",
+            "truck",
+            "special_vehicle",
+            "motorcycle",
+            "eco_friendly_car",
+            "electric_car",
+            "hydrogen_car",
+            "hybrid_car",
+        }
+    )
+    | MAIL_MEASURE_FIELDS
+)
 REGION_FIELDS = ("sido", "sigungu", "region", "region_code")
 IDENTITY_FIELDS = (
-    *REGION_FIELDS, "org_name", "org_code", "organization_code", "organization_name",
-    "department", "vehicle_type", "vehicle_use", "fuel_type",
+    *REGION_FIELDS,
+    "org_name",
+    "org_code",
+    "organization_code",
+    "organization_name",
+    "department",
+    "vehicle_type",
+    "vehicle_use",
+    "fuel_type",
 )
 PERIOD_FIELDS = ("year", "month", "base_date")
 GROUP_FIELDS = (*IDENTITY_FIELDS, "period")
