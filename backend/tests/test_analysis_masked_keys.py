@@ -22,6 +22,8 @@ RAW = ["kim1@example.com", "kim2@example.com", "010-1234-5678", "010-9999-5678"]
 MAP = {"시도": "sido", "시군구": "sigungu", "인구수": "population"}
 HDR = ["시도", "시군구", "인구수"]
 A1, A2 = "가팀 k***@example.com (가림 구분 1)", "가팀 k***@example.com (가림 구분 2)"
+# 원문만 다른 두 행 (시도가 달라 반복이 아님)
+TWO = [HDR, ["서울특별시", "가팀 kim1@example.com", 10], ["부산광역시", "가팀 kim2@example.com", 20]]
 
 
 @pytest.fixture(scope="module")
@@ -255,6 +257,50 @@ def _variant_files(c: TestClient, tag: str) -> list[int]:
         assert c.post(f"/files/{fid}/pii/acknowledge").status_code == 200
         fids.append(fid)
     return fids
+
+
+def test_blank_none_and_zero_stay_apart_from_numbered_values(mk: TestClient) -> None:
+    c = mk
+    rows = [
+        HDR,
+        ["서울특별시", "가팀 kim1@example.com", 10],
+        ["부산광역시", "가팀 kim2@example.com", 20],
+        ["대구광역시", "", 0],  # 빈 구분 값 · 측정값 0 (0은 유효한 숫자)
+        ["인천광역시", None, 7],  # 비어 있는 칸
+    ]
+    fid = _file(c, "f1_blank.xlsx", rows, MAP)
+    r = _run(c, _body([fid], group_by=["sigungu"]))
+    assert _groups(r) == {(A1,): (1, 10.0), (A2,): (1, 20.0), ("(값 없음)",): (2, 7.0)}
+    assert sum(g["sum"] for g in r["groups"]) == 37 and sum(g["count"] for g in r["groups"]) == 4
+
+
+def test_bins_classify_each_numbered_group_on_its_own(mk: TestClient) -> None:
+    c = mk
+    fid = _file(c, "f1_bins.xlsx", TWO, MAP)
+    bins = {"on": "sum", "ranges": [{"label": "적음", "max": 15}, {"label": "많음", "min": 15}]}
+    r = _run(c, _body([fid], group_by=["sigungu"], bins=bins))
+    # 합친 뒤(30) 한 구간에 넣지 않고, 원문이 다른 두 그룹을 각자의 합계로 나눈다
+    assert {tuple(g["keys"]): g["bin"] for g in r["groups"]} == {(A1,): "적음", (A2,): "많음"}
+    assert [row[:2] + row[6:7] for row in _download(c, r["id"])["결과"][1:]] == [[A1, 10, "적음"], [A2, 20, "많음"]]
+
+
+def test_owner_reads_the_same_numbers_and_other_users_get_nothing(app_real_login, owner, mk: TestClient) -> None:  # noqa: F811
+    res = owner.post("/users", json={"username": "mk-user2", "display_name": "MK-USER2", "status": "active",
+                                     "password": "pass-mk-user2"})  # fmt: skip
+    assert res.status_code == 201, res.text
+    other = _client(app_real_login, "mk-user2", "pass-mk-user2")
+    fid = _file(mk, "f1_perm.xlsx", TWO, MAP)
+    rid = _run(mk, _body([fid], group_by=["sigungu"]))["id"]
+    seen = owner.get(f"/analysis/runs/{rid}").json()
+    assert seen["read_only"] is True
+    items = owner.get(f"/analysis/runs/{rid}/groups", params={"limit": 50}).json()["items"]
+    assert [(g["keys"], g["count"], g["sum"]) for g in items] == [([A1], 1, 10.0), ([A2], 1, 20.0)]
+    assert [row[:2] for row in _download(owner, rid)["결과"][1:]] == [[A1, 10], [A2, 20]]
+    _no_raw(json.dumps([seen, items], ensure_ascii=False))
+    for path in (f"/analysis/runs/{rid}", f"/analysis/runs/{rid}/groups", f"/analysis/runs/{rid}/download"):
+        assert other.get(path).status_code == 404  # 남의 결과는 있는지도 알리지 않음 (기존 권한)
+    # 최고 관리자도 남의 파일로 새 결과를 만들지 않는다 (기존 권한 그대로)
+    assert owner.post("/analysis/preview", json=_body([fid], group_by=["sigungu"])).status_code == 403
 
 
 @pytest.mark.parametrize("bad", ["same_raw_repeated", "variant"])
