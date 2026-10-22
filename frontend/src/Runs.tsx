@@ -108,6 +108,14 @@ function Runs() {
                     ) : (
                       '-'
                     )}
+                    {/* 통계 요약은 표준 항목 이름만으로는 어느 지표인지 알 수 없어 원본 열을 함께 적는다 (예전 실행은 원본 열 기록 없음) */}
+                    {r.summary.summary_items?.map((i) => (
+                      <span key={i.field_key} className="mw-muted mw-block">
+                        통계 요약: {i.field_label}
+                        {i.source_columns?.length ? ` (원본 열 ${i.source_columns.map((c) => c.column).join(', ')})` : ''} · 단위{' '}
+                        {i.unit ?? '-'} · 기간 {i.periods?.join(', ') || '-'} · {i.coverage.text}
+                      </span>
+                    ))}
                     {/* 결과가 있는 수동 검토도 같은 주소로 다시 연다 (조회 권한은 서버가 정함) */}
                     {r.review_session_id !== null && (
                       <button

@@ -509,6 +509,15 @@ export type IntegrationRun = {
     mode?: 'sheets' // 파일별 시트로 묶기 (없으면 하나의 통합표)
     stats_summary?: boolean
     sheet_order?: string[]
+    // 통계 요약 항목 (파일별 시트 + 요약). source_columns는 이 목록이 생긴 뒤에 만든 실행에만 있다
+    summary_items?: {
+      field_key: string
+      field_label: string
+      source_columns?: SourceColumn[]
+      unit: string | null
+      periods: string[] | null
+      coverage: { included: number; total: number; text: string }
+    }[]
   }
   error: string | null
   created_at: string
@@ -1195,6 +1204,10 @@ export type AnalysisOverlap = {
     b: { row: number; value: number | string | null }
   }[]
 }
+/** 계산한 원본 열 (가린 이름). 표준 항목 이름('건수')만으로는 어느 지표('발신Mail건수')를 계산했는지 알 수 없어 함께 보인다.
+ * 가린 뒤 같아진 서로 다른 이름에는 서버가 '(가림 구분 n)'을 붙여 보낸다. */
+export type SourceColumn = { column: string; sheets: number; files: number[] }
+
 export type AnalysisPreview = {
   field_key: string
   field_label: string
@@ -1203,6 +1216,7 @@ export type AnalysisPreview = {
   variants: string[]
   unit: string | null
   units: string[]
+  source_columns: SourceColumn[]
   targets: AnalysisTarget[]
   problems: string[]
   warnings: string[]
@@ -1264,6 +1278,7 @@ export type AnalysisRunDetail = {
     level_conflicts?: AnalysisPreview['region_levels']['conflicts']
     base_dates?: Record<string, string>
     records?: string[]
+    source_columns: SourceColumn[] // 서버가 채움 (이 목록이 생기기 전 결과는 저장된 입력의 열로)
   }
   inputs: (AnalysisTarget & { sha256: string })[]
   result: {
@@ -1369,6 +1384,7 @@ export type AnalysisRunSummary = {
   groups: number
   rows_included: number
   files: number
+  source_columns?: string[] // 이 목록이 생긴 뒤에 만든 결과에만 있음
 }
 
 export async function fetchAnalysisRuns(): Promise<AnalysisRunSummary[]> {
@@ -1470,6 +1486,7 @@ export type BundlePlanItem = {
   region_levels: { choice: 'lower' | 'upper' | null; mismatch: number; conflicts: BundleLevelConflict[] } | null
   unit: string | null
   periods: string[]
+  source_columns: SourceColumn[] // 지금 계산에 들어가는 시트의 원본 열
   links: BundlePlanLink[]
   coverage: { included: number; total: number; text: string }
   rows: { candidate: number; excluded: Record<string, number> } | null

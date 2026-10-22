@@ -33,6 +33,7 @@ from app.analysis import (
     compute,
     conditions,
     evaluate,
+    excel_number,
     inputs,
     label_of,
     preview_out,
@@ -139,6 +140,7 @@ def analysis_run(body: RunIn, db: Annotated[Session, Depends(get_session)], user
         "rows_included": result["rows_included"],
         "files": len({t.file_id for t in ev.ok}),
         "group_labels": result["group_labels"],
+        "source_columns": [c["column"] for c in cond["source_columns"]],  # 목록에서도 계산한 원본 지표를 보이게
     }
     run = AnalysisRun(
         created_by=user.id,
@@ -190,6 +192,7 @@ def analysis_runs(db: Annotated[Session, Depends(get_session)], user: CurrentUse
 def analysis_detail(run_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> dict:
     run = _get(db, user, run_id)
     res = json.loads(run.result)
+    cond, inp = json.loads(run.conditions), json.loads(run.inputs)
     owner = db.get(User, run.created_by) if run.created_by else None
     meta = {k: v for k, v in res.items() if k not in ("groups", "detail", "excluded")}
     return {
@@ -197,8 +200,9 @@ def analysis_detail(run_id: int, db: Annotated[Session, Depends(get_session)], u
         "created_at": utc_to_kst(run.created_at),  # DB 기본값(UTC) → KST
         "created_by": mask_text(owner.display_name) if owner else None,
         "read_only": run.created_by != user.id,
-        "conditions": shown(json.loads(run.conditions)),
-        "inputs": shown(json.loads(run.inputs)),
+        # 원본 열은 저장값을 바꾸지 않고 보여 줄 때 채운다 (목록이 생기기 전 결과는 저장된 입력으로)
+        "conditions": shown({**cond, "source_columns": source_list(cond, inp)}),
+        "inputs": shown(inp),
         "result": shown({**meta, "groups_total": len(res["groups"])}),
     }
 
@@ -264,7 +268,7 @@ def _rows(ws: Any, start: int, rows: list[list[Any]], header: bool = False) -> i
 
 
 def _value(v: Any) -> Any:
-    return NO_VALUE if v is None else v
+    return NO_VALUE if v is None else excel_number(v)  # 16자리 이상 정수는 글자로 (자릿수 보존)
 
 
 def _numtext(v: float | None) -> str:
@@ -294,6 +298,36 @@ def level_conflict_text(x: dict[str, Any]) -> str:
         f"하위 지역 {x['lower_count']}곳 합계 {_amount(x.get('lower_sum'))}{missing} · "
         f"차이 {_amount(x.get('difference'))}"
     )
+
+
+def source_list(cond: dict[str, Any], inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """계산한 원본 열 (analysis.source_columns). 이 목록이 생기기 전에 만든 결과는 저장된 입력(사용한 시트의 열)으로
+    만든다 — 그 결과에는 가린 뒤 같아진 서로 다른 열 이름을 나눌 근거가 없어 가린 이름 그대로 센다."""
+    if "source_columns" in cond:
+        return cond["source_columns"]
+    rows: dict[str, dict[str, Any]] = {}
+    for t in inputs:
+        if t["status"] == "ok" and t.get("column"):
+            row = rows.setdefault(t["column"], {"column": t["column"], "sheets": 0, "files": []})
+            row["sheets"] += 1
+            if t["file_id"] not in row["files"]:
+                row["files"].append(t["file_id"])
+    return list(rows.values())
+
+
+def source_text(cond: dict[str, Any], inputs: list[dict[str, Any]]) -> str:
+    return source_columns_text(source_list(cond, inputs))
+
+
+def source_columns_text(cols: list[dict[str, Any]]) -> str:
+    """원본 열 목록을 Excel 한 칸에 적는 글 (데이터 통계 분석 결과 '조건' 시트·묶기 '통계 요약' 시트가 같이 쓴다)."""
+    text = " · ".join(f"{c['column']} (시트 {c['sheets']}개)" for c in cols) or "-"
+    if len(cols) > 1:
+        text += (
+            " — 이름이 서로 다른 열을 같은 표준 항목으로 확정했습니다."
+            " 같은 지표인지 아래 자료 표의 파일·시트·열로 확인하세요"
+        )
+    return text
 
 
 def _state_text(res: dict[str, Any]) -> str:
@@ -332,7 +366,8 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
         ["항목", "값"],
         ["분석 번호", run.id],
         ["생성 시각 (KST)", utc_to_kst(run.created_at).strftime("%Y-%m-%d %H:%M:%S") if run.created_at else ""],
-        ["분석 항목", cond["field_label"]],
+        ["분석 항목 (표준 항목)", cond["field_label"]],
+        ["원본 열 (계산한 지표)", source_text(cond, inp)],
         ["열 이름의 구분", cond["variant"] or "구분 없음"],
         ["단위", cond["unit"] or "확인 안 됨"],
         ["결과 상태", _state_text(res)],
@@ -442,7 +477,9 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
     wd = wb.create_sheet("근거 행")
     detail = [["파일 번호", "파일", "시트", "원본 행", "기간", *res["group_labels"], cond["field_label"]]]
     for r in res["detail"]:
-        detail.append([r["file_id"], r["file_name"], r["sheet"], r["row"], r["period"], *r["keys"], r["value"]])
+        detail.append(
+            [r["file_id"], r["file_name"], r["sheet"], r["row"], r["period"], *r["keys"], excel_number(r["value"])]
+        )
     if res["detail_total"] > len(res["detail"]):
         detail.append([f"처음 {len(res['detail'])}행만 적음 (계산은 전체 {res['detail_total']}행으로 함)"])
     _rows(wd, 1, detail, header=True)

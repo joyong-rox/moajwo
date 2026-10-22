@@ -39,6 +39,8 @@ const KIND_LABEL: Record<string, string> = {
   unit_estimate: '단위 추정',
   header_missing: '헤더 확인 필요',
   quantity_not_number: '수량으로 계산하지 못한 값',
+  formula_mismatch: '합계 산식 확인 필요',
+  sum_incomplete: '합계 검사 불완전',
 }
 
 const GROUPS: { category: ReviewCategory; title: string; hint: string }[] = [

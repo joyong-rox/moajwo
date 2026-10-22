@@ -141,7 +141,7 @@ def check_reviews(pg: Page) -> None:
 
 def check_analysis(pg: Page) -> None:
     login(pg, "user1")
-    pg.locator(".side-link", has_text="데이터 분석").first.click()
+    pg.locator(".side-link", has_text="데이터 통계 분석").first.click()
     settle(pg)
     summary = pg.locator("details.an-past > summary").first
     if not summary.count():
@@ -155,7 +155,7 @@ def check_analysis(pg: Page) -> None:
     pg.locator("section.an h2").first.wait_for(timeout=60000)
     pg.wait_for_timeout(1000)
     rec("nav", {"what": "분석: 지난 결과 열기 → 결과", "link": link_text, "after": focus(pg)})
-    new = pg.get_by_role("link", name="새 분석")
+    new = pg.get_by_role("link", name="새 통계 분석")
     new.focus()
     pg.keyboard.press("Enter")
     settle(pg, 1500)
@@ -170,7 +170,7 @@ IS_SUMMARY = "e === document.querySelector('details.an-past > summary')"
 def check_summary(pg: Page) -> None:
     """'새 분석'으로 돌아와 '내 분석 결과'(summary)에 초점이 온 뒤에도 기본 키보드 동작이 그대로인지 (복귀 직후 + 이후 이동)."""
     login(pg, "user1")
-    pg.locator(".side-link", has_text="데이터 분석").first.click()
+    pg.locator(".side-link", has_text="데이터 통계 분석").first.click()
     settle(pg)
     if not pg.locator("details.an-past > summary").count():
         rec("summary", {"what": "summary", "result": "지난 결과 없음 (측정 안 함)"})
@@ -183,7 +183,7 @@ def check_summary(pg: Page) -> None:
     pg.keyboard.press("Enter")
     pg.locator("section.an h2").first.wait_for(timeout=60000)
     pg.wait_for_timeout(800)
-    new = pg.get_by_role("link", name="새 분석")
+    new = pg.get_by_role("link", name="새 통계 분석")
     new.focus()
     pg.keyboard.press("Enter")
     settle(pg, 1500)
@@ -288,7 +288,7 @@ def check_failure(pg: Page) -> None:
     pg.wait_for_timeout(1500)
     rec("failure", {"what": "검토 상세를 찾지 못함 (시험용 404)", "after": focus(pg), "alerts": pg.locator("section.review-panel [role=alert]").all_inner_texts()})
     pg.unroute(pat)
-    pg.locator(".side-link", has_text="데이터 분석").first.click()
+    pg.locator(".side-link", has_text="데이터 통계 분석").first.click()
     settle(pg)
     if not pg.locator("details.an-past > summary").count():
         rec("failure", {"what": "분석 결과를 불러오지 못함", "result": "지난 결과 없음 (측정 안 함)"})
@@ -309,7 +309,7 @@ def check_failure(pg: Page) -> None:
 
 def start_held_analysis(pg: Page, held: list):
     """분석 지난 결과를 열되 상세 응답을 붙잡아 둔다 (시험에서 '기다리는 중'을 만든다). 붙잡은 경로를 돌려준다."""
-    pg.locator(".side-link", has_text="데이터 분석").first.click()
+    pg.locator(".side-link", has_text="데이터 통계 분석").first.click()
     settle(pg)
     apat = re.compile(r"/api/analysis/runs/\d+$")
     pg.route(apat, lambda r: held.append(r))
@@ -335,7 +335,7 @@ def release_held(pg: Page, held: list, apat) -> None:
 def check_stale(pg: Page) -> None:
     """상세를 기다리는 동안 다른 일이 생겼을 때 이전 대기가 지금 화면의 초점을 빼앗지 않는지 (시간 초과 3초를 넘겨 확인)."""
     login(pg, "user1")
-    if not (pg.locator(".side-link", has_text="데이터 분석").count()):
+    if not (pg.locator(".side-link", has_text="데이터 통계 분석").count()):
         return
     held: list = []
     # A) 기다리는 동안 메뉴로 다른 화면 → 사용자가 글자를 눌러 초점이 본문으로 → 3.6초 뒤

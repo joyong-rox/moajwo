@@ -42,11 +42,12 @@ from sqlalchemy.orm import Session
 
 from app import analysis
 from app.analysis import AGG_LABEL, MEASURE_FIELDS, NO_VALUE, AnalysisIn, Evaluation, TargetIn, label_of
-from app.analysis_api import LEVEL_TEXT, level_conflict_text
+from app.analysis_api import LEVEL_TEXT, level_conflict_text, source_columns_text
 from app.auth import CurrentUser
 from app.config import DATA_DIR
 from app.decisions import load_decisions
 from app.files import get_file_for, load_parsed
+from app.formulas import TOTAL_FORMULAS
 from app.integration import KST, OUTPUT_DIR
 from app.mapping_review import sheet_id
 from app.models import IntegrationRun, SourceFile
@@ -504,9 +505,28 @@ def build_plan(db: Session, user: CurrentUser, req: BundleIn) -> Plan:
     decisions = {fid: load_decisions(db, fid) for fid in per_file}
     fields = _fields(out_sheets, decisions)
     items = None if req.summary is None else _summary(db, user, req.summary, out_sheets, problems)
+    if req.summary is not None:
+        warnings.extend(double_count_notes(req.summary))
     plan = Plan(req, files_out, out_sheets, items, fields, problems, warnings)
     plan.basis = _basis(plan, records)
     return plan
+
+
+def double_count_notes(summary: SummaryIn) -> list[str]:
+    """요약에 합계 항목과 그 구성 항목(또는 그 안에 든 다른 합계)을 함께 고르면, 항목끼리 더할 때 같은 수량을 두 번
+    센다는 것을 알린다. 계산은 항목마다 따로 하므로 막지 않는다 (app.formulas.TOTAL_FORMULAS)."""
+    chosen = [i.field_key for i in summary.items]
+    notes = []
+    for total, parts in TOTAL_FORMULAS.items():
+        inner = [k for k, ps in TOTAL_FORMULAS.items() if k != total and set(ps) < set(parts)]
+        both = [k for k in chosen if k in parts or k in inner]
+        if total in chosen and both:
+            names = ", ".join(f"'{label_of(k)}'" for k in both)
+            notes.append(
+                f"'{label_of(total)}'은(는) {' + '.join(label_of(p) for p in parts)}의 합계입니다 — "
+                f"요약의 '{label_of(total)}'과(와) {names}을(를) 서로 더하면 같은 수량을 두 번 셉니다."
+            )
+    return notes
 
 
 def _fields(sheets: list[OutSheet], decisions: dict[int, dict[str, dict[str, str | None]]]) -> list[dict[str, Any]]:
@@ -565,7 +585,7 @@ def _summary(
         if len(used) > analysis.MAX_TARGETS:
             item_problems.append(
                 f"'{label}': 계산할 시트가 {len(used)}개로 "
-                f"통계 요약 한도({analysis.MAX_TARGETS}개, 데이터 분석과 같음)를 "
+                f"통계 요약 한도({analysis.MAX_TARGETS}개, 데이터 통계 분석과 같음)를 "
                 "넘습니다 — 일부를 이 항목에서 빼거나 나눠 만드세요."
             )
         elif used:
@@ -641,6 +661,8 @@ def _summary(
                     "units": pv["units"] if pv else [],
                     "periods": pv["periods"] if pv else [],
                     "stock": pv["stock"] if pv else False,
+                    # 계산할 원본 열 (표준 항목 이름만으로는 어느 지표인지 알 수 없어 함께 보여 준다)
+                    "source_columns": pv["source_columns"] if pv else [],
                     "links": rows,
                     "coverage": {
                         "included": included,
@@ -743,10 +765,13 @@ def _write_sheet(ws: Any, o: OutSheet, parsed: FileResult, formulas: dict[str, s
 def _plain(v: Any) -> Any:
     if v is None:
         return NO_VALUE
-    return int(v) if isinstance(v, float) and v.is_integer() and abs(v) < 2**53 else v
+    # 16자리 이상 정수는 글자로 (Excel 숫자 칸은 15자리까지만 정확 — analysis.excel_number)
+    return analysis.excel_number(int(v) if isinstance(v, float) and v.is_integer() and abs(v) < 2**53 else v)
 
 
-def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], processed_at: str) -> list[dict[str, Any]]:
+def _write_summary(
+    ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], processed_at: str, notes: list[str]
+) -> list[dict[str, Any]]:
     row = 1
 
     def line(*values: Any, bold: bool = False, size: int | None = None) -> None:
@@ -763,18 +788,24 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
         "원본·매핑이 바뀌어도 이 시트는 자동으로 다시 계산되지 않습니다."
     )
     line(
-        f"계산: Moajwo 데이터 분석과 같은 엔진·규칙({analysis.POLICY}). 평균 = 유효한 숫자의 합 ÷ 유효한 숫자 개수 "
-        "(파일별 평균을 다시 평균하지 않음). 빈칸·비공개·숫자가 아닌 값은 0으로 바꾸지 않고 뺍니다."
+        f"계산: Moajwo 데이터 통계 분석과 같은 엔진·규칙({analysis.POLICY}). "
+        "평균 = 유효한 숫자의 합 ÷ 유효한 숫자 개수 (파일별 평균을 다시 평균하지 않음). "
+        "빈칸·비공개·숫자가 아닌 값은 0으로 바꾸지 않고 뺍니다."
     )
     line(
         "숫자는 계산해 넣은 값입니다 (엑셀 수식 아님). "
-        "계산은 배정밀도 실수로 해 매우 큰 값의 합계는 끝자리가 다를 수 있습니다."
+        "합계는 정확한 수로 계산합니다 (0.1 + 0.2 = 0.3, 큰 정수도 끝자리까지). "
+        "16자리 이상 정수는 Excel 숫자 칸이 담지 못해 자릿수를 지키려고 글자 칸으로 적습니다."
     )
+    for note in notes:  # 항목끼리의 관계 (합계와 그 구성 항목을 함께 고름 등)
+        line("주의", note)
     saved = []
     for plan, res in items:
         o = plan.out
         row += 1
         line(f"항목: {o['field_label']}", bold=True, size=12)
+        # 표준 항목 이름('건수')만으로는 어느 지표를 계산했는지 알 수 없어 원본 열 이름을 바로 아래에 적는다
+        line("원본 열 (계산한 지표)", source_columns_text(o["source_columns"]))
         cond = analysis.conditions(plan.ev) if plan.ev else {}
         line("단위", cond.get("unit") or "-")
         line("기간", ", ".join(cond.get("periods") or []) or "-")
@@ -802,6 +833,8 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
         if res.get("level_mismatch"):
             state += f" · 집계 수준 {level_text} (하위 지역 합계가 상위 지역 값과 다른 곳 {res['level_mismatch']}곳)"
         line("상태", state)
+        for w in cond.get("warnings") or []:  # 산식 확인·가림 구분 번호 등 계산 엔진의 주의 (화면과 같은 문장)
+            line("주의", w)
         line("계산한 행", f"{res['rows_included']:,}행 포함 · {res['rows_excluded']:,}행 제외")
         labels = o["reason_labels"]
         for k, n in sorted(res["reason_counts"].items()):
@@ -830,6 +863,7 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
             {
                 "field_key": o["field_key"],
                 "field_label": o["field_label"],
+                "source_columns": o["source_columns"],
                 "unit": cond.get("unit"),
                 "periods": cond.get("periods"),
                 "aggregates": o["aggregates"],
@@ -915,7 +949,11 @@ def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
                 parsed[fid] = (record, result, formula_cells(_file_path(record)))
             _, result, formulas = parsed[fid]
             sheets_out.append(_write_sheet(wb.create_sheet(o.name), o, result, formulas))
-        summary_items = _write_summary(wb.create_sheet(SUMMARY_SHEET), results, processed_at) if plan.items else []
+        summary_items = (
+            _write_summary(wb.create_sheet(SUMMARY_SHEET), results, processed_at, double_count_notes(plan.req.summary))
+            if plan.items and plan.req.summary
+            else []
+        )
         with tempfile.NamedTemporaryFile(dir=OUTPUT_DIR, suffix=".xlsx.tmp", delete=False) as tmp:
             tmp_path = Path(tmp.name)
         wb.save(tmp_path)
