@@ -53,3 +53,11 @@ def test_access_log_keeps_query_keys_but_not_values(app_real_login) -> None:  # 
     record = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 0, '%s - "%s %s HTTP/%s" %d', plain, None)
     assert all(f.filter(record) for f in access.filters)
     assert record.getMessage() == '127.0.0.1:50000 - "GET /reviews/3 HTTP/1.1" 200'
+
+
+def test_api_docs_are_off_unless_enabled(app_real_login) -> None:  # noqa: F811
+    """S-03: API 문서·스키마(경로 75개)가 로그인 없이 열렸다. 기본은 끄고, 개발·진단에서만 MOAJWO_API_DOCS=1로 켠다."""
+    c = TestClient(app_real_login)
+    for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
+        assert c.get(path).status_code == 404, path
+    assert c.get("/health").status_code == 200
