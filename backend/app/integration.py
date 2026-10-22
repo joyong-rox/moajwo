@@ -432,16 +432,32 @@ def _autosize(ws: Any, widths: dict[int, int]) -> None:
         ws.column_dimensions[get_column_letter(col)].width = max(8, min(60, width + 2))
 
 
+def _formula_like(values: list[Any]) -> bool:
+    return any(isinstance(v, str) and v.startswith("=") for v in values)
+
+
+def _as_text(ws: Any, row: int) -> None:
+    """결과 파일에는 수식을 쓰지 않는다. openpyxl은 '='로 시작하는 글자를 수식으로 저장하므로, 원본 값·열 이름·사유가
+    '='로 시작해도 글자 칸으로 둔다 — 결과를 Excel로 열 때 HYPERLINK 같은 수식이 실행되지 않게
+    (묶기·분석 결과와 같은 규칙)."""
+    for cell in ws[row]:
+        if cell.data_type == "f":
+            cell.data_type = "s"
+
+
 def write_workbook(path: Path, built: _Built, summary: dict[str, Any]) -> int:
     """3개 시트를 쓴다. 칠한 셀 수를 돌려준다 (셀 단위 변경 기록 수와 같아야 함)."""
     wb = Workbook()
     data = wb.active
     data.title = SHEET_DATA
     data.append(built.labels)
+    _as_text(data, 1)
     for cell in data[1]:
         cell.font, cell.fill = BOLD, HEADER_FILL
     for row in built.rows:
         data.append(row)
+        if _formula_like(row):
+            _as_text(data, data.max_row)
     painted = 0
     widths: dict[int, int] = {i + 1: len(str(label)) * 2 for i, label in enumerate(built.labels)}
     for ch in built.changes:
@@ -484,6 +500,7 @@ def write_workbook(path: Path, built: _Built, summary: dict[str, Any]) -> int:
                 ch.confidence,
             ]
         )
+        _as_text(changes, n + 1)  # 이전·이후 값과 사유도 글자로 (변경 행은 많지 않다)
         changes.cell(row=n + 1, column=10).fill = PatternFill("solid", fgColor=FILLS[ch.kind])
         changes.cell(row=n + 1, column=12).number_format = "0%"
     _autosize(changes, {1: 4, 2: 24, 3: 10, 4: 6, 5: 6, 6: 16, 7: 16, 8: 16, 9: 16, 10: 10, 11: 60, 12: 6})
@@ -493,7 +510,10 @@ def write_workbook(path: Path, built: _Built, summary: dict[str, Any]) -> int:
     changes.freeze_panes = "A2"
     changes.auto_filter.ref = changes.dimensions
 
-    _write_summary(wb.create_sheet(SHEET_SUMMARY), built, summary)
+    summary_ws = wb.create_sheet(SHEET_SUMMARY)
+    _write_summary(summary_ws, built, summary)
+    for row in range(1, summary_ws.max_row + 1):  # 파일·시트·열 이름도 글자로 (요약 시트는 작다)
+        _as_text(summary_ws, row)
     wb.save(path)
     return painted
 
