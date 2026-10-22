@@ -460,7 +460,7 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
             <legend>2. 대상·단위·기간 확인</legend>
             <p className="mw-muted">
               {preview.field_label}
-              {preview.source_columns.length > 0 && ` — 원본 열 ${sourceText(preview.source_columns)}`}
+              {preview.source_columns.length > 0 && ` — 원본 열 ${sourceText(preview.source_columns)} ·`}
               {preview.stock &&
                 ' — 시점 값 항목이라 기간끼리 더하지 않습니다 (기간이 여럿이면 기간별로 나눔).'} 단위{' '}
               {preview.unit ?? '확인 필요'} · 기간 {preview.periods.join(', ') || '확인 필요'} · 계산에 들어갈 행{' '}

@@ -285,7 +285,7 @@ function MappingCommon() {
           <div className="wk-scope" role="region" aria-label="적용 대상">
             <Icon name="file" />
             <span>
-              <strong>적용 대상</strong> {tally} — 공통 검토를 연 파일:{' '}
+              <strong>적용 대상</strong> 공통 검토를 연 파일 {processed + excluded}개 (처리 {processed}개 · 제외 {excluded}개):{' '}
               <span className="wk-scope-names">{scope.map((id) => `#${id} ${nameOf(id)}`).join(', ')}</span>
             </span>
             {[...picked].sort().join(',') !== [...scope].sort().join(',') && (
