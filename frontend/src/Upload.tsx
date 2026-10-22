@@ -38,6 +38,7 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
   const announceTimer = useRef<number | undefined>(undefined)
   const titleId = useId()
   const hintId = useId()
+  const busyId = useId()
 
   useEffect(() => () => window.clearTimeout(announceTimer.current), [])
 
@@ -90,9 +91,13 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
     void handleFiles(e.dataTransfer.files)
   }
 
-  // 업로드 중에는 파일 선택 창을 열지 않는다 (열어도 고른 파일은 처리되지 않음)
+  // 업로드 중에는 파일 선택 창을 열지 않는다 (열어도 고른 파일은 처리되지 않음) — 누르면 이유를 알린다
   function openPicker() {
-    if (!busy) inputRef.current?.click()
+    if (busy) {
+      announce('업로드·분석이 끝난 뒤 파일을 고를 수 있습니다.')
+      return
+    }
+    inputRef.current?.click()
   }
 
   const okIds = results.filter((r) => r.id !== null && !r.error).map((r) => r.id as number)
@@ -126,16 +131,19 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
           <p className="upload-drop-title" id={titleId}>
             {busy ? '업로드·분석 중…' : '파일을 여기에 끌어다 놓으세요'}
           </p>
-          <p className="upload-drop-hint" id={hintId}>
-            또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능 · 파일당 최대 50MB
-          </p>
+          {/* 업로드 중에는 '눌러서 선택' 안내가 맞지 않고, 흐리게 그린 영역에서 글자 대비도 모자라 숨긴다 (이유는 영역 아래) */}
+          {!busy && (
+            <p className="upload-drop-hint" id={hintId}>
+              또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능 · 파일당 최대 50MB
+            </p>
+          )}
         </div>
         {/* 업로드 중에도 그대로 두고 aria-disabled로만 막는다 — disabled로 바꾸면 누른 직후 키보드 초점이 사라진다 */}
         <button
           type="button"
           className="wk-drop-button"
           aria-disabled={busy || undefined}
-          aria-describedby={busy ? titleId : `${titleId} ${hintId}`}
+          aria-describedby={busy ? `${titleId} ${busyId}` : `${titleId} ${hintId}`}
           onClick={(e) => {
             e.stopPropagation() // 둘레 영역의 클릭으로 한 번 더 열지 않게
             openPicker()
@@ -152,6 +160,13 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
           onChange={(e) => void handleFiles(e.target.files)}
         />
       </div>
+      {/* 업로드 중 '파일 선택'이 열리지 않는 이유 — 흐리게 그린 영역 밖, 버튼 바로 아래에 두고 버튼 설명으로 잇는다 */}
+      {busy && (
+        <p className="wk-why" id={busyId}>
+          <strong>지금은 고를 수 없음</strong> 업로드·분석이 끝나면 다시 고를 수 있습니다. 지금 고른 파일은 처리되지
+          않습니다.
+        </p>
+      )}
 
       {busy && (
         <>
