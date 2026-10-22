@@ -387,6 +387,30 @@ def test_preview_view_cache_reuses_masked_parse_and_stays_small(users, monkeypat
     assert len(mapping_review._VIEWS) <= mapping_review.VIEW_CACHE_FILES
 
 
+def test_view_cache_keeps_many_small_files_within_a_cell_budget(users, monkeypatch) -> None:
+    """P-01: 홈은 고른 파일의 상태를 10개씩 조회해 파일마다 원본을 읽는다. 보관이 2개뿐이라 다른 화면에 갔다 오면
+    8개를 다시 읽었다 (격리 측정). 작은 파일은 여러 개 두되, 보관한 칸 수 합계가 예산을 넘으면 오래된 것부터 뺀다."""
+    from app import mapping_review
+
+    u1 = users["mw-user1"]
+    table = [["기관명", "집행액"]] + [[f"기관{j}", j] for j in range(30)]
+    ids = [_upload(u1, f"상태{i}.xlsx", _xlsx(table)) for i in range(10)]
+    calls: list[int] = []
+    real = mapping_review.load_parsed
+    monkeypatch.setattr(mapping_review, "load_parsed", lambda db, fid: calls.append(fid) or real(db, fid))
+    for _ in range(2):  # 홈 → 다른 화면 → 홈
+        for fid in ids:
+            assert u1.get(f"/files/{fid}/mapping/latest").status_code == 200
+    assert sorted(calls) == sorted(ids)  # 두 번째에는 다시 읽지 않는다
+
+    monkeypatch.setattr(mapping_review, "VIEW_CACHE_MAX_CELLS", 31 * 2 * 3)  # 이 파일 3개 분량
+    big = _upload(u1, "예산.xlsx", _xlsx([["기관명", "집행액"]] + [[f"기관{j}", j] for j in range(30)]))
+    assert u1.get(f"/files/{big}/mapping/latest").status_code == 200
+    kept = list(mapping_review._VIEWS)
+    assert len(kept) <= 3 and kept[-1][0] == big  # 가장 최근 것은 남고, 합계가 예산 안으로 줄어든다
+    assert sum(mapping_review._VIEW_CELLS[k] for k in kept) <= 31 * 2 * 3
+
+
 def test_concurrent_previews_parse_once(users, monkeypatch) -> None:
     """큰 파일을 처음 열 때 미리보기·저장된 분석 요청이 동시에 와도 같은 파일은 한 번만 파싱한다."""
     from app import mapping_review
