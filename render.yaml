@@ -1,0 +1,24 @@
+# Disposable review environment based on main. Never attach production data.
+services:
+  - type: web
+    name: moajwo-review
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./deploy/render/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: off
+    envVars:
+      - key: MOAJWO_PREVIEW
+        value: "1"
+      - key: MOAJWO_DATA_DIR
+        value: /app/preview-data
+      - key: MOAJWO_COOKIE_SECURE
+        value: "true"
+      - key: OLLAMA_BASE_URL
+        value: http://127.0.0.1:11434
+      - key: MOAJWO_PREVIEW_OWNER_USERNAME
+        value: preview-owner
+      - key: MOAJWO_PREVIEW_OWNER_PASSWORD
+        generateValue: true
