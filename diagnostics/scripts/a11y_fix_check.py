@@ -103,6 +103,15 @@ def wait_upload_done(pg: Page) -> None:
     pg.wait_for_timeout(600)
 
 
+# 파일 선택 창 조사용 기록 (filechooser_probe.py와 같음): 버튼 keydown·click, 숨긴 input의 click·change
+SPY_JS = """() => { if (window.__fcSpy) return; const s = window.__fcSpy = {btn_keydown: 0, btn_click: 0, input_click: 0, input_cancel: 0, input_change: 0};
+  document.addEventListener('keydown', e => { if (e.target.closest && e.target.closest('.wk-drop-button')) s.btn_keydown++ }, true);
+  document.addEventListener('click', e => { if (e.target.closest && e.target.closest('.wk-drop-button')) s.btn_click++;
+    if (e.target.matches && e.target.matches('input[type=file]')) s.input_click++ }, true);
+  document.addEventListener('cancel', e => { if (e.target.matches && e.target.matches('input[type=file]')) s.input_cancel++ }, true);
+  document.addEventListener('change', e => { if (e.target.matches && e.target.matches('input[type=file]')) s.input_change++ }, true) }"""
+
+
 # 업로드 조작 요소: 수정 전은 영역 전체(div role=button), 수정 후는 영역 안의 '파일 선택' 버튼 — 같은 스크립트로 둘 다 잰다
 CONTROL_JS = "() => document.querySelector('.wk-home .upload-drop[role=button]') ? '.wk-home .upload-drop' : '.wk-home .upload-drop .wk-drop-button'"
 
@@ -114,8 +123,18 @@ def control(pg: Page) -> str:
 def choose(pg: Page, files: list[dict], how: str = "enter") -> None:
     drop = pg.locator(control(pg))
     drop.focus()
-    with pg.expect_file_chooser(timeout=15000) as fc:
-        pg.keyboard.press("Enter" if how == "enter" else "Space")
+    pg.evaluate(SPY_JS)
+    spy0 = pg.evaluate("() => ({...window.__fcSpy})")
+    try:
+        with pg.expect_file_chooser(timeout=15000) as fc:
+            pg.keyboard.press("Enter" if how == "enter" else "Space")
+    except Exception:
+        # 4·7차에 원인 미확인으로 남은 '창이 열리지 않음' — 앱 처리기가 불렸는지(버튼 keydown·click, 숨긴 input click)를 남기고 그대로 실패시킨다
+        spy1 = pg.evaluate("() => ({...window.__fcSpy})")
+        rec("error-detail", {"what": "파일 선택 창 시간 초과 때 기록", "how": how, "delta": {k: spy1[k] - spy0[k] for k in spy1},
+                             "focus": pg.evaluate("() => { const e = document.activeElement; return e ? (e.className || e.tagName).toString().slice(0, 40) : null }"),
+                             "busy": pg.locator(".upload-drop.is-busy").count()})  # fmt: skip
+        raise
     fc.value.set_files(files=files)
 
 

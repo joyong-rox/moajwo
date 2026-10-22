@@ -42,6 +42,7 @@ TRANSITION_RUNS = [
     ("review", "사전 검토 열기", "실제 화면", [f"{vp}.{m}" for vp in ("desktop", "mobile") for m in ("hover", "away")]),
     ("verify", "검증 실행", "실제 화면", [f"{vp}.{m}" for vp in ("desktop", "mobile") for m in ("hover", "away")]),
     ("bundle_make", "묶기 엑셀 만들기", "실제 서버 응답 (구성 확인만 0.6초 붙잡음)", [f"{vp}.{m}" for vp in ("desktop", "mobile") for m in ("hover", "away")]),
+    ("bundle_wait", "묶기 엑셀 만들기", "실제 서버 응답 (확인 응답을 기다린 뒤 활성)", [f"{vp}.{m}" for vp in ("desktop", "mobile") for m in ("hover", "away")]),
     ("bundle_up", "묶기 위로", "실제 화면", ["desktop.keyboard"]),
 ]
 

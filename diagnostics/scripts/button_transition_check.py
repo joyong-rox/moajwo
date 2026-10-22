@@ -10,6 +10,7 @@ a11y_scan.py는 CSS 전환이 끝난 뒤 재는 '정지 상태' 검사다. 이 �
 실제 서버 응답(존재하지 않는 아이디 — 실패 횟수가 쌓이는 계정이 없음)을 나눠 기록한다. 틀린 비밀번호를 서버로 반복 제출하지 않는다.
 그 밖의 버튼: 실제 화면이다. 묶기 '엑셀 만들기'는 요약 스위치를 켰다 바로 꺼, 확인 전 구성(비활성) → 이미 확인된 구성(곧바로 활성)으로 돌아오는
 경로를 잰다 — 활성화가 확인 응답을 기다리지 않는다. 그 사이 확인 결과가 바뀌지 않게 구성 확인 요청을 0.6초 붙잡는다 (붙잡은 수를 기록).
+7차: 확인 응답을 기다린 뒤 활성이 되는 경로(bundle_wait)도 잰다 — 시트 순서를 바꾸고 확인 요청을 0.6초 붙잡았다가 돌려준다.
 사용법: python button_transition_check.py <출력 폴더> <라벨>   환경: ONLY_CHECKS=login,review,bundle (비우면 전부), DIAG_FE_IMAGE(출처 기록)
 """
 
@@ -204,6 +205,41 @@ def check_bundle(b) -> None:
             data = sample(pg, [make], act)
             pg.unroute("**/api/bundle/plan")
             item = summarize(f"bundle_make.{vp}.{method}", "묶기 엑셀 만들기 (.mapping-run)", "실제 화면 (켰다 끈 구성 → 확인된 구성, 응답을 기다리지 않음)", vp, method, data[make])
+            rec(item | {"held_plan_requests": count[0] if count else None})
+            cx.close()
+    # 묶기 '엑셀 만들기' — 확인 응답을 기다린 뒤 활성: 시트 순서를 바꾸면(키보드) 새 구성의 확인 요청이 나가고, 응답이 올 때까지 비활성
+    for vp, size in VIEWPORTS.items():
+        for method in ("hover", "away"):
+            cx = b.new_context(viewport=size, locale="ko-KR")
+            cx.route("**/*", route_guard(URL, BLOCKED))
+            pg = cx.new_page()
+            login(pg, "user1")
+            pg.goto(f"{URL}/bundle?files={IDS['user1']['basic']},{IDS['user1']['many']}")
+            pg.wait_for_load_state("networkidle")
+            pg.wait_for_function(f"() => {{ const b = document.querySelector({json.dumps(make)}); return b && !b.disabled }}", timeout=60000)
+            first = pg.locator("ol.bd-sheets li").first.locator("strong, .bd-sheet-name").first.inner_text().strip()
+            held: list = []
+            pg.route("**/api/bundle/plan", holder(held))
+            pg.locator(make).scroll_into_view_if_needed()
+            if method == "hover":
+                bb = pg.locator(make).bounding_box()
+                pg.mouse.move(bb["x"] + bb["width"] / 2, bb["y"] + bb["height"] / 2)  # 마우스는 엑셀 만들기 위에 둔 채
+            else:
+                pg.mouse.move(2, 2)
+            pg.locator(f"button[aria-label='{first} 아래로']").focus()
+            count: list[int] = []
+
+            def act(pg=pg, held=held, count=count):
+                pg.keyboard.press("Enter")  # 구성 변경 → 확인 요청 (250ms 뒤)
+                pg.wait_for_timeout(600)  # 확인 응답을 붙잡아 둔 시간 — 그동안 비활성
+                count.append(len(held))
+                for r in list(held):
+                    r.continue_()
+                held.clear()
+
+            data = sample(pg, [make], act)
+            pg.unroute("**/api/bundle/plan")
+            item = summarize(f"bundle_wait.{vp}.{method}", "묶기 엑셀 만들기 (.mapping-run)", "실제 서버 응답 (순서 변경 → 확인 응답 0.6초 붙잡은 뒤 활성)", vp, method, data[make])
             rec(item | {"held_plan_requests": count[0] if count else None})
             cx.close()
     cx = b.new_context(viewport=VIEWPORTS["desktop"], locale="ko-KR")

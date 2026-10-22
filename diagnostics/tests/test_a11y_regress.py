@@ -108,7 +108,7 @@ def full_nav():
 # button_transition_check.py의 실행 ID (판정기 목록과 따로 적어 둔다 — 판정기가 이 실행을 모두 요구하는지 함께 본다)
 TR_RUNS = ([f"login.ctl.{vp}.{m}" for vp in ("desktop", "mobile") for m in ("mouse_stay", "mouse_away", "keyboard")]
            + [f"login.real.{vp}.{i}" for vp in ("desktop", "mobile") for i in (1, 2)]
-           + [f"{b}.{vp}.{m}" for b in ("review", "verify", "bundle_make") for vp in ("desktop", "mobile") for m in ("hover", "away")]
+           + [f"{b}.{vp}.{m}" for b in ("review", "verify", "bundle_make", "bundle_wait") for vp in ("desktop", "mobile") for m in ("hover", "away")]
            + ["bundle_up.desktop.keyboard"])  # fmt: skip
 
 
