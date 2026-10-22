@@ -57,12 +57,15 @@ def sheet_id(index: int) -> str:
 # ---------------------------------------------------------------- 미리보기용 보기 (마스킹한 파싱 결과, 작은 캐시)
 #
 # 미리보기 쪽 넘김·작업 화면 매핑·공통 검토·일괄 확정 확인은 열 이름과 정리된 행만 필요하다. 큰 파일(10만 행 CSV)을
-# 요청마다 다시 파싱하면 쪽마다 10초 가까이 걸리므로, 파일 id·내용 해시(sha256)를 키로 최근 몇 개 파일만 메모리에 둔다.
-# 원본 파일은 바뀌지 않으므로(읽기 전용, 해시 고정) 오래된 값이 나오지 않는다. 다른 기능의 파싱은 그대로다.
-# 이 제한은 '보관하는 항목'의 상한이다. 큰 파일을 처음 여는 요청은 파싱하는 동안 원본 크기에 비례한 메모리를 따로 쓴다.
+# 요청마다 다시 파싱하면 쪽마다 10초 가까이 걸리므로, 파일 id·내용 해시(sha256)를 키로 최근 파일을 메모리에 둔다.
+# 원본 파일은 바뀌지 않으므로(읽기 전용, 해시 고정) 오래된 값이 나오지 않는다. 보관 값은 가린 값이고 권한은 꺼내기 전에
+# 따로 확인한다 (get_file_for). 매핑·확정은 보관하지 않아 바뀌어도 다시 만들 필요가 없다. 다른 기능의 파싱은 그대로다.
+# 상한은 '보관하는 칸 수 합계'다 — 작은 파일은 여러 개(홈의 상태 확인은 10개씩), 큰 파일은 적게 (P-01: 2개만 두던 때는
+# 홈에서 다른 화면에 갔다 오면 8개를 다시 읽었다). 큰 파일을 처음 여는 요청은 파싱하는 동안 원본 크기에 비례한
+# 메모리를 따로 쓴다.
 
-VIEW_CACHE_FILES = 2
-VIEW_CACHE_MAX_CELLS = 3_000_000  # 이보다 큰 파일은 보관하지 않는다 (메모리 보호)
+VIEW_CACHE_FILES = 20  # 보관하는 파일 수 상한
+VIEW_CACHE_MAX_CELLS = 3_000_000  # 보관하는 칸 수 합계 상한 (이보다 큰 파일 하나는 보관하지 않는다 — 메모리 보호)
 
 
 @dataclass
@@ -86,6 +89,7 @@ class FileView:
 
 
 _VIEWS: OrderedDict[tuple[int, str], FileView] = OrderedDict()
+_VIEW_CELLS: dict[tuple[int, str], int] = {}  # 보관한 파일의 칸 수 (합계 상한 계산용)
 _VIEWS_LOCK = threading.Lock()
 _BUILDING: dict[tuple[int, str], threading.Lock] = {}  # 같은 파일을 동시에 두 번 파싱하지 않게 (먼저 온 요청을 기다림)
 
@@ -137,8 +141,11 @@ def _build_view(db: Session, record: SourceFile, key: tuple[int, str]) -> FileVi
     if cells <= VIEW_CACHE_MAX_CELLS:
         with _VIEWS_LOCK:
             _VIEWS[key] = view
-            while len(_VIEWS) > VIEW_CACHE_FILES:
-                _VIEWS.popitem(last=False)
+            _VIEW_CELLS[key] = cells
+            # 오래된 것부터 뺀다 — 방금 넣은 것은 남는다 (그 하나는 위에서 상한 안임을 확인)
+            while len(_VIEWS) > VIEW_CACHE_FILES or sum(_VIEW_CELLS.values()) > VIEW_CACHE_MAX_CELLS:
+                old, _ = _VIEWS.popitem(last=False)
+                _VIEW_CELLS.pop(old, None)
     return view
 
 
