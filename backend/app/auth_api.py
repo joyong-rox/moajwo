@@ -94,6 +94,12 @@ def auth_status(request: Request, db: Annotated[Session, Depends(get_session)]) 
     return StatusOut(setup_required=setup_required, user=me_out(row) if row is not None else None)
 
 
+def _conflict(exc: IntegrityError | OperationalError) -> bool:
+    """동시 요청끼리의 충돌인지: 기본 키·유일 제약 위반, 또는 SQLite 쓰기 잠금(database is locked).
+    그 밖의 OperationalError(연결 실패·인증 실패 등)는 충돌이 아니다."""
+    return isinstance(exc, IntegrityError) or "database is locked" in str(getattr(exc, "orig", exc))
+
+
 class SetupIn(BaseModel):
     username: str = Field(max_length=32)
     display_name: str = Field(min_length=1, max_length=64)
@@ -134,6 +140,8 @@ def setup(body: SetupIn, response: Response, db: Annotated[Session, Depends(get_
         db.commit()
     except (IntegrityError, OperationalError) as exc:
         db.rollback()
+        if not _conflict(exc):
+            raise  # DB에 닿지 못함 → 503 (main) — '이미 계정이 있음'으로 보이지 않게
         raise HTTPException(status.HTTP_409_CONFLICT, "이미 계정이 있습니다. 로그인하세요.") from exc
     user, token = login(db, username, body.password)
     _set_cookie(response, token)
@@ -198,6 +206,8 @@ def signup(body: SignupIn, db: Annotated[Session, Depends(get_session)]) -> Sign
         db.commit()
     except (IntegrityError, OperationalError) as exc:
         db.rollback()
+        if not _conflict(exc):
+            raise  # DB에 닿지 못함 → 503 (main) — '이미 있는 아이디'로 보이지 않게
         raise taken from exc
     return SignupOut(username=username, status="pending", status_label=STATUS_LABEL["pending"], message=SIGNUP_DONE)
 
@@ -426,6 +436,8 @@ def create_user(body: UserIn, actor: OwnerDep, db: Annotated[Session, Depends(ge
         db.commit()
     except (IntegrityError, OperationalError) as exc:
         db.rollback()
+        if not _conflict(exc):
+            raise  # DB에 닿지 못함 → 503 (main) — '이미 있는 아이디'로 보이지 않게
         raise taken from exc
     return user_out(user)
 

@@ -6,7 +6,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import (
@@ -61,6 +61,21 @@ async def validation_error(_: Request, exc: RequestValidationError) -> JSONRespo
     (기본 응답은 본문 전체를 담아 비밀번호·이메일·전화번호가 응답·중간 기록에 남았다)."""
     errors = [{k: v for k, v in e.items() if k != "input"} for e in exc.errors()]
     return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, content={"detail": jsonable_encoder(errors)})
+
+
+DB_UNAVAILABLE = "데이터베이스에 연결하지 못했습니다 — 잠시 뒤 다시 시도하세요. 계정·자료는 그대로입니다."
+
+
+@app.exception_handler(OperationalError)
+@app.exception_handler(InterfaceError)
+async def database_unavailable(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+    """DB에 닿지 못한 요청 (외부 DB 휴면에서 깨지 못함·연결 끊김·인증 실패 등)은 503으로 알린다.
+
+    비밀번호 오류·계정 없음·최초 설정 필요로 보이지 않게 한다. 주소·비밀번호·SQL은 응답·기록에 넣지 않는다.
+    """
+    logger.warning("database unavailable: %s", type(getattr(exc, "orig", exc)).__name__)
+    return JSONResponse({"detail": DB_UNAVAILABLE}, status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        headers={"Retry-After": "10"})  # fmt: skip
 
 
 # 로그인 없이 열리는 것은 /health 와 로그인 API(/auth/status·setup·login·logout)뿐이다
