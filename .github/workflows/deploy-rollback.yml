@@ -1,0 +1,36 @@
+# 진단 전용: 로컬 운영과 같은 Compose 구성으로 반영·롤백을 격리 러너(GitHub 호스트, 공개 저장소라 무료)에서 리허설한다.
+# 'ci/deploy-rollback-*' 브랜치를 올릴 때만 돈다 — main·PR에는 영향이 없다. 운영 PC·Render로 요청하지 않는다.
+# 이전 = main, 후보 = 아래 NEW (이 브랜치는 후보 위에 이 파일과 스크립트만 얹은 것). 결과는 아티팩트(30일).
+name: deploy-rollback (diagnostic)
+
+on:
+  push:
+    branches: ["ci/deploy-rollback-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      OLD: adebb6c4f5687b1eb6835e012755bcb5d490968e
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: old → candidate (deploy.sh) → rollback (old images + old ports) → candidate
+        run: |
+          NEW=$(git rev-parse HEAD~1)   # 이 브랜치의 부모 = 후보 HEAD
+          cp diagnostics/ci/deploy_rollback_check.sh diagnostics/ci/deploy_probe.py "$RUNNER_TEMP/"
+          docker compose version
+          bash "$RUNNER_TEMP/deploy_rollback_check.sh" out "$OLD" "$NEW"
+          cat out/results.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: deploy-rollback
+          path: out
+          retention-days: 30
