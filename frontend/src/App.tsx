@@ -34,7 +34,10 @@ import Upload from './Upload'
 import Validation, { type ResultMode } from './Validation'
 import { Banner, Icon, type IconName } from './Workflow'
 
-type Gate = { kind: 'loading' } | { kind: 'signed-out'; setupRequired: boolean } | { kind: 'signed-in'; me: Me }
+type Gate =
+  | { kind: 'loading' }
+  | { kind: 'signed-out'; setupRequired: boolean; unavailable?: string }
+  | { kind: 'signed-in'; me: Me }
 
 async function resolveGate(): Promise<Gate> {
   try {
@@ -42,8 +45,9 @@ async function resolveGate(): Promise<Gate> {
     const { setup_required, user } = await authStatus()
     if (user) return { kind: 'signed-in', me: user }
     return { kind: 'signed-out', setupRequired: setup_required }
-  } catch {
-    return { kind: 'signed-out', setupRequired: false }
+  } catch (err) {
+    // 상태를 확인하지 못했을 때(서버·DB 연결 실패 등) 최초 설정 화면을 열지 않는다 — 로그인 화면에 이유만 보인다
+    return { kind: 'signed-out', setupRequired: false, unavailable: err instanceof Error ? err.message : String(err) }
   }
 }
 
@@ -67,7 +71,13 @@ function App() {
 
   if (gate.kind === 'loading') return <p className="login-loading">확인 중…</p>
   if (gate.kind === 'signed-out') {
-    return <Login setupRequired={gate.setupRequired} onSignedIn={(me) => setGate({ kind: 'signed-in', me })} />
+    return (
+      <Login
+        setupRequired={gate.setupRequired}
+        unavailable={gate.unavailable}
+        onSignedIn={(me) => setGate({ kind: 'signed-in', me })}
+      />
+    )
   }
   const signOut = () => {
     void logout().finally(() => {

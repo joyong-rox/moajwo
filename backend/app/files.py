@@ -29,6 +29,10 @@ router = APIRouter(prefix="/files", tags=["files"])
 mapping_router = APIRouter(prefix="/mapping", tags=["mapping"])
 
 MAX_FILES_PER_REQUEST = 20
+ORIGINAL_GONE = (
+    "원본 파일이 서버에 없습니다 — 서버 재배포·재시작으로 지워졌을 수 있습니다. 같은 원본을 다시 올리면 새 파일로 "
+    "이어서 쓸 수 있습니다 (계정·검토·실행 기록은 그대로)."
+)
 
 
 class SheetOut(BaseModel):
@@ -272,8 +276,12 @@ def load_parsed(session: Session, file_id: int) -> tuple[SourceFile, FileResult]
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "파일을 찾을 수 없습니다.")
     path = (DATA_DIR / record.stored_path).resolve()
-    if not path.is_relative_to(DATA_DIR.resolve()) or not path.is_file():
+    if not path.is_relative_to(DATA_DIR.resolve()):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "원본 파일이 없습니다.")
+    if not path.is_file():
+        # 기록은 있는데 파일이 없다 — 외부 DB를 쓰는 서버(Render 등)는 재배포·재시작 때 파일이 지워질 수 있다.
+        # 다른 파일로 대신 잇지 않고, 기록·계정은 지우지 않는다 (docs/EXTERNAL_DB.md '파일 보존')
+        raise HTTPException(status.HTTP_410_GONE, ORIGINAL_GONE)
     try:
         return record, parse_file(path, record.original_name)
     except ParseError as exc:

@@ -8,3 +8,5 @@ xlrd==2.0.2
 chardet==7.6.0
 python-multipart==0.0.32
 rapidfuzz==3.14.6
+# 외부 PostgreSQL 모드(MOAJWO_DB_MODE=external, docs/EXTERNAL_DB.md)의 드라이버. 로컬 SQLite만 쓰면 불러오지 않는다
+psycopg[binary]==3.3.6

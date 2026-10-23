@@ -413,6 +413,8 @@ docker compose down -v && docker compose up -d
 
 운영 DB·업로드 볼륨 백업, 반영 명령(`scripts/deploy.sh`, 실패 시 중단 조건), 중단 시간, 반영 후 점검, 롤백 절차와 **알려진 제한**은 [docs/DEPLOY.md](docs/DEPLOY.md)에 있습니다. 배포 스크립트의 실패 처리 시험: `bash scripts/test_deploy.sh`.
 
+인터넷 시연 환경(Render)에서 계정·기록을 재배포 뒤에도 남기려면 외부 PostgreSQL(`MOAJWO_DB_MODE=external`)을 씁니다 — 설정·무료 한도·이관·백업·되돌리기 경계와 보존하지 않는 것(업로드·결과 파일)은 [docs/EXTERNAL_DB.md](docs/EXTERNAL_DB.md). 로컬 운영·폐쇄망은 그대로 SQLite입니다.
+
 ## DB 마이그레이션
 
 ```sh
