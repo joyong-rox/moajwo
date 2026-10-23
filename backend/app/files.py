@@ -12,15 +12,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
-from app.config import DATA_DIR
+from app.config import DATA_DIR, MAX_FILE_CELLS, MAX_UPLOAD_MIB, MAX_XLSX_UNCOMPRESSED_MIB, PARSE_SLOTS
 from app.db import get_session
 from app.decisions import DecisionInput, load_decisions, load_learned, load_org_codes, save_decisions
 from app.mapping import get_engine
 from app.models import MappingAnalysis, SourceFile
-from app.parsing import SUPPORTED_EXTENSIONS, FileResult, ParseError, parse_file
+from app.parsing import MAX_CELL_CHARS, SUPPORTED_EXTENSIONS, FileResult, ParseBusy, ParseError, parse_file
 from app.pii import mask_text
 from app.promotion import load_standard, record_approval
-from app.storage import MAX_UPLOAD_BYTES, UploadTooLarge, safe_original_name, store_original
+from app.storage import UploadTooLarge, safe_original_name, store_original
 from app.timefmt import utc_to_kst
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,29 @@ class UploadResultOut(BaseModel):
     error: str | None = None
 
 
+class LimitsOut(BaseModel):
+    """파일 읽기 한도 (환경마다 다름 — docs/MEMORY.md). 화면이 안내 문구에 그대로 쓴다. 크기 단위는 MiB."""
+
+    max_upload_mib: int
+    max_xlsx_uncompressed_mib: int
+    max_file_cells: int
+    max_cell_chars: int
+    parse_slots: int
+    max_files_per_request: int
+
+
+@router.get("/limits", response_model=LimitsOut)
+def file_limits() -> LimitsOut:
+    return LimitsOut(
+        max_upload_mib=MAX_UPLOAD_MIB,
+        max_xlsx_uncompressed_mib=MAX_XLSX_UNCOMPRESSED_MIB,
+        max_file_cells=MAX_FILE_CELLS,
+        max_cell_chars=MAX_CELL_CHARS,
+        parse_slots=PARSE_SLOTS,
+        max_files_per_request=MAX_FILES_PER_REQUEST,
+    )
+
+
 @router.post("", response_model=list[UploadResultOut])
 def upload_files(
     files: Annotated[list[UploadFile], File()],
@@ -78,8 +101,7 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
     try:
         stored = store_original(upload.file, ext)
     except UploadTooLarge:
-        limit_mb = MAX_UPLOAD_BYTES // 1024 // 1024
-        return UploadResultOut(original_name=name, error=f"파일이 너무 큽니다 (최대 {limit_mb}MB).")
+        return UploadResultOut(original_name=name, error=f"파일이 너무 큽니다 (최대 {MAX_UPLOAD_MIB}MiB).")
 
     record = SourceFile(
         original_name=name,
@@ -94,6 +116,15 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
     result = UploadResultOut(original_name=name, id=record.id, size_bytes=stored.size_bytes)
     try:
         parsed = parse_file(stored.path, name)
+    except ParseBusy as exc:
+        # 읽기 차례를 얻지 못함 — 입력 오류가 아니므로 '읽지 못한 파일'로 남기지 않고 기록·원본을 지운다
+        # (다시 올리면 됨. 업로드 때 읽어야 개인정보 탐지 결과가 남으므로 읽지 않은 파일을 두지 않는다)
+        session.delete(record)
+        session.commit()
+        stored.path.chmod(0o600)  # 원본은 읽기 전용으로 저장된다 (Windows는 읽기 전용 파일을 지우지 못함)
+        stored.path.unlink(missing_ok=True)
+        logger.warning("upload parse busy: ext=%s", ext)
+        return UploadResultOut(original_name=name, error=str(exc))
     except ParseError as exc:
         logger.warning("parse failed: id=%s ext=%s reason=%s", record.id, ext, exc)
         result.error = str(exc)
@@ -276,6 +307,8 @@ def load_parsed(session: Session, file_id: int) -> tuple[SourceFile, FileResult]
         raise HTTPException(status.HTTP_404_NOT_FOUND, "원본 파일이 없습니다.")
     try:
         return record, parse_file(path, record.original_name)
+    except ParseBusy as exc:  # 입력 오류가 아니다 — 잠시 뒤 같은 요청을 다시 보내면 된다
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc), headers={"Retry-After": "10"}) from exc
     except ParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
 
