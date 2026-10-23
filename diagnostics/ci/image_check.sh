@@ -165,10 +165,11 @@ fi
 
 # ---------------------------------------------------------------- 완성 이미지 취약점 (Trivy 0.76.0, 릴리스 체크섬 확인)
 TV=0.76.0
-curl -sSL -o trivy.tgz "https://github.com/aquasecurity/trivy/releases/download/v$TV/trivy_${TV}_Linux-64bit.tar.gz"
+TGZ="trivy_${TV}_Linux-64bit.tar.gz"  # 체크섬 파일의 이름 그대로 받아야 sha256sum -c가 찾는다
+curl -sSL -o "$TGZ" "https://github.com/aquasecurity/trivy/releases/download/v$TV/$TGZ"
 curl -sSL -o trivy.sum "https://github.com/aquasecurity/trivy/releases/download/v$TV/trivy_${TV}_checksums.txt"
-if grep " trivy_${TV}_Linux-64bit.tar.gz\$" trivy.sum | sha256sum -c - > /dev/null 2>&1; then
-  tar xzf trivy.tgz trivy
+if grep "  $TGZ\$" trivy.sum | sha256sum -c - >> "$LOG" 2>&1; then
+  tar xzf "$TGZ" trivy
   for n in backend frontend frontend-render; do
     ./trivy image --quiet --format json --scanners vuln --severity HIGH,CRITICAL -o "$OUT/trivy-$n.json" "moajwo-$n:check" 2>> "$LOG"
     res "trivy_$n" "$(python3 - "$OUT/trivy-$n.json" <<'PY'
