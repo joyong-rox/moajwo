@@ -179,6 +179,7 @@ def main() -> None:
     ap.add_argument("--pg-docker")
     ap.add_argument("--port", type=int, default=8190)
     a = ap.parse_args()
+    a.out, a.backend = a.out.resolve(), a.backend.resolve()  # 하위 프로세스는 backend 폴더에서 돈다
     a.out.mkdir(parents=True, exist_ok=True)
     log = a.out / "servers.log"
     work = Path(tempfile.mkdtemp(prefix="extdb-"))
