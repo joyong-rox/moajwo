@@ -1,0 +1,29 @@
+# 진단 전용: 결과 파일 메모리의 통계 요약 묶기·한도 가까운 통합만 다시 잰다 (512MiB 컨테이너, 격리 러너).
+# 'ci/output-memory-*' 브랜치를 올릴 때만 돈다 — main·PR에는 영향이 없다. 운영·Render로 요청하지 않는다.
+name: output-memory (diagnostic)
+
+on:
+  push:
+    branches: ["ci/output-memory-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: build the backend image
+        run: docker build -t moajwo-backend:check backend > build.log 2>&1 || (tail -40 build.log; exit 1)
+      - name: summary bundles and a near-budget integration (part C)
+        run: PARTS=C bash diagnostics/ci/output_memory.sh out/outmem
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: output-memory
+          path: out
+          retention-days: 30
