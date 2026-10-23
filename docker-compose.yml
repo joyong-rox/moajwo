@@ -20,7 +20,8 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "127.0.0.1:8080:80"
+      # 호스트 127.0.0.1:8080 → 컨테이너 8080 (nginx를 비루트로 실행해 컨테이너 안에서도 8080에서 듣는다)
+      - "127.0.0.1:8080:8080"
     depends_on:
       backend:
         condition: service_healthy
