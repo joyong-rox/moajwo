@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 45
     env:
       OLD: adebb6c4f5687b1eb6835e012755bcb5d490968e  # main
-      NEW: 9c3842bb52a6d57aeb25167ab3ef852800fda75c  # 후보 rc/review-20261023
+      NEW: 4c0960f36dd6b6eca227163d64230af69592fd50  # 후보 rc/review-20261023 (최종 앱 코드)
       PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
