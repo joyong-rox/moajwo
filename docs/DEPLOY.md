@@ -6,7 +6,7 @@
 | 항목 | 값 |
 | --- | --- |
 | Compose 프로젝트 | `moajwo` (`docker-compose.yml`) |
-| 서비스 | `backend` (127.0.0.1:8000, `moajwo-backend:latest`, 실행 사용자 `app` uid 1000) · `frontend` (127.0.0.1:8080, `moajwo-frontend:latest`) |
+| 서비스 | `backend` (127.0.0.1:8000, `moajwo-backend:latest`, 실행 사용자 `app` uid 1000) · `frontend` (127.0.0.1:8080, `moajwo-frontend:latest` — 컨테이너 안 포트는 이번 반영부터 8080, 그 전 이미지는 80. 8장) |
 | 데이터 볼륨 | `moajwo_moajwo-data` → `/app/data`: `moajwo.db`(SQLite, journal_mode=delete), `uploads/`(업로드 원본), `outputs/`(통합 결과) — 모두 uid 1000 소유 |
 | 마이그레이션 | backend 기동 명령이 `alembic upgrade head` 후 서버를 띄움 (이미지에 ENTRYPOINT 없음, CMD만) |
 
@@ -20,6 +20,11 @@
 - 승인은 **PR HEAD 커밋**(예: PR #1의 마지막 커밋)으로 받습니다. 병합 방식(merge commit·squash·rebase)에 따라 **병합 후 main의 SHA는
   달라질 수 있으므로**, 스크립트는 SHA가 아니라 **트리(파일 내용)**가 같은지로 "승인한 변경 = 배포할 내용"을 확인하고 두 SHA를 모두 기록합니다.
 - 병합 후 main에 다른 변경이 섞여 있으면 트리가 달라 스크립트가 멈춥니다 (그때는 새로 승인받습니다).
+- 여러 PR을 함께 반영할 때는 **모든 PR(보고서 PR 포함)을 담은 후보 브랜치의 HEAD**를 승인 대상으로 삼습니다. 병합을 마친 main의 트리가
+  그 후보와 같아야 하며(`git diff <후보 SHA> main`이 비어야 함), 보고서 파일 하나만 달라도 스크립트는 멈춥니다. 승인 검사는 없애거나
+  건너뛰지 않습니다.
+- 롤백 단위는 **이미지(롤백 태그) + 이전 컨테이너의 포트 연결 + 백업**입니다. 스크립트 2단계가 실행 중 컨테이너의 실제 포트 연결을
+  `backups/rollback-<시각>.compose.yml`(Compose 덧붙임, `ports: !override`)로 남기고 배포 단위 줄에 적습니다 (4장).
 
 ```bash
 cd /c/Users/juho/Documents/Moajwo
@@ -94,6 +99,11 @@ docker inspect moajwo-backend-1 --format '{{.Image}}'   # 로그의 새 backend 
 - 아래의 `$TS`(백업 시각), `$OLD_B`(이전 backend 이미지 ID), `$TAG`(롤백 태그), `$PREV`(반영 전 리비전)는 반영 로그 마지막의 **배포 단위** 줄에 있습니다. 이전 이미지와 백업은 한 배포 단위로 함께 씁니다.
 - **반영 후 새 데이터가 생겼다면** A는 그 데이터를 활성 데이터에서 빼므로, 빠질 범위를 사용자에게 알리고 **별도 승인**을 받은 뒤 실행합니다. 데이터를 지켜야 하면 B를 씁니다.
 - `down -v`, 자동 downgrade, 운영 데이터 삭제는 하지 않습니다.
+- **이미지만 되돌리지 않습니다.** 지금 저장소의 `docker-compose.yml`은 새 버전의 설정이라, 이전 이미지를 이 파일로 띄우면 설정이 맞지
+  않을 수 있습니다 (예: 8장 — 이전 frontend는 컨테이너 80에서 듣는데 새 설정은 8080으로 연결). 반영 로그의 `rollback-<시각>.compose.yml`을
+  `-f`로 덧붙여 이전 포트 연결로 띄우고, `docker compose … config`로 서비스마다 포트 연결이 하나씩인지 확인합니다 (덧붙임이 목록을
+  더하지 않고 바꾸도록 `!override`를 씀 — Docker Compose 2.24.4 이상). 이 파일이 없는 예전 반영은 `git show <이전 main SHA>:docker-compose.yml`로
+  이전 설정을 꺼내 씁니다.
 
 ### A. 배포 전 백업으로 복원 (기본)
 
@@ -104,7 +114,9 @@ docker compose stop -t 30 frontend backend
 docker run --rm --entrypoint sh -v moajwo_moajwo-data:/data -v "$(pwd -W)/backups:/backup:ro" "$OLD_B" -c \
   "set -e; d=/data/_pre_rollback_$TS; mkdir -p \$d; for f in /data/* /data/.[!.]*; do [ -e \"\$f\" ] || continue; case \"\$f\" in /data/_pre_rollback_*) ;; *) mv \"\$f\" \$d/;; esac; done; tar xzf /backup/moajwo-data-$TS.tgz -C /data; ls -ln /data"
 docker tag moajwo-backend:$TAG moajwo-backend:latest && docker tag moajwo-frontend:$TAG moajwo-frontend:latest
-docker compose up -d --no-build --wait
+RB="-f docker-compose.yml -f backups/rollback-$TS.compose.yml"   # 이전 컨테이너의 포트 연결 (4장 머리말)
+docker compose $RB config | grep -A5 'ports:'                     # 서비스마다 포트 연결이 하나씩, 이전 값인지
+docker compose $RB up -d --no-build --wait
 docker compose exec -T backend alembic current      # = $PREV
 ```
 
@@ -118,7 +130,8 @@ docker compose ps --status running --services       # 아무것도 없어야 함
 # 새 리비전을 아는 '새' 이미지로 downgrade만 실행 (CMD를 바꾸므로 서버는 뜨지 않는다 — 리허설에서 확인)
 docker compose run --rm --no-deps backend alembic downgrade "$PREV"
 docker tag moajwo-backend:$TAG moajwo-backend:latest && docker tag moajwo-frontend:$TAG moajwo-frontend:latest
-docker compose up -d --no-build --wait
+RB="-f docker-compose.yml -f backups/rollback-$TS.compose.yml"
+docker compose $RB up -d --no-build --wait
 docker compose exec -T backend alembic current      # = $PREV
 ```
 
@@ -284,6 +297,44 @@ docker inspect moajwo-backend-1 --format '{{.Image}}'          # = $OLD_B
 | 화면에서 사라짐 | 「데이터 분석」 화면과 분석 진입 버튼 (0019 코드 기능) |
 
 격리 검증 (2026-10-15, 합성 자료 `moajwo-feat` 볼륨): 0018 → 0019 기존 테이블 그대로 · 분석 결과가 있는 0019 → 새 이미지 one-off downgrade 0018: `analysis_runs`만 삭제, 나머지 19개 테이블 행 수·내용 해시 그대로 · 이전(0018) 코드 기동·로그인·확정값 정상, 분석 API 없음 · 다시 0019: 빈 `analysis_runs`, 다시 실행 가능.
+
+## 8. 2026-10-23 후보 반영 (리비전 0019 그대로 · frontend 컨테이너 포트 80 → 8080)
+
+PR #22~#40을 담은 후보(`rc/review-20261023`)를 반영할 때의 절차입니다. DB 마이그레이션은 없습니다 (반영 전후 `0019_analysis_runs`).
+
+| 구분 | 반영 전 (main) | 반영 후 (후보) |
+| --- | --- | --- |
+| backend 이미지 | main 코드 | 후보 코드 (외부 DB 모드는 기본 꺼짐 — 로컬은 그대로 SQLite) |
+| frontend 이미지 | nginx 1.29, root로 시작, **컨테이너 80** | nginx 1.30, 비루트(uid 101), **컨테이너 8080** |
+| Compose 포트 | `127.0.0.1:8080:80` | `127.0.0.1:8080:8080` (호스트 주소·포트는 같음) |
+| 데이터 볼륨 | `moajwo_moajwo-data` | 같음 (새 볼륨을 만들지 않음 — 프로젝트 이름 `moajwo`·서비스 이름 그대로) |
+
+**반영**: 모든 PR을 순서대로 병합한 main이 후보와 같은 트리인지 확인한 뒤(`git diff <후보 SHA> main` 비어 있음)
+
+```bash
+bash scripts/deploy.sh <후보 HEAD SHA> 0019_analysis_runs
+```
+
+스크립트가 이전 포트 연결(`127.0.0.1:8080:80/tcp`)을 `backups/rollback-<시각>.compose.yml`에 남기고, 전환 뒤 `포트 연결: frontend 127.0.0.1:8080:80/tcp → 127.0.0.1:8080:8080/tcp`를 기록합니다.
+
+**롤백 (이전 이미지 + 이전 포트, DB 복원·downgrade 없음)** — 양쪽 리비전이 0019라 DB는 그대로 둡니다. 반영 뒤 생긴 자료(업로드·실행 등)는 그대로 남고 이전 코드가 읽습니다 (스키마 같음).
+
+```bash
+docker compose stop -t 30 frontend backend
+docker tag moajwo-backend:$TAG moajwo-backend:latest && docker tag moajwo-frontend:$TAG moajwo-frontend:latest
+RB="-f docker-compose.yml -f backups/rollback-$TS.compose.yml"
+docker compose $RB config | grep -A5 'ports:'
+#   backend:  - 127.0.0.1:8000:8000 하나 · frontend: target 80, published 8080, host_ip 127.0.0.1 하나 (8080 대상이 남지 않음)
+docker compose $RB up -d --no-build --wait
+docker inspect moajwo-frontend-1 --format '{{.Image}} {{json .HostConfig.PortBindings}}'   # 롤백 태그 이미지 · {"80/tcp":[…8080]}
+curl -s http://127.0.0.1:8080/api/health                         # {"status":"ok","database":"ok"} (frontend 프록시를 거쳐)
+```
+
+롤백 뒤 다시 후보로: 같은 `bash scripts/deploy.sh <후보 HEAD SHA> 0019_analysis_runs` (덧붙임 파일 없이 `docker-compose.yml`만 씀 → 8080:8080으로 다시 만들어짐).
+
+**frontend 단독 반영 경로**(`docker compose up -d --no-deps frontend`)는 이번 반영에 쓰지 않습니다 — backend도 바뀌고, 포트 설정과 이미지가 함께 바뀌어야 하기 때문입니다. 이번 반영 뒤 frontend만 바뀌는 다음 반영에서는 포트가 그대로(8080)라 그 경로를 쓸 수 있지만, 그때 이 반영 이전 frontend 이미지로 되돌리려면 이번 반영의 `rollback-<시각>.compose.yml`이 필요합니다.
+
+**격리 확인**: 아래 '리허설 결과' 5차.
 
 ## 리허설 결과
 

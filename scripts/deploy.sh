@@ -20,6 +20,9 @@
 #   → 4·5가 실패하면, 마이그레이션이 시작되지 않았음(리비전 그대로)을 **확인할 수 있을 때만** 기존 컨테이너를 다시 시작한다.
 #     확인할 수 없으면 재시작하지 않고 현재 상태와 수동 복구 절차를 보고한다.
 #   6) 백업 성공을 확인한 뒤에만 새 이미지로 전환하고, 전환 후 리비전·이미지 조회가 모두 성공해야 '전환 완료'로 보고한다.
+#   롤백 단위 = 이전 이미지(롤백 태그) + 이전 컨테이너의 포트 연결(backups/rollback-<시각>.compose.yml) + 백업.
+#   이미지만 되돌리면 안 되는 반영(예: frontend 컨테이너 포트 80 → 8080)이 있어, 2단계에서 실행 중 컨테이너의 실제 포트
+#   연결을 Compose 덧붙임 파일(ports: !override)로 남긴다 — docs/DEPLOY.md 4장·8장.
 #
 # 격리 환경 검증용 환경변수 (운영에서는 쓰지 않음):
 #   DEPLOY_COMPOSE_ARGS  docker compose 인자 (예: "-f rehearsal/docker-compose.yml")
@@ -93,6 +96,13 @@ revision_in_volume() {  # 볼륨의 DB 리비전을 서버 없이 읽는다 (실
     2>>"$LOG") || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out"
+}
+ports_of() {  # 컨테이너의 호스트 포트 연결 ('127.0.0.1:8080:80/tcp' 꼴, 공백 구분). 조회 실패·결과 없음이면 실패
+  local out
+  out=$(docker inspect "$1" --format \
+    '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}:{{.HostPort}}:{{$p}} {{end}}{{end}}' 2>>"$LOG") || return 1
+  out=$(printf '%s' "$out" | tr -s ' ' | sed 's/^ //; s/ $//')
+  case "$out" in *:*:*) printf '%s\n' "$out" ;; *) return 1 ;; esac
 }
 wait_healthy() {  # backend healthy 대기 (최대 90초). 컨테이너 조회가 실패하면 실패
   local cid status
@@ -168,6 +178,21 @@ TAG="rollback-$TS"
 TAG_REPO="${DEPLOY_TAG_REPO:-moajwo}"
 docker tag "$OLD_B" "$TAG_REPO-backend:$TAG" 2>>"$LOG" && docker tag "$OLD_F" "$TAG_REPO-frontend:$TAG" 2>>"$LOG" || fail "롤백 태그를 만들 수 없음"
 log "반영 전 리비전 $PREV (예상과 같음) · backend ${OLD_B:7:12} · frontend ${OLD_F:7:12} · 롤백 태그 $TAG_REPO-backend·frontend:$TAG"
+OLD_B_PORTS=$(ports_of "$B_CID") || fail "backend 컨테이너의 포트 연결을 확인할 수 없음"
+OLD_F_PORTS=$(ports_of "$F_CID") || fail "frontend 컨테이너의 포트 연결을 확인할 수 없음"
+ROLLBACK_COMPOSE="$BACKUP_DIR/rollback-$TS.compose.yml"
+{
+  echo "# 반영 전($TS) 실행 중이던 컨테이너의 포트 연결 — 롤백 때 docker-compose.yml 뒤에 -f로 덧붙인다 (docs/DEPLOY.md 4장)"
+  echo "# 롤백 태그: $TAG_REPO-backend:$TAG ${OLD_B:7:12} · $TAG_REPO-frontend:$TAG ${OLD_F:7:12}"
+  echo "services:"
+  echo "  backend:"
+  echo "    ports: !override"
+  for p in $OLD_B_PORTS; do echo "      - \"$p\""; done
+  echo "  frontend:"
+  echo "    ports: !override"
+  for p in $OLD_F_PORTS; do echo "      - \"$p\""; done
+} >"$ROLLBACK_COMPOSE" || fail "롤백용 포트 설정 파일을 쓸 수 없음: $ROLLBACK_COMPOSE"
+log "반영 전 포트 연결: backend $OLD_B_PORTS · frontend $OLD_F_PORTS → $ROLLBACK_COMPOSE"
 
 log "== 3. 새 이미지 빌드 (서비스 중단 없음)"
 dc build >>"$LOG" 2>&1 || fail "이미지 빌드 실패 — 기존 서비스는 그대로 동작 중"
@@ -273,7 +298,7 @@ SHA_LINE="sha256 $SHA_REC"
 log "백업 확인: $ARCHIVE ($SHA_LINE) — 운영 볼륨 값 $SRC_TXT · 백업 DB 값 $BK_TXT"
 
 log "== 6. 새 이미지로 전환 (백업 성공 확인 후)"
-ROLLBACK_HINT="docs/DEPLOY.md 4장 (백업 $ARCHIVE, 롤백 태그 $TAG, 반영 전 리비전 $PREV)"
+ROLLBACK_HINT="docs/DEPLOY.md 4장 (백업 $ARCHIVE, 롤백 태그 $TAG, 포트 $ROLLBACK_COMPOSE, 반영 전 리비전 $PREV)"
 dc up -d --wait >>"$LOG" 2>&1 || fail "전환 실패 — 마이그레이션이 일부 진행됐을 수 있음. 자동 롤백하지 않습니다: $ROLLBACK_HINT"
 NEW_REV=$(current_revision) || fail "전환 후 리비전을 확인할 수 없음 — 성공으로 보고하지 않습니다. 상태를 확인하세요: $ROLLBACK_HINT"
 case "$NEW_REV" in *"(head)"*) ;; *) fail "전환 후 리비전이 head가 아님: $NEW_REV — $ROLLBACK_HINT";; esac
@@ -282,5 +307,7 @@ NF_CID=$(container_id frontend) || fail "전환 후 frontend 컨테이너를 확
 NEW_B=$(image_of "$NB_CID") || fail "전환 후 backend 이미지를 확인할 수 없음 — 성공으로 보고하지 않습니다: $ROLLBACK_HINT"
 NEW_F=$(image_of "$NF_CID") || fail "전환 후 frontend 이미지를 확인할 수 없음 — 성공으로 보고하지 않습니다: $ROLLBACK_HINT"
 log "전환 완료: 리비전 $NEW_REV · backend ${NEW_B:7:12} · frontend ${NEW_F:7:12} · 중단 $(( $(date +%s) - T0 ))초"
-log "배포 단위: 승인 $APPROVED / 대상 $HEAD_SHA / 이전 ${OLD_B:7:12}+${OLD_F:7:12}($TAG) / 백업 $ARCHIVE / 리비전 $PREV → $NEW_REV"
+NEW_F_PORTS=$(ports_of "$NF_CID") || NEW_F_PORTS="(조회 실패)"
+log "포트 연결: frontend $OLD_F_PORTS → $NEW_F_PORTS"
+log "배포 단위: 승인 $APPROVED / 대상 $HEAD_SHA / 이전 ${OLD_B:7:12}+${OLD_F:7:12}($TAG) / 이전 포트 $ROLLBACK_COMPOSE / 백업 $ARCHIVE / 리비전 $PREV → $NEW_REV"
 log "반영 후 점검을 진행하세요 (docs/DEPLOY.md 3장). 기록: $LOG"
