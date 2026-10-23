@@ -37,6 +37,9 @@ res seed "$(python3 "$HERE/deploy_probe.py" seed http://127.0.0.1:8080 "$OUT/see
 snapshot old
 
 # ---------------------------------------------------------------- 2. 후보 반영 (deploy.sh 그대로)
+# 러너 환경 맞춤: 백업 컨테이너(backend 이미지의 uid 1000)가 호스트의 backups/(러너 사용자 소유)에 쓸 수 있게 한다.
+# 운영 PC(Docker Desktop)의 바인드 마운트에는 필요 없다 — 1회차는 이 권한 때문에 백업에서 멈추고 기존 서비스를 재개했다.
+mkdir -p backups && chmod 777 backups
 git checkout -q --detach "$NEW"
 bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-1.out" 2>&1
 res deploy1.exit $? "scripts/deploy.sh $NEW 0019_analysis_runs"
