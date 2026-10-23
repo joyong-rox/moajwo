@@ -387,6 +387,52 @@ def test_preview_view_cache_reuses_masked_parse_and_stays_small(users, monkeypat
     assert len(mapping_review._VIEWS) <= mapping_review.VIEW_CACHE_FILES
 
 
+def test_view_cache_keeps_many_small_files_within_a_size_budget(users, monkeypatch) -> None:
+    """P-01: 홈은 고른 파일의 상태를 10개씩 조회해 파일마다 원본을 읽는다. 보관이 2개뿐이라 다른 화면에 갔다 오면
+    8개를 다시 읽었다 (격리 측정). 작은 파일은 여러 개 두되, 보관한 추정 크기 합계가 예산을 넘으면 오래된 것부터
+    뺀다."""
+    from app import mapping_review
+
+    u1 = users["mw-user1"]
+    table = [["기관명", "집행액"]] + [[f"기관{j}", j] for j in range(30)]
+    ids = [_upload(u1, f"상태{i}.xlsx", _xlsx(table)) for i in range(10)]
+    calls: list[int] = []
+    real = mapping_review.load_parsed
+    monkeypatch.setattr(mapping_review, "load_parsed", lambda db, fid: calls.append(fid) or real(db, fid))
+    for _ in range(2):  # 홈 → 다른 화면 → 홈
+        for fid in ids:
+            assert u1.get(f"/files/{fid}/mapping/latest").status_code == 200
+    assert sorted(calls) == sorted(ids)  # 두 번째에는 다시 읽지 않는다
+
+    one = mapping_review._VIEW_BYTES[next(k for k in mapping_review._VIEWS if k[0] == ids[-1])]
+    monkeypatch.setattr(mapping_review, "VIEW_CACHE_MAX_BYTES", one * 3)  # 이 파일 3개 분량
+    big = _upload(u1, "예산.xlsx", _xlsx([["기관명", "집행액"]] + [[f"기관{j}", j] for j in range(30)]))
+    assert u1.get(f"/files/{big}/mapping/latest").status_code == 200
+    kept = list(mapping_review._VIEWS)
+    assert len(kept) <= 3 and kept[-1][0] == big  # 가장 최근 것은 남고, 합계가 예산 안으로 줄어든다
+    assert sum(mapping_review._VIEW_BYTES[k] for k in kept) <= one * 3
+
+
+def test_view_cache_size_counts_long_text(users, monkeypatch) -> None:
+    """칸 수가 같아도 긴 글자가 든 파일은 더 크게 센다 — 칸 수 예산은 긴 글자를 반영하지 못했다."""
+    from app import mapping_review
+
+    u1 = users["mw-user1"]
+    short = _upload(u1, "짧은글자.xlsx", _xlsx([["기관명", "비고"]] + [[f"기관{j}", "짧음"] for j in range(30)]))
+    long_ = _upload(u1, "긴글자.xlsx", _xlsx([["기관명", "비고"]] + [[f"기관{j}", "가" * 5000] for j in range(30)]))
+    for fid in (short, long_):
+        assert u1.get(f"/files/{fid}/mapping/latest").status_code == 200
+    size = {k[0]: v for k, v in mapping_review._VIEW_BYTES.items()}
+    assert size[long_] > size[short] + 30 * 5000  # 긴 글자만큼 (한글은 칸당 2바이트 이상)
+
+    # 예산보다 큰 파일 하나는 보관하지 않는다
+    monkeypatch.setattr(mapping_review, "VIEW_CACHE_MAX_BYTES", size[long_] - 1)
+    mapping_review._VIEWS.clear()
+    mapping_review._VIEW_BYTES.clear()
+    assert u1.get(f"/files/{long_}/mapping/latest").status_code == 200
+    assert long_ not in {k[0] for k in mapping_review._VIEWS}
+
+
 def test_concurrent_previews_parse_once(users, monkeypatch) -> None:
     """큰 파일을 처음 열 때 미리보기·저장된 분석 요청이 동시에 와도 같은 파일은 한 번만 파싱한다."""
     from app import mapping_review

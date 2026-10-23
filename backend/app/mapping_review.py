@@ -15,8 +15,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
+import sys
 import threading
 import unicodedata
 from collections import OrderedDict
@@ -60,12 +62,16 @@ def sheet_id(index: int) -> str:
 # ---------------------------------------------------------------- 미리보기용 보기 (마스킹한 파싱 결과, 작은 캐시)
 #
 # 미리보기 쪽 넘김·작업 화면 매핑·공통 검토·일괄 확정 확인은 열 이름과 정리된 행만 필요하다. 큰 파일(10만 행 CSV)을
-# 요청마다 다시 파싱하면 쪽마다 10초 가까이 걸리므로, 파일 id·내용 해시(sha256)를 키로 최근 몇 개 파일만 메모리에 둔다.
-# 원본 파일은 바뀌지 않으므로(읽기 전용, 해시 고정) 오래된 값이 나오지 않는다. 다른 기능의 파싱은 그대로다.
-# 이 제한은 '보관하는 항목'의 상한이다. 큰 파일을 처음 여는 요청은 파싱하는 동안 원본 크기에 비례한 메모리를 따로 쓴다.
-
-VIEW_CACHE_FILES = 2
-VIEW_CACHE_MAX_CELLS = 3_000_000  # 이보다 큰 파일은 보관하지 않는다 (메모리 보호)
+# 요청마다 다시 파싱하면 쪽마다 10초 가까이 걸리므로, 파일 id·내용 해시(sha256)를 키로 최근 파일을 메모리에 둔다.
+# 원본 파일은 바뀌지 않으므로(읽기 전용, 해시 고정) 오래된 값이 나오지 않는다. 보관 값은 가린 값이고 권한은 꺼내기 전에
+# 따로 확인한다 (get_file_for). 매핑·확정은 보관하지 않아 바뀌어도 다시 만들 필요가 없다. 다른 기능의 파싱은 그대로다.
+# 상한은 '보관한 값의 추정 크기 합계'와 파일 수다 — 작은 파일은 여러 개(홈의 상태 확인은 10개씩), 큰 파일은 적게
+# (P-01: 2개만 두던 때는 홈에서 다른 화면에 갔다 오면 8개를 다시 읽었다). 칸 수만 세면 긴 글자가 빠지므로 칸마다
+# sys.getsizeof로 센다 (같은 객체를 여러 번 셀 수 있어 실제보다 크게 잡힌다). 이 예산은 보관분만이다 — 파일을 처음
+# 읽는 동안의 메모리는 app.parsing의 읽기 한도·동시 읽기 수가 따로 막는다 (docs/MEMORY.md, 환경별 값).
+VIEW_CACHE_FILES = int(os.environ.get("MOAJWO_VIEW_CACHE_FILES") or 20)  # 보관하는 파일 수 상한
+# 보관 추정 크기 합계 상한 (MiB, 2^20 바이트). 이보다 큰 파일 하나는 보관하지 않는다. 0이면 보관하지 않는다
+VIEW_CACHE_MAX_BYTES = int(os.environ.get("MOAJWO_VIEW_CACHE_MIB") or 128) * 2**20
 
 
 @dataclass
@@ -104,6 +110,7 @@ def raw_mark(value: Any) -> str:
 
 
 _VIEWS: OrderedDict[tuple[int, str], FileView] = OrderedDict()
+_VIEW_BYTES: dict[tuple[int, str], int] = {}  # 보관한 파일의 추정 크기 (합계 상한 계산용)
 _VIEWS_LOCK = threading.Lock()
 _BUILDING: dict[tuple[int, str], threading.Lock] = {}  # 같은 파일을 동시에 두 번 파싱하지 않게 (먼저 온 요청을 기다림)
 
@@ -130,7 +137,7 @@ def file_view(db: Session, record: SourceFile) -> FileView:
 def _build_view(db: Session, record: SourceFile, key: tuple[int, str]) -> FileView:
     _, parsed = load_parsed(db, record.id)
     sheets: list[SheetView] = []
-    cells = 0
+    size = 0
     for s in parsed.sheets:
         # 주민등록번호가 탐지된 시트는 13자리 숫자 형태도 가린다 (금액 전체를 가리지 않도록 그 시트에만)
         mask = mask_rrn_number if s.pii.counts.get("rrn") else mask_cell
@@ -142,7 +149,7 @@ def _build_view(db: Session, record: SourceFile, key: tuple[int, str]) -> FileVi
             if changed:
                 marks[i] = changed
             rows.append((r["row"], r["kind"], shown))
-        cells += len(rows) * max(1, len(s.columns))
+        size += _rows_bytes(rows)
         sheets.append(
             SheetView(
                 name=s.name,
@@ -160,12 +167,24 @@ def _build_view(db: Session, record: SourceFile, key: tuple[int, str]) -> FileVi
             )
         )
     view = FileView(sheets=sheets)
-    if cells <= VIEW_CACHE_MAX_CELLS:
+    if size <= VIEW_CACHE_MAX_BYTES and VIEW_CACHE_FILES > 0:
         with _VIEWS_LOCK:
             _VIEWS[key] = view
-            while len(_VIEWS) > VIEW_CACHE_FILES:
-                _VIEWS.popitem(last=False)
+            _VIEW_BYTES[key] = size
+            # 오래된 것부터 뺀다 — 방금 넣은 것은 남는다 (그 하나는 위에서 상한 안임을 확인)
+            while len(_VIEWS) > VIEW_CACHE_FILES or sum(_VIEW_BYTES.values()) > VIEW_CACHE_MAX_BYTES:
+                old, _ = _VIEWS.popitem(last=False)
+                _VIEW_BYTES.pop(old, None)
     return view
+
+
+def _rows_bytes(rows: list[tuple[int, str, list[Any]]]) -> int:
+    """보관할 행의 추정 크기: 행 튜플·칸 목록·칸 값 (글자 길이가 반영된다). 열 이름·예시 칸은 작아 넣지 않는다."""
+    total = 0
+    for row in rows:
+        cells = row[2]
+        total += sys.getsizeof(row) + sys.getsizeof(cells) + sum(sys.getsizeof(c) for c in cells)
+    return total
 
 
 def _sheet(view: FileView, sid: str | None) -> tuple[int, SheetView] | None:
