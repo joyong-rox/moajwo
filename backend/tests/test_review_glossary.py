@@ -273,3 +273,28 @@ def test_link_learned_on_complete_keeps_the_review_ready(user, owner, n) -> None
     other = user.get(f"/reviews/{rejected['id']}").json()
     assert other["needs_recheck"] is True
     assert f"'{n['alias']}': 검사 때 용어사전에 없음 → 지금 {n['entry']}({code})" in other["recheck_reasons"][0]
+
+
+def test_recheck_needed_refuses_completion_and_keeps_earlier_results(user, owner, n) -> None:  # noqa: F811
+    """'다시 검사 필요' (2026-10-23 정책): 다시 검사하기 전에는 완료·통합을 거절하고 기록·결과 파일을 만들지 않는다.
+    이 검토로 이미 만든 결과는 그대로 조회·다운로드한다 (결과를 지우거나 다시 만들지 않음)."""
+    (code,) = _entries(owner, n["entry"])
+    done = _review(user, _upload(user, "결과유지", _rows(n)))
+    _decide(user, done, _entity(done, n["alias"]), "rejected")
+    _complete(user, done)
+    res = user.post(f"/reviews/{done['id']}/integrate", json={"include_unmapped": True})
+    assert res.status_code == 201, res.text
+    run_id = res.json()["id"]
+    earlier = (user.get(f"/runs/{run_id}").json(), user.get(f"/runs/{run_id}/download").content)
+    waiting = _review(user, _upload(user, "완료전", _rows(n)))  # 같은 이름을 '연결하지 않음'으로 결정만 하고 완료 전
+    _decide(user, waiting, _entity(waiting, n["alias"]), "rejected")
+
+    _alias(owner, n["alias"], code)  # 검사 뒤 관리자가 별칭을 더함 → 두 검토 모두 다시 검사 필요
+    _rejected(user, done, f"'{n['alias']}': 검사 때 용어사전에 없음")
+    before = _state()
+    res = user.post(f"/reviews/{waiting['id']}/complete")
+    assert res.status_code == 409 and "다시 검사 필요" in res.json()["detail"], res.text
+    assert user.get(f"/reviews/{waiting['id']}").json()["status"] == "in_review" and _state() == before
+
+    after = (user.get(f"/runs/{run_id}").json(), user.get(f"/runs/{run_id}/download").content)
+    assert after == earlier  # 이미 만든 결과는 그대로 조회·다운로드된다
