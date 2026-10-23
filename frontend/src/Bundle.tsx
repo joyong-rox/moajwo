@@ -14,6 +14,7 @@ import {
   type IntegrationRun,
 } from './api'
 import { SOURCE_NAMES_DIFFER, sourceText } from './analysisFields'
+import { loadFields } from './mappingText'
 import { Toggle } from './components/tailgrids/core/toggle'
 import PiiNotice from './PiiNotice'
 import { navigate, replaceSearch, useSearch } from './router'
@@ -178,6 +179,13 @@ function Bundle() {
   const [failure, setFailure] = useState<Failure | null>(null)
   const [made, setMade] = useState<{ key: string; run: IntegrationRun } | null>(null)
   const [newField, setNewField] = useState('')
+  const [descriptions, setDescriptions] = useState<Record<string, string>>({}) // 항목 정의 (단위·산식)
+
+  useEffect(() => {
+    loadFields()
+      .then((fs) => setDescriptions(Object.fromEntries(fs.map((f) => [f.key, f.description]))))
+      .catch(() => undefined) // 정의를 못 읽어도 요약은 그대로 고를 수 있다
+  }, [])
 
   const { request, invalid } = buildRequest(files, draft)
   const reqKey = JSON.stringify(request)
@@ -459,7 +467,11 @@ function Bundle() {
                 <div className="bd-add">
                   <label>
                     요약할 항목
-                    <select value={pickedField} onChange={(e) => setNewField(e.target.value)}>
+                    <select
+                      value={pickedField}
+                      onChange={(e) => setNewField(e.target.value)}
+                      aria-describedby={descriptions[pickedField] ? 'bd-field-help' : undefined}
+                    >
                       {addable.map((f) => (
                         <option key={f.key} value={f.key}>
                           {f.label} (확정한 시트 {f.sheets}개)
@@ -477,6 +489,11 @@ function Bundle() {
                     항목 추가
                   </button>
                 </div>
+              )}
+              {addable.length > 0 && draft.items.length < (view?.limits.items ?? 10) && descriptions[pickedField] && (
+                <p id="bd-field-help" className="mw-muted">
+                  항목 정의 — {descriptions[pickedField]}
+                </p>
               )}
             </div>
           )}
@@ -942,6 +959,8 @@ function SummaryItem({
                         {(lk.exclude_reason || lk.reasons.length > 0) && (
                           <span className="bd-reason">{lk.exclude_reason ?? lk.reasons.join('; ')}</span>
                         )}
+                        {/* 합계 항목의 산식 확인 — 불일치는 위 사유에 적힘 (다시 확정하거나 '포함'을 꺼야 계산) */}
+                        {lk.formula && lk.formula.state !== 'mismatch' && <span className="bd-reason">{lk.formula.text}</span>}
                         {(lk.repeated || d.rows_are_records) && (
                           <label className="bd-records">
                             <input

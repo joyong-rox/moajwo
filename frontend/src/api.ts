@@ -1135,6 +1135,16 @@ export type AnalysisTargetIn = {
   unit?: string | null
   period?: string | null
   rows_are_records?: boolean // 같은 대상의 행이 반복될 때 '서로 다른 기록'이라고 확인함
+  exclude?: boolean // 사용자가 계산에서 뺌 — 결과의 '제외'에 남는다
+}
+// 합계 항목(발신건수합계 등)의 산식 확인: 확인됨 · 검증 불가(막지 않음) · 불일치(다시 확정하거나 빼야 계산)
+export type AnalysisFormula = {
+  state: 'verified' | 'unverifiable' | 'mismatch'
+  text: string
+  rows: number
+  checked: number
+  differ: number
+  alternative: string | null
 }
 export type AnalysisBin = {
   label?: string | null
@@ -1190,6 +1200,7 @@ export type AnalysisTarget = {
   data_rows: number
   rows_are_records: boolean
   repeated: AnalysisRepeated | null
+  formula?: AnalysisFormula | null // 합계 항목일 때만 (이 규칙 전에 저장한 결과에는 없음)
 }
 export type AnalysisOverlap = {
   a: { file_id: number; file_name: string; sheet: string | null }
@@ -1461,6 +1472,7 @@ export type BundlePlanLink = BundleSheetRef & {
   period?: string | null
   period_source?: string | null
   period_columns?: string[]
+  formula?: AnalysisFormula | null // 합계 항목일 때 산식 확인 (분석 엔진과 같음)
   rows_are_records?: boolean
   // 같은 시트에서 같은 대상의 행이 반복된 정도 (있으면 '서로 다른 기록'인지 사용자가 확인해야 함)
   repeated?: { keys: number; rows: number; same_value: number; different_value: number } | null

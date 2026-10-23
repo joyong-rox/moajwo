@@ -235,6 +235,7 @@ def test_block_and_warning_codes_are_disjoint() -> None:
         "unit_estimate",
         "header_missing",
         "quantity_not_number",
+        "formula_mismatch",
     }
 
 
