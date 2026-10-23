@@ -1,0 +1,37 @@
+# 진단 전용: 파일 읽기 메모리를 공유 PC에서 돌리지 않는 큰 단계까지 격리 러너(GitHub 호스트, 공개 저장소라 무료)에서 잰다.
+# 대상 커밋 위에 이 파일만 얹은 'ci/memory-budget-*' 브랜치를 올릴 때만 돈다 — main·PR에는 영향이 없다.
+# 합성 자료만 쓰고 외부 서비스로 요청하지 않는다. 결과는 아티팩트(30일)로 남긴다.
+name: memory-budget (diagnostic)
+
+on:
+  push:
+    branches: ["ci/memory-budget-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: install (requirements.txt is resolved for Python 3.11 / linux)
+        run: python -m pip install -r backend/requirements.txt
+      - name: measure (each file in a new process; stop when one step peaks over 1500MiB)
+        run: |
+          mkdir -p out
+          { git rev-parse HEAD; nproc; free -m; } | tee out/host.txt
+          python diagnostics/scripts/memory_budget.py backend out/runner-large.json \
+            --xlsx-mib 2,4,8,16,24,32,48 --csv-mib 5,10,20,40 --text-mib 5,10,20 --stop-mib 1500 | tee out/runner-large.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: memory-budget
+          path: out
+          retention-days: 30
