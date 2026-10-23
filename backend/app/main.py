@@ -1,4 +1,6 @@
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Response, status
@@ -21,12 +23,27 @@ from app import (
     review_api,
     validation_api,
 )
+from app import db as app_db
 from app.auth import current_user
 from app.db import get_session
+from app.recovery import recover_interrupted
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Moajwo", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """기동할 때: 결과를 만드는 도중 멈춘 실행·쓰다 만 임시 결과를 정리한다 (app/recovery.py).
+    DB에 닿지 못해도 기동은 막지 않는다 — 요청은 DB 상태에 따라 따로 답한다."""
+    try:
+        with app_db.SessionLocal() as db:
+            recover_interrupted(db)
+    except SQLAlchemyError as exc:
+        logger.warning("startup recovery skipped: %s", type(exc).__name__)
+    yield
+
+
+app = FastAPI(title="Moajwo", version="0.1.0", lifespan=lifespan)
 # 로그인 없이 열리는 것은 /health 와 로그인 API(/auth/status·setup·login·logout)뿐이다
 app.include_router(auth_api.router)
 LOGIN_REQUIRED = [Depends(current_user)]

@@ -31,3 +31,6 @@ MAX_XLSX_UNCOMPRESSED_MIB = _env_int("MOAJWO_MAX_XLSX_UNCOMPRESSED_MIB", 32)
 MAX_FILE_CELLS = _env_int("MOAJWO_MAX_FILE_CELLS", 800_000)  # 파일 하나의 칸 수 (모든 시트, 빈 칸 포함)
 PARSE_SLOTS = _env_int("MOAJWO_PARSE_SLOTS", 1)  # 동시에 읽는(파싱하는) 파일 수 — 서로 다른 파일도 포함
 PARSE_WAIT_S = _env_int("MOAJWO_PARSE_WAIT_S", 60)  # 읽기 차례를 기다리는 최대 시간 (초)
+# 결과 파일(묶기·통합 Excel) 하나에 넣는 칸 수 — 결과는 메모리에 다 만든 뒤 저장한다 (칸 1천 개당 약 0.45MiB,
+# docs/MEMORY.md). 넘으면 실행 기록을 만들기 전에 거절한다. Render(512MiB) 권장 300,000
+MAX_OUTPUT_CELLS = _env_int("MOAJWO_MAX_OUTPUT_CELLS", 1_000_000)
