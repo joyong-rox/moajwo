@@ -1,0 +1,26 @@
+# 진단 전용: 배포 이미지를 격리 러너(GitHub 호스트, 공개 저장소라 무료)에서 만들고 실행해 본다.
+# 대상 커밋 위에 이 파일만 얹은 'ci/image-check-*' 브랜치를 올릴 때만 돈다 — main·PR에는 영향이 없다.
+# 운영·Render 서비스로 요청하지 않고, 비밀 값을 쓰지 않는다. 결과는 아티팩트(30일)로 남긴다.
+name: image-check (diagnostic)
+
+on:
+  push:
+    branches: ["ci/image-check-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: build, run and scan the images
+        run: bash diagnostics/ci/image_check.sh out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: image-check
+          path: out
+          retention-days: 30
