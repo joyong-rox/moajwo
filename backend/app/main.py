@@ -1,4 +1,6 @@
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Request, Response, status
@@ -25,9 +27,11 @@ from app import (
     review_api,
     validation_api,
 )
+from app import db as app_db
 from app.auth import current_user
 from app.config import API_DOCS
 from app.db import db_failure, get_session
+from app.recovery import recover_interrupted
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +50,19 @@ class QueryValueMask(logging.Filter):
 
 logging.getLogger("uvicorn.access").addFilter(QueryValueMask())
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    """기동할 때: 결과를 만드는 도중 멈춘 실행·쓰다 만 임시 결과를 정리한다 (app/recovery.py).
+    DB에 닿지 못해도 기동은 막지 않는다 — 요청은 DB 상태에 따라 따로 답한다."""
+    try:
+        with app_db.SessionLocal() as db:
+            recover_interrupted(db)
+    except SQLAlchemyError as exc:
+        logger.warning("startup recovery skipped: %s", type(exc).__name__)
+    yield
+
+
 app = FastAPI(
     title="Moajwo",
     version="0.1.0",
@@ -53,6 +70,7 @@ app = FastAPI(
     docs_url="/docs" if API_DOCS else None,
     redoc_url="/redoc" if API_DOCS else None,
     openapi_url="/openapi.json" if API_DOCS else None,
+    lifespan=lifespan,
 )
 
 
