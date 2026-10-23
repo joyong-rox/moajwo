@@ -7,14 +7,12 @@
 
 import io
 import json
-import sqlite3
 from typing import Any
 
 import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import DATA_DIR
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_analysis import _body, _db, _file, _preview, _run, _upload, _xlsx
 from tests.test_auth import _client, app_real_login  # noqa: F401
@@ -93,9 +91,8 @@ def test_results_saved_before_the_list_show_columns_from_their_inputs(sc: TestCl
     r = _run(c, _count_body([fid]))
     cond = json.loads(_db("SELECT conditions FROM analysis_runs WHERE id = ?", r["id"])[0][0])
     del cond["source_columns"]  # 이 목록을 저장하기 전에 만든 결과처럼
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        stored = json.dumps(cond, ensure_ascii=False)
-        con.execute("UPDATE analysis_runs SET conditions = ? WHERE id = ?", (stored, r["id"]))
+    stored = json.dumps(cond, ensure_ascii=False)
+    _db("UPDATE analysis_runs SET conditions = ? WHERE id = ?", stored, r["id"])  # 앱과 같은 DB (SQLite·PostgreSQL)
     sheet = {row[0]: row[1] for row in _sheet(c.get(f"/analysis/runs/{r['id']}/download").content, "조건") if row[0]}
     assert sheet["원본 열 (계산한 지표)"] == "발신Mail건수 (시트 1개)"
     shown = c.get(f"/analysis/runs/{r['id']}").json()["conditions"]["source_columns"]  # 화면도 같은 규칙
