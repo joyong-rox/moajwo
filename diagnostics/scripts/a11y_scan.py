@@ -85,7 +85,7 @@ STATES = [
     ("automation-confirm", "user1", "/automations", "open_delete_confirm", "자동화 삭제 확인창"),
     ("bundle", "user1", f"/bundle?files={U1['basic']},{U1['many']}", None, "파일별 묶기(파일 2개 선택)"),
     ("bundle-multisheet", "user1", f"/bundle?files={U1['multi']}", None, "파일별 묶기 — 여러 시트 파일(시트 선택 필요)"),
-    ("analysis-new", "user1", "/analysis", None, "데이터 분석 — 새 분석"),
+    ("analysis-new", "user1", "/analysis", None, "데이터 통계 분석 — 새 분석"),
     ("analysis-loading", "user1", f"/analysis?id={IDS['user1_analysis_many']}", "hold_analysis", "분석 결과 — 불러오는 중"),
     ("analysis-detail", "user1", f"/analysis?id={IDS['user1_analysis_many']}", None, "분석 결과 — 여러 쪽(120그룹)"),
     ("analysis-bins", "user1", f"/analysis?id={IDS['user1_analysis']}", None, "분석 결과 — 구간 분류"),

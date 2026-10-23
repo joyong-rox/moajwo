@@ -509,6 +509,15 @@ export type IntegrationRun = {
     mode?: 'sheets' // 파일별 시트로 묶기 (없으면 하나의 통합표)
     stats_summary?: boolean
     sheet_order?: string[]
+    // 통계 요약 항목 (파일별 시트 + 요약). source_columns는 이 목록이 생긴 뒤에 만든 실행에만 있다
+    summary_items?: {
+      field_key: string
+      field_label: string
+      source_columns?: SourceColumn[]
+      unit: string | null
+      periods: string[] | null
+      coverage: { included: number; total: number; text: string }
+    }[]
   }
   error: string | null
   created_at: string
@@ -1126,6 +1135,16 @@ export type AnalysisTargetIn = {
   unit?: string | null
   period?: string | null
   rows_are_records?: boolean // 같은 대상의 행이 반복될 때 '서로 다른 기록'이라고 확인함
+  exclude?: boolean // 사용자가 계산에서 뺌 — 결과의 '제외'에 남는다
+}
+// 합계 항목(발신건수합계 등)의 산식 확인: 확인됨 · 검증 불가(막지 않음) · 불일치(다시 확정하거나 빼야 계산)
+export type AnalysisFormula = {
+  state: 'verified' | 'unverifiable' | 'mismatch'
+  text: string
+  rows: number
+  checked: number
+  differ: number
+  alternative: string | null
 }
 export type AnalysisBin = {
   label?: string | null
@@ -1181,6 +1200,7 @@ export type AnalysisTarget = {
   data_rows: number
   rows_are_records: boolean
   repeated: AnalysisRepeated | null
+  formula?: AnalysisFormula | null // 합계 항목일 때만 (이 규칙 전에 저장한 결과에는 없음)
 }
 export type AnalysisOverlap = {
   a: { file_id: number; file_name: string; sheet: string | null }
@@ -1195,6 +1215,10 @@ export type AnalysisOverlap = {
     b: { row: number; value: number | string | null }
   }[]
 }
+/** 계산한 원본 열 (가린 이름). 표준 항목 이름('건수')만으로는 어느 지표('발신Mail건수')를 계산했는지 알 수 없어 함께 보인다.
+ * 가린 뒤 같아진 서로 다른 이름에는 서버가 '(가림 구분 n)'을 붙여 보낸다. */
+export type SourceColumn = { column: string; sheets: number; files: number[] }
+
 export type AnalysisPreview = {
   field_key: string
   field_label: string
@@ -1203,6 +1227,7 @@ export type AnalysisPreview = {
   variants: string[]
   unit: string | null
   units: string[]
+  source_columns: SourceColumn[]
   targets: AnalysisTarget[]
   problems: string[]
   warnings: string[]
@@ -1264,6 +1289,7 @@ export type AnalysisRunDetail = {
     level_conflicts?: AnalysisPreview['region_levels']['conflicts']
     base_dates?: Record<string, string>
     records?: string[]
+    source_columns: SourceColumn[] // 서버가 채움 (이 목록이 생기기 전 결과는 저장된 입력의 열로)
   }
   inputs: (AnalysisTarget & { sha256: string })[]
   result: {
@@ -1369,6 +1395,7 @@ export type AnalysisRunSummary = {
   groups: number
   rows_included: number
   files: number
+  source_columns?: string[] // 이 목록이 생긴 뒤에 만든 결과에만 있음
 }
 
 export async function fetchAnalysisRuns(): Promise<AnalysisRunSummary[]> {
@@ -1445,6 +1472,7 @@ export type BundlePlanLink = BundleSheetRef & {
   period?: string | null
   period_source?: string | null
   period_columns?: string[]
+  formula?: AnalysisFormula | null // 합계 항목일 때 산식 확인 (분석 엔진과 같음)
   rows_are_records?: boolean
   // 같은 시트에서 같은 대상의 행이 반복된 정도 (있으면 '서로 다른 기록'인지 사용자가 확인해야 함)
   repeated?: { keys: number; rows: number; same_value: number; different_value: number } | null
@@ -1470,6 +1498,7 @@ export type BundlePlanItem = {
   region_levels: { choice: 'lower' | 'upper' | null; mismatch: number; conflicts: BundleLevelConflict[] } | null
   unit: string | null
   periods: string[]
+  source_columns: SourceColumn[] // 지금 계산에 들어가는 시트의 원본 열
   links: BundlePlanLink[]
   coverage: { included: number; total: number; text: string }
   rows: { candidate: number; excluded: Record<string, number> } | null

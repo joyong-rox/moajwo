@@ -7,6 +7,7 @@ import {
   fetchAnalysisRun,
   fetchAnalysisRuns,
   fetchAnalysisSources,
+  listFiles,
   previewAnalysis,
   runAnalysis,
   type AggKey,
@@ -23,6 +24,7 @@ import {
   type AnalysisTargetIn,
   type RegionLevel,
 } from './api'
+import { SOURCE_NAMES_DIFFER, sourceText } from './analysisFields'
 import { loadFields } from './mappingText'
 import { navigate } from './router'
 import { formatTime } from './runFormat'
@@ -82,7 +84,7 @@ type BinDraft = { label: string; min: string; max: string; minIn: boolean; maxIn
 const targetKey = (t: { file_id: number; sheet_id: string | null }) => `${t.file_id}:${t.sheet_id ?? ''}`
 const toNum = (s: string) => (s.trim() === '' ? null : Number(s))
 
-/** 데이터 분석: 주소에 id가 있으면 저장된 결과, 없으면 새 분석 만들기 */
+/** 데이터 통계 분석: 주소에 id가 있으면 저장된 결과, 없으면 새 분석 만들기 */
 function Analysis() {
   const search = useSearch()
   const q = new URLSearchParams(search)
@@ -107,6 +109,7 @@ function binOverlap(a: BinDraft, b: BinDraft): boolean {
 function AnalysisBuilder({ initialField, initialFiles }: { initialField: string; initialFiles: number[] }) {
   const [fields, setFields] = useState<AnalysisField[] | null>(null)
   const [labels, setLabels] = useState<Record<string, string>>({ period: '기간' })
+  const [descriptions, setDescriptions] = useState<Record<string, string>>({}) // 항목 정의 (단위·산식)
   const [field, setField] = useState(initialField)
   const [sources, setSources] = useState<AnalysisSource[] | null>(null)
   const [chosen, setChosen] = useState<Set<number>>(() => new Set(initialFiles))
@@ -136,13 +139,24 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
   const [busy, setBusy] = useState<'preview' | 'run' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [problems, setProblems] = useState<string[]>([])
+  const [passedNames, setPassedNames] = useState<Record<number, string>>({})
+
+  useEffect(() => {
+    if (initialFiles.length === 0) return
+    listFiles()
+      .then((fs) => setPassedNames(Object.fromEntries(fs.map((x) => [x.id, x.display_name]))))
+      .catch(() => undefined) // 이름을 못 읽어도 번호로 보인다
+  }, [initialFiles.length])
 
   useEffect(() => {
     fetchAnalysisFields()
       .then(setFields)
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
     loadFields()
-      .then((fs) => setLabels(Object.fromEntries([['period', '기간'], ...fs.map((f) => [f.key, f.label])])))
+      .then((fs) => {
+        setLabels(Object.fromEntries([['period', '기간'], ...fs.map((f) => [f.key, f.label])]))
+        setDescriptions(Object.fromEntries(fs.map((f) => [f.key, f.description])))
+      })
       .catch(() => undefined)
   }, [])
 
@@ -185,21 +199,23 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
   }, [bins, useBins])
 
   function request(): AnalysisRequest {
+    // 체크를 끈 자료도 보낸다 — 서버가 결과의 '제외'에 '사용자가 계산에서 뺌'으로 남기고, 목록에서 다시 넣을 수 있게 둔다
     const targets: AnalysisTargetIn[] = preview
-      ? preview.targets
-          .filter((t) => settings[targetKey(t)]?.include ?? true)
-          .map((t) => {
-            if (t.sheet_id === null) return { file_id: t.file_id }
-            const s = settings[targetKey(t)]
-            return {
-              file_id: t.file_id,
-              sheet_id: t.sheet_id,
-              column_id: s?.column || null,
-              unit: s?.unit.trim() || null,
-              period: s?.period.trim() || null,
-              rows_are_records: s?.records ?? false,
-            }
-          })
+      ? preview.targets.map((t) => {
+          if (!(settings[targetKey(t)]?.include ?? true)) {
+            return t.sheet_id === null ? { file_id: t.file_id, exclude: true } : { file_id: t.file_id, sheet_id: t.sheet_id, exclude: true }
+          }
+          if (t.sheet_id === null) return { file_id: t.file_id }
+          const s = settings[targetKey(t)]
+          return {
+            file_id: t.file_id,
+            sheet_id: t.sheet_id,
+            column_id: s?.column || null,
+            unit: s?.unit.trim() || null,
+            period: s?.period.trim() || null,
+            rows_are_records: s?.records ?? false,
+          }
+        })
       : [...chosen].map((file_id) => ({ file_id }))
     return {
       field_key: field,
@@ -332,17 +348,23 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
   }
 
   return (
-    <section className="an" aria-label="데이터 분석">
+    <section className="an" aria-label="데이터 통계 분석">
       <p className="mw-muted">
-        사용자가 확정한 열로 합계·평균·최솟값·최댓값·유효 숫자 개수를 구합니다. 화면을 열거나 대상을 확인해도 다시
-        분석하거나 매핑을 바꾸지 않고, 모델을 부르지 않습니다. 계산은 '분석 실행'을 눌렀을 때만 합니다.
+        사용자가 확정한 수량 열로 합계·평균·최솟값·최댓값·유효 숫자 개수를 구합니다. 열 이름을 표준 항목에 연결하는
+        &lsquo;열 매핑 분석&rsquo;과 다른 화면입니다. 화면을 열거나 대상을 확인해도 다시 분석하거나 매핑을 바꾸지 않고,
+        모델을 부르지 않습니다. 계산은 &lsquo;통계 분석 실행&rsquo;을 눌렀을 때만 합니다.
       </p>
 
       <fieldset className="an-step">
         <legend>1. 분석할 항목과 자료</legend>
         <label className="an-field">
           분석할 항목 (사용자가 확정한 수량 항목)
-          <select value={field} onChange={(e) => pickField(e.target.value)} aria-label="분석할 항목">
+          <select
+            value={field}
+            onChange={(e) => pickField(e.target.value)}
+            aria-label="분석할 항목"
+            aria-describedby={field && descriptions[field] ? 'an-field-help' : undefined}
+          >
             <option value="">— 항목 고르기 —</option>
             {(fields ?? []).map((f) => (
               <option key={f.key} value={f.key}>
@@ -354,8 +376,20 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
             )}
           </select>
         </label>
+        {field && descriptions[field] && (
+          <p id="an-field-help" className="mw-muted">
+            항목 정의 — {descriptions[field]}
+          </p>
+        )}
         {fields?.length === 0 && (
           <p className="mw-muted">확정한 수량 항목이 없습니다. 열 매핑 화면에서 열을 먼저 확정하세요.</p>
+        )}
+        {!field && initialFiles.length > 0 && (
+          <p className="mw-muted" role="note">
+            넘겨받은 파일 {initialFiles.length}개:{' '}
+            {initialFiles.map((id) => `#${id}${passedNames[id] ? ` ${passedNames[id]}` : ''}`).join(', ')} — 분석할 항목을
+            고르면 그 항목으로 확정한 열이 있는 파일만 계산에 쓸 수 있습니다.
+          </p>
         )}
         {/* 자료 목록 불러오기 상태: 영역은 처음부터 두고 내용만 바꾼다 (화면에는 불러오는 동안만 보임) */}
         <p role="status" className={field && sources === null && !error ? 'mw-muted' : 'sr-only'}>
@@ -442,11 +476,13 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
             <legend>2. 대상·단위·기간 확인</legend>
             <p className="mw-muted">
               {preview.field_label}
+              {preview.source_columns.length > 0 && ` — 원본 열 ${sourceText(preview.source_columns)} ·`}
               {preview.stock &&
                 ' — 시점 값 항목이라 기간끼리 더하지 않습니다 (기간이 여럿이면 기간별로 나눔).'} 단위{' '}
               {preview.unit ?? '확인 필요'} · 기간 {preview.periods.join(', ') || '확인 필요'} · 계산에 들어갈 행{' '}
               {preview.rows.candidate.toLocaleString('ko-KR')}
             </p>
+            {preview.source_columns.length > 1 && <p className="mapping-warn">{SOURCE_NAMES_DIFFER}</p>}
             {preview.problems.length > 0 && (
               <div className="an-problems" role="alert">
                 <strong>실행 전에 해결할 문제</strong>
@@ -657,6 +693,10 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                               {r}
                             </span>
                           ))}
+                          {/* 불일치는 위 사유에 이미 적힘 — 확인됨·검증 불가만 따로 (검증 불가는 '검증 완료'가 아님) */}
+                          {t.formula && t.formula.state !== 'mismatch' && (
+                            <span className="mw-muted mw-block">{t.formula.text}</span>
+                          )}
                         </td>
                       </tr>
                     )
@@ -895,7 +935,8 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
             {dirty && <p className="mapping-warn">조건을 바꿨습니다 — '다시 확인'을 누른 뒤 실행할 수 있습니다.</p>}
             {waiting.length > 0 && (
               <p className="mapping-warn">
-                확인이 필요한 자료 {waiting.length}개 — 단위·기간·열을 적고 다시 확인하거나 '사용'을 해제하세요.
+                확인이 필요한 자료 {waiting.length}개 — 단위·기간·열을 적고(산식이 다른 합계는 열 매핑에서 다시 확정하고)
+                다시 확인하거나 '사용'을 해제하세요.
               </p>
             )}
             <div className="admin-actions">
@@ -905,7 +946,7 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                 disabled={!canRun || busy !== null}
                 onClick={() => void run()}
               >
-                {busy === 'run' ? '계산 중… (선택한 전체 행)' : '분석 실행'}
+                {busy === 'run' ? '계산 중… (선택한 전체 행)' : '통계 분석 실행'}
               </button>
               <button type="button" className="mapping-confirm" disabled={busy !== null} onClick={() => void check()}>
                 다시 확인
@@ -942,7 +983,7 @@ function PastRuns() {
   if (!runs || runs.length === 0) return null
   return (
     <details className="an-past">
-      <summary data-focus-key="analysis-past">내 분석 결과 ({runs.length})</summary>
+      <summary data-focus-key="analysis-past">내 통계 분석 결과 ({runs.length})</summary>
       <ul>
         {runs.map((r) => (
           <li key={r.id}>
@@ -954,6 +995,7 @@ function PastRuns() {
               }}
             >
               #{r.id} {r.field_label}
+              {r.source_columns?.length ? ` (원본 열 ${r.source_columns.join(', ')})` : ''}
             </a>{' '}
             <span className="mw-muted">
               {formatTime(r.created_at)} · {r.partial ? '부분 집계' : '전체 집계'}
@@ -1090,12 +1132,12 @@ function AnalysisResult({ id }: { id: number }) {
   const loadMessage = error
     ? ''
     : !detail
-      ? '분석 결과를 불러오는 중…'
+      ? '통계 분석 결과를 불러오는 중…'
       : tablesFailed.length
-        ? `분석 결과 #${detail.id}의 조건·요약을 불러왔습니다. ${tablesFailed.join('·')} 표를 불러오지 못했습니다.`
+        ? `통계 분석 결과 #${detail.id}의 조건·요약을 불러왔습니다. ${tablesFailed.join('·')} 표를 불러오지 못했습니다.`
         : tablesWaiting
-          ? `분석 결과 #${detail.id}의 조건·요약을 불러왔습니다. 결과·제외·근거 표를 불러오는 중…`
-          : `분석 결과 #${detail.id}을(를) 불러왔습니다 (조건·요약, 결과·제외·근거 표).`
+          ? `통계 분석 결과 #${detail.id}의 조건·요약을 불러왔습니다. 결과·제외·근거 표를 불러오는 중…`
+          : `통계 분석 결과 #${detail.id}을(를) 불러왔습니다 (조건·요약, 결과·제외·근거 표).`
   const loadStatus = (
     <p role="status" className={!detail && !error ? 'mw-muted' : 'sr-only'}>
       {loadMessage}
@@ -1105,7 +1147,7 @@ function AnalysisResult({ id }: { id: number }) {
     return (
       <>
         {loadStatus}
-        <section className="an" aria-label="분석 결과">
+        <section className="an" aria-label="통계 분석 결과">
           <p className="upload-error" role="alert">
             {error}
           </p>
@@ -1124,9 +1166,9 @@ function AnalysisResult({ id }: { id: number }) {
   return (
     <>
       {loadStatus}
-      <section className="an" aria-label="분석 결과">
+      <section className="an" aria-label="통계 분석 결과">
       <h2>
-        분석 결과 #{detail.id}{' '}
+        통계 분석 결과 #{detail.id}{' '}
         <span className={`upload-tag ${r.partial || r.level_mismatch ? 'an-status-needs_input' : 'an-status-ok'}`}>
           {r.partial ? '부분 집계' : r.level_mismatch ? '선택한 지역 수준 집계' : '전체 집계'}
         </span>
@@ -1143,10 +1185,15 @@ function AnalysisResult({ id }: { id: number }) {
         </p>
       )}
       <dl className="an-conditions">
-        <dt>분석 항목</dt>
+        <dt>분석 항목 (표준 항목)</dt>
         <dd>
           {c.field_label}
           {c.variant ? ` (구분: ${c.variant})` : ''} · 단위 {c.unit ?? '-'}
+        </dd>
+        <dt>원본 열 (계산한 지표)</dt>
+        <dd>
+          {sourceText(c.source_columns) || '-'}
+          {c.source_columns.length > 1 && <span className="mw-muted mw-block">{SOURCE_NAMES_DIFFER}</span>}
         </dd>
         <dt>기간</dt>
         <dd>
@@ -1239,7 +1286,7 @@ function AnalysisResult({ id }: { id: number }) {
             navigate('/analysis', { clearSearch: true, focus: { to: 'return' } }) // 보던 결과(?id=)를 닫고 새 분석으로 — 연 줄(없으면 화면 제목)로 초점
           }}
         >
-          새 분석
+          새 통계 분석
         </a>
       </div>
 
@@ -1414,6 +1461,9 @@ function AnalysisResult({ id }: { id: number }) {
                       {x}
                     </span>
                   ))}
+                  {t.formula && t.formula.state !== 'mismatch' && (
+                    <span className="mw-muted mw-block">{t.formula.text}</span>
+                  )}
                 </td>
               </tr>
             ))}

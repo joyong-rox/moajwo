@@ -13,6 +13,8 @@ import {
   type BundleRequest,
   type IntegrationRun,
 } from './api'
+import { SOURCE_NAMES_DIFFER, sourceText } from './analysisFields'
+import { loadFields } from './mappingText'
 import { Toggle } from './components/tailgrids/core/toggle'
 import PiiNotice from './PiiNotice'
 import { navigate, replaceSearch, useSearch } from './router'
@@ -177,6 +179,13 @@ function Bundle() {
   const [failure, setFailure] = useState<Failure | null>(null)
   const [made, setMade] = useState<{ key: string; run: IntegrationRun } | null>(null)
   const [newField, setNewField] = useState('')
+  const [descriptions, setDescriptions] = useState<Record<string, string>>({}) // 항목 정의 (단위·산식)
+
+  useEffect(() => {
+    loadFields()
+      .then((fs) => setDescriptions(Object.fromEntries(fs.map((f) => [f.key, f.description]))))
+      .catch(() => undefined) // 정의를 못 읽어도 요약은 그대로 고를 수 있다
+  }, [])
 
   const { request, invalid } = buildRequest(files, draft)
   const reqKey = JSON.stringify(request)
@@ -430,9 +439,9 @@ function Bundle() {
             <div className="bd-summary">
               <p className="mw-muted">
                 사용자가 열 매핑에서 확정한 표준 항목으로 연결합니다 (열 위치·이름이 아니라 확정한 뜻으로, &lsquo;자동 제안&rsquo;은 쓰지
-                않음). 계산은 데이터 분석과 같은 규칙입니다 — 평균은 유효한 숫자의 합 ÷ 개수, 빈칸은 0이 아니라 뺍니다. 요약은 만든
+                않음). 계산은 데이터 통계 분석과 같은 규칙입니다 — 평균은 유효한 숫자의 합 ÷ 개수, 빈칸은 0이 아니라 뺍니다. 요약은 만든
                 때의 값이며 자동으로 다시 계산되지 않습니다. 한 항목에 시트 {view?.limits.summary_sheets ?? 20}개까지 계산합니다
-                (데이터 분석과 같은 한도).
+                (데이터 통계 분석과 같은 한도).
               </p>
               {draft.items.map((it, index) => (
                 <SummaryItem
@@ -458,7 +467,11 @@ function Bundle() {
                 <div className="bd-add">
                   <label>
                     요약할 항목
-                    <select value={pickedField} onChange={(e) => setNewField(e.target.value)}>
+                    <select
+                      value={pickedField}
+                      onChange={(e) => setNewField(e.target.value)}
+                      aria-describedby={descriptions[pickedField] ? 'bd-field-help' : undefined}
+                    >
                       {addable.map((f) => (
                         <option key={f.key} value={f.key}>
                           {f.label} (확정한 시트 {f.sheets}개)
@@ -476,6 +489,11 @@ function Bundle() {
                     항목 추가
                   </button>
                 </div>
+              )}
+              {addable.length > 0 && draft.items.length < (view?.limits.items ?? 10) && descriptions[pickedField] && (
+                <p id="bd-field-help" className="mw-muted">
+                  항목 정의 — {descriptions[pickedField]}
+                </p>
               )}
             </div>
           )}
@@ -561,7 +579,14 @@ function Bundle() {
                         <strong>{view.summary.sheet_name}</strong> <span className="mw-muted">(항상 마지막)</span>
                       </p>
                       <p className="mw-muted">
-                        항목 {view.summary.items.map((i) => `${i.field_label}(${i.aggregate_labels.join('·')}, ${i.coverage.text})`).join(' · ')} — 만든
+                        항목{' '}
+                        {view.summary.items
+                          .map(
+                            (i) =>
+                              `${i.field_label}${i.source_columns.length ? ` — 원본 열 ${i.source_columns.map((c) => c.column).join(', ')}` : ''} (${i.aggregate_labels.join('·')}, ${i.coverage.text})`,
+                          )
+                          .join(' · ')}{' '}
+                        — 만든
                         때의 값, 자동으로 다시 계산되지 않음
                       </p>
                     </div>
@@ -694,6 +719,7 @@ function SummaryItem({
     <div className={`bd-item${out && !out.ready ? ' needs-fix' : ''}`}>
       <div className="bd-item-head">
         <strong>{label}</strong>
+        {out && out.source_columns.length > 0 && <span className="mw-muted">원본 열 {sourceText(out.source_columns)}</span>}
         {out && <span className={`upload-tag ${out.ready ? 'mapping-confirmed' : 'mapping-review'}`}>{out.coverage.text}</span>}
         {checking && <span className="mw-muted">확인 중…</span>}
         {out?.unit && <span className="mw-muted">단위 {out.unit}</span>}
@@ -707,6 +733,7 @@ function SummaryItem({
           항목 빼기
         </button>
       </div>
+      {out && out.source_columns.length > 1 && <p className="mapping-warn">{SOURCE_NAMES_DIFFER}</p>}
       <div className="bd-aggs" role="group" aria-label={`${label} 계산 방식`}>
         {AGGS.map((a) => {
           const on = draft.aggregates.includes(a.key)
@@ -932,6 +959,8 @@ function SummaryItem({
                         {(lk.exclude_reason || lk.reasons.length > 0) && (
                           <span className="bd-reason">{lk.exclude_reason ?? lk.reasons.join('; ')}</span>
                         )}
+                        {/* 합계 항목의 산식 확인 — 불일치는 위 사유에 적힘 (다시 확정하거나 '포함'을 꺼야 계산) */}
+                        {lk.formula && lk.formula.state !== 'mismatch' && <span className="bd-reason">{lk.formula.text}</span>}
                         {(lk.repeated || d.rows_are_records) && (
                           <label className="bd-records">
                             <input
