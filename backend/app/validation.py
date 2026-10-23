@@ -48,8 +48,17 @@ WARNING_LABEL: dict[str, str] = {
 # 합산하면 안 되는 항목 (비율·연월·코드·연락처)
 NON_ADDITIVE_FIELDS = frozenset(
     {
-        "execution_rate", "ratio", "change_rate", "year", "month", "base_date", "region_code",
-        "org_code", "organization_code", "organization_name", "phone",
+        "execution_rate",
+        "ratio",
+        "change_rate",
+        "year",
+        "month",
+        "base_date",
+        "region_code",
+        "org_code",
+        "organization_code",
+        "organization_name",
+        "phone",
     }
 )
 _RATE_NAME = re.compile(r"(률|율|%|비율|비중|구성비|평균|지수)")
