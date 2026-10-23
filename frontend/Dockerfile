@@ -5,7 +5,12 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM nginx:1.29-alpine
+FROM nginx:1.30-alpine
+# 비루트(이미지의 nginx 사용자, uid 101)로 실행한다: 1024 아래 포트를 쓰지 않고(8080), pid·임시 파일은 nginx가 쓸 수 있는
+# 곳에 둔다. 'user' 지시어는 root로 시작할 때만 뜻이 있어 지운다. 기반 이미지의 시작 스크립트는 비루트에서도 그대로 돈다
+# (설정 파일을 고치지 못하면 건너뜀).
+RUN sed -i -e '/^user /d' -e 's,^pid .*;,pid /tmp/nginx.pid;,' /etc/nginx/nginx.conf     && chown -R nginx:nginx /var/cache/nginx
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
-EXPOSE 80
+USER nginx
+EXPOSE 8080

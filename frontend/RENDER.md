@@ -14,6 +14,11 @@ After merging this change into main, set the existing Render service to:
 | Dockerfile Path | frontend/Dockerfile.render |
 | Docker Command | empty (remove the entire previous command) |
 
+The image runs nginx as the non-root `nginx` user (uid 101) and listens on
+port 8080 inside the container (it used to listen on 80 as root). Render
+detects the open port; if it does not, add the environment variable
+`PORT=8080` to the service. The public URL does not change.
+
 Save these settings, then deploy the latest commit. Do not use Restart service
 to apply newly saved configuration. The image uses nginx's exec-form CMD;
 no shell command or startup-time sed substitution is needed.
