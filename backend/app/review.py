@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.auth import MANAGERS
@@ -800,6 +800,20 @@ def complete(db: Session, session: ReviewSession, learn_names: bool = True) -> d
     summary = summarize(session, items, recheck_reasons(db, session))
     if not summary.can_complete:
         raise ReviewError(summary.summary)
+    # 같은 검토를 두 번 완료하지 않는다: 아직 '검토 중'일 때만 바꾸는 조건부 갱신으로 먼저 차지한다.
+    # 화면에서 빠르게 두 번 눌러 거의 동시에 온 두 번째 요청(앞 요청이 끝나기 전에 '검토 중'을 읽음)은 0행이 되어
+    # 거절된다 — 아래 학습도 한 번만 한다.
+    completed_at = datetime.now(UTC)
+    claimed = db.execute(
+        update(ReviewSession)
+        .where(ReviewSession.id == session.id, ReviewSession.status == "in_review")
+        .values(status="ready", completed_at=completed_at)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if claimed != 1:
+        db.rollback()
+        raise ReviewError("이미 검토가 끝난 세션입니다.")
+    session.status, session.completed_at = "ready", completed_at  # 위 갱신과 같은 값을 이 객체에도
     learned = {"columns": 0, "names": 0, "names_skipped": 0}
     if session.remember_format:
         engine = get_engine()
@@ -832,8 +846,6 @@ def complete(db: Session, session: ReviewSession, learn_names: bool = True) -> d
                     )
                     db.flush()
                     learned["names"] += 1
-    session.status = "ready"
-    session.completed_at = datetime.now(UTC)
     db.commit()
     return learned
 

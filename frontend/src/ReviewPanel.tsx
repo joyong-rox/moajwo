@@ -22,6 +22,9 @@ import { REVIEW_STAGES } from './progressStages'
 import { Banner, NavLink, StatusCards, WorkflowSteps, type Step } from './Workflow'
 
 const RECHECK_LABEL = '다시 검사 — 결정 이어받기'
+// 검토 전체에 대한 요청(완료·다시 검사·형식 기억하기)이 진행 중 — 항목 번호와 겹치지 않는 값.
+// 요청이 끝날 때까지 버튼을 막아, 빠르게 두 번 눌러도 요청이 두 번 가지 않게 한다.
+const PANEL_BUSY = -1
 
 const KIND_LABEL: Record<string, string> = {
   mapping: '열 매핑',
@@ -115,7 +118,7 @@ function ReviewPanel({
     setLoading(true)
     setMessage(null)
     const changed = Object.fromEntries(Object.entries(replace).filter(([from, to]) => Number(from) !== to))
-    const ok = await run(null, () => recheckReview(current.id, changed))
+    const ok = await run(PANEL_BUSY, () => recheckReview(current.id, changed))
     if (ok) setReplace({})
     setLoading(false)
     listFiles()
@@ -156,7 +159,7 @@ function ReviewPanel({
   }
 
   const complete = (current: Review) =>
-    void run(null, async () => {
+    void run(PANEL_BUSY, async () => {
       const done = await completeReview(current.id)
       const learned = done.learned
       const skipped = learned?.names_skipped
@@ -261,7 +264,7 @@ function ReviewPanel({
                   const previous = review
                   // 바로 체크 표시를 바꾸고 저장한다. 저장에 실패하면 원래대로 되돌린다.
                   setReview({ ...review, remember_format: e.target.checked })
-                  void run(null, () => setRememberFormat(review.id, e.target.checked)).then((saved) => {
+                  void run(PANEL_BUSY, () => setRememberFormat(review.id, e.target.checked)).then((saved) => {
                     if (!saved) setReview(previous)
                   })
                 }}
