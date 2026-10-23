@@ -3,12 +3,13 @@
 
 - 자료: xlsx(풀었을 때 크기 단계별), csv(파일 크기 단계별). 숫자·짧은 글자·날짜가 섞인 통계표 모양.
   text: 한 칸에 긴 글(2,000자)이 든 CSV (파일 크기 단계별) — 칸 수는 적어도 글자가 메모리를 쓰는 경우.
+  xls: 옛 Excel(BIFF) 파일 크기 단계별 — 만들 때 xlwt가 필요하다 (측정용으로만 설치, 앱 의존성 아님). 시트당 6만 행.
 - 읽기: backend의 app.parsing.parse_file 그대로 (한도는 환경 변수로 넉넉히 풀어 측정 — 거절 경계는 따로 적음).
 - 중단 기준: --stop-mib (기본 1200) — 한 단계의 최대 메모리가 이 값을 넘으면 더 큰 단계를 돌리지 않는다.
   공유 PC에서는 guarded_run.py 아래에서 작은 단계만 돌리고, 큰 단계는 격리 러너(GitHub Actions)에서 돌린다.
 - 결과에는 원문 값이 없다 (합성 자료).
 사용법: python memory_budget.py <backend 폴더> <출력 JSON> [--xlsx-mib 4,8,16] [--csv-mib 5,10] [--text-mib 5]
-        [--stop-mib 1200]
+        [--xls-mib 5] [--stop-mib 1200]
 """
 
 import argparse
@@ -105,6 +106,27 @@ def make_text_csv(path: Path, target_mib: float) -> tuple[int, int]:
     return rows, rows * 3
 
 
+def make_xls(path: Path, target_mib: float) -> tuple[int, int]:
+    import xlwt  # 측정용 (requirements에 없음)
+
+    def write(rows: int) -> None:
+        wb = xlwt.Workbook()
+        for start in range(0, max(rows, 1), 60000):
+            ws = wb.add_sheet(f"시트{start // 60000 + 1}")
+            for c, name in enumerate(COLUMNS):
+                ws.write(0, c, name)
+            for r, i in enumerate(range(start, min(start + 60000, rows)), start=1):
+                for c, value in enumerate(_row(i)):
+                    ws.write(r, c, value)
+        wb.save(str(path))
+
+    write(2000)
+    per_row = path.stat().st_size / 2000
+    rows = max(1, int(target_mib * 2**20 / per_row))
+    write(rows)
+    return rows, rows * len(COLUMNS)
+
+
 def _unpacked(path: Path) -> int:
     with zipfile.ZipFile(path) as z:
         return sum(i.file_size for i in z.infolist())
@@ -129,15 +151,16 @@ def main() -> None:
     ap.add_argument("--xlsx-mib", default="4,8,16")
     ap.add_argument("--csv-mib", default="5,10")
     ap.add_argument("--text-mib", default="")
+    ap.add_argument("--xls-mib", default="")
     ap.add_argument("--stop-mib", type=float, default=1200)
     a = ap.parse_args()
     results = {"host": {"platform": platform.platform(), "python": sys.version.split()[0], "cpus": os.cpu_count()},
                "stop_mib": a.stop_mib, "cases": []}  # fmt: skip
     with tempfile.TemporaryDirectory() as tmp:
         for kind, sizes, make in (("xlsx", a.xlsx_mib, make_xlsx), ("csv", a.csv_mib, make_csv),
-                                  ("text", a.text_mib, make_text_csv)):  # fmt: skip
+                                  ("text", a.text_mib, make_text_csv), ("xls", a.xls_mib, make_xls)):  # fmt: skip
             for size in [float(x) for x in sizes.split(",") if x]:
-                path = Path(tmp) / f"m{size}.{'xlsx' if kind == 'xlsx' else 'csv'}"
+                path = Path(tmp) / f"m{size}.{'csv' if kind == 'text' else kind}"
                 rows, cells = make(path, size)
                 case = {"kind": kind, "target_mib": size, "file_mib": round(path.stat().st_size / 2**20, 2),
                         "unpacked_mib": round((_unpacked(path) if kind == "xlsx" else path.stat().st_size) / 2**20, 2),
