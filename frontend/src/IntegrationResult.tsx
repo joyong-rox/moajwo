@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { integrateReview, listRuns, runDownloadUrl, saveAutomation, type Automation, type IntegrationRun } from './api'
+import { integrateReview, listRuns, saveAutomation, type Automation, type IntegrationRun } from './api'
+import { RunDownloadLink } from './RunDownloadLink'
 
 const CHANGE_LABEL: Record<string, string> = {
   ffill: '병합 셀 채움',
@@ -105,7 +106,7 @@ function IntegrationResult({
       {latest && (
         <div className="integration-latest" role="status">
           <p className="integration-title">
-            결과 #{latest.id}: <a href={runDownloadUrl(latest.id)}>{latest.file_name}</a> 내려받기
+            결과 #{latest.id}: <RunDownloadLink runId={latest.id}>{latest.file_name}</RunDownloadLink> 내려받기
           </p>
           <p className="review-counts">
             <span className="review-chip">통합 {latest.row_count}행</span>
@@ -133,7 +134,7 @@ function IntegrationResult({
               <li key={r.id}>
                 #{r.id} ·{' '}
                 {r.status === 'done' ? (
-                  <a href={runDownloadUrl(r.id)}>{r.file_name}</a>
+                  <RunDownloadLink runId={r.id}>{r.file_name}</RunDownloadLink>
                 ) : (
                   <span className="upload-error">실패: {r.error}</span>
                 )}{' '}
