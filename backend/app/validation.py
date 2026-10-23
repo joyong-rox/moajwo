@@ -147,6 +147,8 @@ class ValidationResult:
     pii: list[PiiStatus]
     notes: list[str]
     entities: list[EntityNote] = field(default_factory=list)
+    # 이 검사가 기관·지역 이름을 해석한 결과 (검토의 검사 기준에 남긴다 — 저장·응답에는 넣지 않음)
+    resolver: EntityResolver | None = field(default=None, repr=False, compare=False)
 
 
 # ---------------------------------------------------------------- 입력 타입
@@ -661,6 +663,7 @@ class EntityResolver:
         self.glossary = glossary
         self.at = period_end(period)
         self._cache: dict[tuple[str, str], Resolution] = {}
+        self._codes: dict[str, str | None] = {}  # 지역코드 값 → 연결한 용어사전 항목 코드
 
     def resolve(self, name: str, field_key: str | None) -> Resolution | None:
         if self.glossary is None:
@@ -675,11 +678,16 @@ class EntityResolver:
         if field_key == "region_code" and name.isdigit():
             # 지역코드 열(시도 2자리, 시도+시군구 5자리)은 용어사전 항목의 시도·시군구 코드로 연결한다
             entry = self.glossary.by_region_code(name, self.at) if self.glossary else None
+            self._codes[name] = entry.code if entry else None
             return f"entity:{entry.code}" if entry else f"region:{name}"
         resolution = self.resolve(name, field_key)
         if resolution is not None and resolution.key:
             return resolution.key
         return f"text:{_norm(name)}"
+
+    def used(self) -> tuple[dict[tuple[str, str], Resolution], dict[str, str | None]]:
+        """이 해석기로 해석한 이름((이름, 성격) → 결과)과 지역코드 — 검사 기준에 남겨 나중에 같은지 비교한다."""
+        return dict(self._cache), dict(self._codes)
 
 
 def row_entity_names(sheet: SheetInput, cells: list[Cell]) -> list[tuple[str, str]]:
@@ -1361,4 +1369,4 @@ def validate(
     else:
         status = "passed"
     entities = collect_entity_notes(files, resolver)
-    return ValidationResult(status, blocks, warnings, pii, notes, entities)
+    return ValidationResult(status, blocks, warnings, pii, notes, entities, resolver)

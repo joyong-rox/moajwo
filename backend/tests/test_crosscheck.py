@@ -538,10 +538,11 @@ def test_alias_api_and_learning_never_store_pii_names(client_with_entry) -> None
 
     from sqlalchemy import select as sql_select
 
-    from app.check_basis import CHECK_BASIS_KEY, build_basis
+    from app.check_basis import CHECK_BASIS_KEY, build_basis, entity_basis
     from app.db import SessionLocal
     from app.models import GlossaryAlias, ReviewItem, ReviewSession
     from app.review import complete
+    from app.validation import EntityResolver
 
     client, code = client_with_entry
     bad = client.post("/glossary/aliases", json={"alias": "carol@example.com 담당", "target_code": code})
@@ -549,7 +550,9 @@ def test_alias_api_and_learning_never_store_pii_names(client_with_entry) -> None
     ok = client.post("/glossary/aliases", json={"alias": "정상별칭기관", "target_code": code})
     assert ok.status_code == 201, ok.text
     with SessionLocal() as db:
-        basis = json.dumps({CHECK_BASIS_KEY: build_basis([], [], {}, {})})  # 파일 없는 검토의 검사 기준
+        # 파일 없는 검토의 검사 기준 (해석한 기관·지역 이름도 없음)
+        entities = entity_basis(EntityResolver(None, "2026-09"), "")
+        basis = json.dumps({CHECK_BASIS_KEY: {**build_basis([], [], {}, {}), "entities": entities}})
         session = ReviewSession(
             status="in_review", params=basis, file_ids="[]", excluded_file_ids="[]", remember_format=True
         )
