@@ -10,7 +10,6 @@ import copy
 import io
 import json
 import re
-import sqlite3
 import zipfile
 from collections.abc import Iterator
 from typing import Any
@@ -19,8 +18,8 @@ import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import DATA_DIR
 from app.pii import mask_text
+from tests.conftest import db_connect
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_analysis import POP, THREE, _body, _file, _run, _upload
 from tests.test_auth import _client, app_real_login  # noqa: F401
@@ -52,7 +51,7 @@ PATHS = ("", "/groups", "/excluded", "/detail", "/download")
 
 
 def _db(sql: str, *args: Any) -> list[tuple]:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         return con.execute(sql, args).fetchall()
 
 
@@ -67,7 +66,7 @@ def _stored(rid: int) -> dict[str, Any]:
 
 
 def _put_stored(rid: int, **cols: Any) -> None:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         for k, v in cols.items():
             text = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
             con.execute(f"update analysis_runs set {k} = ? where id = ?", (text, rid))
@@ -212,7 +211,7 @@ def past(app_real_login, owner) -> Iterator[dict[str, Any]]:  # noqa: F811
     plain = _run(u, _body([_file(u, "보통.xlsx", THREE, {"시도": "sido", "인구수": "population"})]))
     yield {"users": users, "owner": owner, "fid": fid, "id": r["id"], "plain": plain["id"]}
     _restore(r["id"], original)
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         con.execute("update users set display_name = 'AM-USER1' where username = 'am-user1'")
 
 

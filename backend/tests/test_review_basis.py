@@ -287,9 +287,10 @@ def test_alias_change_during_integration_uses_the_checked_mapping(user, monkeypa
 def test_review_approvals_reuse_the_check_only_when_the_check_input_is_unchanged(user) -> None:
     rows = [
         ["분류명", "메모가", "메모나", "빈칸메모", "숫자메모", "관할구역명"],
-        ["가", "참고1", "참고4", "있음", "1", "강서구"],
-        ["나", "참고2", "참고5", "", "2", "동구"],
-        ["다", "참고3", "참고6", "있음", "3", "중구"],
+        # 이 시험만의 지명 — 공용 시험 DB에 다른 시험이 넣은 용어사전 항목('강서구' 등)에 따라 결과가 바뀌지 않게
+        ["가", "참고1", "참고4", "있음", "1", "승인가구"],
+        ["나", "참고2", "참고5", "", "2", "승인나구"],
+        ["다", "참고3", "참고6", "있음", "3", "승인다구"],
     ]
     fid = _upload(user, "승인의존", rows)
     review = _review(user, [fid])
@@ -316,9 +317,8 @@ def test_review_approvals_reuse_the_check_only_when_the_check_input_is_unchanged
         return {(i["kind"], i["before"] or i["column"]) for i in r["items"] if i["category"] in ("pending", "warning")}
 
     # 다시 검사하면 승인한 매핑이 검사에 쓰인다 — 시군구 이름 확인과 빈 칸 경고는 이전 검사 결과에 없던 항목
-    assert {("entity", "강서구"), ("entity", "동구"), ("entity", "중구"), ("blank_value", "빈칸메모")} <= found(
-        new
-    ) - found(review)
+    expected = {("entity", "승인가구"), ("entity", "승인나구"), ("entity", "승인다구"), ("blank_value", "빈칸메모")}
+    assert expected <= found(new) - found(review)
 
 
 def test_reasons_mask_personal_data_in_names(user) -> None:

@@ -242,6 +242,12 @@ def download_run(run_id: int, db: Annotated[Session, Depends(get_session)], user
     if run.status != "done" or not run.output_path:
         raise HTTPException(status.HTTP_409_CONFLICT, "결과 파일이 없습니다.")
     path = (DATA_DIR / run.output_path).resolve()
-    if not path.is_relative_to((DATA_DIR / "outputs").resolve()) or not path.is_file():
+    if not path.is_relative_to((DATA_DIR / "outputs").resolve()):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "결과 파일을 찾을 수 없습니다.")
+    if not path.is_file():  # 기록은 있는데 파일이 없다 (외부 DB 서버의 재배포·재시작 등 — 원본 쪽과 같은 이유)
+        raise HTTPException(
+            status.HTTP_410_GONE,
+            "결과 파일이 서버에 없습니다 — 서버 재배포·재시작으로 지워졌을 수 있습니다. "
+            "실행 기록·변경 내역은 그대로이며, 원본을 다시 올려 다시 실행하면 새 결과 파일을 만듭니다.",
+        )
     return FileResponse(path, media_type=XLSX_MEDIA, filename=path.name)

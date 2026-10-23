@@ -11,9 +11,11 @@ const SIGNUP_NOTICE =
 /** 로그인 화면. 계정이 하나도 없으면(처음 실행) 최고 관리자 계정을 만들고, 그 뒤에는 회원가입(승인 대기)도 받는다. */
 function Login({
   setupRequired,
+  unavailable,
   onSignedIn,
 }: {
   setupRequired: boolean;
+  unavailable?: string; // 처음 상태 확인이 실패한 이유 (서버·DB 연결) — 최초 설정 화면 대신 로그인 화면에 보인다
   onSignedIn: (me: Me) => void;
 }) {
   const [mode, setMode] = useState<Mode>("login");
@@ -111,6 +113,11 @@ function Login({
         <h1>Moajwo</h1>
         <p className="subtitle">문서취합 자동화 도구</p>
         <h2>{title}</h2>
+        {unavailable && (
+          <p className="upload-error" role="alert">
+            서버 상태를 확인하지 못했습니다: {unavailable} 잠시 뒤 새로고침하세요.
+          </p>
+        )}
         {setupRequired && (
           <p className="upload-drop-hint login-notice">{SETUP_NOTICE}</p>
         )}

@@ -398,19 +398,29 @@ with SessionLocal() as db:
 
 
 def test_initial_owner_race_across_processes(tmp_path: Path) -> None:
-    """④ 재검증: 별도 프로세스·별도 DB 연결의 동시 최초 설정에서도 소유자는 한 명, 진 쪽은 409·계정/세션 없음."""
+    """④ 재검증: 별도 프로세스·별도 DB 연결의 동시 최초 설정에서도 소유자는 한 명, 진 쪽은 409·계정/세션 없음.
+    SQLite 실행은 새 데이터 폴더의 SQLite 파일, PostgreSQL 실행은 일회용 시험 서버의 새 DB로 한다."""
     import json
     import os
-    import sqlite3
     import subprocess
     import sys
+
+    from sqlalchemy import create_engine, text
+
+    from tests.conftest import PG_ADMIN, POSTGRES, pg_database
 
     data = tmp_path / "data"
     flags = tmp_path / "flags"
     data.mkdir()
     flags.mkdir()
-    env = {**os.environ, "MOAJWO_DATA_DIR": str(data), "PYTHONIOENCODING": "utf-8"}
-    env.pop("DATABASE_URL", None)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("DATABASE_URL", "MOAJWO_"))}
+    env.update({"MOAJWO_DATA_DIR": str(data), "PYTHONIOENCODING": "utf-8"})
+    url = f"sqlite:///{(data / 'moajwo.db').as_posix()}"
+    if POSTGRES:
+        if not PG_ADMIN:
+            pytest.skip("PostgreSQL 실행: 새 DB를 만들 관리자 주소(MOAJWO_TEST_PG_ADMIN_URL)가 없음")
+        url = pg_database("race_owner")
+        env.update({"DATABASE_URL": url, "MOAJWO_DB_MODE": "external"})
     backend = Path(__file__).resolve().parent.parent
     env["PYTHONPATH"] = str(backend)  # 자식 스크립트는 임시 폴더에 있으므로 app 패키지 경로를 알려 준다
     subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], cwd=backend, env=env, check=True,
@@ -434,9 +444,13 @@ def test_initial_owner_race_across_processes(tmp_path: Path) -> None:
     results = [json.loads(out.strip().splitlines()[-1]) for out, _ in outputs]
     assert sorted(str(r["result"]) for r in results) == ["409", "created"], results
     winner = next(r["name"] for r in results if r["result"] == "created")
-    with sqlite3.connect(data / "moajwo.db") as db:
-        users = db.execute("SELECT id, username, role FROM users").fetchall()
-        sessions = db.execute("SELECT DISTINCT user_id FROM auth_sessions").fetchall()
+    engine = create_engine(url.replace("postgresql://", "postgresql+psycopg://", 1))
+    with engine.connect() as db:
+        users = [tuple(r) for r in db.execute(text("SELECT id, username, role FROM users"))]
+        sessions = [tuple(r) for r in db.execute(text("SELECT DISTINCT user_id FROM auth_sessions"))]
+    engine.dispose()
+    if POSTGRES:
+        pg_database("race_owner", drop=True)
     assert [(u[1], u[2]) for u in users] == [(winner, "owner")]
     assert sessions == [(users[0][0],)]
 

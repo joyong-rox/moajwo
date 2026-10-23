@@ -5,7 +5,6 @@
 
 import io
 import json
-import sqlite3
 from collections.abc import Iterator
 from typing import Any
 
@@ -14,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import DATA_DIR
+from tests.conftest import db_rows
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 PROMO_COLUMN = "세부 추진 내역"  # 기본 표준 사전에 없는 열 이름
@@ -113,9 +113,8 @@ def test_login_required_and_session_lifecycle(app_real_login, accounts) -> None:
     assert me["role"] == "user" and me["role_label"] == "일반 사용자"
     cookie = accounts["user1"].cookies.get("moajwo_session")
     assert cookie and "user1" not in cookie
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        stored = [r[0] for r in con.execute("select token_hash from auth_sessions")]
-        hashes = [r[0] for r in con.execute("select password_hash from users")]
+    stored = [r[0] for r in db_rows("select token_hash from auth_sessions")]
+    hashes = [r[0] for r in db_rows("select password_hash from users")]
     assert cookie not in stored  # DB에는 토큰 해시만
     assert all(h.startswith("scrypt$") and "pass-" not in h for h in hashes)
 
@@ -306,8 +305,7 @@ def test_glossary_name_learning_needs_manager(accounts) -> None:
     일반 사용자는 열 이름만 개인 별칭으로 학습한다.
     """
     u3, owner = accounts["user3"], accounts["owner"]
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        had_entry = con.execute("select count(*) from glossary_entries where code = '1550000'").fetchone()[0]
+    had_entry = db_rows("select count(*) from glossary_entries where code = '1550000'")[0][0]
     csv = "\n".join(["코드,정식명칭,유형", "1550000,국가유산청,중앙행정기관", ""]).encode()
     assert owner.post("/glossary/import", files=[("file", ("g.csv", csv, "text/csv"))]).json()["applied"]
     rows = [["기관명", "집행액"], ["국가유산", 100]]
@@ -328,13 +326,11 @@ def test_glossary_name_learning_needs_manager(accounts) -> None:
             json={"decision": "approved" if choice else "rejected", "choice": choice},
         )
     done = u3.post(f"/reviews/{review['id']}/complete").json()
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        learned = con.execute("select count(*) from glossary_aliases where alias = '국가유산'").fetchone()[0]
+    learned = db_rows("select count(*) from glossary_aliases where alias = '국가유산'")[0][0]
     assert learned == 0
     assert done["learned"]["names"] == 0 and done["learned"]["names_skipped"] == 1
     if not had_entry:  # 같은 테스트 DB를 쓰는 용어사전 테스트에 영향이 없도록
-        with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-            con.execute("delete from glossary_entries where code = '1550000'")
+        db_rows("delete from glossary_entries where code = '1550000'")
 
 
 def test_dashboard_counts_same_content_once(accounts) -> None:
@@ -357,15 +353,11 @@ def test_dashboard_counts_same_content_once(accounts) -> None:
 
 
 def _decision_rows(fid: int) -> list[tuple]:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        return con.execute(
-            "select column_name, field_key from mapping_decisions where source_file_id = ?", (fid,)
-        ).fetchall()
+    return db_rows("select column_name, field_key from mapping_decisions where source_file_id = ?", fid)
 
 
 def _pii_ack(fid: int) -> object:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        return con.execute("select pii_acknowledged_at from source_files where id = ?", (fid,)).fetchone()[0]
+    return db_rows("select pii_acknowledged_at from source_files where id = ?", fid)[0][0]
 
 
 def test_review_cannot_change_other_users_file(accounts) -> None:

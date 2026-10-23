@@ -4,7 +4,6 @@
 - 최초 설정 전 가입 차단·동시 가입·동시 승인은 빈 임시 DB에서 함수를 직접 불러 검사한다.
 """
 
-import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,7 +15,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
-from app.config import DATA_DIR
+from tests.conftest import db_rows
 from tests.test_auth import _client, _upload, app_real_login  # noqa: F401
 
 PENDING_MSG = "최고 관리자의 승인 후 로그인할 수 있습니다"
@@ -35,8 +34,7 @@ def _uid(owner: TestClient, username: str) -> int:
 
 
 def _db_rows(sql: str, *args: Any) -> list[tuple]:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        return con.execute(sql, args).fetchall()
+    return db_rows(sql, *args)  # SQLite·PostgreSQL 모두
 
 
 @pytest.fixture(scope="module")
@@ -295,7 +293,8 @@ def test_overview_matches_actual_data(app_real_login, owner) -> None:  # noqa: F
     uploads = [
         owner_id
         for at, owner_id in _db_rows("select uploaded_at, uploaded_by from source_files")
-        if utc_to_kst(datetime.fromisoformat(at)).date() == today
+        # PostgreSQL은 datetime, SQLite는 글자로 돌려준다
+        if utc_to_kst(at if isinstance(at, datetime) else datetime.fromisoformat(at)).date() == today
     ]
     assert stats["uploads"]["total"] == len(uploads) > 0
     assert stats["uploads"]["inactive_accounts"] == sum(1 for o in uploads if o in inactive)
