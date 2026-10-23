@@ -1301,6 +1301,7 @@ def preview_out(ev: Evaluation) -> dict[str, Any]:
         "variants": ev.variants,
         "unit": ev.unit,
         "units": ev.units,
+        "source_columns": source_columns(ev),
         "targets": [t.out() for t in ev.targets],
         "problems": ev.problems,
         "warnings": ev.warnings,
@@ -1468,7 +1469,33 @@ def conditions(ev: Evaluation) -> dict[str, Any]:
         "mean_denominator": "그룹마다 유효한 숫자의 개수 (빈칸·비공개·숫자가 아닌 값은 분모에 넣지 않음)",
         "reason_labels": {k: v[0] for k, v in REASONS.items()},
         "warnings": ev.warnings,
+        "source_columns": source_columns(ev),
     }
+
+
+def source_columns(ev: Evaluation) -> list[dict[str, Any]]:
+    """계산에 쓴 원본 열 — 표준 항목 이름('건수')만으로는 어느 지표('발신Mail건수')를 계산했는지 알 수 없어 함께 남긴다.
+
+    [{"column": 가린 열 이름, "sheets": 그 열을 쓴 시트 수, "files": 파일 번호}] — 자료 순서에서 처음 나온 순서.
+    가린 뒤 같아진 서로 다른 열 이름은 '(가림 구분 n)'으로 나눈다 (원래 이름은 내보내지 않음).
+    이름이 서로 다르면 같은 지표인지 사용자가 확인해야 한다 — 모두 이 표준 항목으로 사용자가 확정한 열이다.
+    """
+    seen: dict[str, list[str]] = defaultdict(list)  # 가린 이름 → 서로 다른 원래 이름 (공백·전각 차이는 같게)
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for t in ev.ok:
+        if t.column_id is None or t.column is None:
+            continue
+        raw = compact(t._view.columns[int(t.column_id[1:])])  # type: ignore[attr-defined]
+        if raw not in seen[t.column]:
+            seen[t.column].append(raw)
+        row = rows.setdefault((t.column, raw), {"column": t.column, "sheets": 0, "files": []})
+        row["sheets"] += 1
+        if t.file_id not in row["files"]:
+            row["files"].append(t.file_id)
+    for (shown, raw), row in rows.items():
+        if len(seen[shown]) > 1:
+            row["column"] = f"{shown} ({MASKED_NO} {seen[shown].index(raw) + 1})"
+    return list(rows.values())
 
 
 def inputs(ev: Evaluation) -> list[dict[str, Any]]:

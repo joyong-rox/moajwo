@@ -42,7 +42,7 @@ from sqlalchemy.orm import Session
 
 from app import analysis
 from app.analysis import AGG_LABEL, MEASURE_FIELDS, NO_VALUE, AnalysisIn, Evaluation, TargetIn, label_of
-from app.analysis_api import LEVEL_TEXT, level_conflict_text
+from app.analysis_api import LEVEL_TEXT, level_conflict_text, source_columns_text
 from app.auth import CurrentUser
 from app.config import DATA_DIR
 from app.decisions import load_decisions
@@ -565,7 +565,7 @@ def _summary(
         if len(used) > analysis.MAX_TARGETS:
             item_problems.append(
                 f"'{label}': 계산할 시트가 {len(used)}개로 "
-                f"통계 요약 한도({analysis.MAX_TARGETS}개, 데이터 분석과 같음)를 "
+                f"통계 요약 한도({analysis.MAX_TARGETS}개, 데이터 통계 분석과 같음)를 "
                 "넘습니다 — 일부를 이 항목에서 빼거나 나눠 만드세요."
             )
         elif used:
@@ -641,6 +641,8 @@ def _summary(
                     "units": pv["units"] if pv else [],
                     "periods": pv["periods"] if pv else [],
                     "stock": pv["stock"] if pv else False,
+                    # 계산할 원본 열 (표준 항목 이름만으로는 어느 지표인지 알 수 없어 함께 보여 준다)
+                    "source_columns": pv["source_columns"] if pv else [],
                     "links": rows,
                     "coverage": {
                         "included": included,
@@ -763,8 +765,9 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
         "원본·매핑이 바뀌어도 이 시트는 자동으로 다시 계산되지 않습니다."
     )
     line(
-        f"계산: Moajwo 데이터 분석과 같은 엔진·규칙({analysis.POLICY}). 평균 = 유효한 숫자의 합 ÷ 유효한 숫자 개수 "
-        "(파일별 평균을 다시 평균하지 않음). 빈칸·비공개·숫자가 아닌 값은 0으로 바꾸지 않고 뺍니다."
+        f"계산: Moajwo 데이터 통계 분석과 같은 엔진·규칙({analysis.POLICY}). "
+        "평균 = 유효한 숫자의 합 ÷ 유효한 숫자 개수 (파일별 평균을 다시 평균하지 않음). "
+        "빈칸·비공개·숫자가 아닌 값은 0으로 바꾸지 않고 뺍니다."
     )
     line(
         "숫자는 계산해 넣은 값입니다 (엑셀 수식 아님). "
@@ -775,6 +778,8 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
         o = plan.out
         row += 1
         line(f"항목: {o['field_label']}", bold=True, size=12)
+        # 표준 항목 이름('건수')만으로는 어느 지표를 계산했는지 알 수 없어 원본 열 이름을 바로 아래에 적는다
+        line("원본 열 (계산한 지표)", source_columns_text(o["source_columns"]))
         cond = analysis.conditions(plan.ev) if plan.ev else {}
         line("단위", cond.get("unit") or "-")
         line("기간", ", ".join(cond.get("periods") or []) or "-")
@@ -830,6 +835,7 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
             {
                 "field_key": o["field_key"],
                 "field_label": o["field_label"],
+                "source_columns": o["source_columns"],
                 "unit": cond.get("unit"),
                 "periods": cond.get("periods"),
                 "aggregates": o["aggregates"],
