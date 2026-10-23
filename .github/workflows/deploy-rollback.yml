@@ -15,7 +15,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      OLD: adebb6c4f5687b1eb6835e012755bcb5d490968e
+      OLD: adebb6c4f5687b1eb6835e012755bcb5d490968e  # main
+      NEW: 9c3842bb52a6d57aeb25167ab3ef852800fda75c  # 후보 rc/review-20261023
       PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -23,7 +24,6 @@ jobs:
           fetch-depth: 0
       - name: old → candidate (deploy.sh) → rollback (old images + old ports) → candidate
         run: |
-          NEW=$(git rev-parse HEAD~1)   # 이 브랜치의 부모 = 후보 HEAD
           cp diagnostics/ci/deploy_rollback_check.sh diagnostics/ci/deploy_probe.py "$RUNNER_TEMP/"
           docker compose version
           bash "$RUNNER_TEMP/deploy_rollback_check.sh" out "$OLD" "$NEW"
