@@ -21,7 +21,8 @@ services:
   frontend:
     image: ${DIAG_FE_IMAGE:?DIAG_FE_IMAGE 필요}
     ports:
-      - "127.0.0.1:8086:80"
+      # 비루트 nginx 이미지(PR #30 이후)는 컨테이너 안 8080, 그 전 이미지와 비교할 때는 DIAG_FE_PORT=80
+      - "127.0.0.1:8086:${DIAG_FE_PORT:-8080}"
     dns: [127.0.0.1]
     depends_on:
       backend:

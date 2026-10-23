@@ -9,7 +9,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install -r requirements.txt
+# 설치가 끝나면 설치 도구(pip·setuptools·wheel)는 실행 이미지에서 뺀다 — 앱이 쓰지 않고, 기반 이미지에 든 판의
+# 알려진 취약점(진단 보고 M-03)이 실행 이미지에 남지 않게. 의존성을 바꾸려면 이미지를 다시 만든다.
+RUN pip install -r requirements.txt \
+    && pip uninstall -y pip setuptools wheel
 
 COPY . .
 
