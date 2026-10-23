@@ -199,21 +199,23 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
   }, [bins, useBins])
 
   function request(): AnalysisRequest {
+    // 체크를 끈 자료도 보낸다 — 서버가 결과의 '제외'에 '사용자가 계산에서 뺌'으로 남기고, 목록에서 다시 넣을 수 있게 둔다
     const targets: AnalysisTargetIn[] = preview
-      ? preview.targets
-          .filter((t) => settings[targetKey(t)]?.include ?? true)
-          .map((t) => {
-            if (t.sheet_id === null) return { file_id: t.file_id }
-            const s = settings[targetKey(t)]
-            return {
-              file_id: t.file_id,
-              sheet_id: t.sheet_id,
-              column_id: s?.column || null,
-              unit: s?.unit.trim() || null,
-              period: s?.period.trim() || null,
-              rows_are_records: s?.records ?? false,
-            }
-          })
+      ? preview.targets.map((t) => {
+          if (!(settings[targetKey(t)]?.include ?? true)) {
+            return t.sheet_id === null ? { file_id: t.file_id, exclude: true } : { file_id: t.file_id, sheet_id: t.sheet_id, exclude: true }
+          }
+          if (t.sheet_id === null) return { file_id: t.file_id }
+          const s = settings[targetKey(t)]
+          return {
+            file_id: t.file_id,
+            sheet_id: t.sheet_id,
+            column_id: s?.column || null,
+            unit: s?.unit.trim() || null,
+            period: s?.period.trim() || null,
+            rows_are_records: s?.records ?? false,
+          }
+        })
       : [...chosen].map((file_id) => ({ file_id }))
     return {
       field_key: field,
@@ -691,6 +693,10 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
                               {r}
                             </span>
                           ))}
+                          {/* 불일치는 위 사유에 이미 적힘 — 확인됨·검증 불가만 따로 (검증 불가는 '검증 완료'가 아님) */}
+                          {t.formula && t.formula.state !== 'mismatch' && (
+                            <span className="mw-muted mw-block">{t.formula.text}</span>
+                          )}
                         </td>
                       </tr>
                     )
@@ -929,7 +935,8 @@ function AnalysisBuilder({ initialField, initialFiles }: { initialField: string;
             {dirty && <p className="mapping-warn">조건을 바꿨습니다 — '다시 확인'을 누른 뒤 실행할 수 있습니다.</p>}
             {waiting.length > 0 && (
               <p className="mapping-warn">
-                확인이 필요한 자료 {waiting.length}개 — 단위·기간·열을 적고 다시 확인하거나 '사용'을 해제하세요.
+                확인이 필요한 자료 {waiting.length}개 — 단위·기간·열을 적고(산식이 다른 합계는 열 매핑에서 다시 확정하고)
+                다시 확인하거나 '사용'을 해제하세요.
               </p>
             )}
             <div className="admin-actions">
@@ -1454,6 +1461,9 @@ function AnalysisResult({ id }: { id: number }) {
                       {x}
                     </span>
                   ))}
+                  {t.formula && t.formula.state !== 'mismatch' && (
+                    <span className="mw-muted mw-block">{t.formula.text}</span>
+                  )}
                 </td>
               </tr>
             ))}

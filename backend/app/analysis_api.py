@@ -426,6 +426,7 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
             "사유",
             "sha256",
             "그 시트의 확정 매핑",
+            "산식 확인 (합계 항목)",  # 기존 열 위치를 바꾸지 않게 끝에 둔다
         ]
     ]
     for t in inp:
@@ -450,6 +451,7 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
                 "; ".join(t["reasons"]),
                 t["sha256"],
                 mapping,
+                (t.get("formula") or {}).get("text") or "-",  # 이 규칙 전 결과에는 없음
             ]
         )
     _rows(wc, end + 1, files, header=True)

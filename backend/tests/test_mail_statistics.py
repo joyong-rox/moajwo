@@ -20,8 +20,8 @@ def mapped(columns, decisions=None):
     return engine().map_columns(columns, [[1]] * len(columns), use_llm=False, decisions=decisions).columns
 
 
-def evaluate(sheets, field_key, **kwargs):
-    """저장소 경계만 대체하고 실제 매핑·분석 엔진을 실행한다."""
+def evaluate(sheets, field_key, target_options=None, **kwargs):
+    """저장소 경계만 대체하고 실제 매핑·분석 엔진을 실행한다. target_options: 파일 번호 → TargetIn에 더할 값."""
     views, decisions, records = {}, {}, {}
     for i, (columns, rows, overrides) in enumerate(sheets, 1):
         proposals = mapped(columns, overrides)
@@ -36,7 +36,12 @@ def evaluate(sheets, field_key, **kwargs):
         records[i] = SimpleNamespace(id=i, uploaded_by=1, original_name=f"{i}.xlsx", sha256=str(i))
     req = analysis.AnalysisIn(
         field_key=field_key,
-        targets=[analysis.TargetIn(file_id=i, unit=None if field_key.endswith("_mb") else "건") for i in records],
+        targets=[
+            analysis.TargetIn(
+                file_id=i, unit=None if field_key.endswith("_mb") else "건", **(target_options or {}).get(i, {})
+            )
+            for i in records
+        ],
         **kwargs,
     )
     with (
