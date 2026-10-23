@@ -1,12 +1,11 @@
 import io
-import sqlite3
 from typing import Any
 
 import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import DATA_DIR
+from tests.conftest import DbConnection, db_connect
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 LLM_REASON = "강수량 열은 금액으로 보입니다"
@@ -105,8 +104,8 @@ def test_review_items_categories_and_reasons(client: TestClient) -> None:
     assert review["counts"]["block"] == 1 and not review["can_complete"]
 
 
-def _db() -> sqlite3.Connection:
-    return sqlite3.connect(DATA_DIR / "moajwo.db")
+def _db() -> DbConnection:
+    return db_connect()  # SQLite·PostgreSQL 모두
 
 
 def test_decisions_are_persisted_to_backend_state(client: TestClient) -> None:

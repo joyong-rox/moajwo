@@ -6,7 +6,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 BACKEND = Path(__file__).resolve().parent.parent
+# 이 파일은 빈 SQLite 파일에 마이그레이션을 실제로 실행해 그 파일을 읽는다 (예전 리비전에서 head까지·downgrade).
+# PostgreSQL의 마이그레이션은 test_migrations_postgres.py가 맡는다 (빈 DB → head, 모델과 차이 없음, 기본 자료 같음).
+pytestmark = pytest.mark.sqlite_only("SQLite 파일에 마이그레이션을 실행해 읽음 (PostgreSQL은 test_migrations_postgres)")
 
 
 def _alembic(data_dir: Path, *args: str) -> None:
