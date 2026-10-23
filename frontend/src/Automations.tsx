@@ -4,7 +4,6 @@ import {
   listAutomations,
   listFiles,
   runAutomation,
-  runDownloadUrl,
   uploadFiles,
   type Automation,
   type AutomationRunResult,
@@ -15,6 +14,7 @@ import { ProgressPanel } from './Progress'
 import { REVIEW_STAGES } from './progressStages'
 import ReviewPanel from './ReviewPanel'
 import { formatDuration, formatTime, STATUS_CLASS } from './runFormat'
+import { RunDownloadLink } from './RunDownloadLink'
 
 function errorText(err: unknown) {
   return err instanceof Error ? err.message : String(err)
@@ -305,7 +305,7 @@ function AutomationDetail({
           </p>
           {result.run.status === 'done' && (
             <p>
-              결과 파일: <code>{result.run.output_path}</code> · <a href={runDownloadUrl(result.run.id)}>내려받기</a> ·
+              결과 파일: <code>{result.run.output_path}</code> · <RunDownloadLink runId={result.run.id}>내려받기</RunDownloadLink> ·
               소요 {formatDuration(result.run.duration_ms)}
             </p>
           )}

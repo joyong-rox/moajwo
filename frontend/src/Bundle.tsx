@@ -3,7 +3,6 @@ import {
   AnalysisProblemError,
   planBundle,
   runBundle,
-  runDownloadUrl,
   type AggKey,
   type BundleItem,
   type BundleLink,
@@ -16,6 +15,7 @@ import {
 import { Toggle } from './components/tailgrids/core/toggle'
 import PiiNotice from './PiiNotice'
 import { navigate, replaceSearch, useSearch } from './router'
+import { RunDownloadLink } from './RunDownloadLink'
 import { Banner, NavLink, WorkflowSteps, type Step } from './Workflow'
 
 const AGGS: { key: AggKey; label: string }[] = [
@@ -602,7 +602,7 @@ function Bundle() {
             <div className="bd-made" role="status">
               <p>
                 <strong>실행 #{made.run.id} 완료</strong> — {made.run.file_name} ·{' '}
-                <a href={runDownloadUrl(made.run.id)}>내려받기</a> ·{' '}
+                <RunDownloadLink runId={made.run.id}>내려받기</RunDownloadLink> ·{' '}
                 <a
                   href="/runs"
                   onClick={(e) => {

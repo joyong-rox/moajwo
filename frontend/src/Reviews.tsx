@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   countReviews,
   listReviews,
-  runDownloadUrl,
   type Review,
   type ReviewCounts,
   type ReviewFilter,
@@ -10,6 +9,7 @@ import {
 } from './api'
 import { isManager, useAuth } from './authContext'
 import ReviewPanel from './ReviewPanel'
+import { RunDownloadLink } from './RunDownloadLink'
 import { navigate, replaceSearch, useSearch } from './router'
 import { formatTime } from './runFormat'
 import { Icon, StatusCards, type IconName, type Tone } from './Workflow'
@@ -234,7 +234,7 @@ function Reviews() {
                     <td data-label="만든 때">{formatTime(r.created_at)}</td>
                     <td data-label="결과">
                       {r.last_run_id ? (
-                        <a href={runDownloadUrl(r.last_run_id)}>결과 #{r.last_run_id} 내려받기</a>
+                        <RunDownloadLink runId={r.last_run_id}>결과 #{r.last_run_id} 내려받기</RunDownloadLink>
                       ) : r.run_count ? (
                         `실행 ${r.run_count}개 (결과 파일 없음)`
                       ) : (
