@@ -43,6 +43,11 @@ def peak_bytes():
         if not psapi.GetProcessMemoryInfo(k32.GetCurrentProcess(), ctypes.byref(c), c.cb):
             raise OSError("GetProcessMemoryInfo 실패")
         return c.PeakWorkingSetSize
+    if os.path.exists("/proc/self/status"):
+        # 리눅스: 이 프로세스 메모리 공간의 최대값(VmHWM). ru_maxrss는 fork 때 부모의 사용량을 물려받아
+        # 부모가 큰 자료를 만든 뒤에는 자식의 실제 최대가 가려진다
+        with open("/proc/self/status") as f:
+            return next(int(x.split()[1]) * 1024 for x in f if x.startswith("VmHWM:"))
     import resource
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
 from app import parsing
