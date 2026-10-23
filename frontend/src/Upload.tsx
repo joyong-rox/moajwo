@@ -3,7 +3,16 @@ import Mapping from './Mapping'
 import PiiNotice from './PiiNotice'
 import { ProgressPanel, SkeletonRows } from './Progress'
 import { UPLOAD_STAGES } from './progressStages'
-import { ACCEPTED_EXTENSIONS, uploadFiles, type Cell, type RowKind, type SheetSummary, type UploadResult } from './api'
+import {
+  ACCEPTED_EXTENSIONS,
+  fetchFileLimits,
+  uploadFiles,
+  type Cell,
+  type FileLimits,
+  type RowKind,
+  type SheetSummary,
+  type UploadResult,
+} from './api'
 import { navigate } from './router'
 import { Banner, Icon, NavLink } from './Workflow'
 
@@ -38,8 +47,15 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
   const announceTimer = useRef<number | undefined>(undefined)
   const titleId = useId()
   const hintId = useId()
+  // 서버의 읽기 한도 (환경마다 다름). 못 불러오면 크기 안내만 빼고 보인다 — 실제 거절은 서버가 사유와 함께 알린다
+  const [limits, setLimits] = useState<FileLimits | null>(null)
 
   useEffect(() => () => window.clearTimeout(announceTimer.current), [])
+  useEffect(() => {
+    fetchFileLimits()
+      .then(setLimits)
+      .catch(() => undefined)
+  }, [])
 
   function announce(message: string) {
     window.clearTimeout(announceTimer.current)
@@ -127,7 +143,10 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
             {busy ? '업로드·분석 중…' : '파일을 여기에 끌어다 놓으세요'}
           </p>
           <p className="upload-drop-hint" id={hintId}>
-            또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능 · 파일당 최대 50MB
+            또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능
+            {limits &&
+              ` · 파일당 최대 ${limits.max_upload_mib}MiB (xlsx는 풀었을 때 ${limits.max_xlsx_uncompressed_mib}MiB, ` +
+                `${limits.max_file_cells.toLocaleString('ko-KR')}칸까지)`}
           </p>
         </div>
         {/* 업로드 중에도 그대로 두고 aria-disabled로만 막는다 — disabled로 바꾸면 누른 직후 키보드 초점이 사라진다 */}

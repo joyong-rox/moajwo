@@ -206,6 +206,20 @@ export async function listFiles(): Promise<StoredFile[]> {
   return json(await apiFetch(`${API_BASE}/files`))
 }
 
+// 파일 읽기 한도 — 환경마다 다르다 (서버 설정, docs/MEMORY.md). 크기 단위는 MiB.
+export type FileLimits = {
+  max_upload_mib: number
+  max_xlsx_uncompressed_mib: number
+  max_file_cells: number
+  max_cell_chars: number
+  parse_slots: number
+  max_files_per_request: number
+}
+
+export async function fetchFileLimits(): Promise<FileLimits> {
+  return json(await apiFetch(`${API_BASE}/files/limits`))
+}
+
 export async function acknowledgePii(fileId: number): Promise<PiiSummary> {
   return json(await apiFetch(`${API_BASE}/files/${fileId}/pii/acknowledge`, { method: 'POST' }))
 }

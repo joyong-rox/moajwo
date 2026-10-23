@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import BinaryIO
 
-from app.config import DATA_DIR
+from app.config import DATA_DIR, MAX_UPLOAD_MIB
 
 UPLOAD_DIR = DATA_DIR / "uploads"
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MIB * 2**20
 _CHUNK = 1024 * 1024
 
 
