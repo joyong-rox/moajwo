@@ -35,7 +35,7 @@ from app.check_basis import (
     basis_changes,
     entity_changes,
 )
-from app.config import DATA_DIR
+from app.config import DATA_DIR, MAX_OUTPUT_CELLS
 from app.decisions import load_decisions, load_learned, load_org_codes
 from app.files import load_parsed
 from app.glossary import EntityRef, Resolution, entity_ref, normalize_name
@@ -644,6 +644,13 @@ def integrate(db: Session, session: ReviewSession, include_unmapped: bool | None
     if include_unmapped is None:
         include_unmapped = include_unmapped_default(db, session)
     built = build(db, session, include_unmapped)
+    # 결과는 메모리에 다 만든 뒤 저장한다 — 메모리 예산을 넘는 크기는 '실행 중' 기록을 남기기 전에 거절 (docs/MEMORY.md)
+    cells = len(built.rows) * len(built.labels) + len(built.changes) * len(CHANGE_HEADER)
+    if cells > MAX_OUTPUT_CELLS:
+        raise IntegrationError(
+            f"결과에 넣을 칸이 {cells:,}개로 이 서버에서 한 번에 만들 수 있는 {MAX_OUTPUT_CELLS:,}칸을 넘습니다 — "
+            "통합할 파일을 나눠 다시 검토하세요."
+        )
     now = datetime.now(KST)
     items = session_items(db, session)
     warning_count = summarize(session, items).warnings
