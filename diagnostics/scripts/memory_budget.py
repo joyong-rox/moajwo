@@ -2,11 +2,13 @@
 최대 메모리(RSS)·시간·칸 수·결과를 적는다. 판정하지 않고 측정만 저장한다.
 
 - 자료: xlsx(풀었을 때 크기 단계별), csv(파일 크기 단계별). 숫자·짧은 글자·날짜가 섞인 통계표 모양.
+  text: 한 칸에 긴 글(2,000자)이 든 CSV (파일 크기 단계별) — 칸 수는 적어도 글자가 메모리를 쓰는 경우.
 - 읽기: backend의 app.parsing.parse_file 그대로 (한도는 환경 변수로 넉넉히 풀어 측정 — 거절 경계는 따로 적음).
 - 중단 기준: --stop-mib (기본 1200) — 한 단계의 최대 메모리가 이 값을 넘으면 더 큰 단계를 돌리지 않는다.
   공유 PC에서는 guarded_run.py 아래에서 작은 단계만 돌리고, 큰 단계는 격리 러너(GitHub Actions)에서 돌린다.
 - 결과에는 원문 값이 없다 (합성 자료).
-사용법: python memory_budget.py <backend 폴더> <출력 JSON> [--xlsx-mib 4,8,16] [--csv-mib 5,10] [--stop-mib 1200]
+사용법: python memory_budget.py <backend 폴더> <출력 JSON> [--xlsx-mib 4,8,16] [--csv-mib 5,10] [--text-mib 5]
+        [--stop-mib 1200]
 """
 
 import argparse
@@ -92,6 +94,17 @@ def make_csv(path: Path, target_mib: float) -> tuple[int, int]:
     return rows, rows * len(COLUMNS)
 
 
+def make_text_csv(path: Path, target_mib: float) -> tuple[int, int]:
+    note = ("합성 설명 문장입니다. " * 200)[:2000]  # 한 칸 2,000자 (한 칸 한도 32,767자 아래)
+    line = f"2026-09-01,서울특별시,{note}\n"
+    rows = max(1, int(target_mib * 2**20 / len(line.encode("utf-8"))))
+    with path.open("w", encoding="utf-8", newline="") as f:
+        f.write("기준일자,시도,설명\n")
+        for _ in range(rows):
+            f.write(line)
+    return rows, rows * 3
+
+
 def _unpacked(path: Path) -> int:
     with zipfile.ZipFile(path) as z:
         return sum(i.file_size for i in z.infolist())
@@ -115,14 +128,16 @@ def main() -> None:
     ap.add_argument("out", type=Path)
     ap.add_argument("--xlsx-mib", default="4,8,16")
     ap.add_argument("--csv-mib", default="5,10")
+    ap.add_argument("--text-mib", default="")
     ap.add_argument("--stop-mib", type=float, default=1200)
     a = ap.parse_args()
     results = {"host": {"platform": platform.platform(), "python": sys.version.split()[0], "cpus": os.cpu_count()},
                "stop_mib": a.stop_mib, "cases": []}  # fmt: skip
     with tempfile.TemporaryDirectory() as tmp:
-        for kind, sizes, make in (("xlsx", a.xlsx_mib, make_xlsx), ("csv", a.csv_mib, make_csv)):
+        for kind, sizes, make in (("xlsx", a.xlsx_mib, make_xlsx), ("csv", a.csv_mib, make_csv),
+                                  ("text", a.text_mib, make_text_csv)):  # fmt: skip
             for size in [float(x) for x in sizes.split(",") if x]:
-                path = Path(tmp) / f"m{size}.{kind}"
+                path = Path(tmp) / f"m{size}.{'xlsx' if kind == 'xlsx' else 'csv'}"
                 rows, cells = make(path, size)
                 case = {"kind": kind, "target_mib": size, "file_mib": round(path.stat().st_size / 2**20, 2),
                         "unpacked_mib": round((_unpacked(path) if kind == "xlsx" else path.stat().st_size) / 2**20, 2),
