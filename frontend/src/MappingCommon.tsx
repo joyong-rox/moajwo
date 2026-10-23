@@ -109,6 +109,8 @@ function MappingCommon() {
   const hiddenPicked = [...picked].filter((id) => !shownFiles.some((f) => f.id === id)).length
   const nameOf = (id: number) => files?.find((f) => f.id === id)?.display_name ?? `#${id}`
   const scope = requested ?? []
+  // 공통 검토를 연 뒤 파일 선택이 바뀌면 아래 결과는 연 때의 파일 기준이다 (되돌리면 다시 지금 선택의 결과)
+  const selectionChanged = review !== null && [...picked].sort().join(',') !== [...scope].sort().join(',')
 
   // 대상·처리·제외는 서버가 돌려준 파일 상태로 센다: 분석 기록 없음(missing)·파일 구성이 바뀜(stale)은 묶지 않은 파일
   const staleCount = review?.files.filter((f) => f.stale).length ?? 0
@@ -130,6 +132,10 @@ function MappingCommon() {
       return { state: 'attention', detail: review ? '다시 불러오지 못함 — 아래는 이전 결과' : '불러오지 못함 — 다시 여세요' }
     }
     if (!review) return { state: 'todo', detail: picked.size ? '공통 검토를 열면 확인' : '검토할 파일을 고르세요' }
+    // 지난 결과('완료 · 대상 5개' 등)를 바뀐 선택의 결과처럼 보이지 않게 한다
+    if (selectionChanged) {
+      return { state: 'attention', detail: `다시 열기 필요 — 파일 선택이 바뀜 (아래는 연 때의 ${scope.length}개 파일 결과)` }
+    }
     if (processed === 0) return { state: 'attention', detail: `${tally} — 비교한 파일 없음` }
     const groupText = `공통 후보 ${counts.common ?? 0} · 판단이 다름 ${counts.divergent ?? 0} · 미해결 ${counts.unresolved ?? 0}`
     if (excluded > 0) return { state: 'partial', detail: `${tally} · ${groupText}` }
@@ -177,6 +183,7 @@ function MappingCommon() {
             />
             <span className="wk-pickcount" role="status">
               고른 파일 <strong>{picked.size}</strong>개 (최대 {MAX_PICK}) · 전체 {files.length}개
+              {selectionChanged && ' · 공통 검토를 다시 열어야 반영됩니다'}
             </span>
             {picked.size > 0 && (
               <button type="button" className="login-link" onClick={() => setPicked(new Set())}>
@@ -288,7 +295,7 @@ function MappingCommon() {
               <strong>적용 대상</strong> 공통 검토를 연 파일 {processed + excluded}개 (처리 {processed}개 · 제외 {excluded}개):{' '}
               <span className="wk-scope-names">{scope.map((id) => `#${id} ${nameOf(id)}`).join(', ')}</span>
             </span>
-            {[...picked].sort().join(',') !== [...scope].sort().join(',') && (
+            {selectionChanged && (
               <span className="mapping-warn wk-scope-note">파일 선택이 바뀌었습니다 — '공통 검토 열기'를 다시 눌러야 반영됩니다.</span>
             )}
           </div>

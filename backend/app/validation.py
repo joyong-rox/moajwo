@@ -1148,6 +1148,11 @@ def check_formulas(file: FileInput, sheet: SheetInput) -> list[WarningIssue]:
             )
         else:
             message += ". 입력 오류로 단정하지 말고 원본의 산식·포함 범위를 확인하세요"
+        # 통합표는 원본 값을 그대로 옮기므로 경고만 한다. 같은 뜻으로 더하는 통계는 분석 엔진이 막는다 (_formula_checks)
+        message += (
+            " (통합표에는 원본 값 그대로 넣습니다 — 데이터 통계 분석·묶기 통계 요약에서는 이 열을 같은 항목으로 "
+            "더하지 않습니다)"
+        )
         issues.append(
             WarningIssue(
                 "formula_mismatch", message, file.file_id, file.file_name, sheet.sheet.name, check.differ[0][0], name,

@@ -70,8 +70,10 @@ from app.validation import STOCK_FIELDS, _fmt, _month_of, _text_periods, _year_o
 
 # 판정 규칙이 바뀌면 올린다 (저장한 결과에 함께 남음).
 # 7: 메일 지표·용량 단위 구분 (PR #21) · 8: 가린 값이 같아도 원문이 다르면 다른 대상 (F-1)
-# 9: 합계·최솟값·최댓값을 정확한 수로 (C-02 — 0.1 + 0.2 = 0.3, 큰 정수도 끝자리까지)
-POLICY = "analysis-policy-9"
+# 9: 산식이 다르다고 확인된 합계 열은 같은 항목으로 더하지 않음 (다시 확정하거나 빼야 실행) · 사용자가 뺀 자료도 결과에
+#    남김 (D-01) · 10: 합계·최솟값·최댓값을 정확한 수로 (C-02 — 0.1 + 0.2 = 0.3, 큰 정수도 끝자리까지)
+POLICY = "analysis-policy-10"
+USER_EXCLUDED = "사용자가 계산에서 뺌"
 MASKED_NO = "가림 구분"  # 가린 표시가 같은 서로 다른 값에 붙이는 번호의 이름 ('가팀 k***@example.com (가림 구분 2)')
 MAX_TARGETS = 20  # 한 번에 고를 수 있는 파일·시트
 MAX_ROWS = 300_000  # 고른 시트의 데이터 행 합계 상한
@@ -186,6 +188,8 @@ class TargetIn(BaseModel):
     period: str | None = Field(default=None, pattern=r"^(19|20)\d{2}(-(0[1-9]|1[0-2]))?$")  # 기간을 못 찾을 때만
     # 같은 대상의 행이 반복될 때, 사용자가 '서로 다른 기록(거래·발생 건)'이라고 확인했으면 모두 더한다
     rows_are_records: bool = False
+    # 사용자가 이 시트(시트를 고르지 않았으면 이 파일)를 계산에서 뺌 — 읽지 않고 결과의 '제외'에 사유와 함께 남긴다
+    exclude: bool = False
 
 
 class BinIn(BaseModel):
@@ -565,6 +569,8 @@ class TargetEval:
     rows: list[RowRec] = field(default_factory=list)
     records: bool = False  # 사용자가 '반복 행은 서로 다른 기록'이라고 확인함
     repeated: dict[str, Any] | None = None  # 같은 대상의 행이 반복된 정도 (화면에 보여 줌)
+    # 합계 항목일 때 산식 확인 (_formula_checks): state = verified · unverifiable · mismatch, 비교한 범위와 문구
+    formula: dict[str, Any] | None = None
 
     def out(self) -> dict[str, Any]:
         return {
@@ -588,6 +594,7 @@ class TargetEval:
             "data_rows": self.data_rows,
             "rows_are_records": self.records,
             "repeated": self.repeated,
+            "formula": self.formula,
         }
 
 
@@ -660,6 +667,22 @@ def _sheet_targets(db: Session, user: CurrentUser, req: AnalysisIn) -> list[Targ
                 raise _bad(f"같은 파일·시트(#{record.id} {sheet_id(i)})를 두 번 골랐습니다.")
             seen.add((record.id, i))
             sv = view.sheets[i]
+            if t.exclude:  # 사용자가 뺀 시트는 읽지 않고, 결과의 '제외'에 남긴다 (화면에서 다시 넣을 수 있게 목록에 둠)
+                targets.append(
+                    TargetEval(
+                        len(targets),
+                        record.id,
+                        name,
+                        record.sha256,
+                        sheet_id=sheet_id(i),
+                        sheet=mask_text(sv.name),
+                        decisions=decisions.get(sv.name, {}),
+                        data_rows=sv.data_rows,
+                        status="excluded",
+                        reasons=[USER_EXCLUDED],
+                    )
+                )
+                continue
             total_rows += sv.data_rows
             if total_rows > MAX_ROWS:
                 raise HTTPException(
@@ -1034,15 +1057,25 @@ def _read_rows(ev: Evaluation) -> None:
     _overlaps(ev)
     _base_dates(ev)  # 범위(_date_scope)가 자동 제외와 무관해 순서에 기대지 않지만, 근거를 먼저 확인한다
     _region_levels(ev)
-    _formula_warnings(ev)
+    _formula_checks(ev)
 
 
-def _formula_warnings(ev: Evaluation) -> None:
-    """고른 항목이 합계 항목(발신건수합계 등)이면 시트마다 산식(구성 항목의 합)과 맞는지 보고, 다르면 근거와 함께
-    알린다 (app.formulas). 계산은 막지 않는다 — 확정한 열의 값 그대로 계산하되, 산식이 다른 합계를 함께 더하지 않게
-    확인을 돕는다. 구성 항목도 사용자가 확정한 시트만 본다 (분석은 확정한 매핑만 쓴다)."""
+def _formula_checks(ev: Evaluation) -> None:
+    """고른 항목이 합계 항목(발신건수합계 등)이면 시트마다 산식(구성 항목의 합)과 맞는지 보고 결과를 대상에 남긴다
+    (app.formulas). 구성 항목도 사용자가 확정한 열만 본다 (분석은 확정한 매핑만 쓴다). 값·산식을 대신 고치지 않는다.
+
+    - 산식 불일치 (비교한 행 중 다른 행이 있음): 같은 뜻의 합계라고 할 수 없어 그 시트를 '확인 필요'로 막는다 —
+      열 매핑에서 올바른 항목으로 다시 확정하거나 그 시트를 계산에서 빼야 실행된다
+      (원본 값을 그대로 옮기는 통합표·파일별 시트는 경고만 한다).
+    - 검증 불가 (구성 항목 열이 확정되지 않았거나, 모든 칸을 숫자로 읽은 행이 없음): 오류로 단정하지 않아 막지 않고,
+      '검증 불가'와 계산 범위를 주의로 남긴다.
+    - 확인됨: 비교한 행 수와 비교하지 못한 행 수를 남긴다 (확인은 비교한 행에 한함).
+    """
     if ev.req.field_key not in TOTAL_FORMULAS:
         return
+    label = label_of(ev.req.field_key)
+    parts = TOTAL_FORMULAS[ev.req.field_key]
+    parts_text = " + ".join(label_of(p) for p in parts)
     for t in ev.ok:
         if t.column_id is None:
             continue
@@ -1050,23 +1083,47 @@ def _formula_warnings(ev: Evaluation) -> None:
         columns = unique_columns((t.decisions.get(name), j) for j, name in enumerate(sv.columns))
         columns[ev.req.field_key] = int(t.column_id[1:])  # 이 결과가 계산하는 열
         rows = [(row_no, cells) for row_no, kind, cells in sv.rows if kind == "data"]
-        for check in check_totals(rows, columns):
-            if check.total != ev.req.field_key or not check.differ:
-                continue
-            parts = " + ".join(label_of(p) for p in TOTAL_FORMULAS[check.total])
-            text = (
-                f"'{label_of(check.total)}' #{t.file_id} {t.sheet}: '{t.column}' 열이 {parts}의 합과 "
-                f"{len(check.differ)}/{check.checked}행에서 다릅니다 (차이 합계 {_fmt(check.difference)})"
+        missing = [p for p in parts if p not in columns]
+        check = None if missing else next(c for c in check_totals(rows, columns) if c.total == ev.req.field_key)
+        found = {"rows": len(rows), "checked": 0, "differ": 0, "alternative": None}
+        if check is None or check.checked == 0:
+            confirmed = Counter(t.decisions.get(name) for name in sv.columns)
+            absent = [label_of(p) for p in missing if not confirmed[p]]
+            doubled = [label_of(p) for p in missing if confirmed[p] > 1]  # 두 열이면 어느 열과 비교할지 정하지 않음
+            reasons = []
+            if absent:
+                reasons.append(f"구성 항목({', '.join(absent)}) 열이 이 시트에 확정되어 있지 않음")
+            if doubled:
+                reasons.append(f"구성 항목({', '.join(doubled)})으로 확정한 열이 여러 개라 비교할 열을 정하지 않음")
+            if not reasons:
+                reasons.append(f"구성 항목 열은 있으나 {len(rows)}행 모두 숫자로 읽지 못한 칸이 있어 비교하지 못함")
+            why = "; ".join(reasons)
+            text = f"산식 검증 불가 — {why}. 확정한 '{t.column}' 열 값 그대로 계산합니다 (검증 완료 아님)"
+            t.formula = {**found, "state": "unverifiable", "text": text}
+            ev.warnings.append(f"'{label}' #{t.file_id} {t.sheet}: {text}")
+            continue
+        found["checked"] = check.checked
+        skipped = len(rows) - check.checked
+        if not check.differ:
+            text = f"산식 확인 — {parts_text}의 합과 비교한 {check.checked}행 모두 같음" + (
+                f" (숫자로 읽지 못한 칸이 있는 {skipped}행은 비교하지 않음)" if skipped else ""
             )
-            if check.alternative:
-                alt, matched = check.alternative
-                text += (
-                    f" — {' + '.join(label_of(p) for p in TOTAL_FORMULAS[alt])}(으)로는 {matched}행이 맞습니다. "
-                    f"산식이 다른 합계일 수 있으니 '{label_of(alt)}'(으)로 확정할지 확인하세요"
-                )
-            else:
-                text += " — 입력 오류로 단정하지 말고 원본의 산식·포함 범위를 확인하세요"
-            ev.warnings.append(text + " (산식이 다른 합계를 함께 더하면 뜻이 섞입니다)")
+            t.formula = {**found, "state": "verified", "text": text}
+            continue
+        text = (
+            f"산식 불일치 — '{t.column}' 열이 {parts_text}의 합과 비교한 {check.checked}행 중 "
+            f"{len(check.differ)}행에서 다릅니다 (차이 합계 {_fmt(check.difference)})"
+        )
+        if check.alternative:
+            alt, matched = check.alternative
+            text += f". {' + '.join(label_of(p) for p in TOTAL_FORMULAS[alt])}(으)로는 {matched}행이 맞습니다"
+            found["alternative"] = label_of(alt)
+        t.formula = {**found, "differ": len(check.differ), "state": "mismatch", "text": text}
+        t.status = "needs_input"
+        t.reasons.append(
+            f"{text} — 산식이 다른 합계는 '{label}'(으)로 함께 더하지 않습니다. 열 매핑에서 올바른 항목으로 다시 "
+            "확정하거나 이 시트를 계산에서 빼세요 (값·산식을 대신 고치지 않음)"
+        )
 
 
 def _candidate(r: RowRec) -> bool:
@@ -1427,7 +1484,8 @@ def compute(ev: Evaluation) -> dict[str, Any]:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             {
-                "message": "확인이 필요한 자료가 있습니다 (단위·기간·열을 적거나 그 자료를 빼세요).",
+                "message": "확인이 필요한 자료가 있습니다 (단위·기간·열을 적거나, 산식이 다른 합계는 다시 확정하거나, "
+                "그 자료를 빼세요).",
                 "problems": [f"#{t.file_id} {t.sheet}: {'; '.join(t.reasons)}" for t in blocked],
             },
         )

@@ -959,6 +959,8 @@ function SummaryItem({
                         {(lk.exclude_reason || lk.reasons.length > 0) && (
                           <span className="bd-reason">{lk.exclude_reason ?? lk.reasons.join('; ')}</span>
                         )}
+                        {/* 합계 항목의 산식 확인 — 불일치는 위 사유에 적힘 (다시 확정하거나 '포함'을 꺼야 계산) */}
+                        {lk.formula && lk.formula.state !== 'mismatch' && <span className="bd-reason">{lk.formula.text}</span>}
                         {(lk.repeated || d.rows_are_records) && (
                           <label className="bd-records">
                             <input

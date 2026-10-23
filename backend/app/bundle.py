@@ -47,9 +47,9 @@ from app.auth import CurrentUser
 from app.config import DATA_DIR
 from app.decisions import load_decisions
 from app.files import get_file_for, load_parsed
-from app.formulas import TOTAL_FORMULAS
+from app.formulas import TOTAL_FORMULAS, check_totals, unique_columns
 from app.integration import KST, OUTPUT_DIR
-from app.mapping_review import sheet_id
+from app.mapping_review import file_view, sheet_id
 from app.models import IntegrationRun, SourceFile
 from app.parsing import FileResult
 from app.pii import mask_text
@@ -503,6 +503,7 @@ def build_plan(db: Session, user: CurrentUser, req: BundleIn) -> Plan:
                 "같은 시트가 두 번 들어갑니다."
             )
     decisions = {fid: load_decisions(db, fid) for fid in per_file}
+    warnings.extend(_formula_notes(db, records, out_sheets, decisions))
     fields = _fields(out_sheets, decisions)
     items = None if req.summary is None else _summary(db, user, req.summary, out_sheets, problems)
     if req.summary is not None:
@@ -510,6 +511,40 @@ def build_plan(db: Session, user: CurrentUser, req: BundleIn) -> Plan:
     plan = Plan(req, files_out, out_sheets, items, fields, problems, warnings)
     plan.basis = _basis(plan, records)
     return plan
+
+
+def _formula_notes(
+    db: Session,
+    records: dict[int, SourceFile],
+    sheets: list[OutSheet],
+    decisions: dict[int, dict[str, dict[str, str | None]]],
+) -> list[str]:
+    """파일별 시트에 넣는 합계 항목 열이 산식(구성 항목의 합)과 다른지 본다 (app.formulas, 확정한 매핑만).
+    원본 값을 그대로 옮기는 시트라 막지 않고 알린다 — 같은 뜻으로 더하는 통계 요약은 분석 엔진이 막는다."""
+    notes = []
+    for o in sheets:
+        confirmed = decisions.get(o.file.file_id, {}).get(o.sheet.name, {})
+        if not any(key in TOTAL_FORMULAS for key in confirmed.values()):
+            continue
+        sv = file_view(db, records[o.file.file_id]).sheets[o.sheet.index]
+        columns = unique_columns((confirmed.get(name), j) for j, name in enumerate(sv.columns))
+        rows = [(row_no, cells) for row_no, kind, cells in sv.rows if kind == "data"]
+        for check in check_totals(rows, columns):
+            if not check.differ:
+                continue
+            parts = " + ".join(label_of(p) for p in TOTAL_FORMULAS[check.total])
+            text = (
+                f"'{o.name}' 시트의 '{mask_text(sv.columns[check.column])}' 열({label_of(check.total)})이 {parts}의 "
+                f"합과 비교한 {check.checked}행 중 {len(check.differ)}행에서 다릅니다"
+            )
+            if check.alternative:
+                alt, matched = check.alternative
+                text += f" ({' + '.join(label_of(p) for p in TOTAL_FORMULAS[alt])}(으)로는 {matched}행이 맞음)"
+            notes.append(
+                f"{text} — 파일별 시트에는 원본 값 그대로 넣습니다. 통계 요약에서는 이 열을 같은 항목으로 더하지 "
+                "않습니다 (다시 확정하거나 요약에서 빼야 함)."
+            )
+    return notes
 
 
 def double_count_notes(summary: SummaryIn) -> list[str]:
@@ -847,7 +882,8 @@ def _write_summary(
             values = [_plain(g[a]) for a in o["aggregates"]]
             line(*keys, *values)
             groups.append({"keys": keys, **{a: g[a] for a in o["aggregates"]}, "partial": g["partial"]})
-        line("자료", "파일", "시트", "열", "표준 항목", "단위 (근거)", "기간 (근거)", "포함", "사유", bold=True)
+        line("자료", "파일", "시트", "열", "표준 항목", "단위 (근거)", "기간 (근거)", "포함", "사유", "산식 확인",
+             bold=True)  # fmt: skip
         for lk in o["links"]:
             unit = f"{lk.get('unit') or '-'} ({lk.get('unit_source') or '-'})" if lk.get("unit") else "-"
             period = (
@@ -857,8 +893,9 @@ def _write_summary(
             )
             included = {"ok": "포함", "user_excluded": "뺌 (사용자)", "excluded": "뺌"}.get(lk["status"], lk["status"])
             reason = lk.get("exclude_reason") or "; ".join(lk.get("reasons") or [])
+            formula = (lk.get("formula") or {}).get("text") or "-"  # 합계 항목일 때 (확인 · 검증 불가)
             line(lk["output_sheet"], f"#{lk['file_id']} {lk['file_name']}", lk["sheet"], lk.get("column") or "-",
-                 lk.get("field_label") or o["field_label"], unit, period, included, reason)  # fmt: skip
+                 lk.get("field_label") or o["field_label"], unit, period, included, reason, formula)  # fmt: skip
         saved.append(
             {
                 "field_key": o["field_key"],
