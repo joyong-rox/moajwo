@@ -22,16 +22,19 @@ from app.check_basis import (
     INTERNAL_PARAMS,
     LEGACY_REASON,
     Decisions,
+    approved_links,
     basis_changes,
     build_basis,
     column_facts,
     confirmed_entry,
     effect_free,
+    entity_basis,
+    entity_changes,
 )
 from app.decisions import DecisionInput, learn_column, load_decisions, load_learned, load_org_codes, save_decisions
 from app.files import load_parsed
 from app.glossary import normalize_name
-from app.glossary_api import get_glossary
+from app.glossary_api import glossary_state
 from app.mapping import ColumnMapping, MappingEngine, get_engine, normalize, split_column_name
 from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile, User
 from app.parsing import FileResult, SheetResult
@@ -303,7 +306,8 @@ def create_session(
         entity_field=params.get("entity_field"),
         change_threshold=params.get("change_threshold", 0.5),
     )
-    glossary = get_glossary(db)
+    digest, load_glossary = glossary_state(db)
+    glossary = load_glossary()
     files = [_file_input(t) for t in targets]
     result = validate(files, vparams, [_file_input(b) for b in baseline], glossary=glossary)
     # 이름 해석 기준 기간 (기준 기간이 없으면 자료에서 추정). 통합도 같은 기준으로 이름을 바꾸도록 남긴다
@@ -316,6 +320,8 @@ def create_session(
     basis = build_basis(
         [(t.record.id, t.mappings) for t in [*targets, *baseline]], [b.record.id for b in baseline], learned, standard
     )
+    if result.resolver is not None:  # 이 검사가 해석한 기관·지역 이름 — 완료·통합 전에 지금 용어사전과 비교한다
+        basis["entities"] = entity_basis(result.resolver, digest)
 
     session = ReviewSession(
         status="in_review",
@@ -640,8 +646,9 @@ class Summary:
 def recheck_reasons(db: Session, session: ReviewSession) -> list[str]:
     """이 검토의 검사 결과로 완료·통합할 수 없는 이유 — 검사 기준(검사에 적용한 매핑)과 지금이 다른 점.
 
-    파일은 읽지 않고 모델도 부르지 않는다 (확정값·학습 별칭·전사 표준 사전만 조회 — check_basis.basis_changes).
-    개인정보 때문에 제외한 파일은 통합하지 않으므로 보지 않고, 전월 비교 자료는 검사에 썼으므로 본다.
+    파일은 읽지 않고 모델도 부르지 않는다 (확정값·학습 별칭·전사 표준 사전·용어사전만 조회 — check_basis의
+    basis_changes·entity_changes). 개인정보 때문에 제외한 파일은 통합하지 않으므로 보지 않고, 전월 비교 자료는 검사에
+    썼으므로 본다. 용어사전은 검사가 해석한 이름별로 기록해 두어 제외한 파일의 이름도 함께 본다.
     기준을 기록하기 전 버전의 검토는 같은지 확인할 수 없으므로 다시 검사가 필요하다.
     """
     if session.status == "superseded":
@@ -652,7 +659,16 @@ def recheck_reasons(db: Session, session: ReviewSession) -> list[str]:
     excluded = set(json.loads(session.excluded_file_ids))
     fids = [f for f in json.loads(session.file_ids) if f not in excluded] + list(basis.get("baseline", []))
     decisions: dict[int, Decisions] = {f: load_decisions(db, f) for f in fids}
-    return basis_changes(db, basis, decisions, load_learned(db, session.created_by), load_standard(db))
+    changed = basis_changes(db, basis, decisions, load_learned(db, session.created_by), load_standard(db))
+    if "glossary_state" not in db.info:  # 목록·건수는 검토마다 부르므로 한 요청에서 용어사전을 한 번만 읽는다
+        db.info["glossary_state"] = glossary_state(db)
+    digest, load_glossary = db.info["glossary_state"]
+
+    def approved() -> list[tuple[str, str, str | None]]:  # 용어사전 지문이 검사 때와 다를 때만 읽는다
+        entity = ReviewItem.session_id == session.id, ReviewItem.kind == "entity"
+        return approved_links(db.scalars(select(ReviewItem).where(*entity)))
+
+    return changed + entity_changes(basis.get("entities"), digest, load_glossary, approved)
 
 
 def summarize(session: ReviewSession, items: list[ReviewItem], recheck: list[str] | None = None) -> Summary:
@@ -679,7 +695,7 @@ def summarize(session: ReviewSession, items: list[ReviewItem], recheck: list[str
         target = "통합" if session.status == "ready" else "완료·통합"
         text = (
             f"다시 검사 필요 — 이 검사 결과로 {target}할 수 없습니다 ({shown}). "
-            "다시 검사하면 지금 열 매핑으로 검사합니다."
+            "다시 검사하면 지금 열 매핑·용어사전으로 검사합니다."
         )
     elif session.status == "ready":
         text = f"검토 완료 — 통합 준비가 끝났습니다 (자동 보정 {auto}건 적용 예정)."
