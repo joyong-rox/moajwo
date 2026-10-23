@@ -1,14 +1,13 @@
 """LLM 제공자 설정: 기본 로컬, 소유자만 변경, API 키 비노출, 제공자별 요청 형식. 실제 외부 호출은 하지 않는다."""
 
 import json
-import sqlite3
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import llm
-from app.config import DATA_DIR
+from tests.conftest import db_connect
 
 SCHEMA = {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}
 SECRET = "sk-test-0123456789abcdef"
@@ -23,7 +22,7 @@ def client():
     with TestClient(app) as c:
         yield c
     # 다른 테스트에 영향이 없도록 로컬 기본값으로 되돌린다
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         con.execute("delete from app_settings where key = 'llm_provider'")
     llm.set_current(None)
 

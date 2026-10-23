@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import re
-import sqlite3
 import zipfile
 from typing import Any
 
@@ -15,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import DATA_DIR
+from tests.conftest import db_connect
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_auth import _client, app_real_login  # noqa: F401
 
@@ -91,7 +91,7 @@ def _make(c: TestClient, body: dict[str, Any]) -> tuple[dict[str, Any], openpyxl
 
 
 def _db(sql: str, *args: Any) -> list[tuple]:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         return con.execute(sql, args).fetchall()
 
 
