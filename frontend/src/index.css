@@ -4778,6 +4778,14 @@ button.wk-card:hover {
   overflow-wrap: anywhere;
 }
 
+/* 결과 내려받기가 실패한 이유: 링크 바로 아래 줄에 (화면을 떠나지 않음) */
+.run-download-problem {
+  display: block;
+  margin: 4px 0 0;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
 .runs-table .wk-run-review {
   min-height: 30px;
   margin-left: 8px;

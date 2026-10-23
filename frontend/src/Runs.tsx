@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { listAllRuns, runDownloadUrl, type IntegrationRun } from './api'
+import { listAllRuns, type IntegrationRun } from './api'
 import { isManager, useAuth } from './authContext'
 import { navigate } from './router'
 import { formatDuration, formatTime, STATUS_CLASS } from './runFormat'
+import { RunDownloadLink } from './RunDownloadLink'
 
 /** 실행 기록: runs 테이블 기반 (입력 파일 수, 결과 파일 경로, 상태, 소요 시간). */
 function Runs() {
@@ -99,7 +100,7 @@ function Runs() {
                         <span className="runs-file" title={r.output_path}>
                           {r.output_path.split(/[\\/]/).pop()}
                         </span>{' '}
-                        <a href={runDownloadUrl(r.id)}>내려받기</a>
+                        <RunDownloadLink runId={r.id}>내려받기</RunDownloadLink>
                       </>
                     ) : r.status === 'review' && r.review_session_id !== null ? (
                       <span className="mw-muted">검토 대기</span>
