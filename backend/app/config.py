@@ -62,6 +62,7 @@ OLLAMA_LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:7b")
 # 개발·진단에서만 MOAJWO_API_DOCS=1로 켠다.
 API_DOCS = os.environ.get("MOAJWO_API_DOCS", "") == "1"
 
+
 def _env_int(name: str, default: int, minimum: int = 1) -> int:
     """정수 설정. 비어 있으면 기본값, 숫자가 아니거나 최솟값보다 작으면 기동을 멈춘다 (잘못된 한도로 돌지 않게)."""
     raw = os.environ.get(name, "").strip()
