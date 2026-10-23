@@ -306,3 +306,26 @@ def test_unchecked_sums_are_listed_in_the_result_summary(client: TestClient) -> 
     wb = openpyxl.load_workbook(io.BytesIO(client.get(f"/runs/{run['id']}/download").content))
     found = [list(r) for r in wb["처리 요약"].iter_rows(values_only=True) if r[0] == "합계 검사 불완전"]
     assert len(found) == 1 and found[0][4] == "세대수" and "비공개·결측 표기('x') 1개" in found[0][5]
+
+
+def test_text_cells_that_look_like_formulas_stay_text(client: TestClient) -> None:
+    """원본의 글자 칸이 '='로 시작해도 통합 결과에는 수식이 아니라 글자로 들어간다 (Excel로 열 때 실행되지 않게)."""
+    texts = ["=1+1", '=HYPERLINK("http://127.0.0.1:9/","x")']
+    quoted = [t.replace('"', '""') for t in texts]  # CSV 안의 큰따옴표
+    lines = ["기관명,집행액,비고", *[f'행안부,{1000 + i},"{q}"' for i, q in enumerate(quoted)]]
+    fid = client.post("/files", files=[("files", ("formula.csv", "\r\n".join(lines).encode("utf-8"), "text/csv"))])
+    fid = fid.json()[0]["id"]
+    review = client.post("/reviews", json={"file_ids": [fid]}).json()
+    for item in [i for i in review["items"] if i["category"] == "pending"]:
+        candidates = item["payload"].get("candidates") or []
+        choice = candidates[0].get("code") if candidates and item["kind"] != "mapping" else None
+        body = {"decision": "approved", "choice": choice} if choice else {"decision": "rejected"}
+        assert client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json=body).status_code == 200
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = client.post(f"/reviews/{review['id']}/integrate", json={"include_unmapped": True})
+    assert run.status_code == 201, run.text
+    wb = openpyxl.load_workbook(io.BytesIO(client.get(f"/runs/{run.json()['id']}/download").content))
+    found = [c for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.value in texts]
+    assert sorted(c.value for c in found) == sorted(texts)
+    assert {c.data_type for c in found} == {"s"}  # 글자 칸 — 수식(f) 아님
+    assert not [c for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.data_type == "f"]
