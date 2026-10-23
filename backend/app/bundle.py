@@ -44,7 +44,7 @@ from app import analysis
 from app.analysis import AGG_LABEL, MEASURE_FIELDS, NO_VALUE, AnalysisIn, Evaluation, TargetIn, label_of
 from app.analysis_api import LEVEL_TEXT, level_conflict_text, source_columns_text
 from app.auth import CurrentUser
-from app.config import DATA_DIR
+from app.config import DATA_DIR, MAX_OUTPUT_CELLS
 from app.decisions import load_decisions
 from app.files import get_file_for, load_parsed
 from app.formulas import TOTAL_FORMULAS, check_totals, unique_columns
@@ -360,6 +360,7 @@ class Plan:
                 "files": MAX_FILES,
                 "sheets": MAX_SHEETS,
                 "rows": MAX_ROWS,
+                "cells": MAX_OUTPUT_CELLS,
                 "excel_rows": EXCEL_MAX_ROWS,
                 "items": MAX_ITEMS,
                 "summary_sheets": analysis.MAX_TARGETS,
@@ -478,6 +479,13 @@ def build_plan(db: Session, user: CurrentUser, req: BundleIn) -> Plan:
         )
     if total > MAX_ROWS:
         problems.append(f"넣을 행이 {total:,}행으로 한 번에 넣을 수 있는 {MAX_ROWS:,}행을 넘습니다 — 나눠 만드세요.")
+    # 결과는 메모리에 다 만든 뒤 저장한다 — 메모리 예산을 넘는 크기는 실행 기록을 만들기 전에 거절 (docs/MEMORY.md)
+    cells = sum(o.rows * (o.sheet.columns + 2) for o in out_sheets)  # 결과 시트마다 '원본 행'·'행 종류' 두 열이 더 붙음
+    if cells > MAX_OUTPUT_CELLS:
+        problems.append(
+            f"결과에 넣을 칸이 {cells:,}개로 이 서버에서 한 번에 만들 수 있는 {MAX_OUTPUT_CELLS:,}칸을 넘습니다 — "
+            "파일·시트를 나눠 만드세요."
+        )
     for o in out_sheets:
         if o.rows + 1 > EXCEL_MAX_ROWS:
             problems.append(f"'{o.name}': {o.rows:,}행은 엑셀 한 시트에 넣을 수 있는 행 수를 넘습니다.")
