@@ -6,6 +6,7 @@
 프로세스 재시작·재배포·휴면·이관·백업 복원은 diagnostics/scripts/external_db_check.py가 실제 프로세스로 확인한다.
 """
 
+import json
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -15,6 +16,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
 from app import db as app_db
+from app import dbcopy
 from app.config import _database
 from app.main import DB_UNAVAILABLE, app
 from app.models import AuthSession, IntegrationRun, User
@@ -98,3 +100,13 @@ def test_times_keep_the_same_instant_after_storage() -> None:
         db.delete(session)
         db.delete(run)
         db.commit()
+
+
+def test_dbcopy_checks_the_report_path_before_copying(tmp_path, capsys) -> None:
+    """보고 파일을 쓸 수 없으면 DB에 닿기 전에 멈춘다 — 이관은 커밋됐는데 보고만 실패해 종료 코드 1이 되는 일이 없게."""
+    code = dbcopy.main([
+        "--source", f"sqlite:///{(tmp_path / 'none.db').as_posix()}", "--target", "postgresql://u:p@127.0.0.1:9/x",
+        "--apply", "--report", str(tmp_path / "없는 폴더" / "report.json"),
+    ])  # fmt: skip
+    assert code == 1
+    assert "이관하지 않았습니다" in json.loads(capsys.readouterr().out)["error"]

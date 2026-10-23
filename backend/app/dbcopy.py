@@ -188,15 +188,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--report")
     a = ap.parse_args(argv)
+    try:  # 보고 파일 경로부터 확인한다 — 이관을 커밋한 뒤 보고만 못 써서 실패로 끝나지 않게
+        out = open(a.report, "w", encoding="utf-8") if a.report else None
+    except OSError as exc:
+        error = f"보고 파일을 열 수 없습니다 ({exc.strerror}) — 이관하지 않았습니다"
+        print(json.dumps({"error": error}, ensure_ascii=False))
+        return 1
     try:
         report = copy(a.source, a.target, apply=a.apply)
         code = 0
     except (CopyError, ValueError) as exc:
         report, code = {"error": str(exc)}, 1
     text_out = json.dumps(report, ensure_ascii=False, indent=1, default=str)
-    if a.report:
-        with open(a.report, "w", encoding="utf-8") as f:
-            f.write(text_out)
+    if out:
+        with out:
+            out.write(text_out)
     print(text_out)
     return code
 
