@@ -39,7 +39,7 @@ from app.pii import mask_text
 from app.promotion import load_standard
 from app.quantity import confirmed_quantity_indexes, quantity_sheet
 from app.review import mapping_reason, session_items, summarize
-from app.validation import EntityResolver
+from app.validation import WARNING_LABEL, EntityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -536,6 +536,14 @@ def _write_summary(ws: Any, built: _Built, summary: dict[str, Any]) -> None:
                 [f["name"], s["name"], s["data_rows"], s["used_rows"], s["subtotal_rows"], s["note_rows"], "통합"]
             )
 
+    if summary.get("warnings"):
+        title("검증 경고 (통합은 진행 — 확인하지 못했거나 확인이 필요한 내용)")
+        ws.append(["종류", "파일", "시트", "행", "열", "내용"])
+        for cell in ws[ws.max_row]:
+            cell.font, cell.fill = BOLD, HEADER_FILL
+        for w in summary["warnings"]:
+            ws.append([w["kind"], w["file"], w["sheet"], w["row"], w["column"], w["reason"]])
+
     title("변경 종류별 건수")
     for kind, count in summary["change_counts"].items():
         ws.append([KIND_LABEL[kind], count])
@@ -600,6 +608,14 @@ def integrate(db: Session, session: ReviewSession, include_unmapped: bool | None
     now = datetime.now(KST)
     items = session_items(db, session)
     warning_count = summarize(session, items).warnings
+    excluded = set(json.loads(session.excluded_file_ids))
+    # 검증 경고의 내용 (합계 검사 불완전·산식·이상치 등) — 건수만이 아니라 무엇을 확인하지 못했는지 결과에 남긴다
+    warnings = [
+        {"kind": WARNING_LABEL.get(i.kind, i.kind), "file": i.file_name, "sheet": i.sheet, "row": i.row,
+         "column": i.column, "reason": mask_text(i.reason)}
+        for i in items
+        if i.category == "warning" and (i.file_id is None or i.file_id not in excluded)
+    ]  # fmt: skip
     file_ids = [f["id"] for f in built.files if not f["excluded"]]
     if run is None:
         run = IntegrationRun(
@@ -632,6 +648,7 @@ def integrate(db: Session, session: ReviewSession, include_unmapped: bool | None
         "cell_change_count": len(cell_changes),
         "column_change_count": counts.get("column", 0),
         "warning_count": warning_count,
+        "warnings": warnings,
         "change_counts": counts,
         "files": built.files,
         "dropped_columns": built.dropped_columns,

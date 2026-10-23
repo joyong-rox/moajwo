@@ -146,7 +146,8 @@ def test_rounding_tolerance_and_suppressed_values(tmp_path: Path) -> None:
     assert validate([make_input(make_xlsx(tmp_path / "r.xlsx", rows))], ValidationParams()).blocks == []
     rows = [["시도", "인구"], ["서울", 100], ["부산", "x"], ["합계", 500]]
     result = validate([make_input(make_xlsx(tmp_path / "x.xlsx", rows))], ValidationParams())
-    assert result.blocks == [] and any("비공개" in n for n in result.notes)
+    # 막지는 않지만 검사를 건너뛴 사실을 참고 메모가 아니라 경고로 알린다 (C-03 — 통과로 보이지 않게)
+    assert result.blocks == [] and any(w.code == "sum_incomplete" and "비공개" in w.message for w in result.warnings)
 
 
 # ---------------------------------------------------------------- 차단: 필수 기관 / 기간
@@ -236,6 +237,7 @@ def test_block_and_warning_codes_are_disjoint() -> None:
         "header_missing",
         "quantity_not_number",
         "formula_mismatch",
+        "sum_incomplete",
     }
 
 
@@ -341,7 +343,11 @@ def test_national_total_with_single_region_is_skipped(tmp_path: Path) -> None:
     ]
     result = validate([make_input(make_xlsx(tmp_path / "one.xlsx", rows))], ValidationParams())
     assert "sum_mismatch" not in codes(result.blocks)
-    assert any("하위 그룹이 하나뿐" in n for n in result.notes)
+    # 확인하지 못한 합계는 참고 메모가 아니라 경고 (검토 목록·통합 결과에 보임 — 2026-10-23 정책)
+    [w] = [w for w in result.warnings if w.code == "sum_incomplete"]
+    assert w.row == 2 and "하위 그룹이 하나뿐" in w.message and "검사하지 않은 값" in w.message
+    assert not any("하위 그룹이 하나뿐" in n for n in result.notes)
+    assert result.status == "passed_with_warnings"
 
 
 def test_subtotal_placed_above_its_rows(tmp_path: Path) -> None:

@@ -31,7 +31,13 @@ from app.quantity import QUANTITY_FIELDS, quantity_value
 
 BlockCode = Literal["sum_mismatch", "required_entity_missing", "period_mismatch"]
 WarningCode = Literal[
-    "mom_outlier", "blank_value", "unit_estimate", "header_missing", "quantity_not_number", "formula_mismatch"
+    "mom_outlier",
+    "blank_value",
+    "unit_estimate",
+    "header_missing",
+    "quantity_not_number",
+    "formula_mismatch",
+    "sum_incomplete",
 ]
 Status = Literal["blocked", "pii_confirmation_required", "passed_with_warnings", "passed"]
 
@@ -47,6 +53,7 @@ WARNING_LABEL: dict[str, str] = {
     "header_missing": "헤더 확인 필요",
     "quantity_not_number": "수량으로 계산하지 못한 값",
     "formula_mismatch": "합계 산식 확인 필요",
+    "sum_incomplete": "합계 검사 불완전",
 }
 
 # 합산하면 안 되는 항목 (비율·연월·코드·연락처)
@@ -421,13 +428,41 @@ def _stock_columns(
     return out, _row_label(latest), cautions
 
 
-def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[BlockIssue]:
+def check_sums(
+    file: FileInput, sheet: SheetInput, notes: list[str], warnings: list[WarningIssue] | None = None
+) -> list[BlockIssue]:
+    """합계·소계 행이 하위 행의 합과 같은지 본다 → 다르면 차단.
+
+    하위 값 일부를 숫자로 읽지 못했거나(글자) 비공개 표기가 있어 전체를 확인하지 못한 열은 warnings에
+    '합계 검사 불완전'으로 남긴다 — 검사를 건너뛰거나 읽은 값만 비교해 맞은 것을 '통과'로 보이지 않게 한다 (C-03).
+    """
     issues: list[BlockIssue] = []
+    warnings = warnings if warnings is not None else []
     data = _data_rows(sheet.sheet)
     columns = sheet.sheet.columns
     subtotals = [r for r in sheet.sheet.body if r["kind"] == "subtotal"]
     groups = {id(r): _subtotal_group(r["cells"]) for r in subtotals}
     group_rows = [r for r in subtotals if groups[id(r)] is not None]
+
+    def unchecked(row: dict[str, Any], label: str, why: str) -> None:
+        """합계 행을 통째로 확인하지 못함 — 검사했을 숫자 합계가 있으면 경고, 없으면(글자로 보존된 열 등) 참고만."""
+        totals = [j for j, c in enumerate(row["cells"]) if _is_number(c) and _additive(sheet, j)]
+        if not totals:
+            notes.append(f"{file.file_name} / {sheet.sheet.name} {row['row']}행 '{label}': {why} — 합계 검사 생략")
+            return
+        shown = ", ".join(f"'{columns[j]}' {_fmt(row['cells'][j])}" for j in totals)
+        warnings.append(
+            WarningIssue(
+                "sum_incomplete",
+                f"'{label}' 행: {why} 합계({shown})를 확인하지 못했습니다 — 검사하지 않은 값입니다.",
+                file.file_id,
+                file.file_name,
+                sheet.sheet.name,
+                row["row"],
+                columns[totals[0]] if len(totals) == 1 else None,
+            )
+        )
+
     for row in subtotals:
         cells: list[Cell] = row["cells"]
         group = groups[id(row)]
@@ -456,21 +491,16 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
             children = group_rows + ungrouped
             label = next((str(c) for c in cells if is_subtotal_label(c)), "합계")
             if len(group_rows) == 1 and not ungrouped:
-                # 예) 충청남도 자료에 '전국' 행이 함께 실린 경우: 자료에는 한 그룹만 있어 전체 합계와 비교할 수 없다
-                notes.append(
-                    f"{file.file_name} / {sheet.sheet.name} {row['row']}행 '{label}': 자료에 하위 그룹이 하나뿐이라 "
-                    "전체 합계 검사 생략 (일부 지역만 담긴 자료로 봄)"
-                )
+                # 예) 충청남도 자료에 '전국' 행이 함께 실린 경우: 자료에는 한 그룹만 있어 전체 합계와 비교할 수 없다.
+                # 확인하지 못한 합계는 참고 메모가 아니라 경고로 남긴다 (검토 목록·통합 결과 '검증 경고'에 보임)
+                unchecked(row, label, "자료에 하위 그룹이 하나뿐이라(일부 지역만 담긴 자료로 봄) 전체")
                 continue
         else:
             col, value = group
             children = [r for r in data if r["cells"][col] == value]
             label = " ".join(str(c) for c in cells if isinstance(c, str) and not is_missing(c))
         if not children:
-            notes.append(
-                f"{file.file_name} / {sheet.sheet.name} {row['row']}행 '{label}': "
-                "하위 데이터 행을 찾지 못해 합계 검사 생략"
-            )
+            unchecked(row, label, "하위 데이터 행을 찾지 못해")
             continue
         row_issues: list[BlockIssue] = []
         for j, total in enumerate(cells):
@@ -485,11 +515,18 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
             if not _is_number(total) or not _additive(sheet, j) or j in stock_cols:
                 continue
             parts = [r["cells"][j] for r in children]
-            if any(isinstance(p, str) and is_missing(p) and p not in ZERO_MARKERS for p in parts):
-                notes.append(
-                    f"{file.file_name} / {sheet.sheet.name} {row['row']}행 '{columns[j]}': "
-                    "하위 행에 비공개(x, … 등) 값이 있어 합계 검사 생략"
-                )
+            hidden = [p for p in parts if isinstance(p, str) and is_missing(p) and p not in ZERO_MARKERS]
+            if hidden:
+                marks = ", ".join(f"'{m}'" for m in dict.fromkeys(hidden))
+                warnings.append(
+                    WarningIssue(
+                        "sum_incomplete",
+                        f"'{label}' 행의 '{columns[j]}': 하위 {len(parts)}행 중 비공개·결측 표기({marks}) "
+                        f"{len(hidden)}개가 있어 합계를 확인하지 못했습니다 — 이 열의 합계 {_fmt(total)}은(는) "
+                        "검사하지 않은 값입니다 (표기를 0으로 보지 않음).",
+                        file.file_id, file.file_name, sheet.sheet.name, row["row"], columns[j], actual=total,
+                    )
+                )  # fmt: skip
                 continue
             numbers = [p for p in parts if _is_number(p)]
             if not numbers:
@@ -500,6 +537,24 @@ def check_sums(file: FileInput, sheet: SheetInput, notes: list[str]) -> list[Blo
             # 표시 단위 반올림 허용: 하위 행 수 × 마지막 자리의 절반
             unit = 10 ** -max([_decimals(total), *(_decimals(n) for n in numbers)])
             tolerance = 0.5 * unit * len(numbers) + 1e-9 * abs(computed)
+            if unread and abs(computed - total) <= tolerance:
+                shown = ", ".join(
+                    f"{r['row']}행 '{mask_cell(r['cells'][j])}'"
+                    for r in children
+                    if isinstance(r["cells"][j], str) and r["cells"][j].strip() and not is_missing(r["cells"][j])
+                )
+                message = (
+                    f"'{label}' 행의 '{columns[j]}': 하위 {len(parts)}행 중 {unread}개 값({shown})을 숫자로 읽지 못해 "
+                    f"나머지 {len(numbers)}행만 더해 비교했습니다 "
+                    f"(읽은 값의 합 {_fmt(computed)} = 합계 {_fmt(total)}) — "
+                    "읽지 못한 값까지 넣어도 맞는지는 확인하지 못했습니다."
+                )
+                warnings.append(
+                    WarningIssue(
+                        "sum_incomplete", message, file.file_id, file.file_name, sheet.sheet.name, row["row"],
+                        columns[j], expected=computed, actual=total,
+                    )
+                )  # fmt: skip
             if abs(computed - total) > tolerance:
                 row_issues.append(
                     BlockIssue(
@@ -1268,7 +1323,7 @@ def validate(
 
     for f in files:
         for s in f.sheets:
-            blocks.extend(check_sums(f, s, notes))
+            blocks.extend(check_sums(f, s, notes, warnings))
     blocks.extend(check_required(files, params, notes, resolver))
     blocks.extend(check_periods(files, params, notes))
 

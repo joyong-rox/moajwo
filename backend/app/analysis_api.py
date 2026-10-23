@@ -33,6 +33,7 @@ from app.analysis import (
     compute,
     conditions,
     evaluate,
+    excel_number,
     inputs,
     label_of,
     preview_out,
@@ -267,7 +268,7 @@ def _rows(ws: Any, start: int, rows: list[list[Any]], header: bool = False) -> i
 
 
 def _value(v: Any) -> Any:
-    return NO_VALUE if v is None else v
+    return NO_VALUE if v is None else excel_number(v)  # 16자리 이상 정수는 글자로 (자릿수 보존)
 
 
 def _numtext(v: float | None) -> str:
@@ -478,7 +479,9 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
     wd = wb.create_sheet("근거 행")
     detail = [["파일 번호", "파일", "시트", "원본 행", "기간", *res["group_labels"], cond["field_label"]]]
     for r in res["detail"]:
-        detail.append([r["file_id"], r["file_name"], r["sheet"], r["row"], r["period"], *r["keys"], r["value"]])
+        detail.append(
+            [r["file_id"], r["file_name"], r["sheet"], r["row"], r["period"], *r["keys"], excel_number(r["value"])]
+        )
     if res["detail_total"] > len(res["detail"]):
         detail.append([f"처음 {len(res['detail'])}행만 적음 (계산은 전체 {res['detail_total']}행으로 함)"])
     _rows(wd, 1, detail, header=True)

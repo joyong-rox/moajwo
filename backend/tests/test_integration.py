@@ -284,3 +284,25 @@ def test_sigungu_full_name_kept_without_sido_column(client: TestClient) -> None:
     assert [data.cell(row=r, column=j).value for r in (2, 3)] == ["서울특별시 강서구", "부산광역시 강서구"]
     assert [data.cell(row=r, column=header.index("시군구 코드") + 1).value for r in (2, 3)] == ["3150000", "3360000"]
     assert "entity" not in run["summary"]["change_counts"]
+
+
+def test_unchecked_sums_are_listed_in_the_result_summary(client: TestClient) -> None:
+    """C-03: 합계를 확인하지 못한 열(하위 값에 비공개 표기)은 건수만이 아니라 내용을 결과·실행 기록에 남긴다."""
+    rows = [
+        ["2026년 9월 서울특별시 시군구별 인구 현황 (단위: 명, 세대)"],
+        ["시도", "시군구", "인구", "세대수"],
+        ["서울특별시", "계", 300, 30],
+        ["서울특별시", "종로구", 100, "x"],
+        ["서울특별시", "중구", 200, 20],
+    ]
+    review_id, _ = _ready_review(client, _xlsx(rows), "sum_incomplete.xlsx")
+    # 화면(검토 목록)에도 확인한 범위·개수·사유가 그대로 보인다 — '확인 완료'로 보이지 않음
+    [item] = [i for i in client.get(f"/reviews/{review_id}").json()["items"] if i["kind"] == "sum_incomplete"]
+    assert item["category"] == "warning" and "하위 2행 중 비공개·결측 표기('x') 1개" in item["reason"]
+    res = client.post(f"/reviews/{review_id}/integrate")
+    assert res.status_code == 201, res.text
+    run = res.json()
+    assert [w["kind"] for w in run["summary"]["warnings"]] == ["합계 검사 불완전"]
+    wb = openpyxl.load_workbook(io.BytesIO(client.get(f"/runs/{run['id']}/download").content))
+    found = [list(r) for r in wb["처리 요약"].iter_rows(values_only=True) if r[0] == "합계 검사 불완전"]
+    assert len(found) == 1 and found[0][4] == "세대수" and "비공개·결측 표기('x') 1개" in found[0][5]

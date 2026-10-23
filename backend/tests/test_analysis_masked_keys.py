@@ -68,7 +68,7 @@ def test_email_collision_makes_two_groups_with_consistent_numbers(mk: TestClient
     )
     r = _run(c, _body([fid], group_by=["sigungu"]))
     assert _groups(r) == {(A1,): (1, 10.0), (A2,): (1, 20.0)}
-    assert r["detail"]["conditions"]["policy"] == POLICY == "analysis-policy-9"  # 9: 산식 정책 (D-01)
+    assert r["detail"]["conditions"]["policy"] == POLICY == "analysis-policy-10"  # 9: 산식 (D-01) · 10: 정확한 수
     assert any("가림 구분" in w for w in r["detail"]["conditions"]["warnings"])
     # 쪽 이동·근거 행·Excel에서 같은 번호
     page2 = c.get(f"/analysis/runs/{r['id']}/groups", params={"offset": 1, "limit": 1}).json()["items"]
