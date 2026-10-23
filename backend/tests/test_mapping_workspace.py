@@ -1,7 +1,6 @@
 """열 매핑 작업 화면: 엑셀형 미리보기, 저장된 분석, 여러 파일 공통 검토, 선택 일괄 확정 (실제 쿠키 로그인)."""
 
 import io
-import sqlite3
 import threading
 from typing import Any
 
@@ -10,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.config import DATA_DIR
+from tests.conftest import db_connect
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_auth import _client, app_real_login  # noqa: F401
 
@@ -49,7 +48,7 @@ def _col(mapping: dict, name: str, sheet: int = 0) -> dict:
 
 
 def _db(sql: str, *args: Any) -> list[tuple]:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         return con.execute(sql, args).fetchall()
 
 

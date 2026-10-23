@@ -21,7 +21,6 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import openpyxl
-
 from app import parsing
 from app.pii import PiiReport, find_in_text, scan_grid
 

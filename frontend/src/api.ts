@@ -539,6 +539,75 @@ export type IntegrationRun = {
 
 export const runDownloadUrl = (runId: number) => `${API_BASE}/runs/${runId}/download`
 
+const XLSX_TYPE = 'spreadsheetml'
+
+/** 실행 결과 내려받기 결과. 실패하면 화면에 보일 이유 (status 0 = 서버에 닿지 못함) */
+export type DownloadOutcome = { ok: true } | { ok: false; status: number; message: string }
+
+/** 서버의 410·401·403·404·409·5xx를 구분해 사용자가 할 수 있는 일을 알린다 (서버 문구가 있으면 그것을 쓴다). */
+function downloadProblem(status: number, detail: string | null): string {
+  if (status === 410) {
+    return (
+      '기록은 남아 있으나 결과 파일을 찾을 수 없습니다 — 서버 재배포·재시작으로 지워졌을 수 있습니다. ' +
+      '실행 기록·변경 내역은 그대로입니다. 새 결과가 필요하면 원본을 다시 올려 다시 실행하세요.'
+    )
+  }
+  if (status === 401) return '로그인이 끝났습니다 — 다시 로그인한 뒤 내려받으세요.'
+  if (status === 403) return '이 결과를 내려받을 권한이 없습니다.'
+  if (status === 404) return '결과를 찾을 수 없습니다 — 지워졌거나 볼 수 없는 실행입니다.'
+  if (status === 409) return detail ?? '아직 결과 파일이 없는 실행입니다.'
+  if (status >= 500) return detail ?? '서버 오류로 내려받지 못했습니다 — 잠시 뒤 다시 시도하세요.'
+  return detail ?? `내려받지 못했습니다 (HTTP ${status}).`
+}
+
+/** Content-Disposition의 파일 이름 (filename*=UTF-8''… 우선) */
+function attachmentName(header: string | null): string | null {
+  if (!header) return null
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header)
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded[1])
+    } catch {
+      // 잘못 인코딩된 이름은 아래의 일반 이름을 쓴다
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header)
+  return plain ? plain[1] : null
+}
+
+function saveBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.hidden = true
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
+/** 결과 파일을 앱 안에서 받아 저장한다. 성공한 Excel 응답만 저장하고, 오류 응답(JSON)은 파일로 저장하지 않는다.
+ *  화면은 그대로 두므로 목록·검색 조건·키보드 초점이 남는다. 401이면 apiFetch가 로그인 화면으로 돌아가게 알린다. */
+export async function downloadRunResult(runId: number): Promise<DownloadOutcome> {
+  let res: Response
+  try {
+    res = await apiFetch(runDownloadUrl(runId))
+  } catch {
+    return { ok: false, status: 0, message: '서버에 연결하지 못했습니다 — 연결을 확인한 뒤 다시 내려받으세요.' }
+  }
+  if (res.ok && (res.headers.get('content-type') ?? '').includes(XLSX_TYPE)) {
+    saveBlob(await res.blob(), attachmentName(res.headers.get('content-disposition')) ?? `결과-${runId}.xlsx`)
+    return { ok: true }
+  }
+  if (res.ok) return { ok: false, status: res.status, message: '결과 파일 형식이 아닌 응답이라 저장하지 않았습니다.' }
+  const detail = await res.json().then(
+    (j: { detail?: unknown }) => (typeof j.detail === 'string' ? j.detail : null),
+    () => null,
+  )
+  return { ok: false, status: res.status, message: downloadProblem(res.status, detail) }
+}
+
 /** includeUnmapped: 표준 항목이 없는('해당 없음') 열도 원래 이름으로 결과에 넣을지 */
 export async function integrateReview(reviewId: number, includeUnmapped?: boolean): Promise<IntegrationRun> {
   return json(

@@ -51,6 +51,11 @@ DB_MAX_OVERFLOW = int(os.environ.get("MOAJWO_DB_MAX_OVERFLOW") or 2)
 DB_POOL_TIMEOUT_S = int(os.environ.get("MOAJWO_DB_POOL_TIMEOUT_S") or 10)  # 풀에서 연결을 기다리는 최대 시간
 DB_POOL_RECYCLE_S = int(os.environ.get("MOAJWO_DB_POOL_RECYCLE_S") or 240)
 DB_CONNECT_TIMEOUT_S = int(os.environ.get("MOAJWO_DB_CONNECT_TIMEOUT_S") or 15)  # 휴면에서 깨는 시간 포함
+# 마이그레이션(alembic/env.py)과 이관 도구(app/dbcopy.py)가 함께 쓰는 PostgreSQL 잠금 키 — 둘이 동시에 돌지 않게.
+# 기동 때 마이그레이션은 이 잠금과 표 잠금을 최대 MIGRATION_LOCK_TIMEOUT_S초 기다린 뒤 실패한다
+# (무한 대기로 기동 중처럼 보이지 않게)
+MIGRATION_LOCK_KEY = 727_274
+MIGRATION_LOCK_TIMEOUT_S = int(os.environ.get("MOAJWO_MIGRATION_LOCK_TIMEOUT_S") or 60)
 
 # 기본은 로컬 Ollama (폐쇄망). 외부 LLM API는 소유자가 「설정」에서 직접 고른 경우에만 쓴다 (app/llm.py).
 # 컨테이너에서는 host.docker.internal로 호스트의 Ollama에 붙는다. 임베딩은 항상 로컬 Ollama.

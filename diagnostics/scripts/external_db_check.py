@@ -3,13 +3,15 @@
 순서 (단계마다 결과를 results.tsv에 남기고, 실패해도 다음 단계로 간다):
  1. SQLite 앱(uvicorn)으로 최초 소유자·일반 계정 A·B·승인 대기 계정과 업무 기록(업로드·확정·검토·통합·묶기·분석)을 만든다.
  2. 빈 PostgreSQL에 마이그레이션(스키마 소유 계정) → 이관 dry-run → 적용 → 다시 적용(거절) → 다른 빈 DB에서
-    중간 실패(되돌림) 확인.
+    실패 지점별(표 복사 뒤·모든 시퀀스 뒤) 되돌림: 표 건수와 시퀀스 상태가 그대로인지.
  3. '재배포': 빈 데이터 폴더 + 외부 DB(앱 계정, 데이터만 읽고 쓰는 권한)로 새 프로세스 → 같은 계정 로그인·역할·상태,
     소유 관계(남의 자료 404·관리자 조회), 지워진 원본·결과 파일의 안내(410), 새 가입·새 업로드(번호 충돌 없음).
  4. '재시작': 같은 데이터 폴더로 다시 띄워 로그인·방금 올린 파일 유지.
  5. '휴면 뒤 재접속': 관리자 계정으로 앱 연결을 모두 끊은 뒤(pg_terminate_backend) 요청 — 성공과 걸린 시간.
  6. 장애: 앱 계정 로그인 금지(인증 실패) 동안 상태·로그인·최초 설정이 503이고 '설정 필요'가 아님 → 되돌리면 회복.
     DB 주소 없이 외부 모드로 띄우면 기동하지 않고 SQLite 파일도 만들지 않음.
+    이관 잠금 대기: 다른 연결이 이관처럼 표를 잠근 동안 앱 요청은 앱 계정의 잠금 대기 제한(lock_timeout) 뒤 503(바쁨)
+    — 빈 표를 읽어 '최초 설정 필요'로 답하지 않음 → 잠금이 풀리면 정상.
  7. 빈 PostgreSQL에서 최초 소유자 설정을 동시에 8번 — 소유자는 하나.
  8. 논리 백업(pg_dump -Fc) → 다른 빈 DB로 복원 → 그 DB로 띄워 로그인·건수 확인, 원래 DB는 그대로.
 비밀번호는 실행 때 만들고 출력·저장하지 않는다. 합성 자료만 쓴다.
@@ -157,6 +159,15 @@ def count(url: str, table: str) -> int:
     return n
 
 
+def sequence_state(url: str, table: str) -> tuple[int, bool]:
+    e = create_engine(url.replace("postgresql://", "postgresql+psycopg://", 1))
+    with e.connect() as c:
+        seq = c.execute(text("SELECT pg_get_serial_sequence(:t, 'id')"), {"t": table}).scalar()
+        last, called = c.execute(text(f"SELECT last_value, is_called FROM {seq}")).one()
+    e.dispose()
+    return int(last), bool(called)
+
+
 def csv_bytes(rows: list[list]) -> bytes:
     buf = io.StringIO()
     csv.writer(buf, lineterminator="\n").writerows(rows)
@@ -192,6 +203,9 @@ def main() -> None:
         admin_exec(admin, f"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') THEN "
                           f"CREATE ROLE {role} LOGIN; END IF; END $$",
                    f"ALTER ROLE {role} LOGIN PASSWORD '{pw[key]}'")  # fmt: skip
+    # 앱 계정의 서버 쪽 제한 시간 (docs/EXTERNAL_DB.md 5장과 같은 값) — 잠금·긴 문장에서 무한히 기다리지 않게
+    admin_exec(admin, "ALTER ROLE moajwo_app SET lock_timeout = '5s'", "ALTER ROLE moajwo_app SET statement_timeout = '60s'",
+               "ALTER ROLE moajwo_app SET idle_in_transaction_session_timeout = '60s'")  # fmt: skip
     owner_url = lambda db: with_password(admin, "moajwo_owner", pw["role_o"], db)  # noqa: E731
     app_url = lambda db: with_password(admin, "moajwo_app", pw["role_a"], db)  # noqa: E731
 
@@ -256,16 +270,21 @@ def main() -> None:
     same = bool(digests) and all(v["source"] == v["target"] for v in digests.values())
     res("copy_digest", same, f"표 {len(digests)}개 내용 해시 원천 = 대상")
     code, again = dbcopy(owner_url("extdb_main"), "--apply")
-    res("copy_again_refused", code == 1 and "이미 자료" in again.get("error", ""), again.get("error", "")[:80])
-    fresh_db(admin, "extdb_fail")
-    subprocess.run([a.python, "-m", "alembic", "upgrade", "head"], cwd=a.backend, capture_output=True,
-                   env={**os.environ, "DATABASE_URL": owner_url("extdb_fail"), "MOAJWO_DATA_DIR": str(work / "m2")})  # fmt: skip
-    fail = subprocess.run([a.python, "-c", "import sys; from app.dbcopy import copy; copy(sys.argv[1], sys.argv[2], "
-                           "apply=True, fail_after='source_files')", f"sqlite:///{src_db.as_posix()}",
-                           owner_url("extdb_fail")], cwd=a.backend, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          env={**os.environ, "MOAJWO_DATA_DIR": str(work / "copy")})  # fmt: skip
-    res("copy_midway_failure_rolled_back", fail.returncode != 0 and count(owner_url("extdb_fail"), "users") == 0,
-        f"source_files 뒤 실패 → users {count(owner_url('extdb_fail'), 'users')}행")  # fmt: skip
+    res("copy_again_refused", code == 1 and "이관 표시" in again.get("error", ""), again.get("error", "")[:80])
+    res("copy_source_unchanged", applied.get("source", {}).get("unchanged"), "원천 파일 해시 앞뒤 같음 (스냅숏에서 읽음)")
+    for point in ("table:source_files", "sequence:all"):
+        fresh_db(admin, "extdb_fail")
+        subprocess.run([a.python, "-m", "alembic", "upgrade", "head"], cwd=a.backend, capture_output=True,
+                       env={**os.environ, "DATABASE_URL": owner_url("extdb_fail"), "MOAJWO_DB_MODE": "external",
+                            "MOAJWO_DATA_DIR": str(work / "m2")})  # fmt: skip
+        seq_before = sequence_state(owner_url("extdb_fail"), "users")
+        fail = subprocess.run([a.python, "-c", "import sys; from app.dbcopy import copy; copy(sys.argv[1], sys.argv[2], "
+                               "apply=True, fail_at=sys.argv[3])", f"sqlite:///{src_db.as_posix()}",
+                               owner_url("extdb_fail"), point], cwd=a.backend, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", env={**os.environ, "MOAJWO_DATA_DIR": str(work / "copy")})  # fmt: skip
+        users, seq_after = count(owner_url("extdb_fail"), "users"), sequence_state(owner_url("extdb_fail"), "users")
+        res(f"copy_failure_rolled_back[{point}]", fail.returncode != 0 and users == 0 and seq_after == seq_before,
+            f"실패 뒤 users {users}행 · users 시퀀스 {seq_before} → {seq_after}")  # fmt: skip
 
     # ---------------------------------------------------------------- 3. 재배포 (빈 데이터 폴더, 앱 계정)
     ext_env = {"DATABASE_URL": app_url("extdb_main"), "MOAJWO_MIGRATION_DATABASE_URL": owner_url("extdb_main"),
@@ -326,6 +345,24 @@ def main() -> None:
     nourl.stop()
     res("missing_url_refused", not started and not (work / "nourl" / "moajwo.db").exists(),
         "외부 모드 + DATABASE_URL 없음 → 기동 안 함, SQLite 파일 없음")  # fmt: skip
+    fresh_db(admin, "extdb_lockwait")
+    lw = Server(a, work / "lockwait", a.port + 5, {"DATABASE_URL": app_url("extdb_lockwait"),
+                "MOAJWO_MIGRATION_DATABASE_URL": owner_url("extdb_lockwait"), "MOAJWO_DB_MODE": "external"}, log)  # fmt: skip
+    res("lockwait_start", lw.start())
+    holder = create_engine(owner_url("extdb_lockwait").replace("postgresql://", "postgresql+psycopg://", 1))
+    with holder.connect() as h:  # 이관 도구처럼: 이관 잠금 + 표 ACCESS EXCLUSIVE 잠금을 쥔 채 커밋하지 않음
+        h.execute(text("SELECT pg_advisory_xact_lock(727274)"))
+        h.execute(text("LOCK TABLE users, app_settings, auth_sessions IN ACCESS EXCLUSIVE MODE"))
+        t = time.monotonic()
+        s, body = lw.client.call("GET", "/auth/status")
+        waited = round(time.monotonic() - t, 1)
+        h.rollback()
+    holder.dispose()
+    detail = body.get("detail", "") if isinstance(body, dict) else ""
+    res("lockwait_503_busy", f"{s} {waited}s", f"{detail[:40]} · 최초 설정 응답 아님={'setup_required' not in str(body)}")
+    s, body = lw.client.call("GET", "/auth/status")
+    res("lockwait_released", s, f"잠금이 풀린 뒤 상태 확인 (빈 DB라 setup_required={body.get('setup_required') if isinstance(body, dict) else body})")
+    lw.stop()
 
     # ---------------------------------------------------------------- 7. 최초 소유자 동시 설정
     fresh_db(admin, "extdb_race")

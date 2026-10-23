@@ -46,6 +46,14 @@ fi
 case "$1" in
   inspect)
     case "$*" in *Health*) echo healthy; exit 0 ;; esac
+    case "$*" in *PortBindings*)          # 포트 연결: 반영 전 frontend는 80, 전환 뒤는 8080
+      [ "$S" = ports_fail ] && exit 1
+      case "$2" in
+        *backend*) echo "127.0.0.1:8000:8000/tcp " ;;
+        *) if switched; then echo "127.0.0.1:8080:8080/tcp "; else echo "127.0.0.1:8080:80/tcp "; fi ;;
+      esac
+      exit 0 ;;
+    esac
     if switched; then
       [ "$S" = post_image_fail ] && exit 1
       echo "sha256:new000000000000$2"
@@ -126,6 +134,12 @@ run_case() {  # 이름, 시나리오, 승인 SHA, 기대 종료 코드, 있어�
       NO_DONE) grep -q "전환 완료" "$state/out" && { ok=0; why="$why '전환 완료'가 출력됨"; } ;;
       START) grep -q "compose start" "$STUB_LOG" || { ok=0; why="$why 재시작이 실행되지 않음"; } ;;
       DONE) grep -q "전환 완료" "$state/out" || { ok=0; why="$why '전환 완료'가 없음"; } ;;
+      ROLLBACK_PORTS)  # 반영 전 포트 연결을 그대로 되돌리는 덧붙임 파일 (덧붙이지 않고 바꾸는 !override)
+        f=$(ls backups/rollback-*.compose.yml 2>/dev/null | head -1)
+        { [ -n "$f" ] && grep -q '^    ports: !override$' "$f" && grep -qx '      - "127.0.0.1:8080:80/tcp"' "$f" \
+          && grep -qx '      - "127.0.0.1:8000:8000/tcp"' "$f"; } || { ok=0; why="$why 롤백용 포트 파일이 없거나 다름"; }
+        grep -q "포트 연결: frontend 127.0.0.1:8080:80/tcp → 127.0.0.1:8080:8080/tcp" "$state/out" \
+          || { ok=0; why="$why 전후 포트 연결 기록 없음"; } ;;
     esac
   done
   # 모든 사례 공통: 운영 볼륨은 읽기 전용으로만 마운트, 백업 DB 검사 컨테이너에는 운영 볼륨을 마운트하지 않음
@@ -146,6 +160,8 @@ run_case "Compose조회실패+리비전확인실패" ps_fail_rev_fail "$APPROVED
 run_case "볼륨조회실패"           volps_fail      "$APPROVED"   1 "볼륨을 쓰는 컨테이너를 확인할 수 없음" NO_BACKUP NO_SWITCH NO_DONE START
 run_case "정지후실행중서비스남음" ps_running      "$APPROVED"   1 "정지 후에도 실행 중"                 NO_BACKUP NO_SWITCH NO_DONE START
 run_case "두조회정상+빈결과"      ok              "$APPROVED"   0 "정지 확인 \\(두 조회 모두 성공"      DONE NO_START
+run_case "롤백단위에포트연결기록"  ok              "$APPROVED"   0 "이전 포트 backups/rollback-"          DONE ROLLBACK_PORTS
+run_case "포트조회실패"           ports_fail      "$APPROVED"   1 "frontend 컨테이너의 포트 연결을 확인할 수 없음|backend 컨테이너의 포트 연결을 확인할 수 없음" NO_STOP NO_BACKUP NO_SWITCH NO_START
 run_case "백업실패"               backup_fail     "$APPROVED"   1 "백업 생성·압축 검사 실패"            UNVERIFIED NO_SWITCH NO_DONE START
 run_case "전환후이미지조회실패"   post_image_fail "$APPROVED"   1 "전환 후 backend 이미지를 확인할 수 없음" NO_DONE
 run_case "전환후리비전조회실패"   post_rev_fail   "$APPROVED"   1 "전환 후 리비전을 확인할 수 없음"       NO_DONE

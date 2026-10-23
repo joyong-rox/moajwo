@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.config import DATA_DIR
 from app.db import Base, engine
 from app.main import app
+from tests.conftest import db_dump
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -200,10 +201,8 @@ def test_xlsx_that_expands_beyond_the_limit_is_not_read(client: TestClient, monk
 
 
 def test_validation_flow_blocks_and_pii(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    import sqlite3
 
     from app import files, validation_api
-    from app.config import DATA_DIR
     from app.mapping import MappingEngine, load_dictionary
 
     engine = MappingEngine(load_dictionary(), None, None)
@@ -259,9 +258,7 @@ def test_validation_flow_blocks_and_pii(client: TestClient, monkeypatch: pytest.
     assert listed[up2["id"]]["pii"]["acknowledged"] is True
 
     # 원문 개인정보는 DB 어디에도 저장되지 않는다
-    con = sqlite3.connect(DATA_DIR / "moajwo.db")
-    dump = "\n".join(con.iterdump())
-    con.close()
+    dump = db_dump()  # 모든 표·모든 행 (SQLite·PostgreSQL)
     assert "010-1234-5678" not in dump and "kim@example.go.kr" not in dump
 
     # 입력 검증

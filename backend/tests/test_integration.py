@@ -1,6 +1,5 @@
 import hashlib
 import io
-import sqlite3
 from datetime import datetime
 from typing import Any
 
@@ -9,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import DATA_DIR
+from tests.conftest import DbConnection, db_connect
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 DATA_SHEET, CHANGE_SHEET, SUMMARY_SHEET = "통합 데이터", "변경 내역", "처리 요약"
@@ -86,8 +86,8 @@ def _ready_review(client: TestClient, data: bytes, name: str) -> tuple[int, int]
     return review["id"], fid
 
 
-def _db() -> sqlite3.Connection:
-    return sqlite3.connect(DATA_DIR / "moajwo.db")
+def _db() -> DbConnection:
+    return db_connect()
 
 
 def test_integration_creates_three_sheets_with_painted_changes(client: TestClient) -> None:
@@ -116,7 +116,7 @@ def test_integration_creates_three_sheets_with_painted_changes(client: TestClien
 
     with _db() as con:
         changes = con.execute(
-            "select output_row, column, kind, before, after, reason, confidence from run_changes where run_id = ?",
+            'select output_row, "column", kind, before, after, reason, confidence from run_changes where run_id = ?',
             (run["id"],),
         ).fetchall()
     cell_changes = {(r, c): (k, b, a) for r, c, k, b, a, _, _ in changes if k != "column"}

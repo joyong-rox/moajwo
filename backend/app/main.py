@@ -6,7 +6,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.exc import InterfaceError, OperationalError, SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 
 from app import (
@@ -26,7 +27,7 @@ from app import (
 )
 from app.auth import current_user
 from app.config import API_DOCS
-from app.db import get_session
+from app.db import db_failure, get_session
 
 logger = logging.getLogger(__name__)
 
@@ -63,18 +64,39 @@ async def validation_error(_: Request, exc: RequestValidationError) -> JSONRespo
     return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, content={"detail": jsonable_encoder(errors)})
 
 
-DB_UNAVAILABLE = "데이터베이스에 연결하지 못했습니다 — 잠시 뒤 다시 시도하세요. 계정·자료는 그대로입니다."
+DB_UNREACHABLE = "데이터베이스에 연결하지 못했습니다 — 잠시 뒤 다시 시도하세요."
+DB_BUSY = "데이터베이스가 다른 작업으로 바빠 처리하지 못했습니다 — 잠시 뒤 다시 시도하세요."
+# 쓰기 요청은 커밋됐는지 모를 수 있다 (커밋 응답 전에 연결이 끊기는 경우 등) — '그대로입니다'라고 단정하지 않는다
+WRITE_UNCERTAIN = (
+    " 이 요청이 반영됐는지는 확인하지 못했습니다 — 화면을 새로 고쳐 반영 여부를 확인한 뒤 필요하면 다시 하세요."
+)
+READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
-@app.exception_handler(OperationalError)
-@app.exception_handler(InterfaceError)
-async def database_unavailable(request: Request, exc: SQLAlchemyError) -> JSONResponse:
-    """DB에 닿지 못한 요청 (외부 DB 휴면에서 깨지 못함·연결 끊김·인증 실패 등)은 503으로 알린다.
+def _db_error_name(exc: BaseException) -> str:
+    orig = getattr(exc, "orig", None)
+    state = getattr(orig, "sqlstate", None)
+    return type(orig or exc).__name__ + (f" {state}" if state else "")
 
-    비밀번호 오류·계정 없음·최초 설정 필요로 보이지 않게 한다. 주소·비밀번호·SQL은 응답·기록에 넣지 않는다.
+
+@app.exception_handler(DBAPIError)
+@app.exception_handler(SQLAlchemyTimeoutError)
+async def database_failure(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+    """DB에 닿지 못했거나(외부 DB 휴면에서 깨지 못함·연결 끊김·인증 실패) 바빠서(연결 풀 대기 초과·잠금 대기
+    초과) 처리하지 못한 요청은 503으로 알린다 — 비밀번호 오류·계정 없음·최초 설정 필요로 보이지 않게.
+
+    - 쓰기 요청은 반영 여부를 확인하라고 안내한다. 서버도 화면도 자동으로 다시 보내지 않는다.
+    - 데이터·코드·스키마 오류는 연결 장애로 감추지 않는다 — 그대로 500.
+    - 주소·비밀번호·SQL·매개변수는 응답·기록에 넣지 않는다 (오류 종류·SQLSTATE만).
     """
-    logger.warning("database unavailable: %s", type(getattr(exc, "orig", exc)).__name__)
-    return JSONResponse({"detail": DB_UNAVAILABLE}, status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+    kind = db_failure(exc)
+    if kind is None:
+        raise exc
+    logger.warning("database %s: %s", kind, _db_error_name(exc))
+    detail = DB_UNREACHABLE if kind == "unreachable" else DB_BUSY
+    if request.method not in READ_METHODS:
+        detail += WRITE_UNCERTAIN
+    return JSONResponse({"detail": detail}, status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                         headers={"Retry-After": "10"})  # fmt: skip
 
 
@@ -105,8 +127,8 @@ def health(response: Response, session: Annotated[Session, Depends(get_session)]
     try:
         session.execute(text("SELECT 1"))
         database = "ok"
-    except SQLAlchemyError:
-        logger.exception("health check: database unavailable")
+    except SQLAlchemyError as exc:
+        logger.warning("health check: database %s: %s", db_failure(exc) or "error", _db_error_name(exc))
         database = "error"
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {"status": "ok", "database": database}
