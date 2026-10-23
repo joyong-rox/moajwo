@@ -148,11 +148,10 @@ TMPD=$(mktemp -d)
 JAR="$TMPD/cookies"; PW="Ci-$(openssl rand -hex 12)"
 curl -s -c "$JAR" -o /dev/null -H 'Content-Type: application/json' \
   -d "{\"username\":\"ci-owner\",\"display_name\":\"CI\",\"password\":\"$PW\"}" $S/auth/setup
-# 구간 최대: 호스트에서 컨테이너 cgroup의 memory.peak를 비울 수 있으면(리눅스 6.12+) 사례마다 비우고, 아니면 누적 최대를 적는다
-CG="/sys/fs/cgroup/system.slice/docker-$(docker inspect -f '{{.Id}}' small).scope"
+# 최대 메모리는 컨테이너 기동부터의 누적 최대다 (memory.peak 초기화는 리눅스 6.12+에서도 쓴 쪽 파일 설명자에만 적용되어
+# 다른 읽기에는 누적 값이 보인다 — 2회차에서 확인). 사례를 작은 것부터 돌려 늘어난 만큼을 그 사례의 몫으로 읽는다.
 PEAK_MODE=누적
-if echo 0 | sudo -n tee "$CG/memory.peak" > /dev/null 2>&1; then PEAK_MODE=구간; fi
-reset_peak() { [ "$PEAK_MODE" = 구간 ] && echo 0 | sudo -n tee "$CG/memory.peak" > /dev/null 2>&1; true; }
+reset_peak() { true; }
 peak() { docker exec small cat /sys/fs/cgroup/memory.peak 2>/dev/null | awk '{printf "%.0fMiB", $1/1048576}'; }
 current() { docker exec small cat /sys/fs/cgroup/memory.current 2>/dev/null | awk '{printf "%.0fMiB", $1/1048576}'; }
 cat > "$TMPD/sum.py" <<'PY'
@@ -184,7 +183,7 @@ request() {  # request <이름> <설명> <curl 인자...>
     "$what · ${ms}ms · ${PEAK_MODE} 최대 $(peak) · 지금 $(current) · $(state)"
 }
 upload() { local name=$1 what=$2; shift 2; local args=(); for f in "$@"; do args+=(-F "files=@$OUT/$f"); done; request "$name" "$what" "${args[@]}" $S/files; }
-res mem_baseline "$(peak)" "기동 직후 최대 (alembic upgrade 포함) · 지금 $(current) · 구간 측정=$PEAK_MODE"
+res mem_baseline "$(peak)" "기동 직후 최대 (alembic upgrade 포함) · 지금 $(current)"
 reset_peak; upload small_csv "일반 파일" ci.csv
 reset_peak; upload xlsx_under "한도 아래 xlsx" x_under.xlsx
 reset_peak; upload xlsx_over "한도 위 xlsx" x_over.xlsx
