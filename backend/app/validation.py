@@ -443,6 +443,26 @@ def check_sums(
     subtotals = [r for r in sheet.sheet.body if r["kind"] == "subtotal"]
     groups = {id(r): _subtotal_group(r["cells"]) for r in subtotals}
     group_rows = [r for r in subtotals if groups[id(r)] is not None]
+
+    def unchecked(row: dict[str, Any], label: str, why: str) -> None:
+        """합계 행을 통째로 확인하지 못함 — 검사했을 숫자 합계가 있으면 경고, 없으면(글자로 보존된 열 등) 참고만."""
+        totals = [j for j, c in enumerate(row["cells"]) if _is_number(c) and _additive(sheet, j)]
+        if not totals:
+            notes.append(f"{file.file_name} / {sheet.sheet.name} {row['row']}행 '{label}': {why} — 합계 검사 생략")
+            return
+        shown = ", ".join(f"'{columns[j]}' {_fmt(row['cells'][j])}" for j in totals)
+        warnings.append(
+            WarningIssue(
+                "sum_incomplete",
+                f"'{label}' 행: {why} 합계({shown})를 확인하지 못했습니다 — 검사하지 않은 값입니다.",
+                file.file_id,
+                file.file_name,
+                sheet.sheet.name,
+                row["row"],
+                columns[totals[0]] if len(totals) == 1 else None,
+            )
+        )
+
     for row in subtotals:
         cells: list[Cell] = row["cells"]
         group = groups[id(row)]
@@ -471,21 +491,16 @@ def check_sums(
             children = group_rows + ungrouped
             label = next((str(c) for c in cells if is_subtotal_label(c)), "합계")
             if len(group_rows) == 1 and not ungrouped:
-                # 예) 충청남도 자료에 '전국' 행이 함께 실린 경우: 자료에는 한 그룹만 있어 전체 합계와 비교할 수 없다
-                notes.append(
-                    f"{file.file_name} / {sheet.sheet.name} {row['row']}행 '{label}': 자료에 하위 그룹이 하나뿐이라 "
-                    "전체 합계 검사 생략 (일부 지역만 담긴 자료로 봄)"
-                )
+                # 예) 충청남도 자료에 '전국' 행이 함께 실린 경우: 자료에는 한 그룹만 있어 전체 합계와 비교할 수 없다.
+                # 확인하지 못한 합계는 참고 메모가 아니라 경고로 남긴다 (검토 목록·통합 결과 '검증 경고'에 보임)
+                unchecked(row, label, "자료에 하위 그룹이 하나뿐이라(일부 지역만 담긴 자료로 봄) 전체")
                 continue
         else:
             col, value = group
             children = [r for r in data if r["cells"][col] == value]
             label = " ".join(str(c) for c in cells if isinstance(c, str) and not is_missing(c))
         if not children:
-            notes.append(
-                f"{file.file_name} / {sheet.sheet.name} {row['row']}행 '{label}': "
-                "하위 데이터 행을 찾지 못해 합계 검사 생략"
-            )
+            unchecked(row, label, "하위 데이터 행을 찾지 못해")
             continue
         row_issues: list[BlockIssue] = []
         for j, total in enumerate(cells):

@@ -60,3 +60,12 @@ def test_a_real_mismatch_still_blocks(tmp_path: Path) -> None:
     assert [b.code for b in result.blocks] == ["sum_mismatch"] and "읽지 못한" not in result.blocks[0].message
     assert "글자로 남아 합계에 넣지 않은 하위 값 1개" in result.blocks[0].message
     assert not [w for w in result.warnings if w.code == "sum_incomplete"]
+
+
+def test_a_total_whose_rows_are_not_in_the_sheet_is_a_warning(tmp_path: Path) -> None:
+    # '서울특별시 계' 행은 있는데 서울 하위 행이 없다 — 합계를 확인하지 못했으므로 참고 메모가 아니라 경고 (2026-10-23)
+    rows = [["서울특별시", "계", 300, 30], ["부산광역시", "해운대구", 100, 10], ["부산광역시", "수영구", 200, 20]]
+    result = _run(tmp_path, rows)
+    [w] = [w for w in result.warnings if w.code == "sum_incomplete"]
+    assert w.row == 3 and "하위 데이터 행을 찾지 못해 합계(" in w.message and "확인하지 못했습니다" in w.message
+    assert not result.blocks and not [n for n in result.notes if "합계 검사 생략" in n]

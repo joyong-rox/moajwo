@@ -296,6 +296,9 @@ def test_unchecked_sums_are_listed_in_the_result_summary(client: TestClient) -> 
         ["서울특별시", "중구", 200, 20],
     ]
     review_id, _ = _ready_review(client, _xlsx(rows), "sum_incomplete.xlsx")
+    # 화면(검토 목록)에도 확인한 범위·개수·사유가 그대로 보인다 — '확인 완료'로 보이지 않음
+    [item] = [i for i in client.get(f"/reviews/{review_id}").json()["items"] if i["kind"] == "sum_incomplete"]
+    assert item["category"] == "warning" and "하위 2행 중 비공개·결측 표기('x') 1개" in item["reason"]
     res = client.post(f"/reviews/{review_id}/integrate")
     assert res.status_code == 201, res.text
     run = res.json()

@@ -343,7 +343,11 @@ def test_national_total_with_single_region_is_skipped(tmp_path: Path) -> None:
     ]
     result = validate([make_input(make_xlsx(tmp_path / "one.xlsx", rows))], ValidationParams())
     assert "sum_mismatch" not in codes(result.blocks)
-    assert any("하위 그룹이 하나뿐" in n for n in result.notes)
+    # 확인하지 못한 합계는 참고 메모가 아니라 경고 (검토 목록·통합 결과에 보임 — 2026-10-23 정책)
+    [w] = [w for w in result.warnings if w.code == "sum_incomplete"]
+    assert w.row == 2 and "하위 그룹이 하나뿐" in w.message and "검사하지 않은 값" in w.message
+    assert not any("하위 그룹이 하나뿐" in n for n in result.notes)
+    assert result.status == "passed_with_warnings"
 
 
 def test_subtotal_placed_above_its_rows(tmp_path: Path) -> None:
