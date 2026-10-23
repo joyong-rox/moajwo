@@ -2,7 +2,6 @@
 
 import hashlib
 import io
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -11,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import DATA_DIR
+from tests.conftest import db_rows
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_auth import _client, app_real_login  # noqa: F401
 
@@ -75,8 +75,7 @@ def _run(c: TestClient, body: dict) -> dict:
 
 
 def _db(sql: str, *args: Any) -> list[tuple]:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        return con.execute(sql, args).fetchall()
+    return db_rows(sql, *args)  # SQLite·PostgreSQL 모두
 
 
 @pytest.fixture(scope="module")
@@ -804,7 +803,8 @@ def test_analysis_times_are_shown_in_kst(an) -> None:
     fid = _file(u, "시각표시.xlsx", THREE, {"시도": "sido", "인구수": "population"})
     r = _run(u, _body([fid]))
     stored = _db("select created_at from analysis_runs where id = ?", r["id"])[0][0]
-    kst = datetime.fromisoformat(stored).replace(tzinfo=UTC) + timedelta(hours=9)
+    stored = stored if isinstance(stored, datetime) else datetime.fromisoformat(stored).replace(tzinfo=UTC)
+    kst = stored.astimezone(UTC) + timedelta(hours=9)  # SQLite는 UTC 글자, PostgreSQL은 시간대 붙은 값
     detail = r["detail"]["created_at"]
     assert detail.endswith("+09:00") and detail[:19] == kst.strftime("%Y-%m-%dT%H:%M:%S")
     listed = next(x for x in u.get("/analysis/runs").json() if x["id"] == r["id"])["created_at"]
