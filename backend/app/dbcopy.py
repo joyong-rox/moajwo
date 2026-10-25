@@ -47,17 +47,19 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
 import tempfile
 import time
 import uuid
+from contextlib import ExitStack
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -349,7 +351,10 @@ def copy(
 
 def _copy(src: Engine, dst: Engine, report: dict[str, Any], apply: bool, fail_at: str | None, lock_s: int) -> None:
     head, tables = _head(), _tables()
-    with src.connect() as s, dst.connect() as d:
+    with ExitStack() as stack:
+        s = stack.enter_context(src.connect())
+        report["stage"] = "대상 접속"  # 대상 주소·서비스 파일·인증 실패가 원천 문제처럼 보이지 않게
+        d = stack.enter_context(dst.connect())
         report["stage"] = "확인"
         report["revision"] = {"head": head, "source": _revision(s), "target": _revision(d)}
         if report["revision"]["source"] != head or report["revision"]["target"] != head:
@@ -548,35 +553,47 @@ def _dump(report: dict[str, Any], ascii_only: bool = False) -> str:
 
 
 SECRET_IN_ARGS_WARNING = (
-    "경고: --target 주소에 비밀번호가 들어 있습니다. 명령 인자는 셸 기록과 프로세스 목록에 남을 수 있습니다 — "
-    "서비스 주소(postgresql:///?service=이름, 비밀번호는 PGPASSFILE 비밀번호 파일)나 --target-env(환경 변수 이름)를 "
-    "쓰세요 (docs/EXTERNAL_DB.md 3-1). 이번 실행은 그대로 진행하며 보고에 주소를 남기지 않습니다."
+    "경고: 명령 인자(--target·--target-env)에 비밀번호가 든 주소가 있습니다. 명령 인자는 셸 기록과 프로세스 목록에 "
+    "남을 수 있습니다 — 서비스 주소(postgresql:///?service=이름, 비밀번호는 PGPASSFILE 비밀번호 파일)나 --target-env"
+    "(환경 변수 이름)를 쓰세요 (docs/EXTERNAL_DB.md 3-1). 보고에는 주소를 남기지 않습니다."
 )
+# 주소의 비밀값 매개변수 (libpq: password, 클라이언트 키 암호 sslpassword, OAuth oauth_client_secret)
+SECRET_KEYS = frozenset({"password", "sslpassword", "oauth_client_secret"})
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")  # --target-env에 넣는 환경 변수 이름
 
 
 def has_password(raw: str) -> bool:
-    """주소에 비밀번호가 있는지 (사용자 정보의 비밀번호 또는 ?password= 매개변수). 해석하지 못하면 글자로 찾는다."""
+    """주소에 비밀값이 있는지 (사용자 정보의 비밀번호 또는 SECRET_KEYS 매개변수). SQLAlchemy가 해석하지 못하는 주소
+    (libpq 다중 호스트·잘못된 포트)는 사용자 정보를 urlsplit으로 보고, 그래도 없으면 글자로 찾는다."""
     try:
         url = make_url(raw)
     except Exception:  # 해석하지 못하는 주소는 어차피 접속 전에 거절된다 — 경고 여부만 보수적으로 정한다
-        return "password" in raw.lower()
-    return bool(url.password) or any(key.lower() == "password" for key in url.query)
+        try:
+            if urlsplit(raw).password:
+                return True
+        except ValueError:
+            pass
+        lowered = raw.lower()
+        return any(key in lowered for key in SECRET_KEYS)
+    return bool(url.password) or any(key.lower() in SECRET_KEYS for key in url.query)
 
 
 def _target_input(a: argparse.Namespace) -> dict[str, Any]:
     """대상 주소를 어디서 받았는지와, 명령 인자에 비밀번호가 있었는지(참·거짓)만 보고에 남긴다 — 주소는 남기지 않는다.
-    비밀번호가 든 --target은 호환으로 그대로 쓰되 stderr로 경고한다 (DB에 닿기 전에)."""
-    if a.target_env is not None:
-        return {"target_input": "--target-env", "target_secret_in_args": False}
-    secret = has_password(a.target)
+    비밀번호가 든 --target은 호환으로 그대로 쓰되 stderr로 경고한다 (DB에 닿기 전에). --target-env에 이름 대신 주소를
+    넣은 실수도 같은 기준으로 경고·표시한다 (그 실행은 _target_url이 멈춤)."""
+    given = a.target if a.target_env is None else a.target_env
+    secret = has_password(given) if a.target_env is None or not ENV_NAME.fullmatch(given) else False
     if secret:
         print(SECRET_IN_ARGS_WARNING, file=sys.stderr, flush=True)
-    return {"target_input": "--target", "target_secret_in_args": secret}
+    return {"target_input": "--target" if a.target_env is None else "--target-env", "target_secret_in_args": secret}
 
 
 def _target_url(a: argparse.Namespace) -> str:
     if a.target_env is None:
         return a.target
+    if not ENV_NAME.fullmatch(a.target_env):  # 받은 값(주소일 수 있음)을 문구에 넣지 않는다
+        raise CopyError("--target-env에는 주소가 아니라 환경 변수 이름을 넣으세요 — 이관하지 않았습니다")
     raw = os.environ.get(a.target_env, "").strip()
     if not raw:
         raise CopyError(f"환경 변수 {a.target_env}에 대상 주소가 없습니다 — 이관하지 않았습니다")

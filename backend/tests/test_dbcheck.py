@@ -9,7 +9,12 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +23,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 
 from app import dbcheck
-from tests.conftest import PG_ADMIN, pg_database, pg_service_files
+from tests.conftest import PG_ADMIN, pg_database, pg_role_with_password
 
 UNREACHABLE = "postgresql://u:pw-secret-123@127.0.0.1:9/x"  # 거절되는 로컬 포트
 APP_ENV, MIG_ENV = "MOAJWO_DBCHECK_TEST_APP", "MOAJWO_DBCHECK_TEST_MIGRATION"
@@ -75,6 +80,37 @@ def test_unreachable_address_is_exit_2_and_never_printed(monkeypatch: pytest.Mon
     assert "pw-secret-123" not in raw and "127.0.0.1" not in raw
 
 
+@pytest.mark.parametrize("flag", ["--app-env", "--app-service"])
+def test_an_address_in_a_name_flag_is_refused_without_repeating_it(
+    flag: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """이름 자리(환경 변수 이름·서비스 이름)에 주소를 넣는 실수(예: --app-env "$DATABASE_URL") — 받은 값을 출력에
+    되풀이하지 않고 확인 못 함(2)으로 끝낸다. DB에 닿지 않는다."""
+    monkeypatch.setenv(MIG_ENV, UNREACHABLE)
+    code, out, raw = _run(capsys, flag, UNREACHABLE, "--migration-env", MIG_ENV)
+    assert code == dbcheck.EXIT_UNKNOWN and out["result"] == "unknown" and out["failed"] == "app"
+    assert "이름" in out["error"] and "app_input" not in out
+    assert "pw-secret-123" not in raw and "127.0.0.1" not in raw
+
+
+@pytest.mark.parametrize(("env_name", "service"), [(UNREACHABLE, None), (None, UNREACHABLE)], ids=["env", "service"])
+def test_resolve_refuses_a_value_that_is_not_a_name(env_name: str | None, service: str | None) -> None:
+    """앱·마이그레이션 양쪽이 같은 resolve를 쓴다 — 이름이 아닌 값은 그 값을 문구에 넣지 않고 거절."""
+    with pytest.raises(dbcheck.CheckError) as exc:
+        dbcheck.resolve(env_name, service, "MOAJWO_MIGRATION_DATABASE_URL")
+    assert "pw-secret-123" not in str(exc.value) and "127.0.0.1" not in str(exc.value)
+
+
+def test_unreadable_connect_timeout_setting_is_exit_2() -> None:
+    """시간 제한 환경 변수가 정수가 아니면 확인 못 함(2) — 파이썬 일반 실패(1)와 섞여 '다른 DB'로 읽히지 않게."""
+    env = {**os.environ, "MOAJWO_DB_CONNECT_TIMEOUT_S": "15s", "PYTHONIOENCODING": "utf-8"}
+    p = subprocess.run([sys.executable, "-m", "app.dbcheck", "--app-env", "MOAJWO_DBCHECK_TEST_NOT_SET"],
+                       capture_output=True, text=True, encoding="utf-8", env=env,
+                       cwd=Path(__file__).resolve().parents[1], timeout=120)  # fmt: skip
+    assert p.returncode == dbcheck.EXIT_UNKNOWN, (p.returncode, p.stderr[-300:])
+    assert json.loads(p.stdout)["result"] == "unknown"
+
+
 # ---------------------------------------------------------------- PostgreSQL (일회용 시험 서버)
 
 
@@ -94,7 +130,7 @@ def two_databases() -> Any:
     role, password = "dbcheck_" + secrets.token_hex(4), "Ck-" + secrets.token_urlsafe(12) + ":@/"
     _admin("CREATE TABLE alembic_version (version_num varchar(32) PRIMARY KEY)", names[0])
     _admin("INSERT INTO alembic_version VALUES ('0019_analysis_runs')", names[0])
-    _admin(f"CREATE ROLE {role} LOGIN PASSWORD '{password}'")
+    pg_role_with_password(role, password)
     _admin(f"GRANT SELECT ON alembic_version TO {role}", names[0])
     reader = make_url(urls[0]).set(username=role, password=password).render_as_string(hide_password=False)
     yield {"one": urls[0], "two": urls[1], "reader_one": reader, "role": role, "password": password}
@@ -104,12 +140,12 @@ def two_databases() -> Any:
 
 
 @pg
-def test_same_database_through_two_accounts_is_the_same(two_databases, tmp_path: Path, monkeypatch, capsys) -> None:
+def test_same_database_through_two_accounts_is_the_same(two_databases, service_files, monkeypatch, capsys) -> None:
     """앱 쪽은 환경 변수(비밀번호가 든 주소), 마이그레이션 쪽은 서비스 주소(비밀번호는 비밀번호 파일) — 계정이 달라도
     같은 DB면 0. 출력에 주소·비밀번호가 없다."""
     for name in ("PGSERVICE", "PGPASSWORD"):
         monkeypatch.delenv(name, raising=False)
-    for name, value in pg_service_files(tmp_path, "dbcheck-migrate", two_databases["one"]).items():
+    for name, value in service_files("dbcheck-migrate", two_databases["one"]).items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv(APP_ENV, two_databases["reader_one"])
     code, out, raw = _run(capsys, "--app-env", APP_ENV, "--migration-service", "dbcheck-migrate")
@@ -133,3 +169,30 @@ def test_different_database_on_the_same_server_is_different(two_databases, monke
     assert "postmaster_start_time" not in out["differences"]  # 같은 서버
     secret = make_url(PG_ADMIN).password
     assert not secret or secret not in raw
+
+
+@pg
+def test_probe_does_not_wait_forever_behind_a_lock(two_databases, monkeypatch, capsys) -> None:
+    """이관·마이그레이션이 alembic_version을 잠근 동안 확인은 잠금 대기 제한(5초) 뒤 확인 못 함(2)으로 끝난다 —
+    끝없이 기다리거나, 잠금 오류를 '읽지 못한 항목'으로 삼켜 같음으로 답하지 않는다."""
+    monkeypatch.setenv(APP_ENV, two_databases["one"])
+    monkeypatch.setenv(MIG_ENV, two_databases["one"])
+    holder = create_engine(make_url(two_databases["one"]).set(drivername="postgresql+psycopg"))
+    result: dict[str, Any] = {}
+
+    def check() -> None:
+        result["code"] = dbcheck.main(["--app-env", APP_ENV, "--migration-env", MIG_ENV])
+
+    with holder.connect() as h:
+        h.execute(text("LOCK TABLE alembic_version IN ACCESS EXCLUSIVE MODE"))  # 이관 도구와 같은 잠금, 커밋하지 않음
+        started = time.monotonic()
+        th = threading.Thread(target=check, daemon=True)
+        th.start()
+        th.join(20)
+        waited, still_waiting = time.monotonic() - started, th.is_alive()
+        h.rollback()  # 잠금을 푼다 (아래 join이 끝나게)
+    th.join(30)
+    holder.dispose()
+    out = json.loads(capsys.readouterr().out)
+    assert not still_waiting, "잠금을 20초 넘게 기다림"
+    assert result["code"] == dbcheck.EXIT_UNKNOWN and "55P03" in out["error"] and waited < 15, (waited, out)

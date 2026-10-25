@@ -32,7 +32,6 @@ from app import dbcopy
 from app.auth import hash_password
 from app.models import AppSetting, AuthSession, Automation, IntegrationRun, LearnedAlias, RunChange, SourceFile, User
 from app.timefmt import KST
-from tests.conftest import pg_service_files
 
 BACKEND = Path(__file__).resolve().parent.parent
 UNREACHABLE = "postgresql://u:pw-secret-123@127.0.0.1:9/x"  # 거절되는 로컬 포트 (외부로 요청하지 않음)
@@ -256,8 +255,12 @@ def test_errors_name_the_kind_not_the_values(tmp_path: Path, capsys) -> None:
         ("postgresql://u@127.0.0.1:9/x?sslmode=require&password=pw-secret-123", True),
         ("postgresql:///?service=moajwo-migrate", False),
         ("postgresql://u@127.0.0.1:9/x?sslmode=require", False),
+        ("postgresql://u:pw-secret-123@127.0.0.1:9,127.0.0.1:10/x", True),  # libpq 다중 호스트 — SQLAlchemy 해석 실패
+        ("postgresql://u:pw-secret-123@127.0.0.1:abc/x", True),  # 잘못된 포트 — 해석 실패
+        ("postgresql://u@127.0.0.1:9/x?sslkey=k.pem&sslpassword=pw-secret-123", True),  # 클라이언트 키 암호
+        ("postgresql://u@127.0.0.1:9/x?oauth_client_secret=pw-secret-123", True),
     ],
-    ids=["userinfo", "query", "service", "no-password"],
+    ids=["userinfo", "query", "service", "no-password", "multi-host", "bad-port", "sslpassword", "oauth-secret"],
 )
 def test_password_in_the_target_argument_warns_and_is_recorded_only_as_a_flag(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], target: str, secret: bool
@@ -269,7 +272,7 @@ def test_password_in_the_target_argument_warns_and_is_recorded_only_as_a_flag(
     out = json.loads(captured.out)
     assert code == dbcopy.EXIT_NOT_APPLIED and out["db_applied"] == "no"
     assert out["target_input"] == "--target" and out["target_secret_in_args"] is secret
-    assert ("비밀번호가 들어 있습니다" in captured.err) is secret
+    assert ("비밀번호가 든 주소가 있습니다" in captured.err) is secret
     assert "pw-secret-123" not in captured.out + captured.err and "127.0.0.1" not in captured.out + captured.err
 
 
@@ -282,7 +285,7 @@ def test_password_in_the_target_argument_still_works_for_compatibility(tmp_path:
     captured = capsys.readouterr()
     out = json.loads(captured.out)
     assert code == dbcopy.EXIT_NOT_APPLIED and "OperationalError" in out["error"]  # 대상에 접속을 시도함
-    assert out["target_secret_in_args"] is True and "비밀번호가 들어 있습니다" in captured.err
+    assert out["target_secret_in_args"] is True and "비밀번호가 든 주소가 있습니다" in captured.err
     assert "pw-secret-123" not in captured.out + captured.err
 
 
@@ -307,6 +310,38 @@ def test_target_env_reads_the_address_from_the_environment(
     assert out["target_input"] == "--target-env" and out["target_secret_in_args"] is False
     assert "경고" not in captured.err
     assert "pw-secret-123" not in captured.out + captured.err and "127.0.0.1" not in captured.out + captured.err
+
+
+def test_an_address_given_as_the_env_name_is_refused_without_repeating_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--target-env에 이름 대신 주소를 넣는 실수(예: --target-env "$MIGRATION_URL") — 출력·보고 파일에 받은 값을
+    되풀이하지 않고, 명령 인자에 비밀번호가 있었음을 경고·표시한 뒤 DB에 닿기 전에 멈춘다."""
+    src = tmp_path / "moajwo.db"
+    _small_sqlite(src)
+    report = tmp_path / "report.json"
+    args = ["--source", f"sqlite:///{src.as_posix()}", "--target-env", UNREACHABLE, "--report", str(report)]
+    code = dbcopy.main(args)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    saved = report.read_text(encoding="utf-8")
+    assert code == dbcopy.EXIT_NOT_APPLIED and out["db_applied"] == "no" and "stage" not in out  # 이관 시작 전
+    assert "환경 변수 이름" in out["error"]
+    assert out["target_input"] == "--target-env" and out["target_secret_in_args"] is True
+    assert "비밀번호" in captured.err
+    for text_ in (captured.out, captured.err, saved):
+        assert "pw-secret-123" not in text_ and "127.0.0.1" not in text_
+
+
+def test_target_connection_failure_is_reported_at_the_target_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """대상에 접속하지 못하면 '대상 접속' 단계로 적는다 (원천 문제처럼 보이지 않게)."""
+    src = tmp_path / "moajwo.db"
+    _small_sqlite(src)
+    monkeypatch.setattr(dbcopy, "DB_CONNECT_TIMEOUT_S", 2)
+    code, out = _run(capsys, "--source", f"sqlite:///{src.as_posix()}", "--target", "postgresql://u@127.0.0.1:9/x")
+    assert code == dbcopy.EXIT_NOT_APPLIED and out["stage"] == "대상 접속" and out["error"].startswith("[대상 접속]")
 
 
 def test_exactly_one_of_target_and_target_env(tmp_path: Path) -> None:
@@ -447,7 +482,7 @@ def test_dry_run_and_apply_keep_the_source_and_copy_everything(pg_env, target, t
     # 확인만: 비밀번호가 든 --target (호환 — 경고하고 그대로 동작)
     code, out = _run(capsys, "--source", _src(pg_env), "--target", target, "--report", str(report))
     assert code == 0 and out["result"].startswith("dry-run") and _state(target) == before
-    assert out["target_secret_in_args"] is True and out["tz_unverified_runs"] == 0
+    assert out["target_secret_in_args"] is bool(make_url(target).password) and out["tz_unverified_runs"] == 0
     assert json.loads(report.read_text(encoding="utf-8"))["tool"] == dbcopy.TOOL  # 정상 보고서 저장 유지
     assert out["source"]["unchanged"] and out["snapshot"]["integrity"] == "ok"
     # 적용: 주소는 환경 변수로만 (--target-env)
@@ -482,13 +517,13 @@ def test_dry_run_and_apply_keep_the_source_and_copy_everything(pg_env, target, t
 
 
 @pg
-def test_service_url_target_takes_the_password_from_the_password_file(pg_env, target, tmp_path, monkeypatch,
-                                                                      capsys) -> None:  # fmt: skip
+def test_service_url_target_takes_the_password_from_the_password_file(pg_env, target, tmp_path, service_files,
+                                                                      monkeypatch, capsys) -> None:  # fmt: skip
     """--target 'postgresql:///?service=이름': 접속 정보는 서비스 파일, 비밀번호는 비밀번호 파일에서 — 명령 인자에
     비밀번호가 없다 (경고 없음). 비밀번호 파일이 비면 인증에서 실패하고, 없는 서비스 파일을 가리키면 접속하지 않는다."""
     for name in ("PGSERVICE", "PGPASSWORD", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE"):
         monkeypatch.delenv(name, raising=False)
-    for name, value in pg_service_files(tmp_path, "moajwo-migrate", target).items():
+    for name, value in service_files("moajwo-migrate", target).items():
         monkeypatch.setenv(name, value)
     args = ["--source", _src(pg_env), "--target", "postgresql:///?service=moajwo-migrate"]
     before = _state(target)

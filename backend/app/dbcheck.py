@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import UTC
 from typing import Any
@@ -37,8 +38,23 @@ from sqlalchemy.pool import NullPool
 
 TOOL = "moajwo.dbcheck"
 EXIT_SAME, EXIT_DIFFERENT, EXIT_UNKNOWN = 0, 1, 2
+
+
+def _seconds(name: str, default: int) -> int | None:
+    """정수가 아니면 None — 가져올 때 실패하면 파이썬 일반 실패(종료 1)가 '다른 DB'(1)와 섞이므로 main이 2로 끝낸다."""
+    try:
+        return int(os.environ.get(name) or default)
+    except ValueError:
+        return None
+
+
 # 접속 제한 시간 — 휴면에서 깨는 시간 포함 (app.config의 MOAJWO_DB_CONNECT_TIMEOUT_S와 같은 값)
-CONNECT_TIMEOUT_S = int(os.environ.get("MOAJWO_DB_CONNECT_TIMEOUT_S") or 15)
+CONNECT_TIMEOUT_S = _seconds("MOAJWO_DB_CONNECT_TIMEOUT_S", 15)
+# 이관·마이그레이션이 표를 잠근 동안 끝없이 기다리지 않는다 (트랜잭션 범위 — 트랜잭션 모드 풀러에서도 안전)
+LOCK_TIMEOUT = "5s"
+# 이름 자리에 주소를 넣는 실수(--app-env "$DATABASE_URL")를 값을 되풀이하지 않고 거절한다
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+SERVICE_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 # 비교하는 항목 (같은 DB면 모두 같아야 한다)
 COMPARED = (
     "database",
@@ -79,9 +95,15 @@ def safe_error(exc: BaseException) -> str:
 def resolve(env_name: str | None, service: str | None, default_env: str) -> tuple[str, str]:
     """(SQLAlchemy 주소, 어디서 받았는지). 서비스 이름이면 비밀번호 없는 서비스 주소를 만든다."""
     if service:
+        if not SERVICE_NAME.fullmatch(service):
+            raise CheckError(
+                "서비스 이름 자리에 이름이 아닌 값이 있습니다 — 주소가 아니라 서비스 이름(영문·숫자·_ . -)을 넣으세요"
+            )
         raw, source = f"postgresql:///?service={quote(service, safe='')}", f"service:{service}"
     else:
         name = env_name or default_env
+        if not ENV_NAME.fullmatch(name):
+            raise CheckError("환경 변수 이름 자리에 이름이 아닌 값이 있습니다 — 주소가 아니라 변수 이름을 넣으세요")
         raw, source = os.environ.get(name, "").strip(), f"env:{name}"
         if not raw:
             raise CheckError(f"환경 변수 {name}에 주소가 없습니다")
@@ -95,11 +117,14 @@ def resolve(env_name: str | None, service: str | None, default_env: str) -> tupl
 
 
 def _optional(conn: Connection, sql: str) -> tuple[bool, Any]:
-    """(읽었는지, 값). 권한 등으로 실패해도 앞의 조회를 깨지 않게 저장점 안에서 읽는다."""
+    """(읽었는지, 값). 권한이 없으면(42501) 앞의 조회를 깨지 않게 저장점 안에서 '읽지 못함'으로 둔다. 그 밖의 오류
+    (잠금 대기 제한 55P03 등)는 삼키지 않는다 — 읽지 못한 항목을 빼고 같음으로 답하지 않게 확인 못 함(2)으로."""
     try:
         with conn.begin_nested():
             return True, conn.execute(text(sql)).scalar()
-    except DBAPIError:
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != "42501":
+            raise
         return False, None
 
 
@@ -110,6 +135,7 @@ def probe(url: str) -> dict[str, Any]:
     try:
         with engine.connect() as conn:
             conn.execute(text("SET TRANSACTION READ ONLY"))
+            conn.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
             row = dict(conn.execute(CORE).mappings().one())
             info: dict[str, Any] = {"user": row.pop("user_name"), **row}
             # 세션 시간대가 계정마다 달라도 같은 순간이면 같은 글자가 되게 UTC로 맞춘다
@@ -178,6 +204,10 @@ def main(argv: list[str] | None = None) -> int:
     mig_side.add_argument("--migration-service", metavar="NAME", help="마이그레이션 쪽 libpq 서비스 이름")
     a = ap.parse_args(argv)
     report: dict[str, Any] = {"tool": TOOL}
+    if CONNECT_TIMEOUT_S is None:
+        report.update({"result": "unknown", "error": "MOAJWO_DB_CONNECT_TIMEOUT_S가 정수(초)가 아닙니다"})
+        report["message"] = f"확인하지 못했습니다 — {report['error']}"
+        return _emit(report, EXIT_UNKNOWN)
     sides = (
         ("app", a.app_env, a.app_service, "DATABASE_URL"),
         ("migration", a.migration_env, a.migration_service, "MOAJWO_MIGRATION_DATABASE_URL"),

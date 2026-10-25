@@ -133,6 +133,39 @@ def pg_service_files(directory, name: str, url: str) -> dict[str, str]:  # noqa:
     return {"PGSERVICEFILE": str(service), "PGPASSFILE": str(passfile)}
 
 
+@pytest.fixture
+def service_files(tmp_path):  # noqa: ANN001, ANN201
+    """pg_service_files를 시험 폴더에 만들고 시험이 끝나면 지운다 — pytest는 지난 시험 폴더를 남겨 두므로(기본 3회)
+    시험 서버 비밀번호가 든 비밀번호 파일을 그대로 두지 않는다."""
+    from pathlib import Path
+
+    made: list[Path] = []
+
+    def make(name: str, url: str) -> dict[str, str]:
+        env = pg_service_files(tmp_path, name, url)
+        made.extend(Path(v) for v in env.values())
+        return env
+
+    yield make
+    for path in made:
+        path.unlink(missing_ok=True)
+
+
+def pg_role_with_password(role: str, password: str) -> None:
+    """시험 서버(PG_ADMIN)에 로그인 역할을 만든다. 평문 비밀번호를 DDL에 넣지 않고 클라이언트에서 만든 SCRAM 검증자를
+    보낸다 — 서버가 문장을 기록하는 설정(log_statement=ddl, 실패한 문장 기록)에서도 평문이 로그에 남지 않게."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    url = make_url(PG_ADMIN).set(drivername="postgresql+psycopg")
+    engine = create_engine(url, isolation_level="AUTOCOMMIT")
+    with engine.connect() as con:
+        pgconn = con.connection.dbapi_connection.pgconn
+        verifier = pgconn.encrypt_password(password.encode(), role.encode(), b"scram-sha-256").decode()
+        con.exec_driver_sql(f"CREATE ROLE {role} LOGIN PASSWORD '{verifier}'")  # text()는 검증자의 :를 매개변수로 읽음
+    engine.dispose()
+
+
 def db_dump() -> str:
     """앱 DB의 모든 표·모든 행을 글자로 (SQLite iterdump 대신 — 두 DB에서 같게). '원문이 어디에도 없음' 확인용."""
     from sqlalchemy import inspect, text
