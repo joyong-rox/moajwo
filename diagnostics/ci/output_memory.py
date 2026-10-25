@@ -5,6 +5,10 @@ A. 재현: 결과 칸 예산을 끈 컨테이너(MOAJWO_MAX_OUTPUT_CELLS 아주 
    '실행 중' 기록이 '실패'와 이유로 바뀌고 쓰다 만 임시 파일이 지워지는지 (app/recovery.py).
 B. Render 권장 예산(30만 칸): 한도 아래·경계·위의 묶기, 통계 요약을 넣은 묶기('서로 다른 기록' 표시), 큰 묶기 중 다른 요청
    (큰 xlsx 올리기·실행 기록 조회), 검토 → 통합(한도 아래·위). 단계마다 cgroup 누적 최대 메모리·시간·결과 크기.
+D. (사례마다 새 컨테이너, 예산 30만 칸) D1 묶기+묶기 동시 · D2 묶기+통합 동시 · D3 긴 글자(CSV 고유 글자, 공백이 붙은
+   공유 문자열 — Excel 방식으로 직접 만든 xlsx) · D4 넓은 표 묶기·통합 · D5 큰 통계 요약(한도 안 실행, 한도 넘는 계획)
+   · D6 분석 Excel 내려받기(하나·둘 동시) · D7 작은 xlsx의 큰 병합 범위 · D3L 로컬 기본 한도의 공유 긴 글자
+   · D8 결과 만들기 차례 2개에서 묶기 둘 + 큰 xlsx 올리기를 동시에.
 중단 기준: 컨테이너가 죽으면(B에서) 더 큰 단계는 하지 않는다. 합성 자료만 쓴다. 비밀번호는 실행 때 만들고 출력하지 않는다.
 사용법: python3 output_memory.py <A|B> <backend 주소> <컨테이너 이름> <합성 파일 폴더> <출력 폴더>
 """
@@ -51,6 +55,8 @@ class Client:
             headers["Content-Type"] = f"multipart/form-data; boundary={b}"
         elif body is not None:
             data, headers["Content-Type"] = json.dumps(body).encode(), "application/json"
+        if files is not None and all(f.suffix == ".csv" for f in files):
+            data = data.replace(f"Content-Type: {XLSX}".encode(), b"Content-Type: text/csv")
         req = urllib.request.Request(BASE + path, data=data, method=method, headers=headers)
         try:
             with self.op.open(req, timeout=timeout) as r:
@@ -74,7 +80,7 @@ def mem() -> dict:
     peak = docker("exec", CONTAINER, "cat", "/sys/fs/cgroup/memory.peak")
     cur = docker("exec", CONTAINER, "cat", "/sys/fs/cgroup/memory.current")
     ev = docker("exec", CONTAINER, "cat", "/sys/fs/cgroup/memory.events")
-    events = dict(line.split() for line in ev.splitlines() if line)
+    events = dict(line.split() for line in ev.splitlines() if len(line.split()) == 2)  # 컨테이너가 멈추면 오류 문구
     return {"peak_mib": round(int(peak) / 2**20) if peak.isdigit() else None,
             "current_mib": round(int(cur) / 2**20) if cur.isdigit() else None,
             "oom_kill": int(events["oom_kill"]) if "oom_kill" in events else None}  # fmt: skip
@@ -96,7 +102,7 @@ def wait_healthy() -> None:
         time.sleep(2)
 
 
-def upload(c: Client, names: list[str], confirm: bool = True) -> list[int]:
+def upload(c: Client, names: list[str], confirm: bool = True, mapping: dict[str, str] | None = None) -> list[int]:
     ids: list[int] = []
     for i in range(0, len(names), 10):
         s, body = c.call("POST", "/files", files=[FILES / n for n in names[i : i + 10]])
@@ -109,7 +115,7 @@ def upload(c: Client, names: list[str], confirm: bool = True) -> list[int]:
     for fid in ids if confirm else []:
         pv = c.call("GET", f"/files/{fid}/preview?sheet=s0")[1]
         cols = {col["name"]: col["column_id"] for col in pv["columns"]}
-        items = [{"sheet_id": "s0", "column_id": cols[n], "field_key": k} for n, k in MAP.items() if n in cols]
+        items = [{"sheet_id": "s0", "column_id": cols[n], "field_key": k} for n, k in (mapping or MAP).items() if n in cols]
         c.call("PUT", f"/files/{fid}/mapping/decisions", {"decisions": items})
     return ids
 
@@ -211,9 +217,9 @@ def names(prefix: str, n: int) -> list[str]:
     return [f"{prefix}_{i}.xlsx" for i in range(n)]
 
 
-def part_a(c: Client) -> None:
-    fids = upload(c, names("b20000", 10))
-    bundle(c, "A 묶기 200,000행 (예산 끔)", fids, 200_000)
+def part_a(c: Client, files: int = 10) -> None:
+    fids = upload(c, names("b20000", files))
+    bundle(c, f"{PART} 묶기 {files * 20000:,}행 (예산 끔)", fids, files * 20000)
     before = leftovers("killed")
     if alive():
         log(case="A note", text="죽지 않음 — 재현 안 됨")
@@ -258,15 +264,313 @@ def part_c(c: Client) -> None:
     integrate(c, "C 통합 37,000행 (약 29.6만 칸)", fs, 37_000)
 
 
+STATS = {"시도": "sido", "시군구": "sigungu", "인구수(명)": "population", "남자(명)": "population_male",
+         "여자(명)": "population_female", "세대수(세대)": "households", "예산(천원)": "budget", "지출(천원)": "expenditure",
+         "집행률(%)": "execution_rate"}  # fmt: skip
+WIDE = {"시도": "sido", "시군구": "sigungu"}
+LONG = {"시도": "sido", "시군구": "sigungu"}
+
+
+def _plan(c: Client, fids: list[int], items: list[str] | None = None) -> tuple[int, dict, int]:
+    body: dict = {"file_ids": fids}
+    if items:
+        links = [{"file_id": f, "sheet_id": "s0", "rows_are_records": True} for f in fids]
+        body["summary"] = {"items": [{"field_key": k, "aggregates": ["sum", "count"], "links": links} for k in items]}
+    t = time.monotonic()
+    s, plan = c.call("POST", "/bundle/plan", body)
+    return s, (plan if isinstance(plan, dict) else {"raw": str(plan)[:160]}), round((time.monotonic() - t) * 1000)
+
+
+def _review_ready(c: Client, fids: list[int]) -> int | None:
+    s, review = c.call("POST", "/reviews", {"file_ids": fids})
+    if s != 201:
+        log(case="review failed", status=s, detail=str(review)[:160])
+        return None
+    rid = review["id"]
+    for it in review.get("items", []):
+        if it.get("category") == "pending" and it.get("decision") is None:
+            payload = it.get("payload") or {}
+            cands = payload.get("candidates") or []
+            if it.get("kind") == "mapping":  # 제안한 표준 항목만 — 다른 후보를 고르면 매핑이 바뀌어 '다시 검사'가 된다
+                choice = payload.get("field_key")
+            else:
+                choice = cands[0].get("code") if cands else None
+            ok = choice or it.get("kind") == "pii"
+            c.call("POST", f"/reviews/{rid}/items/{it['id']}/decision",
+                   {"decision": "approved", "choice": choice} if ok else {"decision": "rejected"})  # fmt: skip
+    cs, done = c.call("POST", f"/reviews/{rid}/complete")
+    if cs != 200:
+        log(case="complete failed", status=cs, detail=str(done)[:160])
+        return None
+    return rid
+
+
+def _together(jobs: dict[str, tuple[str, str, object]]) -> dict[str, dict]:
+    """여러 요청을 같은 순간에 보낸다 (각자 다른 연결, 같은 계정). 결과: 상태·시간·요약."""
+    gate = threading.Barrier(len(jobs))
+    out: dict[str, dict] = {}
+
+    def go(name: str, method: str, path: str, body: object) -> None:
+        cl = Client()
+        cl.op = MAIN.op
+        gate.wait()
+        t = time.monotonic()
+        if method == "UPLOAD":  # body = 올릴 파일 목록
+            s, res = cl.call("POST", path, files=body, timeout=300)
+            if s == 200 and isinstance(res, list) and res and res[0].get("error"):
+                s, res = 422, res[0]["error"]
+        else:
+            s, res = cl.call(method, path, body)
+        out[name] = {"status": s, "ms": round((time.monotonic() - t) * 1000),
+                     "detail": None if s in (200, 201) else str(res)[:200],
+                     "run": res.get("id") if isinstance(res, dict) else None}  # fmt: skip
+
+    ths = [threading.Thread(target=go, args=(n, *j)) for n, j in jobs.items()]
+    for th in ths:
+        th.start()
+    for th in ths:
+        th.join(900)
+    return out
+
+
+def part_d1(c: Client) -> None:
+    """묶기 + 묶기를 동시에 — 각각 한도(30만 칸) 가까이 (60,000행 × 5칸)."""
+    a, b = upload(c, names("b6000", 10)), upload(c, names("b5000", 10))
+    (sa, pa, _), (sb, pb, _) = _plan(c, a), _plan(c, b)
+    log(case="D1 준비", plans=[sa, sb], ready=[pa.get("ready"), pb.get("ready")], **mem())
+    res = _together({"묶기 60,000행": ("POST", "/bundle/run", {"file_ids": a, "expected_basis": pa.get("basis")}),
+                     "묶기 50,000행": ("POST", "/bundle/run", {"file_ids": b, "expected_basis": pb.get("basis")})})  # fmt: skip
+    log(case="D1 묶기+묶기 동시 (300,000칸 + 250,000칸)", results=res, **mem(), state=state())
+
+
+def part_d2(c: Client) -> None:
+    """묶기(60,000행 = 30만 칸) + 통합(37,000행 ≈ 29.6만 칸)을 동시에."""
+    a = upload(c, names("b6000", 10))
+    sa, pa, _ = _plan(c, a)
+    rid = _review_ready(c, upload(c, ["i37000_0.xlsx"]))
+    log(case="D2 준비", plan=sa, ready=pa.get("ready"), review=rid, **mem())
+    if rid is None:
+        return
+    res = _together({"묶기 60,000행": ("POST", "/bundle/run", {"file_ids": a, "expected_basis": pa.get("basis")}),
+                     "통합 37,000행": ("POST", f"/reviews/{rid}/integrate", {"include_unmapped": True})})  # fmt: skip
+    log(case="D2 묶기+통합 동시 (300,000칸 + 약 296,000칸)", results=res, **mem(), state=state())
+
+
+def part_d3(c: Client) -> None:
+    """긴 글자: (a) CSV 5개 × 1,000행 × 3,000자(고유) 묶기 (b) 공백이 붙은 32,000자 공유 문자열을 N칸이 가리키는 작은 xlsx."""
+    t = time.monotonic()
+    fids = upload(c, [f"lt_{i}.csv" for i in range(5)], mapping=LONG)
+    log(case="D3a 긴 글자 CSV 올리기 (5 × 1,000행 × 3,000자)", ms=round((time.monotonic() - t) * 1000), **mem(), state=state())
+    s, plan, plan_ms = _plan(c, fids)
+    if s == 200 and plan.get("ready"):
+        t = time.monotonic()
+        rs, run = c.call("POST", "/bundle/run", {"file_ids": fids, "expected_basis": plan["basis"]})
+        log(case="D3a 긴 글자 CSV 묶기", status=rs, ms=round((time.monotonic() - t) * 1000), plan_ms=plan_ms,
+            detail=None if rs == 201 else str(run)[:160], **mem(), state=state())  # fmt: skip
+    else:
+        log(case="D3a 묶기 계획", status=s, ready=plan.get("ready"), problems=(plan.get("problems") or [])[:2], **mem())
+    _shared_text(c, (499, 500, 2000, 4000, 8000))
+
+
+def part_d3l(c: Client) -> None:
+    """로컬·폐쇄망 기본 한도(글자 6,400만)에서 공유 긴 글자 — 한도 바로 아래(1,999칸)·위."""
+    _shared_text(c, (1999, 2000, 4000, 8000))
+
+
+def _shared_text(c: Client, sizes: tuple[int, ...]) -> None:
+    for n in sizes:  # 같은 32,000자(앞뒤 공백)를 n칸이 공유 문자열로 가리킴 (파일은 수 KB)
+        if not alive():
+            return
+        t = time.monotonic()
+        try:
+            fid = upload(c, [f"sst_{n}.xlsx"], mapping=LONG)
+        except RuntimeError as exc:
+            log(case=f"D3b 공유 긴 글자 {n}칸 올리기", error=str(exc)[:160], **mem(), state=state())
+            continue
+        log(case=f"D3b 공유 긴 글자 {n}칸 올리기", ms=round((time.monotonic() - t) * 1000), **mem(), state=state())
+        s, plan, plan_ms = _plan(c, fid)
+        if s == 200 and plan.get("ready"):
+            t = time.monotonic()
+            rs, run = c.call("POST", "/bundle/run", {"file_ids": fid, "expected_basis": plan["basis"]})
+            log(case=f"D3b 공유 긴 글자 {n}칸 묶기", status=rs, ms=round((time.monotonic() - t) * 1000),
+                detail=None if rs == 201 else str(run)[:160], **mem(), state=state())  # fmt: skip
+        else:
+            log(case=f"D3b 공유 긴 글자 {n}칸 계획", status=s, ready=plan.get("ready"), **mem(), state=state())
+
+
+def part_d4(c: Client) -> None:
+    """넓은 표: 1,000열 × 290행 (약 29만 칸) 묶기, 같은 파일 통합(해당 없음 열 포함)."""
+    fid = upload(c, ["w_wide.xlsx"], mapping=WIDE)
+    log(case="D4 넓은 표 올리기", **mem(), state=state())
+    s, plan, plan_ms = _plan(c, fid)
+    if s == 200 and plan.get("ready"):
+        t = time.monotonic()
+        rs, run = c.call("POST", "/bundle/run", {"file_ids": fid, "expected_basis": plan["basis"]})
+        log(case="D4 넓은 표 묶기 (1,000열 × 290행)", status=rs, ms=round((time.monotonic() - t) * 1000), plan_ms=plan_ms,
+            detail=None if rs == 201 else str(run)[:160], **mem(), state=state())  # fmt: skip
+    else:
+        log(case="D4 묶기 계획", status=s, ready=plan.get("ready"), problems=(plan.get("problems") or [])[:2], **mem())
+    if not alive():
+        return
+    rid = _review_ready(c, fid)
+    if rid is not None:
+        t = time.monotonic()
+        s, run = c.call("POST", f"/reviews/{rid}/integrate", {"include_unmapped": True})
+        log(case="D4 넓은 표 통합 (해당 없음 열 포함)", status=s, ms=round((time.monotonic() - t) * 1000),
+            detail=None if s == 201 else str(run)[:200], **mem(), state=state())  # fmt: skip
+
+
+def part_d5(c: Client) -> None:
+    """큰 통계 요약: (a) 한도 안 묶기 1파일 27,000행 × 요약 항목 7개 (b) 한도 넘는 묶기 4파일 × 27,000행 × 7개의 '계획'."""
+    items = ["population", "population_male", "population_female", "households", "budget", "expenditure"]
+    one = upload(c, ["s7_0.xlsx"], mapping=STATS)
+    s, plan, plan_ms = _plan(c, one, items)
+    log(case="D5a 계획 (1파일 27,000행 × 요약 6)", status=s, ready=plan.get("ready"), plan_ms=plan_ms,
+        problems=(plan.get("problems") or [])[:2], **mem(), state=state())  # fmt: skip
+    if s == 200 and plan.get("ready") and alive():
+        t = time.monotonic()
+        body = {"file_ids": one, "expected_basis": plan["basis"],
+                "summary": {"items": [{"field_key": k, "aggregates": ["sum", "count"],
+                                       "links": [{"file_id": one[0], "sheet_id": "s0", "rows_are_records": True}]} for k in items]}}  # fmt: skip
+        rs, run = c.call("POST", "/bundle/run", body)
+        log(case="D5a 묶기+요약 6", status=rs, ms=round((time.monotonic() - t) * 1000),
+            detail=None if rs == 201 else str(run)[:160], **mem(), state=state())  # fmt: skip
+    if not alive():
+        return
+    four = one + upload(c, [f"s7_{i}.xlsx" for i in (1, 2, 3)], mapping=STATS)
+    s, plan, plan_ms = _plan(c, four, items)
+    log(case="D5b 계획 (4파일 × 27,000행 × 요약 6 — 칸 한도 넘음)", status=s, ready=plan.get("ready"), plan_ms=plan_ms,
+        problems=(plan.get("problems") or [])[:2], **mem(), state=state())  # fmt: skip
+
+
+def part_d6(c: Client) -> None:
+    """데이터 분석 Excel 내려받기: 30,000행 (시군구 5,000개로 묶음, 숫자 아닌 값 5,000행) — 미리보기·실행·내려받기."""
+    fid = upload(c, ["an_30k.xlsx"])
+    body = {"field_key": "population", "targets": [{"file_id": fid[0], "sheet_id": "s0", "rows_are_records": True}],
+            "group_by": ["sigungu"]}  # fmt: skip
+    t = time.monotonic()
+    s, pv = c.call("POST", "/analysis/preview", body)
+    log(case="D6 분석 미리보기", status=s, ms=round((time.monotonic() - t) * 1000),
+        detail=None if s == 200 else str(pv)[:160], **mem(), state=state())  # fmt: skip
+    if s != 200 or not alive():
+        return
+    t = time.monotonic()
+    rs, run = c.call("POST", "/analysis/run", {**body, "expected_fingerprint": pv["fingerprint"]})
+    log(case="D6 분석 실행", status=rs, ms=round((time.monotonic() - t) * 1000),
+        detail=None if rs == 201 else str(run)[:160], **mem(), state=state())  # fmt: skip
+    if rs != 201 or not alive():
+        return
+    t = time.monotonic()
+    ds, raw = c.call("GET", f"/analysis/runs/{run['id']}/download")
+    log(case="D6 분석 Excel 내려받기", status=ds, ms=round((time.monotonic() - t) * 1000),
+        bytes=len(raw) if isinstance(raw, bytes) else None, **mem(), state=state())  # fmt: skip
+    if ds == 200 and alive():
+        res = _together({"내려받기 1": ("GET", f"/analysis/runs/{run['id']}/download", None),
+                         "내려받기 2": ("GET", f"/analysis/runs/{run['id']}/download", None)})  # fmt: skip
+        log(case="D6 분석 Excel 내려받기 둘 동시", results=res, **mem(), state=state())
+
+
+def part_d7(c: Client) -> None:
+    """병합 범위: 몇 KB xlsx의 큰 병합 하나 (A3:Z<n>) — 칸 수 한도(Render 40만) 안·밖."""
+    for name in ("merge_300k.xlsx", "merge_1m.xlsx"):
+        if not alive():
+            return
+        t = time.monotonic()
+        try:
+            upload(c, [name], confirm=False)
+            log(case=f"D7 큰 병합 올리기 {name}", status="ok", ms=round((time.monotonic() - t) * 1000), **mem(), state=state())
+        except RuntimeError as exc:
+            log(case=f"D7 큰 병합 올리기 {name}", error=str(exc)[:200], ms=round((time.monotonic() - t) * 1000),
+                **mem(), state=state())  # fmt: skip
+
+
+def part_d8(c: Client) -> None:
+    """결과 만들기 차례 2개(MOAJWO_OUTPUT_SLOTS=2): 한도 가까운 묶기 둘(30만·25만 칸) + 큰 xlsx(풀었을 때 14.8MiB) 올리기를
+    같은 순간에 — 차례를 1개로 둔 근거(결과 둘이 겹친 데에 읽기 하나가 더 겹칠 때)를 잰다. 수정 전 이미지에는 차례가 없다."""
+    a, b = upload(c, names("b6000", 10)), upload(c, names("b5000", 10))
+    (sa, pa, _), (sb, pb, _) = _plan(c, a), _plan(c, b)
+    log(case="D8 준비", plans=[sa, sb], ready=[pa.get("ready"), pb.get("ready")], **mem())
+    res = _together({"묶기 60,000행": ("POST", "/bundle/run", {"file_ids": a, "expected_basis": pa.get("basis")}),
+                     "묶기 50,000행": ("POST", "/bundle/run", {"file_ids": b, "expected_basis": pb.get("basis")}),
+                     "큰 xlsx 올리기": ("UPLOAD", "/files", [FILES / "x_big.xlsx"])})  # fmt: skip
+    log(case="D8 묶기+묶기+큰 xlsx 올리기 동시 (차례 2개)", results=res, **mem(), state=state())
+
+
+def part_d9(c: Client) -> None:
+    """긴 글자 파일 넷(각 499칸 × 32,000자 ≈ 1,597만 자 — 파일 하나의 글자 한도 바로 아래)을 한 결과로: 묶기, 그다음 통합.
+    결과 칸은 몇천 개라 칸 수 예산에 걸리지 않는다 — 결과 하나의 글자 양을 따로 막아야 하는지 잰다."""
+    fids = upload(c, [f"sst499_{k}.xlsx" for k in range(4)], mapping=LONG)
+    log(case="D9 올리기 (4 × 499칸 × 32,000자)", **mem(), state=state())
+    s, plan, plan_ms = _plan(c, fids)
+    if s == 200 and plan.get("ready") and alive():
+        t = time.monotonic()
+        rs, run = c.call("POST", "/bundle/run", {"file_ids": fids, "expected_basis": plan["basis"]})
+        log(case="D9 묶기 (약 6,390만 자)", status=rs, ms=round((time.monotonic() - t) * 1000), plan_ms=plan_ms,
+            detail=None if rs == 201 else str(run)[:200], **mem(), state=state())  # fmt: skip
+    else:
+        log(case="D9 묶기 계획", status=s, ready=plan.get("ready"), problems=(plan.get("problems") or [])[:2], **mem(),
+            state=state())  # fmt: skip
+    if not alive():
+        return
+    rid = _review_ready(c, fids)
+    if rid is not None and alive():
+        t = time.monotonic()
+        s, run = c.call("POST", f"/reviews/{rid}/integrate", {"include_unmapped": True})
+        log(case="D9 통합 (약 6,390만 자)", status=s, ms=round((time.monotonic() - t) * 1000),
+            detail=None if s == 201 else str(run)[:200], **mem(), state=state())  # fmt: skip
+
+
+def part_d10(c: Client, n: int) -> None:
+    """긴 글자 파일 n개(각 약 1,597만 자)를 통합만 — 새 컨테이너에서 결과 하나의 글자 양에 따른 메모리."""
+    fids = upload(c, [f"sst499_{k}.xlsx" for k in range(n)], mapping=LONG)
+    log(case=f"D10 올리기 {n}개", **mem(), state=state())
+    rid = _review_ready(c, fids)
+    if rid is None or not alive():
+        return
+    t = time.monotonic()
+    s, run = c.call("POST", f"/reviews/{rid}/integrate", {"include_unmapped": True})
+    log(case=f"D10 통합 {n}개 (약 {n * 1597}만 자)", status=s, ms=round((time.monotonic() - t) * 1000),
+        detail=None if s == 201 else str(run)[:200], **mem(), state=state())  # fmt: skip
+
+
+def part_d11(c: Client, n: int) -> None:
+    """긴 글자 파일 n개를 묶기만 — 새 컨테이너."""
+    fids = upload(c, [f"sst499_{k}.xlsx" for k in range(n)], mapping=LONG)
+    log(case=f"D11 올리기 {n}개", **mem(), state=state())
+    s, plan, plan_ms = _plan(c, fids)
+    if s != 200 or not plan.get("ready") or not alive():
+        log(case=f"D11 묶기 계획 {n}개", status=s, ready=plan.get("ready"), problems=(plan.get("problems") or [])[:2],
+            **mem(), state=state())  # fmt: skip
+        return
+    t = time.monotonic()
+    rs, run = c.call("POST", "/bundle/run", {"file_ids": fids, "expected_basis": plan["basis"]})
+    log(case=f"D11 묶기 {n}개 (약 {n * 1597}만 자)", status=rs, ms=round((time.monotonic() - t) * 1000), plan_ms=plan_ms,
+        detail=None if rs == 201 else str(run)[:200], **mem(), state=state())  # fmt: skip
+
+
+MAIN = Client()
+
+
 def main() -> None:
-    c = Client()
+    c = MAIN
     s, _ = c.call("POST", "/auth/setup", {"username": "ci-out", "display_name": "CI", "password": PW})
     log(case="setup", status=s, **mem())
     try:
-        {"A": part_a, "B": part_b, "C": part_c}[PART](c)
+        if PART.startswith(("D10_", "D11_")):  # D10_n·D11_n: 파일 n개
+            (part_d10 if PART.startswith("D10_") else part_d11)(c, int(PART.split("_")[1]))
+            raise _Done
+        {"A": part_a, "B": part_b, "C": part_c, "D1": part_d1, "D2": part_d2, "D3": part_d3, "D4": part_d4,
+         "D5": part_d5, "D6": part_d6, "D7": part_d7, "D3L": part_d3l, "D8": part_d8, "D9": part_d9,
+         "A3": lambda cl: part_a(cl, 15)}[PART](c)  # fmt: skip
+    except _Done:
+        pass
     except RuntimeError as exc:
         log(case="stopped", error=str(exc), **mem(), state=state())
     leftovers("end")
+
+
+class _Done(Exception):
+    """D10_n·D11_n을 돌렸다 (아래 표를 건너뜀)."""
 
 
 if __name__ == "__main__":
