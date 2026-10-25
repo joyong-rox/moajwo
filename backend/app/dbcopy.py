@@ -11,7 +11,7 @@
   - 비밀번호가 든 --target 주소도 호환으로 그대로 동작하지만 stderr로 경고한다. 보고에는 주소 없이
     target_secret_in_args(참·거짓)만 남긴다.
 - 기본은 확인만 한다 (dry-run): 원천 스냅숏의 리비전·무결성·표별 건수, 대상 리비전·건수, 대상이 비었는지,
-  지원 범위.
+  시간대 출처 확인이 필요한 실행 기록 후보.
 - 원천 보호: 원천 파일은 읽기 전용으로만 연다. SQLite 백업 API(한 읽기 트랜잭션으로 모든 페이지 복사 — 한 시점)로
   임시 스냅숏을 만들고, 스냅숏의 무결성을 검사한 뒤 스냅숏에서 읽는다 (쓰기 중인 파일을 그대로 복사하지 않음).
   스냅숏 해시와 원천 파일 해시(앞뒤)를 보고한다. 원천 앱의 쓰기를 멈추는 일은 이 도구가 아니라 전환 절차의 단계다.
@@ -28,8 +28,9 @@
   말고 대상을 조회한다.
 - 대상에 업무 자료가 하나라도 있으면 덮어쓰지 않고 멈춘다 (같은 이관을 두 번 실행해도 여기서 막힘 — 이관 표시가
   있으면 같은 원천인지 함께 알린다). 마이그레이션이 넣는 기본 자료(용어사전 기본 항목·설정 표시)는 원천 값으로 바꾼다.
-- 지원 범위: 0009(실행 기록 시각) 이전에 만든 실행 기록이 있는 원천은 거절한다. 0009가 그 기록의 시작·종료 시각을
-  생성 시각(UTC)으로 채웠는데 앱은 KST로 읽으므로 시간대 출처가 불명확하다 — 추정해서 고치지 않는다.
+- 시간대 출처 확인이 필요한 실행 기록 후보(시작 시각 = 생성 시각)가 있으면 적용하지 않고 멈춘다 (보고
+  tz_unverified_runs). 0009(실행 기록 시각)가 그 이전 기록의 시작·종료 시각을 생성 시각(UTC)으로 채웠을 수 있는데,
+  앱은 시작·종료를 KST 벽시계로 읽는다. 후보일 뿐 출처를 단정할 수 없으므로 9시간 보정을 추정해서 하지 않는다.
 - 비밀번호는 해시 그대로 옮긴다 (평문을 알아내거나 초기화하지 않음). 로그인 세션(auth_sessions)은 옮기지 않는다
   (이관 뒤 다시 로그인).
 - 시간: SQLite는 시간대 없이 저장한다. 통합 실행 시작·끝과 자동화 수정 시각은 KST 벽시계, 나머지는 UTC다
@@ -260,9 +261,10 @@ def _count(conn: Connection, name: str) -> int:
     return conn.execute(text(f"SELECT count(*) FROM {_q(name)}")).scalar() or 0
 
 
-def _legacy_runs(conn: Connection) -> int:
-    """0009 이전 실행 기록 수: 0009가 시작·종료 시각을 생성 시각(UTC)으로 채운 행은 시작 = 생성 시각이다
-    (그 뒤 기록은 시작이 KST 벽시계, 생성이 UTC라 같아지지 않는다)."""
+def _tz_unverified_runs(conn: Connection) -> int:
+    """시간대 출처 확인이 필요한 실행 기록 후보 수 — 시작 시각 = 생성 시각인 행.
+    0009가 그 이전 기록의 시작·종료 시각을 생성 시각(UTC)으로 채웠을 수 있다 (앱은 시작·종료를 KST 벽시계로 읽는다).
+    그 뒤 기록은 시작이 KST 벽시계, 생성이 UTC라 보통 같아지지 않는다. 후보일 뿐 0009가 채웠다고 단정하지 않는다."""
     return conn.execute(
         text("SELECT count(*) FROM runs WHERE started_at IS NOT NULL AND started_at = created_at")
     ).scalar() or 0  # fmt: skip
@@ -354,11 +356,11 @@ def _copy(src: Engine, dst: Engine, report: dict[str, Any], apply: bool, fail_at
             raise CopyError(
                 "원천·대상 리비전이 최신(head)이 아닙니다 — 둘 다 'alembic upgrade head'로 맞춘 뒤 다시 하세요"
             )
-        report["legacy_0009_runs"] = legacy = _legacy_runs(s)
-        if legacy:
+        report["tz_unverified_runs"] = unverified = _tz_unverified_runs(s)
+        if unverified:
             raise CopyError(
-                f"원천에 0009 이전 실행 기록이 {legacy}건 있습니다 — 시작·종료 시각의 시간대 출처가 불명확해 이 도구의 "
-                "지원 범위 밖입니다 (추정해서 고치지 않음)"
+                f"원천에 시간대 출처 확인이 필요한 실행 기록 후보가 {unverified}건 있습니다 (시작 시각 = 생성 시각 — "
+                "0009가 생성 시각(UTC)으로 채웠을 수 있음). 9시간 보정을 추정해서 하지 않으므로 적용하지 않습니다"
             )
         counts = {t.name: {"source": _count(s, t.name), "target_before": _count(d, t.name)} for t in tables}
         report["counts"] = counts

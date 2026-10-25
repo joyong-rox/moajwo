@@ -447,7 +447,7 @@ def test_dry_run_and_apply_keep_the_source_and_copy_everything(pg_env, target, t
     # 확인만: 비밀번호가 든 --target (호환 — 경고하고 그대로 동작)
     code, out = _run(capsys, "--source", _src(pg_env), "--target", target, "--report", str(report))
     assert code == 0 and out["result"].startswith("dry-run") and _state(target) == before
-    assert out["target_secret_in_args"] is True
+    assert out["target_secret_in_args"] is True and out["tz_unverified_runs"] == 0
     assert json.loads(report.read_text(encoding="utf-8"))["tool"] == dbcopy.TOOL  # 정상 보고서 저장 유지
     assert out["source"]["unchanged"] and out["snapshot"]["integrity"] == "ok"
     # 적용: 주소는 환경 변수로만 (--target-env)
@@ -603,15 +603,20 @@ def test_app_writes_wait_while_the_copy_holds_the_tables(pg_env, target, monkeyp
 
 
 @pg
-def test_runs_from_before_0009_are_out_of_scope(pg_env, target, tmp_path) -> None:
-    legacy = tmp_path / "legacy.db"
-    shutil.copy(pg_env["source"], legacy)
-    con = sqlite3.connect(legacy)
-    with con:  # 0009가 채운 모양: 시작·종료 = 생성 시각(UTC)
+def test_runs_whose_time_zone_origin_needs_confirmation_stop_the_copy(pg_env, target, tmp_path) -> None:
+    """시작 시각 = 생성 시각인 실행 기록은 시간대 출처 확인이 필요한 후보다 (0009가 생성 시각(UTC)으로 채웠을 수 있음).
+    확인만·적용 모두 멈추고 대상은 그대로 — 9시간 보정을 추정해서 하지 않는다."""
+    unverified = tmp_path / "tz-unverified.db"
+    shutil.copy(pg_env["source"], unverified)
+    con = sqlite3.connect(unverified)
+    with con:  # 0009가 채웠을 수 있는 모양: 시작·종료 = 생성 시각(UTC)
         con.execute("UPDATE runs SET started_at = created_at, finished_at = created_at")
     con.close()
     before = _state(target)
     for apply in (False, True):
-        with pytest.raises(dbcopy.CopyError, match="0009 이전 실행 기록이 1건"):
-            dbcopy.copy(f"sqlite:///{legacy.as_posix()}", target, apply=apply)
+        report: dict[str, Any] = {}
+        with pytest.raises(dbcopy.CopyError, match="시간대 출처 확인이 필요한 실행 기록 후보가 1건"):
+            dbcopy.copy(f"sqlite:///{unverified.as_posix()}", target, apply=apply, report=report)
+        assert report["tz_unverified_runs"] == 1 and report["db_applied"] == "no"
+        assert "legacy_0009_runs" not in report
     assert _state(target) == before
