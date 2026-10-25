@@ -21,7 +21,7 @@ import chardet
 import openpyxl
 import xlrd
 
-from app.config import MAX_FILE_CELLS, MAX_XLSX_UNCOMPRESSED_MIB, PARSE_SLOTS, PARSE_WAIT_S
+from app.config import MAX_FILE_CELLS, MAX_FILE_TEXT_CHARS, MAX_XLSX_UNCOMPRESSED_MIB, PARSE_SLOTS, PARSE_WAIT_S
 from app.pii import PiiReport, mask_cell, scan_grid
 
 SUPPORTED_EXTENSIONS = (".xlsx", ".xls", ".csv")
@@ -202,22 +202,44 @@ def parse_slot() -> Iterator[None]:
         _PARSE_SLOTS.release()
 
 
+_MERGE_REF = re.compile(rb'<mergeCell\s+ref="([A-Z]{1,3})(\d+):([A-Z]{1,3})(\d+)"')
+
+
+def _column_number(letters: bytes) -> int:
+    n = 0
+    for ch in letters:
+        n = n * 26 + ch - 64
+    return n
+
+
 def _check_xlsx_size(path: Path) -> None:
-    """압축을 푼 크기(중앙 디렉터리의 크기 합)가 한도를 넘으면 읽기 전에 멈춘다.
+    """압축을 푼 크기(중앙 디렉터리의 크기 합)가 한도를 넘으면 읽기 전에 멈춘다. 병합 범위의 넓이 합도 칸 수 한도로
+    먼저 본다 — openpyxl은 병합 범위의 칸마다 객체를 만들어, 몇 KB짜리 파일의 큰 병합 하나가 읽는 동안 수백 MiB가 된다
+    (칸 수는 읽은 뒤에야 세므로 그 전에 막는다).
 
     zipfile은 적힌 크기보다 많이 풀지 않는다 (넘으면 CRC 오류) — 적힌 크기 합이 실제로 풀리는 양의 상한이다.
     """
     try:
         with zipfile.ZipFile(path) as archive:
-            total = sum(info.file_size for info in archive.infolist())
+            infos = archive.infolist()
+            total = sum(info.file_size for info in infos)
+            if total > MAX_XLSX_UNCOMPRESSED_BYTES:
+                raise ParseError(
+                    f"압축을 풀면 {total / 2**20:,.1f}MiB라 읽지 않았습니다 "
+                    f"(한도 {MAX_XLSX_UNCOMPRESSED_BYTES / 2**20:,.1f}MiB). "
+                    "시트를 나누거나 필요한 범위만 저장해 다시 올리세요."
+                )
+            merged = 0
+            for info in infos:  # 시트 하나씩 (풀었을 때 크기는 위 한도 안)
+                if info.filename.startswith("xl/worksheets/") and info.filename.endswith(".xml"):
+                    for m in _MERGE_REF.finditer(archive.read(info)):
+                        rows = int(m[4]) - int(m[2]) + 1
+                        cols = _column_number(m[3]) - _column_number(m[1]) + 1
+                        merged += max(rows, 0) * max(cols, 0)
     except zipfile.BadZipFile:
         return  # 손상 파일은 아래 openpyxl이 알린다 (기존 안내)
-    if total > MAX_XLSX_UNCOMPRESSED_BYTES:
-        raise ParseError(
-            f"압축을 풀면 {total / 2**20:,.1f}MiB라 읽지 않았습니다 "
-            f"(한도 {MAX_XLSX_UNCOMPRESSED_BYTES / 2**20:,.1f}MiB). "
-            "시트를 나누거나 필요한 범위만 저장해 다시 올리세요."
-        )
+    if merged > MAX_FILE_CELLS:
+        raise ParseError(_too_many_cells(f"병합 범위만 {merged:,}칸"))
 
 
 def _read_xlsx(path: Path) -> tuple[dict[str, list[list[Any]]], Filled]:
@@ -766,6 +788,14 @@ def _parse_file(path: Path, original_name: str | None) -> FileResult:
     # xlsx·xls는 읽은 뒤에 센다 (읽는 메모리는 압축 해제·업로드 한도가 막음) — 행을 정리·분석하기 전에 멈춘다
     if total > MAX_FILE_CELLS:
         raise ParseError(_too_many_cells(f"{len(sheets)}개 시트 {total:,}칸"))
+    # 정리(앞뒤 공백 제거)할 때 칸마다 글자 사본이 생긴다 — 같은 긴 글자를 여러 칸이 가리키는 파일(공유 문자열·병합)은
+    # 읽은 크기보다 훨씬 커지므로, 정리하기 전에 칸마다의 글자 길이 합을 본다
+    chars = sum(len(v) for grid in sheets.values() for row in grid for v in row if isinstance(v, str))
+    if chars > MAX_FILE_TEXT_CHARS:
+        raise ParseError(
+            f"글자가 너무 많아 읽지 않았습니다 (모든 칸의 글자 {chars:,}자, 한도 {MAX_FILE_TEXT_CHARS:,}자). "
+            "긴 글자가 반복되는 열·병합을 줄이거나 시트를 나눠 다시 올리세요."
+        )
     names = list(sheets)
     skipped = [n for n in names if _INFO_SHEET.search(n)]
     if len(skipped) == len(names):  # 시트가 설명 시트뿐이면 그대로 읽는다

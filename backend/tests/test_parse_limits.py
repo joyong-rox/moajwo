@@ -141,3 +141,86 @@ def test_different_files_are_not_parsed_at_the_same_time(tmp_path, monkeypatch: 
     for t in threads:
         t.join(timeout=30)
     assert peak == parsing.PARSE_SLOTS
+
+
+def _shared_xlsx(rows: list[list[str]], merges: tuple[str, ...] = ()) -> bytes:
+    """Excel처럼 공유 문자열(sharedStrings)로 저장한 xlsx — 같은 긴 글자를 여러 칸이 가리켜도 파일은 작다
+    (openpyxl은 칸마다 글자를 넣어 저장해 이런 파일을 만들지 않는다)."""
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    pkg = "http://schemas.openxmlformats.org/package/2006/relationships"
+    ct = "application/vnd.openxmlformats-officedocument.spreadsheetml"
+    strings: dict[str, int] = {}
+    body = "".join(
+        f'<row r="{r}">'
+        + "".join(
+            f'<c r="{chr(65 + c)}{r}" t="s"><v>{strings.setdefault(v, len(strings))}</v></c>' for c, v in enumerate(row)
+        )
+        + "</row>"
+        for r, row in enumerate(rows, start=1)
+    )
+    refs = "".join(f'<mergeCell ref="{m}"/>' for m in merges)
+    merge = f'<mergeCells count="{len(merges)}">{refs}</mergeCells>' if merges else ""
+    sheet = f'<worksheet xmlns="{ns}"><sheetData>{body}</sheetData>{merge}</worksheet>'
+    sst = "".join(f'<si><t xml:space="preserve">{escape(s)}</t></si>' for s in strings)
+    parts = {
+        "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        f'<Override PartName="/xl/workbook.xml" ContentType="{ct}.sheet.main+xml"/>'
+        f'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="{ct}.worksheet+xml"/>'
+        f'<Override PartName="/xl/sharedStrings.xml" ContentType="{ct}.sharedStrings+xml"/></Types>',
+        "_rels/.rels": f'<Relationships xmlns="{pkg}"><Relationship Id="rId1" Type="{rel}/officeDocument"'
+        ' Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": f'<workbook xmlns="{ns}" xmlns:r="{rel}"><sheets><sheet name="s" sheetId="1" r:id="rId1"/>'
+        "</sheets></workbook>",
+        "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{pkg}">'
+        f'<Relationship Id="rId1" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/>'
+        f'<Relationship Id="rId2" Type="{rel}/sharedStrings" Target="sharedStrings.xml"/></Relationships>',
+        "xl/worksheets/sheet1.xml": sheet,
+        "xl/sharedStrings.xml": f'<sst xmlns="{ns}" uniqueCount="{len(strings)}">{sst}</sst>',
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in parts.items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_a_long_shared_text_repeated_in_many_cells_is_not_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """공유 문자열 하나를 여러 칸이 가리키면 파일·풀었을 때 크기는 작아도, 정리할 때 칸마다 글자 사본이 생긴다
+    (10.7KB 파일의 32,000자 × 800칸이 읽을 때 최고 98.8MiB) — 칸마다의 글자 길이 합으로 정리 전에 멈춘다."""
+    long = " " + "가" * 2_000 + " "  # 앞뒤 공백 — 정리하면 칸마다 새 글자가 된다
+    rows = [["시도", "비고"], *[["서울특별시", long] for _ in range(60)]]
+    data = _shared_xlsx(rows)
+    assert len(data) < 10_000  # 작은 파일
+    chars = len("시도") + len("비고") + 60 * (len("서울특별시") + len(long))
+    monkeypatch.setattr(parsing, "MAX_FILE_TEXT_CHARS", chars - 1)
+    analyzed: list[str] = []
+    real = parsing.analyze_sheet
+    monkeypatch.setattr(parsing, "analyze_sheet", lambda *a, **k: analyzed.append(a[0]) or real(*a, **k))
+    body = client.post("/files", files=[("files", ("반복글자.xlsx", data, XLSX))]).json()[0]
+    assert "글자가 너무 많아 읽지 않았습니다" in body["error"] and f"{chars:,}자" in body["error"], body
+    assert analyzed == []  # 정리(칸마다 사본) 전에 멈춘다 — 기록은 '읽지 못한 파일'로 남는다 (다른 읽기 오류와 같음)
+    monkeypatch.setattr(parsing, "MAX_FILE_TEXT_CHARS", chars)  # 경계: 한도와 같으면 읽는다
+    body = client.post("/files", files=[("files", ("반복글자.xlsx", data, XLSX))]).json()[0]
+    assert body["error"] is None and body["data_rows"] == 60, body
+
+
+def test_a_huge_merged_range_in_a_tiny_xlsx_is_refused_before_loading(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """병합 범위는 openpyxl이 칸마다 객체를 만든다 — 몇 KB 파일의 큰 병합도 열기 전에 칸 수 한도로 거절한다."""
+    data = _shared_xlsx([["시도", "인구"], ["서울특별시", "10"]], merges=("A3:Z40000",))  # 26 × 39,998칸
+    monkeypatch.setattr(parsing, "MAX_FILE_CELLS", 1_000_000)
+    opened: list[object] = []
+    real = parsing.openpyxl.load_workbook
+    monkeypatch.setattr(parsing.openpyxl, "load_workbook", lambda *a, **k: opened.append(a) or real(*a, **k))
+    monkeypatch.setattr(parsing, "MAX_FILE_CELLS", 26 * 39_998 - 1)
+    body = client.post("/files", files=[("files", ("큰병합.xlsx", data, XLSX))]).json()[0]
+    assert "병합 범위만 1,039,948칸" in body["error"] and opened == [], body
