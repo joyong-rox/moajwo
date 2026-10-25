@@ -113,6 +113,32 @@ res render_uid "$(docker exec render id -u)" "id -u"
 res render_index "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/)" "GET / (8080)"
 docker rm -f render > /dev/null
 
+# Render 앞단 → https API → backend 흐름을 격리로: 같은 이름(moajwo-test-api.onrender.com)의 대역 TLS 앞단(자체 서명)을 이 망
+# 안에 두고 그 뒤에 위 backend를 둔다 — 실제 Render로 요청하지 않는다. 로그인(이미 만든 ci-owner)·쿠키·보안 헤더·상류 검증 설정
+RT=$(mktemp -d)
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=moajwo-test-api.onrender.com" \
+  -keyout "$RT/k.pem" -out "$RT/c.pem" > /dev/null 2>&1 && chmod 644 "$RT"/*.pem
+printf 'server { listen 443 ssl; ssl_certificate /t/c.pem; ssl_certificate_key /t/k.pem;\n  location / { proxy_pass http://backend:8000; } }\n' > "$RT/tls.conf"
+docker run -d --name api-tls --network mnet --network-alias moajwo-test-api.onrender.com -v "$RT:/t:ro" \
+  -v "$RT/tls.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.30-alpine > /dev/null
+sleep 2
+docker run -d --name render-chain --network mnet -p 127.0.0.1:18082:8080 moajwo-frontend-render:check > /dev/null
+for _ in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18082/ && break; sleep 1; done
+R=http://127.0.0.1:18082
+res render_chain_health "$(curl -s $R/api/health)" "앞단 /api/health → https 대역 API → backend"
+RJ="$RT/cookies"
+res render_chain_login "$(curl -s -c "$RJ" -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d "{\"username\":\"ci-owner\",\"password\":\"$PW\"}" $R/api/auth/login) · me $(curl -s -b "$RJ" -o /dev/null -w '%{http_code}' $R/api/auth/me)" \
+  "로그인(앞단을 거쳐) → 쿠키로 /api/auth/me"
+res render_chain_cookie "$(grep -c moajwo "$RJ" 2>/dev/null)개 · $(curl -s -D - -o /dev/null -H 'Content-Type: application/json' -d "{\"username\":\"ci-owner\",\"password\":\"$PW\"}" $R/api/auth/login | grep -i '^set-cookie' | sed 's/=[^;]*;/=<값>;/' | tr -d '\r' | head -1)" \
+  "로그인 쿠키 속성 (값은 지움 — Secure는 MOAJWO_COOKIE_SECURE를 켠 Render에서만)"
+res render_chain_headers "$(curl -sI $R/ | grep -ciE '^(content-security-policy|x-frame-options|x-content-type-options|referrer-policy):')/4" "GET / 보안 헤더 4종"
+res render_chain_api_headers "$(curl -sI $R/api/health | grep -ciE '^(content-security-policy|x-frame-options|x-content-type-options|referrer-policy):')/4" "GET /api/health 보안 헤더 (앞단이 API 응답에 붙이는지)"
+res render_upstream_verify "$(docker exec render-chain nginx -T 2>/dev/null | grep -cE '^\s*proxy_ssl_verify\s+on')" \
+  "상류 인증서 검증 설정 수 (0 = nginx 기본값 off — 자체 서명 대역 API로도 통과함)"
+docker rm -f render-chain api-tls > /dev/null
+rm -rf "$RT"
+
 # ---------------------------------------------------------------- 메모리 제한 컨테이너의 읽기 한도 (Render 무료와 같은 512MiB)
 # 한도는 docs/MEMORY.md의 Render 권장값. 자료는 측정 대상이 아닌 일회용 컨테이너(같은 backend 이미지의 openpyxl)에서 만든다
 # — 만드는 데 쓴 메모리가 측정 컨테이너의 최대값에 섞이지 않게. 중단 기준: 컨테이너 OOM·재시작이 나면 그 뒤 측정은 믿지 않는다.
