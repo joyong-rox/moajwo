@@ -19,12 +19,15 @@ import hashlib
 import io
 import json
 import os
+import re
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -681,9 +684,12 @@ def test_database_failure_during_startup_recovery_is_not_reported_complete(
 def test_one_run_failing_to_settle_makes_the_report_incomplete(
     dead_worker: tuple[str, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app import recovery
+    from app import recovery, runlease
 
     worker, proc = dead_worker
+    lock = runlease.WORKERS_DIR / f"{proc}.lock"
+    old = time.time() - 600  # 그 서버가 뜬 지 오래 — 잠금 파일도 오래됐다 (정리는 60초보다 오래된 것만 지운다)
+    os.utime(lock, (old, old))
     first = _case(worker, proc, "err1", None, None, None)
     second = _case(worker, proc, "err2", None, None, None)
     real = recovery._settle_dead
@@ -698,9 +704,74 @@ def test_one_run_failing_to_settle_makes_the_report_incomplete(
     assert report["errors"] == 1 and not report["complete"] and report["next_s"] is not None
     assert _get_run(first["id"])["status"] == "running"  # 판정하지 않고 다음 차례로 (확인 필요로 굳히지 않음)
     assert _get_run(second["id"])["status"] == "failed"
+    assert lock.exists(), "아직 실행 중인 담당의 잠금 파일을 지웠다 — 다음 차례에 끝났다는 근거가 없다"
     monkeypatch.undo()
     recovery.recover()
-    assert _get_run(first["id"])["status"] == "failed"
+    assert _get_run(first["id"])["status"] == "failed"  # 근거(잠금)로 정함 — '결과 확인 필요'로 굳지 않음
+    recovery.recover()
+    assert not lock.exists()  # 그 담당의 실행이 모두 끝난 뒤에야 지운다
+
+
+def _cli(data: Path, *args: str) -> subprocess.CompletedProcess:
+    """격리 데이터 폴더(SQLite)로 backend 명령을 별도 프로세스로 — 서버를 멈춘 뒤 운영자가 치는 것과 같게."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("MOAJWO_", "DATABASE_URL"))}
+    env.update({"MOAJWO_DATA_DIR": str(data), "PYTHONIOENCODING": "utf-8", "OLLAMA_BASE_URL": "http://127.0.0.1:9"})
+    return subprocess.run([sys.executable, *args], cwd=BACKEND, env=env, capture_output=True, text=True,
+                          encoding="utf-8", timeout=180)  # fmt: skip
+
+
+def test_cli_recover_in_its_own_process_reports_what_still_blocks_the_downgrade(tmp_path: Path) -> None:
+    """서버를 멈춘 롤백 전 정리: 같은 결과 폴더의 끝난 담당 → 판정, 근거 없는 실행은 신호가 10분 넘었을 때만 '결과
+    확인 필요', 신호가 새로운 다른 디스크 실행·이전 판 실행은 그대로. 담당이 있는 실행 중 행이 남으면 종료 2와 그 수를
+    알리고, 없어지면 종료 0 — 그 뒤 downgrade가 된다."""
+    data = tmp_path / "data"
+    assert _cli(data, "-m", "alembic", "upgrade", "head").returncode == 0
+    disk = _cli(data, "-c", "from app import runlease; print(runlease.identity()['disk'])").stdout.strip()
+    assert re.fullmatch(r"[0-9a-f]{12}", disk), disk
+    proc = "dead" + os.urandom(4).hex()
+    lock = data / "outputs" / ".workers" / f"{proc}.lock"
+    lock.write_bytes(b"")
+    old = time.time() - 600
+    os.utime(lock, (old, old))
+    now = datetime.now(UTC)
+    beat = {"stale": now - timedelta(seconds=3600), "fresh": now - timedelta(seconds=30)}
+    rows = {  # 이름: (담당, 마지막 생존 신호)
+        "dead": (f"{disk}-{proc}", beat["stale"]),
+        "other_stale": ("bbbbbbbbbbbb-cccccccccccc", beat["stale"]),
+        "other_fresh": ("bbbbbbbbbbbb-dddddddddddd", beat["fresh"]),
+        "legacy": (None, None),
+    }
+    con = sqlite3.connect(data / "moajwo.db")
+    ids = {}
+    for name, (worker, at) in rows.items():
+        cur = con.execute(
+            "INSERT INTO runs (status, trigger, input_file_count, file_ids, row_count, change_count, warning_count,"
+            " summary, worker, heartbeat_at)"
+            " VALUES ('running', 'manual', 0, '[]', 0, 0, 0, '{\"mode\": \"sheets\"}', ?, ?)",
+            (worker, at.strftime("%Y-%m-%d %H:%M:%S.%f") if at else None),
+        )
+        ids[name] = cur.lastrowid
+    con.commit()
+
+    def states() -> dict[str, str]:
+        return {n: con.execute("SELECT status FROM runs WHERE id = ?", (i,)).fetchone()[0] for n, i in ids.items()}
+
+    first = _cli(data, "-m", "app.recovery", "recover")
+    out = json.loads(first.stdout)
+    assert first.returncode == 2, (first.returncode, first.stdout, first.stderr[-400:])
+    assert out["blocking"] == 1 and out["legacy"] == 1 and out["complete"] is True, out
+    assert states() == {"dead": "failed", "other_stale": "check", "other_fresh": "running", "legacy": "running"}
+    refused = _cli(data, "-m", "alembic", "downgrade", "0019_analysis_runs")
+    assert refused.returncode != 0 and "실행 중인 결과 실행이 1건" in refused.stderr
+    con.execute("UPDATE runs SET heartbeat_at = ? WHERE id = ?",
+                (beat["stale"].strftime("%Y-%m-%d %H:%M:%S.%f"), ids["other_fresh"]))  # fmt: skip
+    con.commit()
+    second = _cli(data, "-m", "app.recovery", "recover")
+    assert second.returncode == 0 and json.loads(second.stdout)["blocking"] == 0, second.stdout
+    assert states()["other_fresh"] == "check" and states()["legacy"] == "running"
+    con.close()
+    down = _cli(data, "-m", "alembic", "downgrade", "0019_analysis_runs")
+    assert down.returncode == 0, down.stderr[-400:]
 
 
 def test_heartbeat_runs_only_while_a_run_is_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
