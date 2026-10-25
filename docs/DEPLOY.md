@@ -298,9 +298,9 @@ docker inspect moajwo-backend-1 --format '{{.Image}}'          # = $OLD_B
 
 격리 검증 (2026-10-15, 합성 자료 `moajwo-feat` 볼륨): 0018 → 0019 기존 테이블 그대로 · 분석 결과가 있는 0019 → 새 이미지 one-off downgrade 0018: `analysis_runs`만 삭제, 나머지 19개 테이블 행 수·내용 해시 그대로 · 이전(0018) 코드 기동·로그인·확정값 정상, 분석 API 없음 · 다시 0019: 빈 `analysis_runs`, 다시 실행 가능.
 
-## 8. 2026-10-23 후보 반영 (리비전 0019 그대로 · frontend 컨테이너 포트 80 → 8080)
+## 8. 통합 후보 반영 (리비전 0019 → 0020 · frontend 컨테이너 포트 80 → 8080)
 
-PR #22~#40을 담은 후보(`rc/review-20261023`)를 반영할 때의 절차입니다. DB 마이그레이션은 없습니다 (반영 전후 `0019_analysis_runs`).
+PR #22~#41을 담은 통합 후보(`rc/review-20261023`, 통합 PR)를 반영할 때의 절차입니다. **DB 마이그레이션이 하나 있습니다**: `0019_analysis_runs → 0020_run_worker_lease` (`runs`에 빈 값을 허용하는 열 두 개 — 9장). 2026-10-23 후보까지는 마이그레이션이 없었고, #41의 2026-10-25 보완이 0020을 더했습니다.
 
 | 구분 | 반영 전 (main) | 반영 후 (후보) |
 | --- | --- | --- |
@@ -308,6 +308,7 @@ PR #22~#40을 담은 후보(`rc/review-20261023`)를 반영할 때의 절차입�
 | frontend 이미지 | nginx 1.29, root로 시작, **컨테이너 80** | nginx 1.30, 비루트(uid 101), **컨테이너 8080** |
 | Compose 포트 | `127.0.0.1:8080:80` | `127.0.0.1:8080:8080` (호스트 주소·포트는 같음) |
 | 데이터 볼륨 | `moajwo_moajwo-data` | 같음 (새 볼륨을 만들지 않음 — 프로젝트 이름 `moajwo`·서비스 이름 그대로) |
+| DB 리비전 | `0019_analysis_runs` | `0020_run_worker_lease` (기동 때 자동 upgrade — 9장) |
 
 **반영**: 모든 PR을 순서대로 병합한 main이 후보와 같은 트리인지 확인한 뒤(`git diff <후보 SHA> main` 비어 있음)
 
@@ -315,12 +316,16 @@ PR #22~#40을 담은 후보(`rc/review-20261023`)를 반영할 때의 절차입�
 bash scripts/deploy.sh <후보 HEAD SHA> 0019_analysis_runs
 ```
 
-스크립트가 이전 포트 연결(`127.0.0.1:8080:80/tcp`)을 `backups/rollback-<시각>.compose.yml`에 남기고, 전환 뒤 `포트 연결: frontend 127.0.0.1:8080:80/tcp → 127.0.0.1:8080:8080/tcp`를 기록합니다.
+스크립트가 이전 포트 연결(`127.0.0.1:8080:80/tcp`)을 `backups/rollback-<시각>.compose.yml`에 남기고, 전환 뒤 `포트 연결: frontend 127.0.0.1:8080:80/tcp → 127.0.0.1:8080:8080/tcp`를 기록합니다. 반영 전 리비전 인자는 지금 운영 리비전 `0019_analysis_runs`입니다 (반영 뒤 `0020_run_worker_lease (head)`).
 
-**롤백 (이전 이미지 + 이전 포트, DB 복원·downgrade 없음)** — 양쪽 리비전이 0019라 DB는 그대로 둡니다. 반영 뒤 생긴 자료(업로드·실행 등)는 그대로 남고 이전 코드가 읽습니다 (스키마 같음).
+**롤백 (이전 이미지 + 이전 포트 + 0020 → 0019 downgrade)** — 이전 이미지는 0020을 모르므로(기동 때 `alembic upgrade head`가 멈춤) 새 이미지로 DB를 먼저 0019로 내립니다 (9장 롤백 B와 같은 순서). 반영 뒤 생긴 자료(업로드·실행 등)는 그대로 남고 이전 코드가 읽습니다 — 지워지는 것은 0020이 더한 두 열뿐이고, '결과 확인 필요' 행은 이전 판 화면에 상태 원문으로 보입니다 (9장 표).
 
 ```bash
 docker compose stop -t 30 frontend backend
+docker compose run --rm --no-deps backend python -m app.recovery recover    # 끝난 실행 정리 — 서버를 띄우지 않음 (9장)
+docker compose run --rm --no-deps backend python -m app.recovery status     # running에 담당이 있는 행이 없어야 함
+# 반영 뒤 자료가 생겼으면 여기서 롤백 직전 백업·검증 (1·2장 '5단계 백업 검증'과 같은 방식)
+docker compose run --rm --no-deps backend alembic downgrade 0019_analysis_runs   # 새 이미지로 (이 판의 실행 중 행이 있으면 멈춤)
 docker tag moajwo-backend:$TAG moajwo-backend:latest && docker tag moajwo-frontend:$TAG moajwo-frontend:latest
 RB="-f docker-compose.yml -f backups/rollback-$TS.compose.yml"
 docker compose $RB config | grep -A5 'ports:'
@@ -328,9 +333,10 @@ docker compose $RB config | grep -A5 'ports:'
 docker compose $RB up -d --no-build --wait
 docker inspect moajwo-frontend-1 --format '{{.Image}} {{json .HostConfig.PortBindings}}'   # 롤백 태그 이미지 · {"80/tcp":[…8080]}
 curl -s http://127.0.0.1:8080/api/health                         # {"status":"ok","database":"ok"} (frontend 프록시를 거쳐)
+docker compose exec -T backend alembic current                   # 0019_analysis_runs
 ```
 
-롤백 뒤 다시 후보로: 같은 `bash scripts/deploy.sh <후보 HEAD SHA> 0019_analysis_runs` (덧붙임 파일 없이 `docker-compose.yml`만 씀 → 8080:8080으로 다시 만들어짐).
+롤백 뒤 다시 후보로: 같은 `bash scripts/deploy.sh <후보 HEAD SHA> 0019_analysis_runs` (덧붙임 파일 없이 `docker-compose.yml`만 씀 → 8080:8080으로 다시 만들어지고 0020으로 다시 upgrade).
 
 **frontend 단독 반영 경로**(`docker compose up -d --no-deps frontend`)는 이번 반영에 쓰지 않습니다 — backend도 바뀌고, 포트 설정과 이미지가 함께 바뀌어야 하기 때문입니다. 이번 반영 뒤 frontend만 바뀌는 다음 반영에서는 포트가 그대로(8080)라 그 경로를 쓸 수 있지만, 그때 이 반영 이전 frontend 이미지로 되돌리려면 이번 반영의 `rollback-<시각>.compose.yml`이 필요합니다.
 
