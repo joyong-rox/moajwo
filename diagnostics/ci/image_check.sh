@@ -271,22 +271,30 @@ curl -sSL -o trivy.sum "https://github.com/aquasecurity/trivy/releases/download/
 if grep "  $TGZ\$" trivy.sum | sha256sum -c - >> "$LOG" 2>&1; then
   tar xzf "$TGZ" trivy
   ./trivy --version | head -1 >> "$LOG"
+  # 검사 보고(JSON)에는 취약점 DB 시각이 없다 — DB를 먼저 받고 그 판·시각을 따로 남긴다
+  ./trivy image --download-db-only --quiet 2>> "$LOG"
+  ./trivy version --format json > "$OUT/trivy-version.json" 2>> "$LOG"
   for n in frontend frontend-render; do  # 대상 CVE는 심각도와 상관없이 찾는다 (HIGH·CRITICAL만 보면 등급이 다를 때 놓침)
-    ./trivy image --quiet --format json --scanners vuln -o "$OUT/trivy-all-$n.json" "moajwo-$n:check" 2>> "$LOG"
-    res "trivy_target_$n" "$(python3 - "$OUT/trivy-all-$n.json" <<'PY'
+    ./trivy image --quiet --skip-db-update --format json --scanners vuln -o "$OUT/trivy-all-$n.json" "moajwo-$n:check" 2>> "$LOG"
+    res "trivy_target_$n" "$(python3 - "$OUT/trivy-all-$n.json" "$OUT/trivy-version.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 v = [x for r in d.get("Results", []) for x in r.get("Vulnerabilities") or []]
 hit = [f"{x['PkgName']} {x['InstalledVersion']} (수정 {x.get('FixedVersion') or '-'})" for x in v
        if x["VulnerabilityID"] == "CVE-2026-111497"]
-db = (d.get("Metadata") or {}).get("DB") or {}
+os_ = (d.get("Metadata") or {}).get("OS") or {}
+try:
+    db = json.load(open(sys.argv[2])).get("VulnerabilityDB") or {}
+except (OSError, ValueError):
+    db = {}
 print(("남음: " + "; ".join(hit)) if hit else "검출 없음", "· 모든 심각도", len({x["VulnerabilityID"] for x in v}), "개",
-      "· DB", db.get("UpdatedAt", "-")[:19])
+      "· OS", os_.get("Family", "-"), os_.get("Name", "-"),
+      "· 검사 대상", [r.get("Type") for r in d.get("Results", [])], "· DB", (db.get("UpdatedAt") or "-")[:19])
 PY
-)" "CVE-2026-111497 (brotli-libs) — trivy-all-$n.json"
+)" "CVE-2026-111497 (brotli-libs) — trivy-all-$n.json · DB 시각 trivy-version.json (OS 패키지 대상이 없으면 검사가 안 된 것)"
   done
   for n in backend frontend frontend-render; do
-    ./trivy image --quiet --format json --scanners vuln --severity HIGH,CRITICAL -o "$OUT/trivy-$n.json" "moajwo-$n:check" 2>> "$LOG"
+    ./trivy image --quiet --skip-db-update --format json --scanners vuln --severity HIGH,CRITICAL -o "$OUT/trivy-$n.json" "moajwo-$n:check" 2>> "$LOG"
     res "trivy_$n" "$(python3 - "$OUT/trivy-$n.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))

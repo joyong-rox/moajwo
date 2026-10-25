@@ -552,14 +552,17 @@ def part_d11(c: Client, n: int) -> None:
 
 
 def part_d12(c: Client, name: str = "sst499_0.xlsx") -> None:
-    """긴 글자 파일 하나(기본: 결과 글자 예산 바로 아래 — 통합이 약 4,790만 자로 셈)의 통합과 큰 xlsx 올리기를 같은
-    순간에 — 결과 만들기 차례 하나 + 읽기 차례 하나가 겹치는, 차례가 허용하는 가장 큰 조합."""
+    """긴 글자 파일 하나(sst<칸 수>_0 — 칸마다 같은 32,002자. 통합은 결과 칸과 변경 기록 앞뒤 값까지 칸 수 × 약 96,000자로
+    센다: 기본 499칸 ≈ 4,790만 자)의 통합과 큰 xlsx 올리기를 같은 순간에 — 결과 만들기 차례 하나 + 읽기 차례 하나가 겹치는,
+    차례가 허용하는 가장 큰 조합."""
+    cells = int(name.removeprefix("sst").split("_")[0])
     fids = upload(c, [name], mapping=LONG)
     rid = _review_ready(c, fids)
     log(case="D12 준비", review=rid, **mem(), state=state())
     if rid is None or not alive():
         return
-    res = _together({"통합 1개 (약 4,790만 자)": ("POST", f"/reviews/{rid}/integrate", {"include_unmapped": True}),
+    res = _together({f"통합 1개 ({cells}칸, 약 {cells * 96006 // 10000:,}만 자)":
+                         ("POST", f"/reviews/{rid}/integrate", {"include_unmapped": True}),
                      "큰 xlsx 올리기": ("UPLOAD", "/files", [FILES / "x_big.xlsx"])})  # fmt: skip
     log(case="D12 긴 글자 통합 + 큰 xlsx 올리기 동시", results=res, **mem(), state=state())
 
