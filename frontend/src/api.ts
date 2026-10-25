@@ -518,8 +518,10 @@ export const runDownloadUrl = (runId: number) => `${API_BASE}/runs/${runId}/down
 
 const XLSX_TYPE = 'spreadsheetml'
 
-/** 실행 결과 내려받기 결과. 실패하면 화면에 보일 이유 (status 0 = 서버에 닿지 못함) */
+/** 실행 결과 내려받기 결과. 실패하면 화면에 보일 이유 (status 0 = 서버에 닿지 못함·취소함) */
 export type DownloadOutcome = { ok: true } | { ok: false; status: number; message: string }
+
+const DOWNLOAD_CANCELLED: DownloadOutcome = { ok: false, status: 0, message: '내려받기를 취소했습니다.' }
 
 /** 서버의 410·401·403·404·409·5xx를 구분해 사용자가 할 수 있는 일을 알린다 (서버 문구가 있으면 그것을 쓴다). */
 function downloadProblem(status: number, detail: string | null): string {
@@ -564,22 +566,33 @@ function saveBlob(blob: Blob, name: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
-/** 결과 파일을 앱 안에서 받아 저장한다. 성공한 Excel 응답만 저장하고, 오류 응답(JSON)은 파일로 저장하지 않는다.
+/** 결과 파일을 앱 안에서 받아 저장한다. 성공한 Excel 응답을 끝까지 받았을 때만 저장하고, 오류 응답(JSON)·도중에 끊긴
+ *  본문·취소(signal — 링크가 화면에서 내려감·로그아웃)는 파일로 저장하지 않는다. 다시 받기는 사용자가 누를 때만 한다.
  *  화면은 그대로 두므로 목록·검색 조건·키보드 초점이 남는다. 401이면 apiFetch가 로그인 화면으로 돌아가게 알린다. */
-export async function downloadRunResult(runId: number): Promise<DownloadOutcome> {
+export async function downloadRunResult(runId: number, signal?: AbortSignal): Promise<DownloadOutcome> {
   let res: Response
   try {
-    res = await apiFetch(runDownloadUrl(runId))
+    res = await apiFetch(runDownloadUrl(runId), { signal })
   } catch {
+    if (signal?.aborted) return DOWNLOAD_CANCELLED
     return { ok: false, status: 0, message: '서버에 연결하지 못했습니다 — 연결을 확인한 뒤 다시 내려받으세요.' }
   }
   if (res.ok && (res.headers.get('content-type') ?? '').includes(XLSX_TYPE)) {
-    saveBlob(await res.blob(), attachmentName(res.headers.get('content-disposition')) ?? `결과-${runId}.xlsx`)
+    let blob: Blob
+    try {
+      blob = await res.blob() // 헤더 뒤 본문이 끊기면(연결 끊김·길이 불일치) 여기서 실패한다 — 받은 일부는 저장하지 않는다
+    } catch {
+      if (signal?.aborted) return DOWNLOAD_CANCELLED
+      return { ok: false, status: res.status, message: '파일을 받는 도중 연결이 끊겨 저장하지 않았습니다 — 다시 내려받으세요.' }
+    }
+    // 본문을 다 받은 뒤의 취소는 blob()을 실패시키지 않는다 — 그 사이 화면이 내려갔으면 저장하지 않는다
+    if (signal?.aborted) return DOWNLOAD_CANCELLED
+    saveBlob(blob, attachmentName(res.headers.get('content-disposition')) ?? `결과-${runId}.xlsx`)
     return { ok: true }
   }
   if (res.ok) return { ok: false, status: res.status, message: '결과 파일 형식이 아닌 응답이라 저장하지 않았습니다.' }
   const detail = await res.json().then(
-    (j: { detail?: unknown }) => (typeof j.detail === 'string' ? j.detail : null),
+    (j: { detail?: unknown } | null) => (typeof j?.detail === 'string' ? j.detail : null),
     () => null,
   )
   return { ok: false, status: res.status, message: downloadProblem(res.status, detail) }
