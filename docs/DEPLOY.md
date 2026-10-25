@@ -340,7 +340,7 @@ docker compose exec -T backend alembic current                   # 0019_analysis
 
 **frontend 단독 반영 경로**(`docker compose up -d --no-deps frontend`)는 이번 반영에 쓰지 않습니다 — backend도 바뀌고, 포트 설정과 이미지가 함께 바뀌어야 하기 때문입니다. 이번 반영 뒤 frontend만 바뀌는 다음 반영에서는 포트가 그대로(8080)라 그 경로를 쓸 수 있지만, 그때 이 반영 이전 frontend 이미지로 되돌리려면 이번 반영의 `rollback-<시각>.compose.yml`이 필요합니다.
 
-**격리 확인**: 아래 '리허설 결과' 5차.
+**격리 확인**: 아래 '리허설 결과' 5차(포트, 0019 그대로)·6차(통합 후보 — 0020 downgrade 포함). Windows Docker Desktop에서는 `ports: !override` 덧붙임과 `pwd -W` 경로 백업 마운트를 명령 수준으로만 확인했습니다 (6차 아래).
 
 ## 9. 0020 반영 (결과 실행의 담당 프로세스·생존 신호) — 확인 항목과 롤백
 
@@ -476,6 +476,24 @@ docker compose exec -T backend alembic current      # = 0019_analysis_runs
 
 - 1회차(run 39937781741)는 백업 컨테이너가 러너의 `backups/`에 쓰지 못해 5b단계에서 멈췄고, 스크립트가 리비전 그대로를 확인한 뒤 기존 컨테이너를 재개했습니다 (설계대로). 폴더 권한을 맞춘 2회차가 위 결과입니다.
 - 증거: 저장소 밖 `backups/review-20261023b/deploy-rollback/` (합성 자료 압축 백업은 올리지 않음).
+
+### 6차 — 통합 후보 반영·롤백 (0019 → 0020, downgrade 포함) (2026-10-25, 격리 러너 ubuntu-24.04, run 40170744105)
+
+같은 Compose 프로젝트(`moajwo`)·서비스·볼륨: main `adebb6c` 기동·합성 자료(최초 소유자·CSV·매핑 확정·묶기 결과) → `bash scripts/deploy.sh 969d08e 0019_analysis_runs` → 8장 롤백(서버 정지 → 끝난 담당의 '실행 중' 행 하나(합성) → 정리 전 downgrade → `recover` → `status` → 새 이미지로 downgrade → 이전 이미지 + 이전 포트) → 다시 반영 → 트리가 다른 승인 SHA. 스크립트 `diagnostics/ci/deploy_rollback_check.sh`.
+
+| 단계 | 결과 |
+| --- | --- |
+| 반영 | 종료 0, `0020_run_worker_lease (head)`, 중단 8초, frontend 포트 `127.0.0.1:8080:80` → `127.0.0.1:8080:8080` |
+| 반영 뒤 | 같은 계정 로그인·역할, 실행 기록 1건, 반영 전에 만든 결과를 다시 내려받아 해시 같음, 원본 미리보기 200, 행 수(users 1·source_files 1·runs 1·mapping_decisions 3)·원본·결과 파일 해시 목록 같음, 볼륨은 `moajwo_moajwo-data` 하나 |
+| 정리 전 downgrade | 거절 (종료 1) "이 판에서 시작한 실행 중인 결과 실행이 1건 …" — 리비전 그대로 |
+| `recover` (one-off 컨테이너) | 종료 0 — 실패 1건(끝난 담당, 저장 전), `blocking` 0 · `status`: 실행 중 0, 결과 확인 필요 0 |
+| downgrade (새 이미지, one-off) | 종료 0, `Running downgrade 0020_run_worker_lease -> 0019_analysis_runs` |
+| 롤백 뒤 (이전 이미지 + 이전 포트 80) | 웹·프록시 health 200, 같은 계정 로그인, 결과 다시 내려받기 해시 같음, 실행 기록 2건(정리된 실패 1건 포함), `0019_analysis_runs`, frontend 대상 포트 80 하나 |
+| 다시 반영 | 종료 0, 중단 9초, `0020_run_worker_lease` |
+| 트리가 다른 승인 SHA | 1단계에서 멈춤 ("내용이 승인한 커밋(adebb6c…)과 다름"), 컨테이너 그대로 |
+
+- 리눅스 러너 맞춤 두 가지(`pwd -W` → `pwd`, 백업 폴더 권한)는 5차와 같습니다.
+- **Windows Docker Desktop (이 PC, Docker 27.5.1 · Compose 2.32.4-desktop.1, 2026-10-25) — 명령 수준만:** 일회용 볼륨·일회용 폴더로, 운영 컨테이너·볼륨은 쓰지 않았습니다 (`backups/review-20261025/rc/docker-desktop-check/`). `ports: !override` 덧붙임 파일은 `docker compose config`에서 frontend를 대상 80 하나로 바꾸고(덧붙임 없이 쓰면 8080에 대상 8080·80 두 개), `pwd -W` 경로 바인드 마운트에 uid 1000 컨테이너가 백업 단계와 같은 `tar`·`gzip -t`·`sha256sum`으로 쓰고(호스트에서 다시 계산한 해시 같음) 읽기 전용으로 꺼내 `integrity_check` ok. 앞의 세 차례는 확인 스크립트 오류로 실패했고(합성 자료 준비 두 번 — 빈 볼륨을 이미지에 없는 경로에 붙여 root 소유, Windows 경로 변환 한 번) 그 기록도 남겼습니다. `scripts/deploy.sh` 전체를 이 PC에서 돌리지는 않았습니다 (운영과 같은 엔진·포트를 써야 함).
 
 ## 알려진 제한
 
