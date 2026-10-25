@@ -73,8 +73,9 @@
 | 비밀번호 파일 | `~/.pgpass` | `%APPDATA%\postgresql\pgpass.conf` (점 없음) | POSIX: 그룹·다른 사용자에게 권한이 있으면 그 파일을 **무시**(경고) → `chmod 0600 ~/.pgpass` / Windows: **하지 않음** (안전한 폴더에 있다고 가정) |
 
 - `%APPDATA%`는 사용자 프로필의 `AppData\Roaming` 폴더입니다. 다른 위치는 `PGSERVICEFILE`·`PGPASSFILE` 환경 변수로 지정합니다. 경로를 직접 지정하는 쪽을 권합니다 — `PGSERVICEFILE`이 없는 파일을 가리키면 `service file "…" not found` 오류로 멈춥니다 (기본 위치의 파일이 없을 때는 조용히 건너뜀). `PGPASSFILE`의 파일이 없으면 오류 없이 비밀번호 없이 접속하다가 인증에서 실패합니다.
-- **Windows는 권한을 검사하지 않으므로** 두 파일을 사용자 프로필 폴더(`%APPDATA%\postgresql`)에 두고 본인만 읽게 줄입니다 (cmd):
-  `icacls "%APPDATA%\postgresql\pgpass.conf" /inheritance:r /grant:r "%USERNAME%:F"` — 서비스 파일도 같게. PowerShell에서는 `"${env:USERNAME}:F"`.
+- **Windows는 권한을 검사하지 않으므로** 두 파일을 사용자 프로필 폴더(`%APPDATA%\postgresql`)에 두고 본인만 읽게 줄입니다 (서비스 파일 `.pg_service.conf`도 같게):
+  - cmd: `icacls "%APPDATA%\postgresql\pgpass.conf" /inheritance:r /grant:r "%USERNAME%:F"`
+  - PowerShell: `icacls "$env:APPDATA\postgresql\pgpass.conf" /inheritance:r /grant:r "${env:USERNAME}:F"` — PowerShell은 `%APPDATA%`를 펼치지 않아 cmd 형태를 그대로 쓰면 경로를 찾지 못합니다 (종료 3).
 - 비밀번호 파일은 한 줄에 `호스트:포트:DB:계정:비밀번호` — 앞 네 칸은 `*`(아무 값)도 되고, 칸 안의 `:`와 `\`는 `\`로 이스케이프합니다. 맞는 첫 줄의 비밀번호를 씁니다.
 - 서비스 파일은 `[이름]` 아래 `키=값` 줄입니다 (`=` 앞뒤에 공백 없이, 주석은 `#`로 시작하는 줄만). 연결 문자열에 직접 준 값(예: `postgresql:///다른DB?service=이름`의 DB 이름)이 서비스 파일 값보다 앞섭니다.
 
@@ -119,7 +120,10 @@ psql --no-password "service=moajwo-migrate" -c "SELECT count(*) FROM users"
 
 - `--no-password`(`-w`): 비밀번호 파일이 맞지 않으면 비밀번호를 묻지 않고 바로 실패합니다 (묻는 창에 비밀번호를 치지 않음, 스크립트가 묻는 창에서 멈추지 않음).
 - **호환 — 권장하지 않음:** 비밀번호가 든 주소(`postgresql://계정:비밀번호@…`)도 동작은 합니다. `app.dbcopy --target`에 넣으면 stderr로 경고하고 보고에는 `target_secret_in_args: true`만 남깁니다 (주소는 남기지 않음). 주소를 꼭 써야 하면 `--target-env 변수 이름`처럼 환경 변수로 넘깁니다.
-- 로컬 확인 (2026-10-25, Windows, PostgreSQL 17.11 서버, psql 17·psycopg의 libpq 18, 합성 파일): 서비스 주소로 alembic 마이그레이션·`app.dbcopy` dry-run(경고 없음)·`app.dbcheck`·pg_dump(`PGSERVICE`)·pg_restore(`--dbname=service=…`)·psql이 비밀번호 파일의 비밀번호로 접속, 빈 비밀번호 파일 → `fe_sendauth: no password supplied`, 없는 `PGSERVICEFILE` → `service file "…" not found`, 위 icacls 명령(cmd·PowerShell) 뒤 파일 권한 항목이 본인 하나. POSIX의 0600 검사(그룹·다른 사용자 권한이 있으면 무시)는 이 PC(Windows)에서 시험하지 않았습니다 — PostgreSQL 문서 기준입니다.
+  - 그 환경 변수도 **손으로 치지 않습니다** — `$env:X = "postgresql://…"`·`export X=…` 같은 줄은 셸 기록(PowerShell PSReadLine 기록 파일, bash 기록)에 남습니다. 본인만 읽게 줄인 파일에서 읽어 넣고 끝나면 지웁니다:
+    PowerShell `$env:MOAJWO_DBCOPY_TARGET = (Get-Content -Raw <접근 제한 파일>).Trim()` … `Remove-Item Env:MOAJWO_DBCOPY_TARGET` / sh `export MOAJWO_DBCOPY_TARGET="$(cat <접근 제한 파일>)"` … `unset MOAJWO_DBCOPY_TARGET`. 서비스 주소가 먼저입니다.
+  - 이름 자리(`--target-env`·`app.dbcheck --app-env`·`--app-service` 등)에 주소를 넣는 실수(`--target-env "$MIGRATION_URL"`)는 받은 값을 출력·보고에 되풀이하지 않고 멈춥니다 (dbcopy는 그 인자에 비밀번호가 있었으면 경고하고 `target_secret_in_args: true`로 표시 — 시험).
+- 로컬 확인 (2026-10-25, Windows, PostgreSQL 17.11 서버, psql 17·psycopg의 libpq 18, 합성 파일): 서비스 주소로 alembic 마이그레이션·`app.dbcopy` dry-run(경고 없음)·`app.dbcheck`·pg_dump(`PGSERVICE`)·pg_restore(`--dbname=service=…`)·psql이 비밀번호 파일의 비밀번호로 접속, 빈 비밀번호 파일 → `fe_sendauth: no password supplied`, 없는 `PGSERVICEFILE` → `service file "…" not found`. icacls는 위 두 형태를 그대로(cmd는 배치 파일, PowerShell은 PowerShell 5.1) 일회용 파일에 실행해 권한 항목이 본인 하나(`<PC>\<사용자>:(F)`)가 되는 것과, PowerShell에 `%APPDATA%` 형태를 쓰면 종료 3으로 실패하는 것을 확인했습니다 (`%APPDATA%` 자리는 일회용 폴더). POSIX의 0600 검사(그룹·다른 사용자 권한이 있으면 무시)는 이 PC(Windows)에서 시험하지 않았습니다 — PostgreSQL 문서 기준입니다.
 
 ## 4. 연결 관리와 장애 때 동작
 
@@ -140,22 +144,24 @@ psql --no-password "service=moajwo-migrate" -c "SELECT count(*) FROM users"
 
 ## 5. DB 계정과 스키마
 
-- **계정 분리:** 앱 계정(`moajwo_app`)은 데이터 읽기·쓰기만, 스키마 변경·이관은 소유 계정(Neon 기본 `neondb_owner`)으로만 씁니다. Neon SQL 편집기에서 소유 계정으로 한 번 실행합니다 (비밀번호는 Neon이 만든 값 또는 충분히 긴 무작위 값):
+- **계정 분리:** 앱 계정(`moajwo_app`)은 데이터 읽기·쓰기만, 스키마 변경·이관은 소유 계정(Neon 기본 `neondb_owner`)으로만 씁니다. 소유 계정으로 한 번 실행합니다:
 
 ```sql
-CREATE ROLE moajwo_app LOGIN PASSWORD '…';
+CREATE ROLE moajwo_app LOGIN;
 GRANT USAGE ON SCHEMA public TO moajwo_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO moajwo_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO moajwo_app;
--- 앱 계정의 서버 쪽 제한 시간: 잠금(이관 중 등)·긴 문장·열어 둔 트랜잭션에서 무한히 기다리지 않게 (503 '바쁨'으로 끝남)
+-- 앱 계정의 서버 쪽 제한 시간: 잠금(이관 중 등)·긴 문장·버려진 트랜잭션에서 무한히 기다리지 않게 (503 '바쁨'으로 끝남)
 ALTER ROLE moajwo_app SET lock_timeout = '5s';
 ALTER ROLE moajwo_app SET statement_timeout = '60s';
-ALTER ROLE moajwo_app SET idle_in_transaction_session_timeout = '60s';
+ALTER ROLE moajwo_app SET idle_in_transaction_session_timeout = '600s';
 -- 이미 만든 표가 있으면 (복원 뒤 등)
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO moajwo_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO moajwo_app;
 ```
 
+- **앱 계정 비밀번호는 평문 SQL로 보내지 않습니다.** `CREATE/ALTER ROLE … PASSWORD '평문'`은 서버 설정(`log_statement`, 실패한 문장 기록)에 따라 서버 로그에 평문이 남을 수 있습니다 (PostgreSQL `CREATE ROLE` 문서의 주의). psql에서 `\password moajwo_app`을 쓰면 psql이 클라이언트에서 암호화한 값(SCRAM 검증자)을 보냅니다 — 비밀번호는 묻는 창에 넣고 명령 인자·셸 기록에 넣지 않습니다. Neon 콘솔의 역할 관리로 만들고 Neon이 만든 비밀번호를 쓰는 방법도 있습니다 (그 화면의 동작은 전환 때 확인). 시험 스크립트·시험도 같은 방식(클라이언트에서 만든 검증자)으로 보냅니다.
+- **`idle_in_transaction_session_timeout`은 600초:** 원본을 읽는 요청(미리보기·열 매핑 등)은 원본 기록을 읽은 트랜잭션을 연 채 읽기 차례를 기다리고(최대 `MOAJWO_PARSE_WAIT_S` 60초) 파일을 읽습니다 (`app/files.py`의 `load_parsed`). 이 제한을 60초로 두면 차례를 다 기다린 정상 요청도 서버가 끊어 'DB에 연결하지 못함'(503)이 됩니다 — Render 무료 인스턴스는 0.1 CPU라 큰 파일 읽기 자체도 러너(약 6초)보다 길 수 있습니다 (추정, Render에서 재지 않음). 이 값은 버려진 연결이 잠금을 쥐고 있는 시간의 상한이라 10분으로 둡니다.
 - 앱 계정은 시퀀스를 바꿀 수 없습니다 (`ALTER SEQUENCE` 42501 — 확인). 이관 도구는 소유 계정으로 돌립니다.
 - **스키마 초기화:** 빈 DB에 `alembic upgrade head`를 실제로 실행합니다 (기동 때 자동). 표를 맞추지 않고 `alembic stamp head`만 하지 않습니다.
   - 시험(`tests/test_migrations_postgres.py`): 빈 PostgreSQL → head, 마이그레이션 결과와 앱 모델의 차이 0건(열 타입 포함), 기본 용어사전 자료가 SQLite head와 같음.
@@ -254,15 +260,19 @@ python -m app.dbcopy --source sqlite:///<원천 파일> --target-env <주소가 
 5. **같은 DB 확인:** `python -m app.dbcheck --app-service moajwo-app --migration-service moajwo-migrate` → 종료 0, `"result": "same"`. 종료 1(다름)이면 전환하지 않고 두 주소(프로젝트·분기·DB 이름)를 다시 확인합니다. Render에 넣을 `DATABASE_URL`·`MOAJWO_MIGRATION_DATABASE_URL`과 같은 값(호스트·계정·DB)인지도 확인합니다.
 6. (A) 원천 확보(8-1) → `app.dbcopy` dry-run(`tz_unverified_runs: 0` 확인) → `--apply --report backups/external-db/<시각>/dbcopy-report.json` → 7장 백업을 받아 다른 빈 DB로 **복원 확인**.
    (B) 이관하지 않습니다 — 빈 DB 그대로 (`setup_required: true`가 정상).
-7. 승인 묶음(8-5)을 만들어 소유자가 한 번 승인합니다.
+7. **Render 설정 읽기 확인 (바꾸지 않음):** 웹·API 서비스마다 Settings의 Auto-Deploy 방식, 연결 브랜치, Dockerfile 경로·빌드 문맥을 대시보드에서 읽어 기록합니다. 이 값으로 '승인된 배포 방법'(병합 / 수동 배포)을 정합니다:
+   - **On Commit**(새 서비스 기본): 연결 브랜치에 병합·푸시하는 순간 재배포됩니다 (그 재배포도 SQLite를 지움).
+   - **After CI Checks Pass**: 연결 브랜치의 새 커밋에서 CI 체크가 모두 통과하면 재배포됩니다. 체크가 0개면 자동 배포하지 않습니다 — 지금 이 저장소의 main·후보에는 GitHub Actions가 없어(2026-10-25 확인) 다른 체크가 붙지 않는 한 수동 배포가 됩니다.
+   - **Off**: 수동 배포만.
+8. 승인 묶음(8-5)을 만들어 소유자가 한 번 승인합니다.
 
 **전환** (승인 뒤, 한 번에):
 
-8. Render API 서비스의 Auto-Deploy와 연결 브랜치를 대시보드에서 확인합니다 — On Commit이면 연결 브랜치에 병합·푸시하는 순간 재배포됩니다 (그 재배포도 SQLite를 지움). Off면 수동 배포만 합니다.
-9. Render 환경 변수는 **"Save only"** 로 저장합니다: 3장 변수(`MOAJWO_DB_MODE=external`, `DATABASE_URL` = 풀러·앱 계정, `MOAJWO_MIGRATION_DATABASE_URL` = 직접 연결·소유 계정).
-10. 승인된 배포 한 번: PostgreSQL을 지원하는 앱 커밋(이 PR 이후 코드)을 배포합니다. 저장한 변수는 이 배포부터 쓰입니다. 기동 때 마이그레이션은 직접 연결로 돕니다.
-11. 점검 (쓰기 없는 것만): `/health`, `/auth/status` — (A) `setup_required: false`, 이관한 계정 로그인 → **로그인부터 쓰기입니다** (세션·최근 로그인 시각·실패 횟수) / (B) `setup_required: true`가 정상 → 최초 소유자 설정 → 계정을 새로 등록. 점검에 쓴 계정·시각·생긴 세션 수를 기록합니다.
-12. 쓰기 재개 시점을 기록하고, 전환 뒤 첫 백업(7장)을 받습니다.
+9. 7단계에서 기록한 Render 설정이 그대로인지 다시 봅니다 (바뀌었으면 멈추고 묶음을 고쳐 다시 승인).
+10. Render 환경 변수는 **"Save only"** 로 저장합니다: 3장 변수(`MOAJWO_DB_MODE=external`, `DATABASE_URL` = 풀러·앱 계정, `MOAJWO_MIGRATION_DATABASE_URL` = 직접 연결·소유 계정).
+11. 승인된 배포 한 번: PostgreSQL을 지원하는 앱 커밋(이 PR 이후 코드)을 배포합니다. 저장한 변수는 이 배포부터 쓰입니다. 기동 때 마이그레이션은 직접 연결로 돕니다.
+12. 점검 (쓰기 없는 것만): `/health`, `/auth/status` — (A) `setup_required: false`, 이관한 계정 로그인 → **로그인부터 쓰기입니다** (세션·최근 로그인 시각·실패 횟수) / (B) `setup_required: true`가 정상 → 최초 소유자 설정 → 계정을 새로 등록. 점검에 쓴 계정·시각·생긴 세션 수를 기록합니다.
+13. 쓰기 재개 시점을 기록하고, 전환 뒤 첫 백업(7장)을 받습니다.
 
 Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environment-variables · https://render.com/docs/deploys, 2026-10-25 확인):
 
@@ -270,11 +280,11 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 |---|---|---|
 | Save, rebuild, and deploy | 새로 빌드하고 새 변수로 배포 | 저장과 동시에 재배포가 시작됨 — 재배포되면 지금 SQLite·파일이 지워짐 |
 | Save and deploy | 지금 빌드를 새 변수로 다시 배포 (다시 빌드하지 않음) | 저장과 동시에 지금 빌드로 재배포 — 재배포되면 지금 SQLite·파일이 지워짐. 지금 빌드가 PostgreSQL을 지원하지 않는 코드(main: psycopg 드라이버 없음)면 새 변수로는 기동하지 못할 것으로 보임 (코드 확인, 실행 안 함) |
-| Save only | 저장만 — 배포하지 않음. 다음 배포부터 새 값을 씀 | **권장** — 저장과 배포를 나눠, 승인된 배포 한 번(10단계)만 재배포 |
+| Save only | 저장만 — 배포하지 않음. 다음 배포부터 새 값을 씀 | **권장** — 저장과 배포를 나눠, 승인된 배포 한 번(11단계)만 재배포 |
 
 - **(A)에서는 원천 확보(8-1) 전에 앞의 두 선택지를 고르지 않습니다** — 저장과 함께 재배포되어 지금 Render SQLite와 파일이 지워집니다.
 - **Restart는 저장만 한 변수를 반영하지 않습니다** — 지금 배포된 커밋을 그때의 변수 값으로 다시 띄웁니다. 전환은 배포로만 합니다.
-- Docker 서비스는 환경 변수를 빌드 인자로도 넘깁니다 — 빌드가 그 값을 쓰면 다시 빌드("Save, rebuild, and deploy" 또는 새 커밋 배포)해야 반영됩니다. 이 저장소의 `backend/Dockerfile`에는 `ARG`가 없어 빌드가 DB 변수를 쓰지 않지만, Render API 서비스가 어느 Dockerfile·브랜치로 빌드하는지는 저장소에 기록이 없어 대시보드에서 확인합니다.
+- Docker 서비스는 환경 변수를 빌드 인자로도 넘깁니다 — 빌드가 그 값을 쓰면 다시 빌드("Save, rebuild, and deploy" 또는 새 커밋 배포)해야 반영됩니다. 이 저장소의 `backend/Dockerfile`에는 `ARG`가 없어 빌드가 DB 변수를 쓰지 않지만, Render API 서비스가 어느 Dockerfile·브랜치로 빌드하는지는 저장소에 기록이 없어 준비 7단계에서 대시보드로 확인합니다.
 - 환경 그룹을 고치면 자동 배포가 켜진 연결 서비스가 모두 재배포됩니다 — 이 변수들은 서비스 자체의 환경 변수로 둡니다.
 - **같은 DB 확인(`app.dbcheck`)이 보는 것:** 두 주소 각각으로 읽기 전용 트랜잭션에서 `current_database()`·DB OID·`pg_postmaster_start_time()`·`server_version_num`·`alembic_version`·Neon 식별자(`neon.tenant_id`·`neon.timeline_id` — 설정이 있을 때)를 읽어 비교합니다. 한쪽이 읽지 못한 항목은 비교에서 빼고 `not_compared`에 적습니다. 출력(JSON)에 주소·호스트·비밀번호가 없습니다 (계정 이름은 있음). 종료 0 같음 · 1 다름 · 2 확인 못 함(주소 없음·연결 실패). 서버 시작 시각만 다르면 그 사이 서버가 다시 시작됐을 수 있으니 다시 실행합니다.
   - 로컬 PostgreSQL 17.11에서 시험: 같은 DB를 서로 다른 두 계정으로(하나는 서비스 주소) → 같음, 같은 서버의 다른 DB → 다름, 닿지 않는 주소 → 2.
@@ -284,13 +294,13 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 
 - **복구 대상도 PostgreSQL을 지원해야 합니다.** 기본 복구는 검증된 외부 DB를 유지한 채 PostgreSQL을 지원하는 호환 앱 이미지로 되돌리는 것입니다. 초기 SQLite 전용 이미지(이 PR 이전)로 돌아갈 수 있다고 가정하지 않습니다.
 - **환경 변수만 이전 값으로 돌리고 재배포하는 SQLite 복구는 쓰지 않습니다.** Render 재배포는 SQLite 파일을 지우므로 원천 파일이 남는다는 보장이 없습니다. SQLite로 돌아가려면 실제 백업 복원 위치·명령·파일 생존 조건이 검증된 별도 복원 절차가 있어야 하며, 지금은 없습니다 (Render Free는 셸·디스크가 없음) — 복구안으로 제시하지 않습니다.
-- Render 대시보드의 롤백은 환경 변수도 대상 배포 때 값으로 되돌리고, 자동 배포를 끕니다 (https://render.com/docs/rollbacks). 전환 전 배포로 롤백하면 외부 DB 설정이 빠진 채 빈 SQLite로 떠 최초 설정 화면이 다시 열릴 것으로 보이므로 (코드 기준 판단, 실행 안 함), 전환 전 배포로의 대시보드 롤백을 복구 수단으로 쓰지 않습니다.
+- Render 롤백 배포는 대상 배포 때의 설정(환경 변수 포함)으로 **그 롤백 배포만** 돌립니다. 서비스에 저장된 현재 설정은 바뀌지 않고, 다음 일반 배포는 현재 저장값(외부 DB)을 다시 씁니다. 대시보드에서 롤백하면 자동 배포가 꺼지므로 나중에 Settings에서 다시 켜야 합니다 (API로 롤백하면 끄지 않음) (https://render.com/docs/rollbacks, 2026-10-25 확인). 전환 전 배포로 롤백하면 그 롤백 배포는 외부 DB 설정 없이 빈 SQLite로 떠 최초 설정 화면이 다시 열릴 것으로 보이므로 (코드 기준 판단, 실행 안 함), 전환 전 배포로의 롤백을 복구 수단으로 쓰지 않습니다.
 - 외부 DB 자체가 손상되면 7장 백업으로 **다른 빈 DB에** 복원해 확인한 뒤 주소를 바꿉니다.
 - **쓰기 재개 후**: 전환 뒤 생긴 계정·기록이 있으므로, 예전 백업으로 되돌려 새 계정·자료를 잃는 복구를 자동으로 하지 않습니다. 필요하면 그 시점 백업을 먼저 받고, 잃는 범위를 알린 뒤 승인받습니다.
 
 ### 8-5. 최종 전환 승인 묶음 (소유자가 한 번 검토·승인)
 
-아래를 한 묶음으로 만들어 소유자가 한 번 검토·승인한 뒤 8-3의 전환 단계(8~12)를 진행합니다. 묶음에 비밀번호·주소를 넣지 않습니다. 이 저장소 작업에서는 이 묶음을 만들거나 그 안의 단계를 실행하지 않았습니다.
+아래를 한 묶음으로 만들어 소유자가 한 번 검토·승인한 뒤 8-3의 전환 단계(9~13)를 진행합니다. 묶음에 비밀번호·주소를 넣지 않습니다. 이 저장소 작업에서는 이 묶음을 만들거나 그 안의 단계를 실행하지 않았습니다.
 
 1. 경로 결정 — (A) 기존 계정 이관 / (B) 새 계정 등록, 그 이유
 2. Neon 프로젝트(`moajwo-test`)·지역·PostgreSQL 판(17), 무료 조건을 확인한 날짜(2장)
@@ -298,8 +308,8 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 4. (A) `app.dbcopy` 보고 — dry-run과 적용(`dbcopy-report.json`: 표별 건수·내용 해시·`tz_unverified_runs`·`target_secret_in_args`)
 5. (A) 7장 복원 확인 결과 — 다른 빈 DB, 로그인·건수·내용 해시, 원본 DB 그대로
 6. 같은 DB 확인(`app.dbcheck`) 출력 — `result: same`, 앱 쪽·마이그레이션 쪽 계정 이름
-7. 최종 앱 SHA·이미지, Render 환경 변수 저장 방식("Save only")과 승인된 배포 방법, Auto-Deploy·연결 브랜치 확인 결과
-8. 중단 계획 — 원천 쓰기 중지 → 전환 배포 → 점검 → 쓰기 재개 (예정 시각)
+7. 최종 앱 SHA·이미지, Render 환경 변수 저장 방식("Save only")과 승인된 배포 방법 — 준비 7단계의 Render 설정 읽기 확인 결과(웹·API의 Auto-Deploy 방식·연결 브랜치·Dockerfile 경로)
+8. 중단 계획 — (A)는 8-1의 보호 시점(원천 쓰기를 멈춘 시각)부터 전환까지 지금 Render 서비스가 받는 쓰기는 **옮겨지지 않고** 전환 배포 때 지워집니다: 그 사이 쓰기를 멈추거나(사용자 안내) 잃는 범위를 소유자가 받아들임을 적습니다. 그다음 전환 배포 → 점검 → 쓰기 재개 (예정 시각)
 9. 되돌리기 경계 (8-4)
 10. 전환 뒤 백업 계획 — 7장 백업 주기·보관 위치
 11. 계정 — 이관한 계정 수(A, 이관 보고)와 새로 만든·만들 계정(B, 또는 전환 뒤 새 가입)을 나눠 적음
@@ -312,8 +322,8 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
   - `MOAJWO_TEST_PG_ADMIN_URL=<일회용 시험 서버 관리자 주소>`가 있으면 시험마다 빈 DB를 새로 만드는 시험(이관 도구 실패·동시성·대상 주소 입력, 같은 DB 확인, 마이그레이션, 여러 프로세스의 최초 설정)도 돕니다. 없으면 그 시험만 건너뜁니다. 운영·시연 DB 주소를 넣지 않습니다.
   - 대상 주소 입력(`tests/test_dbcopy.py`): 비밀번호가 든 `--target`의 경고·`target_secret_in_args`, `--target-env`, 둘 중 하나만, PostgreSQL에서 합성 서비스·비밀번호 파일로 서비스 주소 접속(빈 비밀번호 파일 → 인증 실패, 없는 `PGSERVICEFILE` → 오류). 같은 DB 확인: `tests/test_dbcheck.py`.
 - 계정 보존 확인: `python diagnostics/scripts/external_db_check.py --admin-service <서비스 이름> --backend backend --out <폴더> --pg-bin <pg_dump·pg_restore·psql 폴더> [--role-prefix <이름>]` — 관리자 비밀번호는 `PGSERVICEFILE`·`PGPASSFILE`의 파일에서 읽습니다 (또는 `--admin-env <주소가 든 환경 변수 이름>`). 실제 프로세스로 1~9단계 (스크립트 머리말).
-  - 하위 프로세스에는 비밀번호를 명령 인자로 넘기지 않습니다: 앱은 환경 변수, 이관 도구는 `--target-env`·서비스 주소, pg_dump·pg_restore·psql은 `PGSERVICE`와 임시 서비스·비밀번호 파일(본인만 접근, 끝나면 지움).
-  - 9단계는 모든 하위 프로세스(`subprocess.run` 포함)의 명령 인자와 스크립트 자신의 인자, 결과 파일에 생성한 비밀번호가 없는지, 임시 파일 권한·삭제를 결과 행으로 남깁니다.
+  - 하위 프로세스에는 비밀번호를 명령 인자로 넘기지 않습니다: 앱은 환경 변수, 이관 도구는 `--target-env`·서비스 주소, pg_dump·psql은 `PGSERVICE`, pg_restore는 `--dbname=service=…` (모두 임시 서비스·비밀번호 파일 — 본인만 접근, 끝나면 지움. 권한을 줄이지 못하면 비밀번호를 쓰지 않고 멈춤).
+  - 9단계는 이 스크립트가 `subprocess`로 띄운 하위 프로세스(`subprocess.run` 포함 — 목록 인자만 허용하고 셸 확장은 거절, `os.system` 같은 다른 실행 경로는 쓰지 않음)의 명령 인자와 스크립트 자신의 인자, 결과 파일에 생성한 비밀번호가 없는지, 임시 파일 권한·삭제를 결과 행으로 남깁니다.
   - `--role-prefix`로 계정 이름을 바꾸면 같은 시험 서버의 다른 계정 비밀번호를 건드리지 않습니다.
-  - 2026-10-25 로컬 실행 (Windows, PostgreSQL 17.11, 합성 값): 결과 46행 모두 통과 — `argv_no_secrets`(하위 프로세스 30개), `outputs_no_secrets`, `secret_files_private`·`secret_files_removed` 포함.
-- **하지 않은 것:** 실제 Neon 프로젝트 연결(계정 생성은 소유자), Neon 휴면에서 깨는 실제 시간, 연결 풀러(PgBouncer·Neon 풀러)를 거친 연결과 `app.dbcheck`, Render 환경 변수 저장·실제 재배포·전환. 모두 승인 뒤의 단계입니다.
+  - 2026-10-25 로컬 실행 (Windows, PostgreSQL 17.11, 합성 값): 결과 46행 모두 통과 — `argv_no_secrets`(하위 프로세스 30개), `outputs_no_secrets`, `secret_files_private`·`secret_files_removed` 포함. 검토 후속(이름 자리 검사·검증자 전송·실패 시 멈춤·같은 DB 판정에 결과 값까지 확인) 뒤 다시 실행해 같은 46행 (시간 값만 다름).
+- **하지 않은 것:** 실제 Neon 프로젝트 연결(계정 생성은 소유자), Neon 휴면에서 깨는 실제 시간, 연결 풀러(PgBouncer·Neon 풀러)를 거친 연결과 `app.dbcheck` — 이것들은 소유자의 준비 단계(8-3 2~5단계)입니다. Render 환경 변수 저장·실제 재배포·전환은 승인 뒤의 단계입니다.
