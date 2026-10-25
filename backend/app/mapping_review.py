@@ -87,7 +87,6 @@ VIEW_CACHE_MAX_BYTES = int(os.environ.get("MOAJWO_VIEW_CACHE_MIB") or 128) * 2**
 @dataclass
 class SheetView:
     name: str  # 원래 시트 이름 — 서버 안에서만 쓴다 (응답에는 가려서)
-    tab: int  # 원본 통합 문서의 시트 순번 (0부터, 건너뛴 설명 시트 포함)
     columns: list[str]  # 원래 열 이름 — 서버 안에서 확정값과 연결할 때만 쓴다 (응답에는 가려서)
     source_columns: list[int]
     header_row: int | None
@@ -97,6 +96,7 @@ class SheetView:
     data_rows: int
     title_texts: list[str]
     note_texts: list[str]
+    tab: int = 0  # 원본 통합 문서의 시트 순번 (0부터, 건너뛴 설명 시트 포함 — 'N번째 시트'로 알릴 때)
     samples: list[list[Any]] = field(default_factory=list)  # 열별 값 예시 (파서가 가린 값)
     # 가림으로 글자가 바뀐 칸만: rows의 순번 → {열 번호: 원문 구분 표지}. 가린 표시가 같아도 원문이 다른 값을
     # 서버 안에서 구별하는 데만 쓴다 (분석의 같은 대상·그룹 비교). 원문·원문 해시는 두지 않는다 — raw_mark 참고
