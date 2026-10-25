@@ -41,7 +41,7 @@ from app import analysis, runlease
 from app.analysis import AGG_LABEL, MEASURE_FIELDS, NO_VALUE, AnalysisIn, Evaluation, TargetIn, label_of
 from app.analysis_api import LEVEL_TEXT, level_conflict_text
 from app.auth import CurrentUser
-from app.config import DATA_DIR, MAX_OUTPUT_CELLS
+from app.config import DATA_DIR, MAX_OUTPUT_CELLS, MAX_OUTPUT_TEXT_CHARS
 from app.decisions import load_decisions
 from app.files import get_file_for, load_parsed
 from app.integration import KST, OUTPUT_DIR
@@ -142,6 +142,7 @@ class SheetInfo:
     formula_missing: int  # 수식인데 저장된 결과값이 없는 칸
     formula_cached: int  # 저장된 결과값을 쓰는 수식 칸
     long_numbers: int  # 엑셀 숫자 칸이 정확히 담지 못하는 15자리 넘는 정수
+    text_chars: int = 0  # 결과에 넣는 행(데이터·소계·주석) 칸의 글자 수 합 — 결과 글자 예산 (MAX_OUTPUT_TEXT_CHARS)
 
 
 @dataclass
@@ -206,7 +207,7 @@ def file_info(db: Session, record: SourceFile) -> FileInfo:
     for i, s in enumerate(parsed.sheets):
         cells = formulas.get(s.name, set())
         kinds = {"data": s.data_rows, "subtotal": s.subtotal_rows, "note": s.note_rows, "empty": s.empty_rows}
-        missing = cached = long_numbers = 0
+        missing = cached = long_numbers = text_chars = 0
         for entry in s.body:
             if entry["kind"] == "empty":
                 continue
@@ -215,6 +216,8 @@ def file_info(db: Session, record: SourceFile) -> FileInfo:
                 missing += state == "missing"
                 cached += state == "cached"
                 long_numbers += _long(value)
+                if isinstance(value, str):
+                    text_chars += len(value)
         sheets.append(
             SheetInfo(
                 i,
@@ -226,6 +229,7 @@ def file_info(db: Session, record: SourceFile) -> FileInfo:
                 missing,
                 cached,
                 long_numbers,
+                text_chars,
             )  # fmt: skip
         )
     info = FileInfo(record.id, record.sha256, record.original_name, Path(record.original_name).suffix.lower(), sheets,
@@ -357,6 +361,7 @@ class Plan:
                 "sheets": MAX_SHEETS,
                 "rows": MAX_ROWS,
                 "cells": MAX_OUTPUT_CELLS,
+                "text_chars": MAX_OUTPUT_TEXT_CHARS,
                 "excel_rows": EXCEL_MAX_ROWS,
                 "items": MAX_ITEMS,
                 "summary_sheets": analysis.MAX_TARGETS,
@@ -477,11 +482,18 @@ def build_plan(db: Session, user: CurrentUser, req: BundleIn) -> Plan:
         problems.append(f"넣을 행이 {total:,}행으로 한 번에 넣을 수 있는 {MAX_ROWS:,}행을 넘습니다 — 나눠 만드세요.")
     # 결과는 메모리에 다 만든 뒤 저장한다 — 메모리 예산을 넘는 크기는 실행 기록을 만들기 전에 거절 (docs/MEMORY.md)
     cells = sum(o.rows * (o.sheet.columns + 2) for o in out_sheets)  # 결과 시트마다 '원본 행'·'행 종류' 두 열이 더 붙음
-    oversized = total > MAX_ROWS or cells > MAX_OUTPUT_CELLS or any(o.rows + 1 > EXCEL_MAX_ROWS for o in out_sheets)
+    chars = sum(o.sheet.text_chars for o in out_sheets)  # 칸 수가 적어도 긴 글자 칸은 메모리를 많이 쓴다
+    oversized = total > MAX_ROWS or cells > MAX_OUTPUT_CELLS or chars > MAX_OUTPUT_TEXT_CHARS
+    oversized = oversized or any(o.rows + 1 > EXCEL_MAX_ROWS for o in out_sheets)
     if cells > MAX_OUTPUT_CELLS:
         problems.append(
             f"결과에 넣을 칸이 {cells:,}개로 이 서버에서 한 번에 만들 수 있는 {MAX_OUTPUT_CELLS:,}칸을 넘습니다 — "
             "파일·시트를 나눠 만드세요."
+        )
+    if chars > MAX_OUTPUT_TEXT_CHARS:
+        problems.append(
+            f"결과에 넣을 글자가 {chars:,}자로 이 서버에서 한 번에 만들 수 있는 {MAX_OUTPUT_TEXT_CHARS:,}자를 "
+            "넘습니다 — 긴 글자 열을 줄이거나 파일·시트를 나눠 만드세요."
         )
     for o in out_sheets:
         if o.rows + 1 > EXCEL_MAX_ROWS:

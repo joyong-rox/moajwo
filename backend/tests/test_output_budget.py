@@ -3,6 +3,8 @@
 - 묶기·통합의 결과 칸이 한도(MOAJWO_MAX_OUTPUT_CELLS)를 넘으면 실행 기록·결과·임시 파일을 만들기 전에 거절한다.
   (512MiB 격리 컨테이너에서 한도 안의 묶기 20만 행이 메모리 부족으로 죽고 '실행 중' 기록·임시 파일이 남았다)
 - 쌓는 중에도 칸 수를 본다 (넘으면 남은 파일을 읽지 않음).
+- 결과 하나의 글자 수 합(MOAJWO_MAX_OUTPUT_TEXT_CHARS)도 같은 때 본다 — 칸 수는 글자 양을 보지 않는다 (512MiB 격리
+  컨테이너에서 칸 몇천 개·약 6,390만 자인 긴 글자 파일 넷의 통합이 수정 전·후 모두 메모리 부족으로 죽었다).
 - 결과 만들기 차례(동시 1개, app/output_slot.py): 다른 결과를 만드는 중이면 기다리지 않고 거절하고 아무것도
   남기지 않는다.
 멈춘 실행 정리는 test_run_recovery.py, 완료 경계는 test_run_completion.py.
@@ -128,6 +130,47 @@ def test_integration_stops_while_building_once_the_budget_is_passed(user, monkey
     assert res.status_code == 409 and "칸을 넘습니다" in res.json()["detail"], res.text
     assert len(set(reads)) == 1, f"한도를 넘은 뒤에도 파일을 더 읽었다: {reads}"
     assert _state() == before  # 실행 기록·결과·임시 파일 없음
+
+
+def _long_text_files(c: TestClient, prefix: str, n: int) -> list[int]:
+    """칸은 몇십 개지만 글자가 많은 파일 (긴 '비고' 열 — 매핑하지 않은 열)."""
+    fids = []
+    for k in range(n):
+        rows = [["서울특별시", f"구{k}{i}", i, "가" * 200 + f"-{prefix}{k}{i}"] for i in range(10)]
+        fid = _upload(c, f"{prefix}-{k}.xlsx", _xlsx({f"{prefix}{k}": [[*HEAD, "비고"], *rows]}))
+        _confirm(c, fid, MAP)
+        fids.append(fid)
+    return fids
+
+
+def test_bundle_with_more_text_than_the_budget_is_refused_before_any_record(user, monkeypatch) -> None:
+    fids = _long_text_files(user, "ob-text", 2)
+    plan = _plan(user, {"file_ids": fids})
+    assert plan["ready"] and plan["limits"]["text_chars"] == bundle.MAX_OUTPUT_TEXT_CHARS
+    cells = plan["total_rows"] * (len(HEAD) + 1 + 2)
+    assert cells < bundle.MAX_OUTPUT_CELLS  # 칸 예산에는 걸리지 않는 크기
+    monkeypatch.setattr(bundle, "MAX_OUTPUT_TEXT_CHARS", 2_000)  # 긴 글자 20칸만으로 4천 자가 넘는다
+    before = _state()
+    over = _plan(user, {"file_ids": fids})
+    assert not over["ready"] and any("결과에 넣을 글자가" in p for p in over["problems"]), over["problems"]
+    res = user.post("/bundle/run", json={"file_ids": fids, "expected_basis": over["basis"]})
+    assert res.status_code == 409 and "자를 넘습니다" in str(res.json()["detail"]["problems"])
+    assert _state() == before  # 실행 기록·결과·임시 파일 모두 없음
+    monkeypatch.undo()
+    ok = _plan(user, {"file_ids": fids})
+    assert user.post("/bundle/run", json={"file_ids": fids, "expected_basis": ok["basis"]}).status_code == 201
+
+
+def test_integration_with_more_text_than_the_budget_stops_before_a_running_record(user, monkeypatch) -> None:
+    """통합은 쌓는 중에 결과 칸 글자와 변경 기록(앞뒤 값·이유)의 글자를 함께 센다 — 넘으면 실행 기록 전에 409."""
+    rid = _review_of(user, _long_text_files(user, "ob-itext", 1))
+    monkeypatch.setattr(integration, "MAX_OUTPUT_TEXT_CHARS", 1_000)
+    before = _state()
+    res = user.post(f"/reviews/{rid}/integrate", json={"include_unmapped": True})
+    assert res.status_code == 409 and "결과에 넣을 글자가" in res.json()["detail"], res.text
+    assert _state() == before
+    monkeypatch.undo()
+    assert user.post(f"/reviews/{rid}/integrate", json={"include_unmapped": True}).status_code == 201
 
 
 def test_a_second_result_is_refused_while_one_is_being_made_and_leaves_nothing(user, monkeypatch) -> None:

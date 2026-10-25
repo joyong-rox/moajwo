@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 
 from app import runlease
 from app.check_basis import BASIS_VERSION, CHECK_BASIS_KEY, LEGACY_REASON, applied_drift, basis_changes
-from app.config import DATA_DIR, MAX_OUTPUT_CELLS
+from app.config import DATA_DIR, MAX_OUTPUT_CELLS, MAX_OUTPUT_TEXT_CHARS
 from app.decisions import load_decisions, load_learned, load_org_codes
 from app.files import load_parsed
 from app.glossary import EntityRef, Resolution, entity_ref, normalize_name
@@ -120,6 +120,7 @@ class _Built:
     files: list[dict[str, Any]] = field(default_factory=list)
     dropped_columns: list[dict[str, Any]] = field(default_factory=list)
     unmapped_columns: list[str] = field(default_factory=list)  # 원래 이름으로 넣은 '해당 없음' 열
+    text_chars: int = 0  # 결과 칸·변경 기록(앞뒤 값·이유)의 글자 수 합 — 결과 글자 예산 (쌓는 중에 센다)
 
 
 # ---------------------------------------------------------------- 값 비교
@@ -354,25 +355,26 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                         continue
                     if kind is None:
                         kind, reason = _classify(original, value, c)
-                    built.changes.append(
-                        Change(
-                            fid,
-                            record.original_name,
-                            sheet.name,
-                            entry["row"],
-                            out_row,
-                            c.label,
-                            c.source,
-                            kind,
-                            text(original),
-                            text(value),
-                            reason,
-                            confidence,
-                            output_col=label_index[c.label] + 1,
-                        )
+                    change = Change(
+                        fid,
+                        record.original_name,
+                        sheet.name,
+                        entry["row"],
+                        out_row,
+                        c.label,
+                        c.source,
+                        kind,
+                        text(original),
+                        text(value),
+                        reason,
+                        confidence,
+                        output_col=label_index[c.label] + 1,
                     )
+                    built.changes.append(change)
+                    built.text_chars += len(change.before or "") + len(change.after or "") + len(change.reason)
                 built.rows.append(row)
-                _check_cells(built)  # 쌓는 중에도 — 한도를 넘는 입력은 다 읽기 전에 멈춘다 (값은 늘기만 한다)
+                built.text_chars += sum(len(v) for v in row if isinstance(v, str))
+                _check_size(built)  # 쌓는 중에도 — 한도를 넘는 입력은 다 읽기 전에 멈춘다 (값은 늘기만 한다)
             info["sheets"].append(
                 {
                     "name": sheet.name,
@@ -564,14 +566,19 @@ def _output_path(run_id: int, now: datetime) -> Path:
     return OUTPUT_DIR / f"통합결과_{run_id:04d}_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
 
 
-def _check_cells(built: _Built) -> None:
-    """결과에 넣을 칸 — 메모리 예산(MAX_OUTPUT_CELLS)을 넘으면 거절한다. 쌓는 중에도 부르므로(값은 늘기만 함) 다 읽기
-    전에 멈추고, 실행 기록을 만들기 전이라 남는 기록·파일이 없다."""
+def _check_size(built: _Built) -> None:
+    """결과에 넣을 칸·글자 — 메모리 예산(MAX_OUTPUT_CELLS·MAX_OUTPUT_TEXT_CHARS)을 넘으면 거절한다. 쌓는 중에도
+    부르므로(값은 늘기만 함) 다 읽기 전에 멈추고, 실행 기록을 만들기 전이라 남는 기록·파일이 없다."""
     cells = len(built.rows) * len(built.labels) + len(built.changes) * len(CHANGE_HEADER)
     if cells > MAX_OUTPUT_CELLS:
         raise IntegrationError(
             f"결과에 넣을 칸이 {cells:,}개 이상으로 이 서버에서 한 번에 만들 수 있는 "
             f"{MAX_OUTPUT_CELLS:,}칸을 넘습니다 — 통합할 파일을 나눠 다시 검토하세요."
+        )
+    if built.text_chars > MAX_OUTPUT_TEXT_CHARS:
+        raise IntegrationError(
+            f"결과에 넣을 글자가 {built.text_chars:,}자 이상으로 이 서버에서 한 번에 만들 수 있는 "
+            f"{MAX_OUTPUT_TEXT_CHARS:,}자를 넘습니다 — 긴 글자 열을 줄이거나 통합할 파일을 나눠 다시 검토하세요."
         )
 
 
@@ -614,7 +621,7 @@ def _integrate(db: Session, session: ReviewSession, include_unmapped: bool | Non
     if include_unmapped is None:
         include_unmapped = include_unmapped_default(db, session)
     built = build(db, session, include_unmapped)
-    _check_cells(built)  # 결과는 메모리에 다 만든 뒤 저장한다 — '실행 중' 기록을 남기기 전에 거절 (docs/MEMORY.md)
+    _check_size(built)  # 결과는 메모리에 다 만든 뒤 저장한다 — '실행 중' 기록을 남기기 전에 거절 (docs/MEMORY.md)
     now = datetime.now(KST)
     items = session_items(db, session)
     warning_count = summarize(session, items).warnings

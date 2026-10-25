@@ -285,6 +285,57 @@ docker inspect moajwo-backend-1 --format '{{.Image}}'          # = $OLD_B
 
 격리 검증 (2026-10-15, 합성 자료 `moajwo-feat` 볼륨): 0018 → 0019 기존 테이블 그대로 · 분석 결과가 있는 0019 → 새 이미지 one-off downgrade 0018: `analysis_runs`만 삭제, 나머지 19개 테이블 행 수·내용 해시 그대로 · 이전(0018) 코드 기동·로그인·확정값 정상, 분석 API 없음 · 다시 0019: 빈 `analysis_runs`, 다시 실행 가능.
 
+## 8. 0020 반영 (결과 실행의 담당 프로세스·생존 신호) — 확인 항목과 롤백
+
+반영 절차는 1~3장과 같습니다 (`bash scripts/deploy.sh <승인한 PR HEAD SHA> 0019_analysis_runs`). backend가 시작하면서 `0019_analysis_runs → 0020_run_worker_lease`를 적용합니다.
+
+- 0020은 `runs`에 빈 값을 허용하는 열 두 개만 더합니다: `worker`(그 실행을 만드는 서버 프로세스 — `<결과 폴더 식별자>-<프로세스 식별자>`), `heartbeat_at`(마지막 생존 신호, UTC). 기존 행은 두 열이 비어 있고 다른 표·값은 바꾸지 않습니다 (SQLite는 `ALTER TABLE ADD COLUMN` 두 번). PostgreSQL에서는 표 잠금을 5초까지만 기다리고(`lock_timeout`), 넘으면 마이그레이션이 실패해 서버가 뜨지 않습니다 — 트랜잭션 DDL이라 바뀐 것이 없으니 잠금을 쥔 연결을 정리한 뒤 다시 반영합니다.
+- **멈춘 실행 정리가 바뀝니다** (`backend/app/recovery.py`): 시작 시각만으로 '실패'로 바꾸지 않습니다. 같은 결과 폴더를 쓰는 프로세스가 담당 프로세스의 운영체제 잠금(`outputs/.workers/<프로세스>.lock`)으로 끝났음을 확인했을 때만 파일을 보고 정합니다 — 저장 전 → 실패(그 실행의 임시 파일만 지움), 기록한 해시와 같은 결과·임시 파일 → 완료, 해시가 다르거나 예상 밖 파일 → '결과 확인 필요'. 기동 때 한 번과, 정할 근거가 생길 때만 도는 일회성 타이머로 돕니다.
+- **새 실행 상태 '결과 확인 필요'(`check`)**: 담당이 끝났는데 이 서버가 결과를 근거로 정할 수 없을 때(다른 디스크·이전 판 실행·해시 불일치)입니다. 실패로 바꾸지 않고 결과 파일을 지우지 않습니다. 화면에는 '결과 확인 필요 — 이유'로 보이고 내려받기는 막힙니다 (완료가 아님).
+- **반영 전에 남아 있던 '실행 중' 행**(이전 판이 멈춘 실행 — 담당이 비어 있음): 새 판은 기동 30분 뒤(무중단 배포의 이전 서버가 아직 돌 수 있는 시간) '결과 확인 필요'로 표시합니다. 이전 판 임시 파일(`tmp*.xlsx.tmp`)·기록과 연결되지 않은 결과 파일은 자동으로 지우지 않습니다.
+- 결과 만들기는 한 번에 하나입니다 (`MOAJWO_OUTPUT_SLOTS`, 기본 1 — `docs/MEMORY.md`). 다른 결과를 만드는 동안 온 요청은 기다리지 않고 503으로 거절되며 실행 기록·파일을 남기지 않습니다.
+- 반영 후 점검 (조회만): `alembic current` → `0020_run_worker_lease (head)`, 아래 `status`로 실행 중·결과 확인 필요 건수, 실행 기록 화면이 열리고 기존 완료 실행의 결과를 내려받을 수 있음.
+
+### 결과 확인 필요 실행 정리 — 별도 절차 (관리자)
+
+```bash
+docker compose exec -T backend python -m app.recovery status
+docker compose exec -T backend python -m app.recovery resolve <실행 번호> --failed
+```
+
+- `status`: 실행 중·결과 확인 필요 실행(담당 상태 `me`·`alive`·`dead`·`unknown`·이전 판, 마지막 신호 뒤 지난 초, 결과 파일 이름, 확인 필요 이유)과, 기록과 연결되지 않은 결과 파일·이전 판 임시 파일의 이름을 보여 줍니다. 아무것도 바꾸지 않습니다.
+- `resolve … --failed`: '결과 확인 필요'인 실행만 실패로 바꿉니다 (그 상태일 때만 — 그 사이 바뀌었으면 바꾸지 않음, 종료 1). 남은 파일은 지우지 않고 경로만 알립니다. 지울지는 관리자가 파일을 확인한 뒤 따로 정합니다.
+- `recover`: 위 정리 판정을 한 번 (기동 정리와 같음). 서버를 멈춘 뒤 롤백 전에 씁니다 (아래). 살아 있는 담당·근거 없는 실행·이전 판 실행은 바꾸지 않습니다.
+- 오래됐다는 이유만으로 `outputs/`의 파일을 지우지 않습니다.
+
+### 롤백 B — 데이터를 지키며 0019로 되돌리기 (별도 승인 후 수동)
+
+```bash
+# 1) 쓰기 중지 — 진행 중 요청은 최대 30초 기다림 (결과 만들기도 요청 안에서 끝남)
+docker compose stop -t 30 frontend backend
+# 2) 끝난 실행을 근거대로 정리 — 서버를 띄우지 않는 one-off (같은 볼륨·결과 폴더)
+docker compose run --rm --no-deps backend python -m app.recovery recover
+docker compose run --rm --no-deps backend python -m app.recovery status   # running에 담당이 있는 행이 없어야 함
+# 3) 롤백 직전 백업 (0020 상태) — 1·2장 '5단계 백업 검증'과 같은 방식 (리비전·행 수 기록 → 백업 → 백업 DB 검증 → 비교 → sha256)
+# 4) 새 이미지(0020을 아는 코드)로 downgrade만 실행 — one-off라 서버는 뜨지 않는다
+docker compose run --rm --no-deps backend alembic downgrade 0019_analysis_runs
+# 5) 이전 이미지로 전환
+docker tag moajwo-backend:$TAG moajwo-backend:latest && docker tag moajwo-frontend:$TAG moajwo-frontend:latest
+docker compose up -d --no-build --wait
+docker compose exec -T backend alembic current      # = 0019_analysis_runs
+```
+
+| 구분 | 내용 |
+| --- | --- |
+| 지워짐 | `runs.worker`·`runs.heartbeat_at` 두 열 (담당·생존 신호) |
+| 그대로 남음 | 실행 기록·변경 내역·결과 파일, 계정·세션·업로드·매핑·분석 등 다른 모든 표 |
+| 남지만 이전 판이 모르는 것 | '결과 확인 필요'(`check`) 행 — 이전 판 화면에는 상태 원문이 보이고 내려받을 수 없음. 되돌리기 전에 `resolve … --failed`로 정리할지 정합니다 |
+| downgrade가 멈추는 경우 | 이 판에서 시작한 실행 중 행(담당 있음)이 있을 때 — "이 판에서 시작한 실행 중인 결과 실행이 N건 있어 0019로 내리지 않습니다". 2)로 정리한 뒤 다시 합니다. 이 판 전에 시작한 실행 중 행(담당 없음)은 이전 판이 남긴 그대로라 막지 않습니다 |
+
+- 이전 이미지는 기동 때 `alembic upgrade head`가 모르는 리비전(0020)에서 멈추므로 DB를 먼저 0019로 내립니다 (자동 downgrade는 하지 않음).
+- 롤백 A(반영 직전 백업 복원)는 4장 A와 같습니다 — 반영 뒤 생긴 실행·결과는 활성 데이터에서 빠집니다 (지우지 않고 `_pre_rollback_<시각>/`).
+- 확인한 것: 마이그레이션 up → down → up, 이 판의 실행 중 행이 있으면 downgrade 거절·이전 판 행은 통과 (`tests/test_migrations.py`), `recover`가 서버 없이 끝난 담당의 실행만 정리 (`tests/test_run_recovery.py`). 실제 Docker 볼륨으로 위 순서를 리허설한 기록은 통합 후보의 리허설(아래 '리허설 결과')에 적습니다.
+
 ## 리허설 결과
 
 ### 1차 — 수동 명령 (2026-10-11, 운영 볼륨 복제본, 격리 프로젝트 `moajwo-rehearsal`, 소스 `24d2fc4`)
