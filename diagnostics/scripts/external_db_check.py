@@ -16,16 +16,19 @@
  7. 빈 PostgreSQL에서 최초 소유자 설정을 동시에 8번 — 소유자는 하나.
  8. 논리 백업(pg_dump -Fc, PGSERVICE) → 다른 빈 DB로 복원(pg_restore --dbname=service=…) → psql(서비스)로 건수,
     그 DB로 띄워 로그인·건수 확인, 원래 DB는 그대로.
- 9. 비밀값 점검: 하위 프로세스 명령 인자 전부와 이 스크립트 자신의 인자에 실행 때 만든 비밀번호(원문·URL 인코딩·비밀번호
-    파일 이스케이프)가 없는지(모든 하위 프로세스를 감싸 기록), 임시 서비스·비밀번호 파일이 본인만 읽게 제한됐고 끝에
-    지워졌는지, 결과 폴더의 파일에 비밀번호가 없는지.
+ 9. 비밀값 점검: 이 스크립트가 subprocess로 띄운 하위 프로세스의 명령 인자 전부(목록 인자만 허용 — 셸 확장은 기록기가
+    볼 수 없어 거절, os.system 등 다른 실행 경로는 쓰지 않음)와 이 스크립트 자신의 인자에 실행 때 만든 비밀번호(원문·URL
+    인코딩·비밀번호 파일 이스케이프)가 없는지, 임시 서비스·비밀번호 파일이 본인만 읽게 제한됐고 끝에 지워졌는지,
+    결과 폴더의 파일에 비밀번호가 없는지. 시험 계정 비밀번호는 평문이 아니라 클라이언트에서 만든 SCRAM 검증자로 보낸다
+    (서버가 문장을 기록하는 설정에서도 평문이 서버 로그에 남지 않게).
 
 비밀번호를 명령 인자에 두지 않는다 (셸 기록·프로세스 목록에 남음):
 - 관리자(슈퍼유저) 접속: --admin-service 이름(PGSERVICEFILE·PGPASSFILE이 가리키는 서비스·비밀번호 파일) 또는
   --admin-env 환경 변수 이름(그 변수에 주소).
 - 이 스크립트가 만드는 계정의 비밀번호는 실행 때 만들고 출력·저장하지 않는다. 하위 프로세스에는 환경 변수(앱의
   DATABASE_URL 등)나 임시 서비스·비밀번호 파일(본인만 접근, 끝나면 지움 — 서비스 파일에는 비밀번호 없음)로만 넘긴다:
-  이관 도구는 --target-env 또는 서비스 주소, pg_dump·pg_restore·psql은 PGSERVICE·PGSERVICEFILE·PGPASSFILE.
+  이관 도구는 --target-env 또는 서비스 주소, pg_dump·psql은 PGSERVICE, pg_restore는 --dbname=service=… (모두
+  PGSERVICEFILE·PGPASSFILE의 임시 서비스·비밀번호 파일).
 - --role-prefix(기본 moajwo → moajwo_owner·moajwo_app)를 바꾸면 같은 시험 서버의 다른 계정 비밀번호를 건드리지 않는다.
 합성 자료만 쓴다.
 사용법: python external_db_check.py (--admin-service 이름 | --admin-env 변수) --backend <backend 폴더> --out <폴더>
@@ -68,7 +71,9 @@ class _RecordingPopen(subprocess.Popen):
     """명령 인자를 ARGV에 남기는 Popen — subprocess.run도 이것을 쓴다 (main에서 subprocess.Popen을 바꿔 끼움)."""
 
     def __init__(self, args, *rest, **kwargs) -> None:  # noqa: ANN001
-        ARGV.append([str(x) for x in args] if isinstance(args, list | tuple) else [str(args)])
+        if kwargs.get("shell") or not isinstance(args, list | tuple):  # 셸이 펼친 값은 이 기록에 보이지 않는다
+            raise TypeError("하위 프로세스는 목록 인자로만 띄운다 (shell=True·문자열 명령 거절 — 9단계 점검 범위)")
+        ARGV.append([str(x) for x in args])
         super().__init__(args, *rest, **kwargs)
 
 
@@ -110,7 +115,10 @@ class Client:
 def child_env(admin_env: str | None, **extra: str) -> dict[str, str]:
     """하위 프로세스 환경: 이 셸의 DB 주소·앱 설정·libpq 변수(PG*)·관리자 주소 변수는 넘기지 않고, 필요한 것만 더한다."""
     drop = ("DATABASE_URL", "MOAJWO_", "PG")
-    env = {k: v for k, v in os.environ.items() if not k.startswith(drop) and k != admin_env}
+    # Windows의 환경 변수 이름은 대소문자를 가리지 않는다 (os.environ 키는 대문자) — 이름을 맞춰 비교해야 관리자 주소가
+    # 하위 프로세스로 새지 않는다
+    same = (lambda k: k.upper() == admin_env.upper()) if os.name == "nt" and admin_env else (lambda k: k == admin_env)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(drop) and not same(k)}
     env.update({"PYTHONIOENCODING": "utf-8", **extra})
     return env
 
@@ -139,7 +147,11 @@ class SecretFiles:
         self.sections: dict[str, dict[str, str]] = {}
         self.passwords: dict[str, str] = {}
         self._write()  # 빈 파일을 먼저 만들고 권한을 줄인 뒤에 내용을 쓴다 (O_TRUNC로 다시 써도 권한은 그대로)
-        self.restricted = all(self._restrict(p) for p in (self.service, self.passfile))
+        restricted = [self._restrict(p) for p in (self.service, self.passfile)]  # 하나가 실패해도 둘 다 시도
+        if not all(restricted):  # 권한을 줄이지 못하면 비밀번호를 쓰지 않는다 (fail-closed)
+            remove_tree(self.dir)
+            raise RuntimeError("임시 서비스·비밀번호 파일의 권한을 본인만으로 줄이지 못해 비밀번호를 쓰지 않고 멈춤")
+        self.restricted = True
 
     @staticmethod
     def _restrict(path: Path) -> bool:
@@ -242,6 +254,18 @@ def admin_exec(*sql: str, db: str | None = None) -> None:
     e.dispose()
 
 
+def admin_password(role: str, password: str) -> None:
+    """역할 비밀번호를 평문이 아니라 클라이언트에서 만든 SCRAM 검증자로 보낸다 (LOGIN도 함께 켬) — 서버가 문장을
+    기록하는 설정(log_statement=ddl, 실패한 문장 기록)에서도 평문이 서버 로그에 남지 않게. text()는 검증자의 :를
+    매개변수로 읽으므로 exec_driver_sql로 보낸다."""
+    e = create_engine(ADMIN, isolation_level="AUTOCOMMIT")
+    with e.connect() as c:
+        pgconn = c.connection.dbapi_connection.pgconn
+        verifier = pgconn.encrypt_password(password.encode(), role.encode(), b"scram-sha-256").decode()
+        c.exec_driver_sql(f"ALTER ROLE {role} LOGIN PASSWORD '{verifier}'")
+    e.dispose()
+
+
 def count(url: str, table: str) -> int:
     e = create_engine(url.replace("postgresql://", "postgresql+psycopg://", 1))
     with e.connect() as c:
@@ -309,6 +333,11 @@ def main() -> None:
     a = ap.parse_args()
     if not re.fullmatch(r"[a-z_][a-z0-9_]{0,40}", a.role_prefix):
         ap.error("--role-prefix는 영문 소문자·숫자·밑줄만")
+    # 이름 자리에 주소를 넣는 실수(--admin-env "$ADMIN_URL") — 받은 값을 오류 문구에 되풀이하지 않는다
+    if a.admin_env is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", a.admin_env):
+        ap.error("--admin-env에는 주소가 아니라 환경 변수 이름을 넣으세요")
+    if a.admin_service is not None and not re.fullmatch(r"[A-Za-z0-9_.-]+", a.admin_service):
+        ap.error("--admin-service에는 주소가 아니라 서비스 이름을 넣으세요")
     subprocess.Popen = _RecordingPopen  # 모든 하위 프로세스의 명령 인자를 남긴다 (9단계)
     a.out, a.backend = a.out.resolve(), a.backend.resolve()  # 하위 프로세스는 backend 폴더에서 돈다
     a.out.mkdir(parents=True, exist_ok=True)
@@ -335,7 +364,13 @@ def main() -> None:
         params = c.connection.dbapi_connection.info.get_parameters()
     e.dispose()
     conn = {k: params[k] for k in CONN_KEYS if params.get(k)}
-    vault = SecretFiles(conn)
+    try:
+        vault = SecretFiles(conn)
+    except RuntimeError as exc:  # 비밀번호를 쓰기 전에 멈췄다 — 결과 행만 남긴다
+        res("secret_files_private", False, str(exc))
+        (a.out / "results.tsv").write_text("".join("\t".join(r) + "\n" for r in RESULTS), encoding="utf-8")
+        remove_tree(work)
+        sys.exit(1)
     try:
         run_checks(a, log, work, pw, conn, vault, owner_role, app_role)
     except Exception:  # 중간에 멈춰도 지금까지의 결과와 아래 점검은 남긴다 (오류 종류와 위치만)
@@ -368,11 +403,11 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
                vault: SecretFiles, owner_role: str, app_role: str) -> None:  # fmt: skip
     for role, key in ((owner_role, "role_o"), (app_role, "role_a")):
         admin_exec(f"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') THEN "
-                   f"CREATE ROLE {role} LOGIN; END IF; END $$",
-                   f"ALTER ROLE {role} LOGIN PASSWORD '{pw[key]}'")  # fmt: skip
+                   f"CREATE ROLE {role} LOGIN; END IF; END $$")  # fmt: skip
+        admin_password(role, pw[key])
     # 앱 계정의 서버 쪽 제한 시간 (docs/EXTERNAL_DB.md 5장과 같은 값) — 잠금·긴 문장에서 무한히 기다리지 않게
     admin_exec(f"ALTER ROLE {app_role} SET lock_timeout = '5s'", f"ALTER ROLE {app_role} SET statement_timeout = '60s'",
-               f"ALTER ROLE {app_role} SET idle_in_transaction_session_timeout = '60s'")  # fmt: skip
+               f"ALTER ROLE {app_role} SET idle_in_transaction_session_timeout = '600s'")  # fmt: skip
     res("secret_files_private", vault.private(),
         "임시 서비스·비밀번호 파일: " + ("chmod 0600" if os.name != "nt" else "icacls /inheritance:r /grant:r 본인:F → 권한 항목이 본인 하나"))  # fmt: skip
 
@@ -454,7 +489,8 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
         except ValueError:
             out = {"result": p.stderr[-160:]}
         users = f"{out.get('app', {}).get('user')} / {out.get('migration', {}).get('user')}"
-        res(name, p.returncode == want, f"exit={p.returncode} {out.get('result')} differences={out.get('differences')} 계정 {users}")
+        ok = p.returncode == want and out.get("result") == ("same" if want == 0 else "different")  # 종료 1만으로는 '다름'이 아님
+        res(name, ok, f"exit={p.returncode} {out.get('result')} differences={out.get('differences')} 계정 {users}")
 
     def dbcopy(*args: str, env: dict[str, str]) -> tuple[int, dict]:
         p = run([a.python, "-m", "app.dbcopy", "--source", source, *args], MOAJWO_DATA_DIR=str(work / "copy"), **env)
@@ -543,7 +579,7 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
               ("POST", "/auth/setup", {"username": "ex-x", "display_name": "x", "password": pw["new"]}),
               ("GET", "/health", None))}  # fmt: skip
     res("outage_503", outage, "인증 실패(앱 계정 로그인 금지) 동안")
-    admin_exec(f"ALTER ROLE {app_role} LOGIN PASSWORD '{pw['role_a']}'")
+    admin_password(app_role, pw["role_a"])
     res("outage_recovered", login(pgs, "ex-a", pw["a"])[1], "되돌린 뒤 로그인")
     pgs.stop()
     nourl = Server(a, work / "nourl", a.port + 2, {"MOAJWO_DB_MODE": "external"}, log)
