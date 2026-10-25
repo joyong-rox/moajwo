@@ -231,14 +231,15 @@ def owner_state(worker_id: str | None) -> str:
         os.close(fd)
 
 
-def forget_dead_workers(min_age_s: float = 60) -> int:
+def forget_dead_workers(keep: set[str], min_age_s: float = 60) -> int:
     """죽음이 확정된(잠금을 얻을 수 있는) 프로세스의 잠금 파일을 지운다. 막 만든 파일은 그 프로세스가 아직 잠그기 전일
-    수 있어 두고, 실행 기록이 남은 담당의 파일은 정리가 그 실행을 끝낸 뒤 지운다 (recovery가 부른다)."""
+    수 있어 두고, keep(아직 '실행 중'인 행의 담당)의 파일은 남긴다 — 그 파일이 '끝났다'는 근거라, 지우면 다음 차례에
+    근거 없음('결과 확인 필요')으로 잘못 정한다 (recovery가 부른다)."""
     removed = 0
     me = identity()
     for path in WORKERS_DIR.glob("*.lock") if WORKERS_DIR.is_dir() else []:
         proc = path.stem
-        if proc == me["proc"] or not _HEX12.match(proc):
+        if proc == me["proc"] or proc in keep or not _HEX12.match(proc):
             continue
         try:
             if time.time() - path.stat().st_mtime < min_age_s:

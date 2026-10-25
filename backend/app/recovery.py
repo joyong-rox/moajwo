@@ -24,6 +24,12 @@
 - 이전 판 임시 파일(tmp*.xlsx.tmp — 실행과 연결 없음)·기록 없는 결과 파일은 자동으로 지우지 않는다 (status가 알림).
 - 별도 절차 (CLI, docs/DEPLOY.md '결과 확인 필요 실행'):
     python -m app.recovery status              실행 중·결과 확인 필요 실행, 연결 없는 파일
+    python -m app.recovery recover             위 판정을 한 번 (기동 정리와 같음 — 서버를 멈춘 롤백 전에 쓴다).
+                                               살아 있는 담당은 그대로, 근거 없는 실행(다른 디스크·잠금 파일 없음)은
+                                               신호가 STALE_S 넘었을 때만 '결과 확인 필요'로(실패·파일 변경 없음),
+                                               이전 판 실행은 그대로(이 명령은 막 뜬 프로세스라). 종료 0 = 담당이 있는
+                                               실행 중 행 없음(downgrade 가능), 2 = 남음(blocking — next_s초 뒤 다시),
+                                               1 = 오류
     python -m app.recovery resolve RUN_ID --failed   결과 확인 필요 → 실패 (조건부, 파일은 지우지 않고 경로만 알림)
 """
 
@@ -259,8 +265,16 @@ def recover(now: datetime | None = None) -> dict[str, Any]:
             logger.warning("run %s: recovery skipped (%s)", row.id, type(exc).__name__)
     report["complete"] = report["errors"] == 0
     report["next_s"] = min(waits) if waits else None
+    try:  # 정리 뒤에도 실행 중인 행: 담당이 있는 것(downgrade를 막음)과 이전 판 것, 그리고 남길 잠금 파일
+        with app_db.SessionLocal() as db:
+            left = list(db.scalars(select(IntegrationRun.worker).where(IntegrationRun.status == "running")))
+    except Exception:  # noqa: BLE001 — 남은 행을 모르면 잠금 파일을 지우지 않는다
+        report["blocking"] = report["legacy"] = None
+        return report
+    report["blocking"] = sum(w is not None for w in left)
+    report["legacy"] = sum(w is None for w in left)
     try:
-        runlease.forget_dead_workers()
+        runlease.forget_dead_workers(keep={w.partition("-")[2] for w in left if w})
     except OSError:
         pass
     return report
@@ -412,14 +426,26 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m app.recovery", description="멈춘 결과 실행 확인·정리 (docs/DEPLOY.md)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="실행 중·결과 확인 필요 실행과 연결 없는 파일")
+    sub.add_parser("recover", help="담당 프로세스가 끝난 실행을 근거대로 한 번 정리 (기동 정리와 같음)")
     r = sub.add_parser("resolve", help="결과 확인 필요 실행을 실패로")
     r.add_argument("run_id", type=int)
     r.add_argument("--failed", action="store_true", required=True)
     a = ap.parse_args(argv)
-    out = status() if a.cmd == "status" else resolve_failed(a.run_id)
+    if a.cmd == "status":
+        out, ok = status(), True
+    elif a.cmd == "recover":  # 0: 담당이 있는 실행 중 행 없음, 2: 남음(살아 있거나 근거를 기다림), 1: 오류
+        out = recover()
+        if out["complete"] and out["blocking"]:
+            encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "")
+            print(json.dumps(out, ensure_ascii=encoding != "utf8", indent=1, default=str))
+            return 2
+        ok = out["complete"] and out["blocking"] == 0
+    else:
+        out = resolve_failed(a.run_id)
+        ok = out["changed"]
     encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "")
     print(json.dumps(out, ensure_ascii=encoding != "utf8", indent=1, default=str))
-    return 0 if a.cmd == "status" or out.get("changed") else 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ from app.check_basis import (
     basis_changes,
     entity_changes,
 )
-from app.config import DATA_DIR, MAX_OUTPUT_CELLS
+from app.config import DATA_DIR, MAX_OUTPUT_CELLS, MAX_OUTPUT_TEXT_CHARS
 from app.decisions import load_decisions, load_learned, load_org_codes
 from app.files import load_parsed
 from app.glossary import EntityRef, Resolution, entity_ref, normalize_name
@@ -128,6 +128,7 @@ class _Built:
     files: list[dict[str, Any]] = field(default_factory=list)
     dropped_columns: list[dict[str, Any]] = field(default_factory=list)
     unmapped_columns: list[str] = field(default_factory=list)  # 원래 이름으로 넣은 '해당 없음' 열
+    text_chars: int = 0  # 결과 칸·변경 기록(앞뒤 값·이유)의 글자 수 합 — 결과 글자 예산 (쌓는 중에 센다)
 
 
 # ---------------------------------------------------------------- 값 비교
@@ -283,6 +284,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
     def column_at(label: str) -> int:
         if label not in label_index:
             built.labels.append(label)
+            built.text_chars += len(label)  # 결과 열 이름 (통합 데이터 시트 1행·처리 요약)
             label_index[label] = len(built.labels) - 1
         return label_index[label]
 
@@ -321,13 +323,15 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                     built.unmapped_columns.append(c.label)
             for d in dropped:
                 built.dropped_columns.append({"file": record.original_name, "sheet": sheet.name, **d})
+                built.text_chars += sum(len(v) for v in built.dropped_columns[-1].values() if isinstance(v, str))
             for c in columns:
                 column_at(c.label)
                 if c.field_key in ENTITY_FIELDS:
                     column_at(f"{c.label} 코드")
                 if normalize_name(c.source) != normalize_name(c.label):
                     reason, _ = mapping_reason(c.mapping)
-                    built.changes.append(
+                    _record(
+                        built,
                         Change(
                             fid,
                             record.original_name,
@@ -341,7 +345,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                             c.label,
                             f"열 이름 매핑: {reason}",
                             round(float(c.mapping.score if c.mapping.score is not None else 1.0), 4),
-                        )
+                        ),
                     )
             sido_col = next((c for c in columns if c.field_key == "sido"), None)
             used_rows = 0
@@ -373,7 +377,8 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                         continue
                     if kind is None:
                         kind, reason = _classify(original, value, c)
-                    built.changes.append(
+                    _record(
+                        built,
                         Change(
                             fid,
                             record.original_name,
@@ -388,10 +393,11 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                             reason,
                             confidence,
                             output_col=label_index[c.label] + 1,
-                        )
+                        ),
                     )
                 built.rows.append(row)
-                _check_cells(built)  # 쌓는 중에도 — 한도를 넘는 입력은 다 읽기 전에 멈춘다 (값은 늘기만 한다)
+                built.text_chars += sum(len(v) for v in row if isinstance(v, str))
+                _check_size(built)  # 쌓는 중에도 — 한도를 넘는 입력은 다 읽기 전에 멈춘다 (값은 늘기만 한다)
             info["sheets"].append(
                 {
                     "name": sheet.name,
@@ -611,14 +617,28 @@ def _output_path(run_id: int, now: datetime) -> Path:
     return OUTPUT_DIR / f"통합결과_{run_id:04d}_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
 
 
-def _check_cells(built: _Built) -> None:
-    """결과에 넣을 칸 — 메모리 예산(MAX_OUTPUT_CELLS)을 넘으면 거절한다. 쌓는 중에도 부르므로(값은 늘기만 함) 다 읽기
-    전에 멈추고, 실행 기록을 만들기 전이라 남는 기록·파일이 없다."""
+def _record(built: _Built, change: Change) -> None:
+    """변경 기록을 더하고 그 글자를 결과 글자 예산에 센다 — 변경 내역 시트·run_changes에 그대로 들어가는 글자
+    (파일·시트·열 이름, 앞뒤 값, 이유)."""
+    built.changes.append(change)
+    fields = (change.file_name, change.sheet, change.column, change.source_column, change.before, change.after,
+              change.reason)  # fmt: skip
+    built.text_chars += sum(len(v) for v in fields if v)
+
+
+def _check_size(built: _Built) -> None:
+    """결과에 넣을 칸·글자 — 메모리 예산(MAX_OUTPUT_CELLS·MAX_OUTPUT_TEXT_CHARS)을 넘으면 거절한다. 쌓는 중에도
+    부르므로(값은 늘기만 함) 다 읽기 전에 멈추고, 실행 기록을 만들기 전이라 남는 기록·파일이 없다."""
     cells = len(built.rows) * len(built.labels) + len(built.changes) * len(CHANGE_HEADER)
     if cells > MAX_OUTPUT_CELLS:
         raise IntegrationError(
             f"결과에 넣을 칸이 {cells:,}개 이상으로 이 서버에서 한 번에 만들 수 있는 "
             f"{MAX_OUTPUT_CELLS:,}칸을 넘습니다 — 통합할 파일을 나눠 다시 검토하세요."
+        )
+    if built.text_chars > MAX_OUTPUT_TEXT_CHARS:
+        raise IntegrationError(
+            f"결과에 넣을 글자가 {built.text_chars:,}자 이상으로 이 서버에서 한 번에 만들 수 있는 "
+            f"{MAX_OUTPUT_TEXT_CHARS:,}자를 넘습니다 — 긴 글자 열을 줄이거나 통합할 파일을 나눠 다시 검토하세요."
         )
 
 
@@ -661,7 +681,7 @@ def _integrate(db: Session, session: ReviewSession, include_unmapped: bool | Non
     if include_unmapped is None:
         include_unmapped = include_unmapped_default(db, session)
     built = build(db, session, include_unmapped)
-    _check_cells(built)  # 결과는 메모리에 다 만든 뒤 저장한다 — '실행 중' 기록을 남기기 전에 거절 (docs/MEMORY.md)
+    _check_size(built)  # 결과는 메모리에 다 만든 뒤 저장한다 — '실행 중' 기록을 남기기 전에 거절 (docs/MEMORY.md)
     now = datetime.now(KST)
     items = session_items(db, session)
     warning_count = summarize(session, items).warnings
