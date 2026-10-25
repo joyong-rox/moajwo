@@ -456,7 +456,9 @@ def test_dry_run_and_apply_keep_the_source_and_copy_everything(pg_env, target, t
     assert code == 0 and out["db_applied"] == "yes" and out["after_commit"]["verified"], out
     assert out["target_input"] == "--target-env" and out["target_secret_in_args"] is False
     password = make_url(target).password
-    assert password not in json.dumps(out, ensure_ascii=False) and password not in report.read_text(encoding="utf-8")
+    if password:  # 시험 서버 주소에 비밀번호가 있으면 출력·보고 어디에도 없어야 한다
+        assert password not in json.dumps(out, ensure_ascii=False)
+        assert password not in report.read_text(encoding="utf-8")
     assert all(d["source"] == d["target"] for d in out["digests"].values())
     assert out["counts"]["users"]["target_after"] == 3 and "auth_sessions" not in out["counts"]
     assert out["sequences"]["users"]["next"] == 4 and _next_user_id(target) == 4

@@ -114,6 +114,8 @@ def pg_service_files(directory, name: str, url: str) -> dict[str, str]:  # noqa:
     from sqlalchemy.engine import make_url
 
     url_ = make_url(url)
+    if not url_.password or not url_.host:
+        pytest.skip("시험 서버 주소에 호스트·비밀번호가 없어 합성 비밀번호 파일을 만들 수 없음")
     port = str(url_.port or 5432)
     lines = [f"[{name}]", f"host={url_.host}", f"port={port}", f"dbname={url_.database}", f"user={url_.username}"]
     lines += [f"{key}={value}" for key, value in url_.query.items() if isinstance(value, str)]  # sslmode 등

@@ -118,8 +118,9 @@ def test_same_database_through_two_accounts_is_the_same(two_databases, tmp_path:
     assert out["app"]["alembic_version"] == out["migration"]["alembic_version"] == "0019_analysis_runs"
     assert out["app"]["neon_timeline_id"] is None and out["not_compared"] == []  # Neon이 아니면 식별자 없음
     assert out["app_input"] == f"env:{APP_ENV}" and out["migration_input"] == "service:dbcheck-migrate"
-    admin_password = make_url(PG_ADMIN).password
-    assert two_databases["password"] not in raw and admin_password not in raw and "127.0.0.1" not in raw
+    for secret in (two_databases["password"], make_url(PG_ADMIN).password):
+        assert not secret or secret not in raw
+    assert "127.0.0.1" not in raw
 
 
 @pg
@@ -130,4 +131,5 @@ def test_different_database_on_the_same_server_is_different(two_databases, monke
     assert code == dbcheck.EXIT_DIFFERENT and out["result"] == "different"
     assert {"database", "database_oid", "alembic_version"} <= set(out["differences"])
     assert "postmaster_start_time" not in out["differences"]  # 같은 서버
-    assert make_url(PG_ADMIN).password not in raw
+    secret = make_url(PG_ADMIN).password
+    assert not secret or secret not in raw
