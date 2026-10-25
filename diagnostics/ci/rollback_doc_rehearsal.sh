@@ -58,7 +58,7 @@ state() {  # 지금 상태 한 줄: DB 리비전 · latest 이미지 · 실행 �
   local ts; ts=$(ts_of_unit)
   printf 'rev=%s backend=%s frontend=%s running=[%s] before_rollback_backups=%s recover_json=%s' "$(dbrev)" \
     "$(img moajwo-backend:latest)" "$(img moajwo-frontend:latest)" \
-    "$(docker compose ps --status running --services 2>/dev/null | sort | tr '\n' ' ')" \
+    "$(docker compose ps --status running --services 2>/dev/null | sort | paste -sd' ')" \
     "$(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l)" \
     "$([ -f "backups/rollback-$ts.recover.json" ] && echo yes || echo no)"
 }
@@ -119,7 +119,7 @@ snapshot() {  # snapshot <단계> — 웹·프록시 health·로그인·이전 �
 expect() {  # expect <이름> <기대 결과> <실제 결과> <뒤 상태> <뒤 상태에 있어야 하는 조각들...>
   local name=$1 want=$2 got=$3 after=$4 ok=yes piece
   shift 4
-  [ "$got" = "$want" ] || ok=no
+  case "$got" in $want) ;; *) ok=no ;; esac   # 기대는 패턴 (예: 2:* — 종료 코드는 그 명령의 것)
   for piece in "$@"; do case "$after" in *"$piece"*) ;; *) ok=no ;; esac; done
   res "$name" "$ok" "기대 $want · 실제 $got · 뒤 상태 $after"
 }
@@ -146,7 +146,7 @@ NEW_STATE="rev=0020_run_worker_lease backend=$NEWSTATE_B frontend=$NEWSTATE_F"
 # S1 이전 포트 파일 없음 → 1단계 정지 전 확인에서 멈춤 (서비스 그대로)
 clean_records; mv "$RBF" "$RBF.hidden"
 r=$(run_steps s1 1 7); mv "$RBF.hidden" "$RBF"
-expect s1.port_file_missing "1:1" "$r" "$(state)" "$NEW_STATE" "running=[backend frontend ]" "recover_json=no"
+expect s1.port_file_missing "1:1" "$r" "$(state)" "$NEW_STATE" "running=[backend frontend]" "recover_json=no"
 # S2 데이터 볼륨을 쓰는 다른 컨테이너 → 1단계 정지 뒤 확인에서 멈춤 (백업·정리 없음)
 clean_records; before=$(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l)
 docker run -d --name rb-extra --entrypoint sleep -v moajwo_moajwo-data:/data moajwo-backend:latest 600 > /dev/null
@@ -156,7 +156,7 @@ res s2.resume "$(resume && echo ok || echo fail)" "docker compose start backend 
 # S3 백업 폴더에 쓸 수 없음 → 2단계에서 멈춤 (정리·downgrade 없음)
 clean_records; chmod 555 backups
 r=$(run_steps s3 1 7); chmod 777 backups
-expect s3.backup_fails "2:1" "$r" "$(state)" "$NEW_STATE" "running=[]" "recover_json=no"
+expect s3.backup_fails "2:*" "$r" "$(state)" "$NEW_STATE" "running=[]" "recover_json=no"
 res s3.resume "$(resume && echo ok || echo fail)" "지금 판 재개"
 # S4 다른 디스크의 실행(생존 신호 새로움) → 3단계 recover 종료 2에서 멈춤
 clean_records; s4=$(in_app "$OTHER_DISK_RUN" | sed -n 's/^run=//p')
