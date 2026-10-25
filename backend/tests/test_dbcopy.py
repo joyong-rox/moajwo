@@ -1,6 +1,7 @@
-"""이관 도구(app/dbcopy.py) — 원천 보호, 보고 파일, 실패 시 대상 그대로, 커밋 불확실성, 동시 이관.
+"""이관 도구(app/dbcopy.py) — 원천 보호, 보고 파일, 실패 시 대상 그대로, 커밋 불확실성, 동시 이관, 대상 주소 입력.
 
 - 보고 파일·원천 보호 시험은 DB 없이 돈다 (경로 검사는 DB에 닿기 전). 원천은 시험마다 만드는 합성 SQLite 파일이다.
+- 대상 주소: --target-env(환경 변수), 서비스 주소(서비스 파일·비밀번호 파일), 비밀번호가 든 --target(호환 — 경고).
 - PostgreSQL 시험은 MOAJWO_TEST_PG_ADMIN_URL(일회용 시험 서버의 관리자 주소 — 운영·시연 DB 아님)이 있을 때만 돈다.
   시험마다 빈 DB를 템플릿에서 새로 만들고 지운다. 실패 지점마다 표 내용·시퀀스·다음 INSERT 번호를 실패 전후로 비교한다.
 """
@@ -34,6 +35,7 @@ from app.timefmt import KST
 
 BACKEND = Path(__file__).resolve().parent.parent
 UNREACHABLE = "postgresql://u:pw-secret-123@127.0.0.1:9/x"  # 거절되는 로컬 포트 (외부로 요청하지 않음)
+TARGET_ENV = "MOAJWO_DBCOPY_TEST_TARGET"  # --target-env 시험용 환경 변수 이름
 ADMIN = os.environ.get("MOAJWO_TEST_PG_ADMIN_URL", "").strip()
 
 
@@ -243,6 +245,113 @@ def test_errors_name_the_kind_not_the_values(tmp_path: Path, capsys) -> None:
     assert code == 1 and "pw-secret-123" not in raw and "127.0.0.1" not in raw
 
 
+# ---------------------------------------------------------------- 대상 주소 입력 (DB 없이 — 닿지 않는 로컬 포트)
+
+
+@pytest.mark.parametrize(
+    ("target", "secret"),
+    [
+        (UNREACHABLE, True),
+        ("postgresql://u@127.0.0.1:9/x?sslmode=require&password=pw-secret-123", True),
+        ("postgresql:///?service=moajwo-migrate", False),
+        ("postgresql://u@127.0.0.1:9/x?sslmode=require", False),
+        ("postgresql://u:pw-secret-123@127.0.0.1:9,127.0.0.1:10/x", True),  # libpq 다중 호스트 — SQLAlchemy 해석 실패
+        ("postgresql://u:pw-secret-123@127.0.0.1:abc/x", True),  # 잘못된 포트 — 해석 실패
+        ("postgresql://u@127.0.0.1:9/x?sslkey=k.pem&sslpassword=pw-secret-123", True),  # 클라이언트 키 암호
+        ("postgresql://u@127.0.0.1:9/x?oauth_client_secret=pw-secret-123", True),
+    ],
+    ids=["userinfo", "query", "service", "no-password", "multi-host", "bad-port", "sslpassword", "oauth-secret"],
+)
+def test_password_in_the_target_argument_warns_and_is_recorded_only_as_a_flag(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], target: str, secret: bool
+) -> None:
+    """비밀번호가 든 --target은 DB에 닿기 전에 stderr로 경고하고, 보고에는 참·거짓만 남긴다 (주소·비밀번호 없음).
+    원천이 없는 경로라 DB에는 닿지 않는다."""
+    code = dbcopy.main(["--source", f"sqlite:///{(tmp_path / 'none.db').as_posix()}", "--target", target])
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert code == dbcopy.EXIT_NOT_APPLIED and out["db_applied"] == "no"
+    assert out["target_input"] == "--target" and out["target_secret_in_args"] is secret
+    assert ("비밀번호가 든 주소가 있습니다" in captured.err) is secret
+    assert "pw-secret-123" not in captured.out + captured.err and "127.0.0.1" not in captured.out + captured.err
+
+
+def test_password_in_the_target_argument_still_works_for_compatibility(tmp_path: Path, monkeypatch, capsys) -> None:
+    """경고하고도 그대로 접속을 시도한다 (호환) — 여기서는 닿지 않는 포트라 연결 실패로 끝난다."""
+    src = tmp_path / "moajwo.db"
+    _small_sqlite(src)
+    monkeypatch.setattr(dbcopy, "DB_CONNECT_TIMEOUT_S", 2)  # 닿지 않는 포트에서 오래 기다리지 않게 (시험 시간)
+    code = dbcopy.main(["--source", f"sqlite:///{src.as_posix()}", "--target", UNREACHABLE])
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert code == dbcopy.EXIT_NOT_APPLIED and "OperationalError" in out["error"]  # 대상에 접속을 시도함
+    assert out["target_secret_in_args"] is True and "비밀번호가 든 주소가 있습니다" in captured.err
+    assert "pw-secret-123" not in captured.out + captured.err
+
+
+def test_target_env_reads_the_address_from_the_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--target-env: 주소(비밀번호 포함)는 환경 변수로만 받는다 — 경고 없음, 보고·출력에 주소·비밀번호 없음.
+    변수가 비어 있으면 DB에 닿기 전에 멈춘다."""
+    src = tmp_path / "moajwo.db"
+    _small_sqlite(src)
+    monkeypatch.setattr(dbcopy, "DB_CONNECT_TIMEOUT_S", 2)  # 닿지 않는 포트에서 오래 기다리지 않게 (시험 시간)
+    monkeypatch.delenv(TARGET_ENV, raising=False)
+    args = ["--source", f"sqlite:///{src.as_posix()}", "--target-env", TARGET_ENV]
+    code, out = _run(capsys, *args)
+    assert code == dbcopy.EXIT_NOT_APPLIED and out["db_applied"] == "no"
+    assert f"환경 변수 {TARGET_ENV}에 대상 주소가 없습니다" in out["error"] and "stage" not in out  # 이관 시작 전
+    monkeypatch.setenv(TARGET_ENV, UNREACHABLE)
+    code = dbcopy.main(args)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert code == dbcopy.EXIT_NOT_APPLIED and "OperationalError" in out["error"]  # 환경 변수의 주소로 접속을 시도함
+    assert out["target_input"] == "--target-env" and out["target_secret_in_args"] is False
+    assert "경고" not in captured.err
+    assert "pw-secret-123" not in captured.out + captured.err and "127.0.0.1" not in captured.out + captured.err
+
+
+def test_an_address_given_as_the_env_name_is_refused_without_repeating_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--target-env에 이름 대신 주소를 넣는 실수(예: --target-env "$MIGRATION_URL") — 출력·보고 파일에 받은 값을
+    되풀이하지 않고, 명령 인자에 비밀번호가 있었음을 경고·표시한 뒤 DB에 닿기 전에 멈춘다."""
+    src = tmp_path / "moajwo.db"
+    _small_sqlite(src)
+    report = tmp_path / "report.json"
+    args = ["--source", f"sqlite:///{src.as_posix()}", "--target-env", UNREACHABLE, "--report", str(report)]
+    code = dbcopy.main(args)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    saved = report.read_text(encoding="utf-8")
+    assert code == dbcopy.EXIT_NOT_APPLIED and out["db_applied"] == "no" and "stage" not in out  # 이관 시작 전
+    assert "환경 변수 이름" in out["error"]
+    assert out["target_input"] == "--target-env" and out["target_secret_in_args"] is True
+    assert "비밀번호" in captured.err
+    for text_ in (captured.out, captured.err, saved):
+        assert "pw-secret-123" not in text_ and "127.0.0.1" not in text_
+
+
+def test_target_connection_failure_is_reported_at_the_target_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """대상에 접속하지 못하면 '대상 접속' 단계로 적는다 (원천 문제처럼 보이지 않게)."""
+    src = tmp_path / "moajwo.db"
+    _small_sqlite(src)
+    monkeypatch.setattr(dbcopy, "DB_CONNECT_TIMEOUT_S", 2)
+    code, out = _run(capsys, "--source", f"sqlite:///{src.as_posix()}", "--target", "postgresql://u@127.0.0.1:9/x")
+    assert code == dbcopy.EXIT_NOT_APPLIED and out["stage"] == "대상 접속" and out["error"].startswith("[대상 접속]")
+
+
+def test_exactly_one_of_target_and_target_env(tmp_path: Path) -> None:
+    src = f"sqlite:///{(tmp_path / 'moajwo.db').as_posix()}"
+    for extra in ([], ["--target", UNREACHABLE, "--target-env", TARGET_ENV]):
+        with pytest.raises(SystemExit) as exc:
+            dbcopy.main(["--source", src, *extra])
+        assert exc.value.code == 2  # 사용법 오류 (argparse) — DB에 닿지 않음
+
+
 # ---------------------------------------------------------------- PostgreSQL (일회용 시험 서버)
 
 pg = pytest.mark.skipif(not ADMIN, reason="MOAJWO_TEST_PG_ADMIN_URL 없음 — PostgreSQL 시험 서버가 있을 때만")
@@ -365,17 +474,26 @@ def _src(pg_env: dict[str, Any]) -> str:
 
 
 @pg
-def test_dry_run_and_apply_keep_the_source_and_copy_everything(pg_env, target, tmp_path, capsys) -> None:
+def test_dry_run_and_apply_keep_the_source_and_copy_everything(pg_env, target, tmp_path, monkeypatch, capsys) -> None:
     source = pg_env["source"]
     src_hash = _digest_file(source)
     before = _state(target)
     report = tmp_path / "dry.json"
+    # 확인만: 비밀번호가 든 --target (호환 — 경고하고 그대로 동작)
     code, out = _run(capsys, "--source", _src(pg_env), "--target", target, "--report", str(report))
     assert code == 0 and out["result"].startswith("dry-run") and _state(target) == before
+    assert out["target_secret_in_args"] is bool(make_url(target).password) and out["tz_unverified_runs"] == 0
     assert json.loads(report.read_text(encoding="utf-8"))["tool"] == dbcopy.TOOL  # 정상 보고서 저장 유지
     assert out["source"]["unchanged"] and out["snapshot"]["integrity"] == "ok"
-    code, out = _run(capsys, "--source", _src(pg_env), "--target", target, "--apply", "--report", str(report))
+    # 적용: 주소는 환경 변수로만 (--target-env)
+    monkeypatch.setenv(TARGET_ENV, target)
+    code, out = _run(capsys, "--source", _src(pg_env), "--target-env", TARGET_ENV, "--apply", "--report", str(report))
     assert code == 0 and out["db_applied"] == "yes" and out["after_commit"]["verified"], out
+    assert out["target_input"] == "--target-env" and out["target_secret_in_args"] is False
+    password = make_url(target).password
+    if password:  # 시험 서버 주소에 비밀번호가 있으면 출력·보고 어디에도 없어야 한다
+        assert password not in json.dumps(out, ensure_ascii=False)
+        assert password not in report.read_text(encoding="utf-8")
     assert all(d["source"] == d["target"] for d in out["digests"].values())
     assert out["counts"]["users"]["target_after"] == 3 and "auth_sessions" not in out["counts"]
     assert out["sequences"]["users"]["next"] == 4 and _next_user_id(target) == 4
@@ -396,6 +514,36 @@ def test_dry_run_and_apply_keep_the_source_and_copy_everything(pg_env, target, t
     code, out = _run(capsys, "--source", _src(pg_env), "--target", target, "--apply")
     assert code == 1 and "이관 표시" in out["error"] and "같은 원천 스냅숏: 예" in out["error"]
     assert _state(target) == after
+
+
+@pg
+def test_service_url_target_takes_the_password_from_the_password_file(pg_env, target, tmp_path, service_files,
+                                                                      monkeypatch, capsys) -> None:  # fmt: skip
+    """--target 'postgresql:///?service=이름': 접속 정보는 서비스 파일, 비밀번호는 비밀번호 파일에서 — 명령 인자에
+    비밀번호가 없다 (경고 없음). 비밀번호 파일이 비면 인증에서 실패하고, 없는 서비스 파일을 가리키면 접속하지 않는다."""
+    for name in ("PGSERVICE", "PGPASSWORD", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in service_files("moajwo-migrate", target).items():
+        monkeypatch.setenv(name, value)
+    args = ["--source", _src(pg_env), "--target", "postgresql:///?service=moajwo-migrate"]
+    before = _state(target)
+    code = dbcopy.main(args)
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
+    assert code == 0 and out["result"].startswith("dry-run"), out
+    assert out["counts"]["users"]["source"] == 3 and out["target_secret_in_args"] is False
+    assert "경고" not in captured.err and _state(target) == before
+    # 비밀번호를 비밀번호 파일에서 읽었다: 빈 비밀번호 파일로 바꾸면 인증에서 실패한다
+    empty = tmp_path / "empty-pgpass.conf"
+    empty.write_text("", encoding="utf-8")
+    monkeypatch.setenv("PGPASSFILE", str(empty))
+    code, out = _run(capsys, *args)
+    assert code == dbcopy.EXIT_NOT_APPLIED and "OperationalError" in out["error"]
+    # PGSERVICEFILE이 없는 파일을 가리키면 오류 (기본 위치의 파일이 없을 때와 달리 조용히 넘어가지 않음)
+    monkeypatch.setenv("PGSERVICEFILE", str(tmp_path / "missing.conf"))
+    code, out = _run(capsys, *args)
+    assert code == dbcopy.EXIT_NOT_APPLIED and "OperationalError" in out["error"]
+    assert _state(target) == before
 
 
 POINTS = ["table:source_files", "sequence:first", "sequence:all", "compare", "commit_lost_before"]
@@ -492,15 +640,20 @@ def test_app_writes_wait_while_the_copy_holds_the_tables(pg_env, target, monkeyp
 
 
 @pg
-def test_runs_from_before_0009_are_out_of_scope(pg_env, target, tmp_path) -> None:
-    legacy = tmp_path / "legacy.db"
-    shutil.copy(pg_env["source"], legacy)
-    con = sqlite3.connect(legacy)
-    with con:  # 0009가 채운 모양: 시작·종료 = 생성 시각(UTC)
+def test_runs_whose_time_zone_origin_needs_confirmation_stop_the_copy(pg_env, target, tmp_path) -> None:
+    """시작 시각 = 생성 시각인 실행 기록은 시간대 출처 확인이 필요한 후보다 (0009가 생성 시각(UTC)으로 채웠을 수 있음).
+    확인만·적용 모두 멈추고 대상은 그대로 — 9시간 보정을 추정해서 하지 않는다."""
+    unverified = tmp_path / "tz-unverified.db"
+    shutil.copy(pg_env["source"], unverified)
+    con = sqlite3.connect(unverified)
+    with con:  # 0009가 채웠을 수 있는 모양: 시작·종료 = 생성 시각(UTC)
         con.execute("UPDATE runs SET started_at = created_at, finished_at = created_at")
     con.close()
     before = _state(target)
     for apply in (False, True):
-        with pytest.raises(dbcopy.CopyError, match="0009 이전 실행 기록이 1건"):
-            dbcopy.copy(f"sqlite:///{legacy.as_posix()}", target, apply=apply)
+        report: dict[str, Any] = {}
+        with pytest.raises(dbcopy.CopyError, match="시간대 출처 확인이 필요한 실행 기록 후보가 1건"):
+            dbcopy.copy(f"sqlite:///{unverified.as_posix()}", target, apply=apply, report=report)
+        assert report["tz_unverified_runs"] == 1 and report["db_applied"] == "no"
+        assert "legacy_0009_runs" not in report
     assert _state(target) == before

@@ -105,6 +105,67 @@ def pg_database(name: str, drop: bool = False) -> str:
     return admin.set(database=name).render_as_string(hide_password=False)
 
 
+def pg_service_files(directory, name: str, url: str) -> dict[str, str]:  # noqa: ANN001
+    """시험용 libpq 서비스 파일·비밀번호 파일을 만들고 그 경로 환경 변수(PGSERVICEFILE·PGPASSFILE)를 돌려준다.
+    서비스 파일에는 비밀번호를 넣지 않는다 (비밀번호 파일에만 — docs/EXTERNAL_DB.md 3-1). 비밀번호 파일의 DB 칸은 *라
+    서비스 주소에서 DB 이름을 바꿔도(postgresql:///다른DB?service=이름) 맞는다. 접속 주소는 postgresql:///?service=이름."""
+    from pathlib import Path
+
+    from sqlalchemy.engine import make_url
+
+    url_ = make_url(url)
+    if not url_.password or not url_.host:
+        pytest.skip("시험 서버 주소에 호스트·비밀번호가 없어 합성 비밀번호 파일을 만들 수 없음")
+    port = str(url_.port or 5432)
+    lines = [f"[{name}]", f"host={url_.host}", f"port={port}", f"dbname={url_.database}", f"user={url_.username}"]
+    lines += [f"{key}={value}" for key, value in url_.query.items() if isinstance(value, str)]  # sslmode 등
+
+    def esc(value: str) -> str:  # 비밀번호 파일 형식: 칸 안의 : 와 \ 는 \ 로 이스케이프
+        return value.replace("\\", "\\\\").replace(":", "\\:")
+
+    folder = Path(directory)
+    service, passfile = folder / "pg_service.conf", folder / "pgpass.conf"
+    service.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    passfile.write_text(f"{esc(url_.host)}:{port}:*:{esc(url_.username)}:{esc(url_.password)}\n", encoding="utf-8",
+                        newline="\n")  # fmt: skip
+    if os.name != "nt":
+        passfile.chmod(0o600)  # 유닉스 libpq는 그룹·다른 사용자 권한이 있는 비밀번호 파일을 무시한다
+    return {"PGSERVICEFILE": str(service), "PGPASSFILE": str(passfile)}
+
+
+@pytest.fixture
+def service_files(tmp_path):  # noqa: ANN001, ANN201
+    """pg_service_files를 시험 폴더에 만들고 시험이 끝나면 지운다 — pytest는 지난 시험 폴더를 남겨 두므로(기본 3회)
+    시험 서버 비밀번호가 든 비밀번호 파일을 그대로 두지 않는다."""
+    from pathlib import Path
+
+    made: list[Path] = []
+
+    def make(name: str, url: str) -> dict[str, str]:
+        env = pg_service_files(tmp_path, name, url)
+        made.extend(Path(v) for v in env.values())
+        return env
+
+    yield make
+    for path in made:
+        path.unlink(missing_ok=True)
+
+
+def pg_role_with_password(role: str, password: str) -> None:
+    """시험 서버(PG_ADMIN)에 로그인 역할을 만든다. 평문 비밀번호를 DDL에 넣지 않고 클라이언트에서 만든 SCRAM 검증자를
+    보낸다 — 서버가 문장을 기록하는 설정(log_statement=ddl, 실패한 문장 기록)에서도 평문이 로그에 남지 않게."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.engine import make_url
+
+    url = make_url(PG_ADMIN).set(drivername="postgresql+psycopg")
+    engine = create_engine(url, isolation_level="AUTOCOMMIT")
+    with engine.connect() as con:
+        pgconn = con.connection.dbapi_connection.pgconn
+        verifier = pgconn.encrypt_password(password.encode(), role.encode(), b"scram-sha-256").decode()
+        con.exec_driver_sql(f"CREATE ROLE {role} LOGIN PASSWORD '{verifier}'")  # text()는 검증자의 :를 매개변수로 읽음
+    engine.dispose()
+
+
 def db_dump() -> str:
     """앱 DB의 모든 표·모든 행을 글자로 (SQLite iterdump 대신 — 두 DB에서 같게). '원문이 어디에도 없음' 확인용."""
     from sqlalchemy import inspect, text
