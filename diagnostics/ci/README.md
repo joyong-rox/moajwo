@@ -4,8 +4,8 @@
 
 | 스크립트 | 무엇을 | 보고 |
 |---|---|---|
-| `image_check.sh` | 배포 이미지 빌드·비루트 실행·프록시·업로드/내려받기·512MiB 읽기 한도·Trivy | REPORT-20261023 6장 |
-| `output_memory.sh` · `output_memory.py` · `shared_xlsx.py` | 결과 파일(묶기·통합) 메모리 — A·A3 예산 끔(메모리 부족 재현·재기동 뒤 정리), B Render 예산, C 통계 요약·한도 가까운 통합, D1~D11 동시 생성·긴 글자(공유 문자열 — Excel 방식으로 직접 만든 xlsx)·넓은 표·큰 통계 요약·분석 Excel·큰 병합·결과 하나의 글자 양 (`PARTS=…`, 이미지 `IMAGE=…` — 수정 전·후를 같은 명령으로) | REPORT-20261023-2 8장, REPORT-20261025 |
+| `image_check.sh` | 배포 이미지 빌드·비루트 실행·프록시·업로드/내려받기·512MiB 읽기 한도·Trivy (두 nginx 최종 이미지는 기반 digest·설치 패키지·기반 대비 변경·대상 CVE를 심각도와 상관없이 따로) | REPORT-20261023 6장, REPORT-20261026 |
+| `output_memory.sh` · `output_memory.py` · `shared_xlsx.py` | 결과 파일(묶기·통합) 메모리 — A·A3 예산 끔(메모리 부족 재현·재기동 뒤 정리), B Render 예산, C 통계 요약·한도 가까운 통합, D1~D11 동시 생성·긴 글자(공유 문자열 — Excel 방식으로 직접 만든 xlsx)·넓은 표·큰 통계 요약·분석 Excel·큰 병합·결과 하나의 글자 양 (`PARTS=…`, 이미지 `IMAGE=…` — 수정 전·후를 같은 명령으로) · E1~E3C 최종 Render 권장값에서 칸마다 다른 긴 한글 여러 파일·결과 한 건 + 큰 업로드·읽기 차례를 기다리는 요청 | REPORT-20261023-2 8장, REPORT-20261025 |
 | `deploy_rollback_check.sh` · `deploy_probe.py` | 같은 Compose 프로젝트로 이전(main) → 후보(`scripts/deploy.sh`) → 롤백(이전 이미지 + 이전 포트, 후보가 리비전을 올렸으면 서버 정지 → 정리 전 downgrade 거절 확인 → `recover` → 새 이미지로 downgrade) → 후보 → 트리가 다른 승인 SHA | REPORT-20261023-2 7장, REPORT-20261025, `docs/DEPLOY.md` 리허설 |
 | `rollback_doc_rehearsal.sh` · `deploy_probe.py` | `docs/DEPLOY.md` 4장 B의 단계 상자(`<!-- rollback-step:N -->`)를 후보 트리의 문서에서 그대로 꺼내 실행 — 실패 경로 6가지(이전 포트 파일 없음·볼륨을 쓰는 컨테이너·백업 실패·recover 2·recover 1·downgrade 거절)에서 뒤 단계가 실행되지 않는지, 정상 0~7단계, 다시 후보, 이전 9장 명령(덧붙임 없이 up)의 수정 전 모습과 6·7단계로 바로잡기 | `docs/DEPLOY.md` 리허설 7차 |
 

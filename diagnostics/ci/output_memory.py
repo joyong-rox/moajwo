@@ -9,6 +9,9 @@ D. (사례마다 새 컨테이너, 예산 30만 칸) D1 묶기+묶기 동시 · 
    공유 문자열 — Excel 방식으로 직접 만든 xlsx) · D4 넓은 표 묶기·통합 · D5 큰 통계 요약(한도 안 실행, 한도 넘는 계획)
    · D6 분석 Excel 내려받기(하나·둘 동시) · D7 작은 xlsx의 큰 병합 범위 · D3L 로컬 기본 한도의 공유 긴 글자
    · D8 결과 만들기 차례 2개에서 묶기 둘 + 큰 xlsx 올리기를 동시에.
+E. 최종 Render 권장값(결과 글자 3,200만·결과 차례 1개·읽기 차례 1개)에서 남은 경계: E1 칸마다 다른 긴 한글 여러 파일(묶기·
+   통합 허용·초과 거절·거절 뒤 다음 정상 요청) · E2 결과 한 건(통합, 예산 바로 아래) + 큰 xlsx 올리기를 같은 순간에 · E3A~C
+   읽기 차례를 기다리는 요청 — 파일 셋을 읽는 검토 생성(A)·큰 업로드(B)를 따로, 그리고 겹쳐(C) 잰다.
 중단 기준: 컨테이너가 죽으면(B에서) 더 큰 단계는 하지 않는다. 합성 자료만 쓴다. 비밀번호는 실행 때 만들고 출력하지 않는다.
 사용법: python3 output_memory.py <A|B> <backend 주소> <컨테이너 이름> <합성 파일 폴더> <출력 폴더>
 """
@@ -561,6 +564,86 @@ def part_d12(c: Client, name: str = "sst499_0.xlsx") -> None:
     log(case="D12 긴 글자 통합 + 큰 xlsx 올리기 동시", results=res, **mem(), state=state())
 
 
+def _small_ok(c: Client, tag: str) -> None:
+    """거절·실패 뒤 다음 정상 요청: 작은 파일 하나 묶기."""
+    fid = upload(c, ["b5000_0.xlsx"])
+    s = bundle(c, f"{tag} 뒤 다음 정상 요청 (묶기 5,000행)", fid, 5000)
+    log(case=f"{tag} 다음 정상 요청", status=s, **mem(), state=state())
+
+
+def part_e1(c: Client) -> None:
+    """칸마다 다른 긴 한글(공유 문자열 없음) 파일 7개(각 1,125칸 × 약 4,100자 ≈ 461만 자): 묶기·통합 6개(≈ 2,770만 자 — 예산
+    3,200만 안)는 허용, 7개(≈ 3,230만 자)는 예산을 넘어 실행 기록을 만들기 전에 거절. 거절 뒤 다음 정상 요청."""
+    fids = upload(c, [f"dk_{k}.xlsx" for k in range(7)], mapping=LONG)
+    log(case="E1 올리기 7개 (칸마다 다른 긴 한글, 각 약 461만 자)", files=len(fids), **mem(), state=state())
+    for n in (6, 7):
+        s, plan, plan_ms = _plan(c, fids[:n])
+        if s == 200 and plan.get("ready") and alive():
+            t = time.monotonic()
+            rs, run = c.call("POST", "/bundle/run", {"file_ids": fids[:n], "expected_basis": plan["basis"]})
+            log(case=f"E1 묶기 {n}개", status=rs, ms=round((time.monotonic() - t) * 1000), plan_ms=plan_ms,
+                detail=None if rs == 201 else str(run)[:200], **mem(), state=state())  # fmt: skip
+        else:
+            log(case=f"E1 묶기 계획 {n}개", status=s, ready=plan.get("ready"), problems=(plan.get("problems") or [])[:2],
+                **mem(), state=state())  # fmt: skip
+        if not alive():
+            return
+    _small_ok(c, "E1 묶기")
+    for n in (6, 7):
+        rid = _review_ready(c, fids[:n])
+        log(case=f"E1 검토 {n}개", review=rid, **mem(), state=state())
+        if rid is None or not alive():
+            return
+        t = time.monotonic()
+        s, run = c.call("POST", f"/reviews/{rid}/integrate", {"include_unmapped": True})
+        log(case=f"E1 통합 {n}개", status=s, ms=round((time.monotonic() - t) * 1000),
+            detail=None if s == 201 else str(run)[:200], **mem(), state=state())  # fmt: skip
+        if not alive():
+            return
+    _small_ok(c, "E1 통합")
+
+
+def part_e2(c: Client) -> None:
+    """결과 한 건 + 큰 업로드를 최종 권장값으로: 긴 글자 파일(330칸 × 32,002자 — 통합 글자 예산 3,200만 바로 아래)의 통합과
+    큰 xlsx(풀었을 때 14.8MiB) 올리기를 같은 순간에 (결과 차례 하나 + 읽기 차례 하나)."""
+    part_d12(c, "sst330_0.xlsx")
+    _small_ok(c, "E2")
+
+
+def _three(c: Client) -> list[int]:
+    return upload(c, [f"dk_{k}.xlsx" for k in range(3)], mapping=LONG)
+
+
+def part_e3a(c: Client) -> None:
+    """E3 기준 A: 파일 셋(칸마다 다른 긴 한글)을 읽는 검토 생성만 — 이 요청 혼자의 최대."""
+    fids = _three(c)
+    log(case="E3A 준비", **mem(), state=state())
+    t = time.monotonic()
+    s, review = c.call("POST", "/reviews", {"file_ids": fids})
+    log(case="E3A 검토 생성 (파일 셋)", status=s, ms=round((time.monotonic() - t) * 1000), **mem(), state=state())
+
+
+def part_e3b(c: Client) -> None:
+    """E3 기준 B: 큰 xlsx 올리기만 — 이 요청 혼자의 최대."""
+    log(case="E3B 준비", **mem(), state=state())
+    t = time.monotonic()
+    s, body = c.call("POST", "/files", files=[FILES / "x_big.xlsx"])
+    ok = s == 200 and isinstance(body, list) and not body[0].get("error")
+    log(case="E3B 큰 xlsx 올리기", status=s, ok=ok, ms=round((time.monotonic() - t) * 1000), **mem(), state=state())
+
+
+def part_e3c(c: Client) -> None:
+    """E3 겹침: 검토 생성(파일 셋 — 파일마다 읽기 차례를 따로 얻음)과 큰 xlsx 올리기를 같은 순간에. 읽기 차례가 하나라 한쪽이
+    기다리는데, 검토 생성은 먼저 읽은 파일의 결과를 쥔 채 다음 파일의 차례를 기다릴 수 있다 — A·B 혼자의 최대와 비교한다.
+    두 요청만 겹친다 (무제한 동시 요청으로 넓히지 않음)."""
+    fids = _three(c)
+    log(case="E3C 준비", **mem(), state=state())
+    res = _together({"검토 생성 (파일 셋)": ("POST", "/reviews", {"file_ids": fids}),
+                     "큰 xlsx 올리기": ("UPLOAD", "/files", [FILES / "x_big.xlsx"])})  # fmt: skip
+    log(case="E3C 검토 생성 + 큰 xlsx 올리기 동시", results=res, **mem(), state=state())
+    _small_ok(c, "E3C")
+
+
 MAIN = Client()
 
 
@@ -578,7 +661,8 @@ def main() -> None:
             raise _Done
         {"A": part_a, "B": part_b, "C": part_c, "D1": part_d1, "D2": part_d2, "D3": part_d3, "D4": part_d4,
          "D5": part_d5, "D6": part_d6, "D7": part_d7, "D3L": part_d3l, "D8": part_d8, "D9": part_d9,
-         "A3": lambda cl: part_a(cl, 15), "D12": part_d12}[PART](c)  # fmt: skip
+         "A3": lambda cl: part_a(cl, 15), "D12": part_d12, "E1": part_e1, "E2": part_e2, "E3A": part_e3a,
+         "E3B": part_e3b, "E3C": part_e3c}[PART](c)  # fmt: skip
     except _Done:
         pass
     except RuntimeError as exc:
