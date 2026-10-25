@@ -161,18 +161,20 @@ echo "되돌릴 배포 단위: 시각 ${TS:-(없음)} · 리비전 ${PREV:-(없�
   [ -n "$TS" ] && [ -n "$PREV" ] && [ -n "$NEWREV" ] \
     || { echo "[중단] 배포 단위를 읽지 못함 — 0단계 출력 확인 (아무것도 바꾸지 않음)"; exit 1; }
   [ "$(docker compose config | sed -n 's/^name: //p')" = moajwo ] || { echo "[중단] Compose 프로젝트가 moajwo가 아님"; exit 1; }
-  docker volume inspect moajwo_moajwo-data --format '데이터 볼륨 {{.Name}}'
+  docker volume inspect moajwo_moajwo-data --format '데이터 볼륨 {{.Name}}' \
+    || { echo "[중단] 데이터 볼륨 moajwo_moajwo-data 없음 (아무것도 바꾸지 않음)"; exit 1; }
   [ -f "$RBF" ] || { echo "[중단] 이전 포트 파일 $RBF 없음 — 이미지만 되돌리지 않음 (아무것도 바꾸지 않음)"; exit 1; }
   docker image inspect "moajwo-backend:$TAG" "moajwo-frontend:$TAG" --format '{{.Id}}' > /dev/null \
     || { echo "[중단] 롤백 태그 $TAG 이미지 없음 (아무것도 바꾸지 않음)"; exit 1; }
   want=$(awk '/^  [a-z]+:$/ {s = $1; sub(":", "", s)} /^      - "/ {p = $2; gsub("\"", "", p); print s, p}' "$RBF" | sort)
-  got=$(docker compose $RB config --format json | docker run --rm -i --entrypoint python "moajwo-backend:$TAG" -c "$PORTS_PY" | sort)
+  got=$(docker compose $RB config --format json | docker run --rm -i --entrypoint python "moajwo-backend:$TAG" -c "$PORTS_PY" | sort) \
+    || { echo "[중단] 덧붙인 Compose 설정을 읽지 못함 (아무것도 바꾸지 않음)"; exit 1; }
   [ -n "$want" ] && [ "$want" = "$got" ] \
     || { echo "[중단] 덧붙인 설정의 포트 연결($got)이 이전 포트 파일($want)과 다름 (아무것도 바꾸지 않음)"; exit 1; }
-  rev=$(dbrev)
+  rev=$(dbrev) || { echo "[중단] DB 리비전을 읽지 못함 (아무것도 바꾸지 않음)"; exit 1; }
   [ "$rev" = "$NEWREV" ] \
     || { echo "[중단] 지금 DB 리비전($rev)이 배포 단위의 반영 후 리비전($NEWREV)과 다름 (아무것도 바꾸지 않음)"; exit 1; }
-  docker compose stop -t 30 frontend backend
+  docker compose stop -t 30 frontend backend || { echo "[중단] 정지 명령 실패 — 1단계부터 다시 (백업·정리를 하지 않음)"; exit 1; }
   [ -z "$(docker compose ps --status running --services)" ] || { echo "[중단] 정지 뒤에도 실행 중인 서비스"; exit 1; }
   w=$(docker ps --filter volume=moajwo_moajwo-data --format '{{.Names}}')
   [ -z "$w" ] || { echo "[중단] 데이터 볼륨을 쓰는 컨테이너가 남음: $w — 백업·정리를 하지 않음"; exit 1; }
@@ -186,11 +188,14 @@ echo "되돌릴 배포 단위: 시각 ${TS:-(없음)} · 리비전 ${PREV:-(없�
 ( set -euo pipefail
   A="moajwo-data-before-rollback-$(date +%Y%m%d-%H%M%S).tgz"
   docker run --rm --entrypoint sh -v moajwo_moajwo-data:/data:ro -v "$HOSTDIR/backups:/backup" moajwo-backend:latest -c \
-    "tar czf /backup/$A -C /data . && gzip -t /backup/$A && tar tzf /backup/$A | grep -qx ./moajwo.db"
+    "tar czf /backup/$A -C /data . && gzip -t /backup/$A && tar tzf /backup/$A | grep -qx ./moajwo.db" \
+    || { echo "[중단] 백업 만들기·압축 검사 실패 — 정리·downgrade를 하지 않음 (만들다 만 backups/$A 는 쓰지 않음)"; exit 1; }
   docker run --rm --entrypoint python -e A="$A" -v moajwo_moajwo-data:/data:ro -v "$HOSTDIR/backups:/backup:ro" \
-    moajwo-backend:latest -c "$VERIFY_PY"
+    moajwo-backend:latest -c "$VERIFY_PY" \
+    || { echo "[중단] 백업 검증 실패 — 정리·downgrade를 하지 않음 (backups/$A 는 쓰지 않음)"; exit 1; }
   sha256sum "backups/$A" | tee "backups/$A.sha256"
-  docker compose run --rm --no-deps backend python -m app.recovery status > "backups/rollback-$TS.status-before.json"
+  docker compose run --rm --no-deps backend python -m app.recovery status > "backups/rollback-$TS.status-before.json" \
+    || { echo "[중단] 정리 전 실행 상태를 남기지 못함 — 출력 확인 (정리를 하지 않음)"; exit 1; }
   echo "[2 완료] 백업 backups/$A 검증됨 · 정리 전 실행 상태 backups/rollback-$TS.status-before.json"
 )
 ```
@@ -213,7 +218,8 @@ echo "되돌릴 배포 단위: 시각 ${TS:-(없음)} · 리비전 ${PREV:-(없�
 ```bash
 # 4) 정리 뒤 상태: running(담당 있음)·running(이전 판)·check를 따로 본다 — 담당이 있는 running이 남으면 멈춤
 ( set -euo pipefail
-  docker compose run --rm --no-deps backend python -m app.recovery status > "backups/rollback-$TS.status.json"
+  docker compose run --rm --no-deps backend python -m app.recovery status > "backups/rollback-$TS.status.json" \
+    || { echo "[중단] status 실패 — 출력 확인 (downgrade를 하지 않음)"; exit 1; }
   docker run --rm -i --entrypoint python moajwo-backend:latest -c "$STATUS_PY" < "backups/rollback-$TS.status.json" \
     || { echo "[중단] 담당이 있는 running이 남음 — 3단계부터 다시"; exit 1; }
   echo "[4 완료] 담당이 있는 running 없음 — check 행은 이유를 보고 하나씩 정한다: resolve <번호> --failed (일괄로 바꾸지 않음)"
@@ -232,7 +238,7 @@ docker compose run --rm --no-deps backend python -m app.recovery resolve <실행
 ( set -euo pipefail
   docker compose run --rm --no-deps backend alembic downgrade "$PREV" \
     || { echo "[중단] downgrade 실패 — 이전 이미지로 바꾸지 않음. 리비전을 확인: 아래 '멈췄을 때' 5단계"; exit 1; }
-  rev=$(dbrev)
+  rev=$(dbrev) || { echo "[중단] downgrade 뒤 리비전을 읽지 못함 — 이전 이미지로 바꾸지 않음"; exit 1; }
   [ "$rev" = "$PREV" ] || { echo "[중단] downgrade 뒤 리비전이 $rev (기대 $PREV) — 이전 이미지로 바꾸지 않음"; exit 1; }
   echo "[5 완료] DB 리비전 $rev"
 )
@@ -242,9 +248,10 @@ docker compose run --rm --no-deps backend python -m app.recovery resolve <실행
 ```bash
 # 6) 이전 backend·frontend 이미지와 이전 포트 연결을 함께 — 실제 컨테이너의 이미지·포트가 롤백 단위와 같은지 확인
 ( set -euo pipefail
-  docker tag "moajwo-backend:$TAG" moajwo-backend:latest
-  docker tag "moajwo-frontend:$TAG" moajwo-frontend:latest
-  docker compose $RB up -d --no-build --wait
+  docker tag "moajwo-backend:$TAG" moajwo-backend:latest && docker tag "moajwo-frontend:$TAG" moajwo-frontend:latest \
+    || { echo "[중단] 이전 이미지로 태그를 바꾸지 못함 — 서비스는 멈춘 그대로 ('멈췄을 때' 6단계)"; exit 1; }
+  docker compose $RB up -d --no-build --wait \
+    || { echo "[중단] 이전 판 기동 실패 — docker compose $RB ps·logs로 원인 확인 ('멈췄을 때' 6단계)"; exit 1; }
   want=$(awk '/^  [a-z]+:$/ {s = $1; sub(":", "", s)} /^      - "/ {p = $2; gsub("\"", "", p); print s, p}' "$RBF" | sort)
   got=$(for s in backend frontend; do
           docker inspect "moajwo-$s-1" --format '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}:{{.HostPort}}:{{$p}} {{end}}{{end}}' \
@@ -284,7 +291,7 @@ docker compose run --rm --no-deps backend python -m app.recovery resolve <실행
 | 3단계 종료 1 | 서비스 멈춤 | 출력의 `errors`를 보고 3단계를 다시, 또는 지금 판 재개 |
 | 4단계 | 서비스 멈춤 | 3단계부터 다시 |
 | 5단계 | 리비전을 확인 (`dbrev` — 0단계에서 정의) | 반영 후 리비전 그대로면 지금 판 재개. 다르면(SQLite downgrade는 표를 다시 만드는 방식이라 실패하면 일부만 바뀔 수 있음) 2단계 백업으로 A 복원을 판단 |
-| 6단계 | 이미지 태그가 이전 판을 가리킴, DB는 반영 전 리비전 | `docker compose $RB ps`·`logs`로 원인 확인. 다시 새 판으로는 `scripts/deploy.sh`로 반영 (1·2장) |
+| 6단계 | 이미지 태그가 이전 판을 가리킴(태그 바꾸기에서 멈췄으면 하나만 바뀌었을 수 있음 — `docker image inspect moajwo-backend:latest moajwo-frontend:latest`를 롤백 태그와 비교), DB는 반영 전 리비전 | 태그를 마저 바꾸고 6단계부터, 또는 `docker compose $RB ps`·`logs`로 원인 확인. 다시 새 판으로는 `scripts/deploy.sh`로 반영 (1·2장) |
 | 7단계 | 이전 판이 떠 있음 | 실패한 확인 항목을 보고 (서비스는 그대로) |
 
 ### A. 배포 전 백업으로 복원 (별도 승인)
