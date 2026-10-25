@@ -183,13 +183,15 @@ def test_bundle_counts_the_header_text(user, monkeypatch) -> None:
 
 
 def test_integration_counts_column_records_and_labels(user, monkeypatch) -> None:
-    """통합은 열 이름 매핑의 변경 기록(원본 열 이름·이유)과 결과 열 이름도 결과 글자로 센다."""
-    long_name = "인구" + "가" * 3000
+    """통합은 열 이름 매핑의 변경 기록(원본 열 이름·이유)과 결과 열 이름도 결과 글자로 센다. 열 이름은 매핑 확정
+    기록의 길이 한도(varchar 255 — PostgreSQL) 안으로: 240자 열 이름 하나가 변경 기록에 세 번(원본 열 이름·앞 값·이유)
+    들어간다."""
+    long_name = "인구" + "가" * 238
     rows = [["시도", "시군구", long_name], ["서울특별시", "종로구", 10]]
     fid = _upload(user, "ob-colname.xlsx", _xlsx({"colname": rows}))
     _confirm(user, fid, {"시도": "sido", "시군구": "sigungu", long_name: "population"})
     rid = _review_of(user, [fid])
-    monkeypatch.setattr(integration, "MAX_OUTPUT_TEXT_CHARS", 1_000)
+    monkeypatch.setattr(integration, "MAX_OUTPUT_TEXT_CHARS", 500)  # 결과 칸·열 이름만이면 이보다 훨씬 적다
     before = _state()
     res = user.post(f"/reviews/{rid}/integrate", json={})
     assert res.status_code == 409 and "결과에 넣을 글자가" in res.json()["detail"], res.text
