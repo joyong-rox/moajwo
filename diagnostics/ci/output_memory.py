@@ -548,6 +548,19 @@ def part_d11(c: Client, n: int) -> None:
         detail=None if rs == 201 else str(run)[:200], **mem(), state=state())  # fmt: skip
 
 
+def part_d12(c: Client, name: str = "sst499_0.xlsx") -> None:
+    """긴 글자 파일 하나(기본: 결과 글자 예산 바로 아래 — 통합이 약 4,790만 자로 셈)의 통합과 큰 xlsx 올리기를 같은
+    순간에 — 결과 만들기 차례 하나 + 읽기 차례 하나가 겹치는, 차례가 허용하는 가장 큰 조합."""
+    fids = upload(c, [name], mapping=LONG)
+    rid = _review_ready(c, fids)
+    log(case="D12 준비", review=rid, **mem(), state=state())
+    if rid is None or not alive():
+        return
+    res = _together({"통합 1개 (약 4,790만 자)": ("POST", f"/reviews/{rid}/integrate", {"include_unmapped": True}),
+                     "큰 xlsx 올리기": ("UPLOAD", "/files", [FILES / "x_big.xlsx"])})  # fmt: skip
+    log(case="D12 긴 글자 통합 + 큰 xlsx 올리기 동시", results=res, **mem(), state=state())
+
+
 MAIN = Client()
 
 
@@ -556,12 +569,16 @@ def main() -> None:
     s, _ = c.call("POST", "/auth/setup", {"username": "ci-out", "display_name": "CI", "password": PW})
     log(case="setup", status=s, **mem())
     try:
-        if PART.startswith(("D10_", "D11_")):  # D10_n·D11_n: 파일 n개
-            (part_d10 if PART.startswith("D10_") else part_d11)(c, int(PART.split("_")[1]))
+        if PART.startswith("D12_"):  # D12_<칸 수><차례 글자>: 그 크기 파일 하나로 D12
+            n = "".join(ch for ch in PART.split("_")[1] if ch.isdigit())
+            part_d12(c, "sst499_0.xlsx" if n == "499" else f"sst{n}_0.xlsx")
+            raise _Done
+        if PART.startswith(("D10", "D11")):  # D10_n·D11_n: 파일 n개 (D10L_n·D11L_n: 로컬 기본 한도, 1GiB)
+            (part_d10 if PART.startswith("D10") else part_d11)(c, int(PART.split("_")[1]))
             raise _Done
         {"A": part_a, "B": part_b, "C": part_c, "D1": part_d1, "D2": part_d2, "D3": part_d3, "D4": part_d4,
          "D5": part_d5, "D6": part_d6, "D7": part_d7, "D3L": part_d3l, "D8": part_d8, "D9": part_d9,
-         "A3": lambda cl: part_a(cl, 15)}[PART](c)  # fmt: skip
+         "A3": lambda cl: part_a(cl, 15), "D12": part_d12}[PART](c)  # fmt: skip
     except _Done:
         pass
     except RuntimeError as exc:

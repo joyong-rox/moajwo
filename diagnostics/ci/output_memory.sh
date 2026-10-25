@@ -71,6 +71,9 @@ for n in (499, 500, 1999, 2000, 4000, 8000):  # 499칸 = 15,968,998자 (Render 1
 for k in range(8):  # D9~D11: 한도(1,600만 자) 바로 아래 파일 — 글자가 조금씩 달라 같은 파일로 보이지 않게
     v = " " + chr(0xAC00 + k) + "가" * 31999 + " "
     shared_xlsx(f"/files/sst499_{k}.xlsx", [["시도", "시군구", "비고"]] + [["서울특별시", GU[i % len(GU)], v] for i in range(499)])
+for n in (330, 416):  # D12_<n>: 결과 글자 예산 후보를 재려고 한 파일만 (같은 32,002자 × n칸)
+    v = " " + chr(0xAC00) + "가" * 31999 + " "
+    shared_xlsx(f"/files/sst{n}_0.xlsx", [["시도", "시군구", "비고"]] + [["서울특별시", GU[i % len(GU)], v] for i in range(n)])
 shared_xlsx("/files/merge_300k.xlsx", [["시도", "인구수"], ["서울특별시", "10"]], merges=("A3:Z11540",))  # 26 × 11,538 ≈ 30만 칸
 shared_xlsx("/files/merge_1m.xlsx", [["시도", "인구수"], ["서울특별시", "10"]], merges=("A3:Z40000",))  # 26 × 39,998 ≈ 104만 칸
 wb = openpyxl.Workbook(write_only=True)  # 1,000열 × 290행
@@ -100,7 +103,7 @@ wb.save("/files/an_30k.xlsx")
 PY
 ls -l "$FILES" >> "$OUT/files.txt"
 # Render 권장 읽기 한도 (docs/MEMORY.md). 글자 수 한도는 수정 전 이미지에 없는 변수라 무시된다 — 같은 명령으로 둘을 잰다
-LIMITS="-e MOAJWO_MAX_UPLOAD_MIB=10 -e MOAJWO_MAX_XLSX_UNCOMPRESSED_MIB=16 -e MOAJWO_MAX_FILE_CELLS=400000 -e MOAJWO_VIEW_CACHE_MIB=32 -e MOAJWO_PARSE_SLOTS=1 -e MOAJWO_MAX_FILE_TEXT_CHARS=16000000"
+LIMITS="-e MOAJWO_MAX_UPLOAD_MIB=10 -e MOAJWO_MAX_XLSX_UNCOMPRESSED_MIB=16 -e MOAJWO_MAX_FILE_CELLS=400000 -e MOAJWO_VIEW_CACHE_MIB=32 -e MOAJWO_PARSE_SLOTS=1 -e MOAJWO_MAX_FILE_TEXT_CHARS=16000000 -e MOAJWO_MAX_OUTPUT_TEXT_CHARS=48000000"
 run_part() {  # run_part <부분> <결과 칸 예산> [메모리] [LIMITS 대신 쓸 환경 변수]
   local name="out$1" memory="${3:-512m}" limits="${4-$LIMITS}"
   docker run -d --name "$name" --memory="$memory" --memory-swap="$memory" -e OLLAMA_BASE_URL=http://127.0.0.1:9 $limits \
@@ -118,7 +121,7 @@ run_part() {  # run_part <부분> <결과 칸 예산> [메모리] [LIMITS 대신
 for part in ${PARTS:-A B}; do
   case "$part" in
     A|A3) run_part "$part" 5000000 ;;
-    D3L) run_part D3L 1000000 1g "" ;;  # 로컬·폐쇄망 기본 한도(환경 변수 없음) — 로컬은 컨테이너 제한이 없어 1GiB로 잰다
+    D3L|D10L_*|D11L_*) run_part "$part" 1000000 1g "" ;;  # 로컬·폐쇄망 기본 한도(환경 변수 없음) — 로컬은 컨테이너 제한이 없어 1GiB로 잰다
     D8) run_part D8 300000 512m "$LIMITS -e MOAJWO_OUTPUT_SLOTS=2" ;;
     *) run_part "$part" 300000 ;;
   esac
