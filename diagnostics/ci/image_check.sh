@@ -27,14 +27,33 @@ build() {  # build <이름> <컨텍스트> [Dockerfile]
     res "build_$name" FAIL "build-$name.log"; tail -30 "$OUT/build-$name.log"
   fi
 }
+# 기반 이미지를 먼저 받아 둔다 — 빌드가 같은 판을 쓰고, 아래에서 그 판의 digest·패키지를 읽는다
+for base in nginx:1.30-alpine node:24-alpine python:3.11-slim; do docker pull -q "$base" >> "$LOG" 2>&1; done
 build backend backend
 build frontend frontend
 build frontend-render frontend frontend/Dockerfile.render
+grep -ho 'docker.io/library/[a-z0-9.:-]*@sha256:[0-9a-f]*' "$OUT"/build-*.log 2>/dev/null | sort -u > "$OUT/base-digests-used.txt"
 for n in backend frontend frontend-render; do
   docker image inspect "moajwo-$n:check" > "$OUT/inspect-$n.json" 2>/dev/null || continue
   docker image inspect "moajwo-$n:check" --format \
     '{{.Id}} user={{.Config.User}} ports={{json .Config.ExposedPorts}} cmd={{json .Config.Cmd}} layers={{len .RootFS.Layers}} size={{.Size}}' \
     | sed "s/^/$n /" | tee -a "$OUT/images.txt"
+done
+
+# ---------------------------------------------------------------- 기반 이미지·설치 패키지 (두 nginx 최종 이미지 — 로컬 frontend·Render)
+# 기반 태그는 떠도는 태그라 빌드 때 받은 판의 digest를 남긴다. 패키지는 기반 nginx 이미지 대비 바뀐 것만 따로 (apk info -v)
+for base in nginx:1.30-alpine node:24-alpine python:3.11-slim; do
+  docker image inspect "$base" --format "$base {{.Id}} {{json .RepoDigests}}" >> "$OUT/bases.txt" 2>&1
+done
+res base_nginx "$(grep '^nginx:' "$OUT/bases.txt" | cut -d' ' -f3- | cut -c1-120)" "기반 nginx:1.30-alpine digest (bases.txt)"
+docker run --rm --entrypoint apk nginx:1.30-alpine info -v 2>/dev/null | sort > "$OUT/apk-base-nginx.txt"
+for n in frontend frontend-render; do
+  docker run --rm --entrypoint apk "moajwo-$n:check" info -v 2>/dev/null | sort > "$OUT/apk-$n.txt"
+  res "image_$n" "$(docker image inspect "moajwo-$n:check" --format '{{.Id}}' | cut -c1-19)" "최종 이미지 ID"
+  res "apk_brotli_$n" "$(grep -E '^brotli-libs-' "$OUT/apk-$n.txt" | tr '\n' ' ')" \
+    "설치된 brotli-libs (기반: $(grep -E '^brotli-libs-' "$OUT/apk-base-nginx.txt" | tr '\n' ' '))"
+  res "apk_changes_$n" "$(diff "$OUT/apk-base-nginx.txt" "$OUT/apk-$n.txt" | grep '^[<>]' | tr '\n' ' ')" \
+    "기반 nginx 대비 패키지 변경 (< 기반 · > 최종, 비면 변경 없음 — apk-$n.txt)"
 done
 
 # ---------------------------------------------------------------- backend
@@ -225,6 +244,21 @@ curl -sSL -o "$TGZ" "https://github.com/aquasecurity/trivy/releases/download/v$T
 curl -sSL -o trivy.sum "https://github.com/aquasecurity/trivy/releases/download/v$TV/trivy_${TV}_checksums.txt"
 if grep "  $TGZ\$" trivy.sum | sha256sum -c - >> "$LOG" 2>&1; then
   tar xzf "$TGZ" trivy
+  ./trivy --version | head -1 >> "$LOG"
+  for n in frontend frontend-render; do  # 대상 CVE는 심각도와 상관없이 찾는다 (HIGH·CRITICAL만 보면 등급이 다를 때 놓침)
+    ./trivy image --quiet --format json --scanners vuln -o "$OUT/trivy-all-$n.json" "moajwo-$n:check" 2>> "$LOG"
+    res "trivy_target_$n" "$(python3 - "$OUT/trivy-all-$n.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+v = [x for r in d.get("Results", []) for x in r.get("Vulnerabilities") or []]
+hit = [f"{x['PkgName']} {x['InstalledVersion']} (수정 {x.get('FixedVersion') or '-'})" for x in v
+       if x["VulnerabilityID"] == "CVE-2026-111497"]
+db = (d.get("Metadata") or {}).get("DB") or {}
+print(("남음: " + "; ".join(hit)) if hit else "검출 없음", "· 모든 심각도", len({x["VulnerabilityID"] for x in v}), "개",
+      "· DB", db.get("UpdatedAt", "-")[:19])
+PY
+)" "CVE-2026-111497 (brotli-libs) — trivy-all-$n.json"
+  done
   for n in backend frontend frontend-render; do
     ./trivy image --quiet --format json --scanners vuln --severity HIGH,CRITICAL -o "$OUT/trivy-$n.json" "moajwo-$n:check" 2>> "$LOG"
     res "trivy_$n" "$(python3 - "$OUT/trivy-$n.json" <<'PY'
