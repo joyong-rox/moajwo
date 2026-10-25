@@ -162,9 +162,18 @@ function ReviewPanel({
     void run(PANEL_BUSY, async () => {
       const done = await completeReview(current.id)
       const learned = done.learned
-      const skipped = learned?.names_skipped
-        ? ` 기관·지역 이름 ${learned.names_skipped}개는 공용 용어사전이라 관리자만 등록할 수 있어 기억하지 않았습니다.`
-        : ''
+      // 기억하지 않은 기관·지역 이름은 이유별로 알린다 (권한 · 개인정보 형식 · 저장 한도)
+      const skipped = [
+        learned?.names_skipped
+          ? ` 기관·지역 이름 ${learned.names_skipped}개는 공용 용어사전이라 관리자만 등록할 수 있어 기억하지 않았습니다.`
+          : '',
+        learned?.names_pii
+          ? ` 기관·지역 이름 ${learned.names_pii}개는 개인정보 형식이 있어 공용 용어사전에 기억하지 않았습니다.`
+          : '',
+        learned?.names_not_storable
+          ? ` 기관·지역 이름 ${learned.names_not_storable}개는 저장 한도(255자)를 넘거나 저장할 수 없는 문자가 있어 기억하지 않았습니다.`
+          : '',
+      ].join('')
       setMessage(
         (learned && (learned.columns || learned.names)
           ? `검토 완료 — 열 이름 ${learned.columns}개, 기관·지역 이름 ${learned.names}개를 기억했습니다.`

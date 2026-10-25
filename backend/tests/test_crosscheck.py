@@ -581,7 +581,7 @@ def test_alias_api_and_learning_never_store_pii_names(client_with_entry) -> None
         db.commit()
         learned = complete(db, session, learn_names=True)
         stored = db.scalar(sql_select(GlossaryAlias.id).where(GlossaryAlias.alias == "carol@example.com 담당"))
-    assert stored is None and learned["names"] == 0 and learned["names_skipped"] == 1
+    assert stored is None and learned["names"] == 0 and learned["names_pii"] == 1 and learned["names_skipped"] == 0
 
 
 @pytest.fixture()

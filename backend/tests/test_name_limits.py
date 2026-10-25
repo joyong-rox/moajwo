@@ -1,20 +1,25 @@
-"""파일에서 온 이름의 저장 한도 (app/name_limits.py) — SQLite와 PostgreSQL에서 같은 거절을, 쓰기 전에, 원문 없이.
+"""파일에서 온 이름·값의 저장 규칙 (app/name_limits.py) — SQLite와 PostgreSQL에서 같은 거절을, 쓰기 전에, 원문 없이.
 
-PostgreSQL은 varchar(255)보다 긴 이름을 쓰는 순간 DB 오류(500)를 냈고 SQLite는 그대로 저장했다. 같은 시험이 두 DB에서
-돈다 (MOAJWO_TEST_DATABASE_URL). 길이는 글자 수 — 한글 255자(765바이트)는 두 DB 모두 저장된다.
+PostgreSQL은 varchar(255)보다 긴 이름을 쓰는 순간 DB 오류(500)를 냈고 NUL(0x00)이 든 글자는 드라이버가 보내지 않았다
+(500). SQLite는 둘 다 그대로 저장했다. 같은 시험이 두 DB에서 돈다 (MOAJWO_TEST_DATABASE_URL). 길이는 글자 수 — 한글
+255자(765바이트)는 두 DB 모두 저장된다. 실제로 저장하는 값만 거절한다 — 비교에만 쓰는 전월 자료의 이름, 결과 파일에만
+쓰는 '코드' 열 이름은 막지 않는다. 거절 문구에는 고정 코드와 위치(파일 번호·시트 순번·열·행)만 (이름·값 원문 없음).
 """
 
 import io
 import json
+import logging
+import warnings
 from typing import Any
 
 import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import db_rows
+from tests.conftest import POSTGRES, db_rows
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+PHONE = "010-1234-5678"
 
 
 def _name(n: int, head: str) -> str:
@@ -23,6 +28,7 @@ def _name(n: int, head: str) -> str:
 
 
 N254, N255, N256 = _name(254, "인구"), _name(255, "세대"), _name(256, "예산")
+RAW = "가" * 10  # 위 긴 이름에만 있는 조각 — 응답·기록에 이 조각이 있으면 원문을 되돌려 보낸 것
 
 
 @pytest.fixture(scope="module")
@@ -46,23 +52,34 @@ def client():
     patch.undo()
 
 
-def _xlsx(rows: list[list], merges: tuple[str, ...] = ()) -> bytes:
+def _xlsx(rows: list[list], merges: tuple[str, ...] = (), sheets: tuple[str, ...] = ("현황",)) -> bytes:
+    """마지막 시트에 rows를 쓴다 (앞 시트는 안내 한 줄)."""
     wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "현황"
+    with warnings.catch_warnings():  # 31자를 넘는 시트 이름은 openpyxl이 경고만 하고 저장한다
+        warnings.simplefilter("ignore")
+        wb.active.title = sheets[0]
+        for extra in sheets[1:]:
+            wb.create_sheet(extra)
+    ws = wb[sheets[-1]]
     for r in rows:
         ws.append(r)
     for m in merges:
         ws.merge_cells(m)
+    if len(sheets) > 1:
+        wb[sheets[0]].append(["이 시트는 작성 안내입니다"])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-def _upload(c: TestClient, name: str, data: bytes) -> int:
-    res = c.post("/files", files=[("files", (name, data, XLSX))])
+def _upload(c: TestClient, name: str, data: bytes, mime: str = XLSX) -> int:
+    res = c.post("/files", files=[("files", (name, data, mime))])
     assert res.status_code == 200 and res.json()[0]["id"], res.text
     return res.json()[0]["id"]
+
+
+def _csv(c: TestClient, name: str, text: str) -> int:
+    return _upload(c, name, text.encode("utf-8-sig"), "text/csv")
 
 
 def _apply(c: TestClient, fid: int, *cols: tuple[str, str | None]) -> Any:
@@ -74,9 +91,15 @@ def _apply(c: TestClient, fid: int, *cols: tuple[str, str | None]) -> Any:
     return c.post("/mapping/batch/apply", json={"items": items})
 
 
+def _put(c: TestClient, fid: int, column_id: str, key: str | None) -> Any:
+    body = {"decisions": [{"sheet_id": "s0", "column_id": column_id, "field_key": key}]}
+    return c.put(f"/files/{fid}/mapping/decisions", json=body)
+
+
 def _decided(fid: int) -> list[tuple]:
     return db_rows(
-        "select column_name, field_key from mapping_decisions where source_file_id = ? order by length(column_name)",
+        "select column_name, field_key from mapping_decisions where source_file_id = ? "
+        "order by length(column_name), column_name",
         fid,
     )
 
@@ -86,21 +109,49 @@ def _count(table: str) -> int:
 
 
 def _counts() -> dict[str, int]:
-    tables = ("validation_runs", "review_sessions", "review_items", "runs", "mapping_decisions", "learned_aliases")
+    tables = ("validation_runs", "review_sessions", "review_items", "runs", "run_changes", "mapping_decisions",
+              "learned_aliases", "mapping_approvals", "standard_terms", "glossary_aliases")  # fmt: skip
     return {t: _count(t) for t in tables}
 
 
+def _over_limit() -> list[tuple[str, str, int]]:
+    """varchar(255) 이름 열에서 255자를 넘는 값 (표·열·건수)."""
+    out = []
+    for table, col in [("mapping_decisions", "column_name"), ("mapping_decisions", "sheet_name"),
+                       ("review_items", '"column"'), ("review_items", "sheet"), ("review_items", "file_name"),
+                       ("run_changes", '"column"'), ("run_changes", "source_column"), ("run_changes", "sheet"),
+                       ("run_changes", "file_name"), ("learned_aliases", "normalized"),
+                       ("standard_terms", "normalized"), ("glossary_aliases", "normalized")]:  # fmt: skip
+        n = db_rows(f"select count(*) from {table} where length({col}) > 255")[0][0]
+        if n:
+            out.append((table, col, n))
+    return out
+
+
+def _approve_pending(c: TestClient, review: dict) -> None:
+    for i in review["items"]:
+        if i["category"] == "pending" and i["decision"] is None:
+            res = c.post(f"/reviews/{review['id']}/items/{i['id']}/decision", json={"decision": "approved"})
+            assert res.status_code == 200, res.text
+
+
 def _ready(c: TestClient, fids: list[int]) -> dict:
-    """검토를 만들고 완료한다 (모든 열을 확정했고 이름은 용어사전에 있음)."""
+    """검토를 만들고 (확인 필요 항목은 승인해) 완료한다."""
     res = c.post("/reviews", json={"file_ids": fids})
     assert res.status_code == 201, res.text
-    review = res.json()
-    res = c.post(f"/reviews/{review['id']}/complete")
+    _approve_pending(c, res.json())
+    res = c.post(f"/reviews/{res.json()['id']}/complete")
     assert res.status_code == 200, res.text
     return res.json()
 
 
-# ---------------------------------------------------------------- 확정 (한 열·일괄·공통 검토 승인 = 일괄 적용 API)
+def _no_echo(text: str, *raws: str) -> None:
+    for raw in raws:
+        assert raw not in text, (raw[:12], text[:300])
+    assert "\\u0000" not in text and "\\u0001" not in text  # 제어 문자가 든 원문을 되돌려 보내지 않음
+
+
+# ---------------------------------------------------------------- 확정 (한 열·열 번호·일괄·공통 검토 승인)
 
 
 def test_names_up_to_the_limit_are_confirmed_and_longer_ones_refused_before_writing(client) -> None:
@@ -110,9 +161,9 @@ def test_names_up_to_the_limit_are_confirmed_and_longer_ones_refused_before_writ
     res = _apply(client, fid, ("c3", "amount"))
     assert res.status_code == 409, res.text
     problems = res.json()["detail"]["problems"]
-    assert len(problems) == 1 and problems[0].startswith("길이.xlsx / 현황 / D열(머리글 1행): "), problems
-    assert "열 이름이 256자로 저장 한도 255자를 넘습니다" in problems[0]
-    assert N256[:20] not in res.text  # 이름 원문을 되돌려 보내지 않는다 (위치·글자 수·한도만)
+    assert len(problems) == 1 and problems[0].startswith(f"파일 #{fid} · 1번째 시트 · D열(머리글 1행): "), problems
+    assert "열 이름이 256자로 저장 한도 255자를 넘습니다" in problems[0] and "[NAME_TOO_LONG]" in problems[0]
+    _no_echo(res.text, RAW, "길이.xlsx")  # 위치만 (이름 원문·가린 파일 이름도 넣지 않음)
     # 한글 255자(765바이트)도 두 DB에서 그대로 저장된다 — 한도는 글자 수
     assert len(N255.encode("utf-8")) == 765
     assert _decided(fid) == [(N254, "note"), (N255, "population")]
@@ -121,12 +172,11 @@ def test_names_up_to_the_limit_are_confirmed_and_longer_ones_refused_before_writ
 def test_one_long_column_keeps_the_whole_request_unsaved_including_not_applicable(client) -> None:
     fid = _upload(client, "섞임.xlsx", _xlsx([["기관명", "섞임 메모", N256], ["행정안전부", "a", 1]]))
     before = _counts()
-    approvals = _count("mapping_approvals")
     # 정상 열 + 긴 열('해당 없음' — 해당 없음도 확정 행을 만든다): 아무것도 저장하지 않는다
     res = _apply(client, fid, ("c1", "note"), ("c2", None))
     assert res.status_code == 409 and len(res.json()["detail"]["problems"]) == 1, res.text
     assert _apply(client, fid, ("c2", None)).status_code == 409
-    assert _decided(fid) == [] and _counts() == before and _count("mapping_approvals") == approvals
+    assert _decided(fid) == [] and _counts() == before
     # 정상 열만 보내면 저장된다
     assert _apply(client, fid, ("c1", "note")).status_code == 200
     assert _decided(fid) == [("섞임 메모", "note")]
@@ -139,19 +189,23 @@ def test_preview_shows_the_long_column_excluded_with_its_place(client) -> None:
     entry = plan["items"][0]
     assert plan["excluded"] == 1 and entry["action"] == "excluded", plan
     assert entry["column"] == "B열(머리글 1행)" and "저장 한도 255자" in entry["reason"]
-    assert N256[:20] not in json.dumps(plan, ensure_ascii=False)
+    _no_echo(json.dumps(plan, ensure_ascii=False), RAW)
     assert _decided(fid) == []
+    # 원본 미리보기는 그대로 열린다 (저장하지 않는 화면)
+    assert client.get(f"/files/{fid}/preview").status_code == 200
 
 
 def test_api_decisions_check_the_name_found_by_column_id_too(client) -> None:
     fid = _upload(client, "직접.xlsx", _xlsx([["기관명", "직접 메모", N256], ["행정안전부", "a", 1]]))
     url = f"/files/{fid}/mapping/decisions"
-    res = client.put(url, json={"decisions": [{"sheet_id": "s0", "column_id": "c2", "field_key": "note"}]})
-    assert res.status_code == 422 and res.json()["detail"].startswith("시트 '현황' · C열(머리글 1행): "), res.text
-    assert "열 이름이 256자로 저장 한도 255자를 넘습니다" in res.text and N256[:20] not in res.text
+    res = _put(client, fid, "c2", "note")
+    assert res.status_code == 422, res.text
+    assert res.json()["detail"].startswith("확정하지 않았습니다 — 1번째 시트 · C열(머리글 1행): 열 이름이 256자로")
+    assert "[NAME_TOO_LONG]" in res.text
+    _no_echo(res.text, RAW, "현황")
     # 예전 방식(열 이름 글자)도 같은 거절
     res = client.put(url, json={"decisions": [{"sheet": "현황", "column": N256, "field_key": None}]})
-    assert res.status_code == 422 and N256[:20] not in res.text
+    assert res.status_code == 422 and RAW not in res.text
     # 정상 열과 함께 보내도 아무것도 저장하지 않는다
     both = [{"sheet_id": "s0", "column_id": "c1", "field_key": "note"}, {"sheet_id": "s0", "column_id": "c2",
             "field_key": None}]  # fmt: skip
@@ -174,14 +228,53 @@ def test_two_level_header_joined_past_the_limit(client) -> None:
     assert _decided(long) == []
 
 
+def test_merged_duplicate_column_is_shown_at_its_original_place(client) -> None:
+    # B1:D1 병합 머리글 — C열은 B열과 값이 같아 복제로 빠지고, D열은 '<254자>_3'(256자)이 된다 (원본 D열)
+    rows = [["기관명", "가" * 254, None, None], ["행정안전부", 1, 1, 2]]
+    fid = _upload(client, "복제열.xlsx", _xlsx(rows, ("B1:D1",)))
+    res = _apply(client, fid, ("c2", "note"))
+    assert res.status_code == 409 and "D열(머리글 1행)" in res.text, res.text
+    res = _put(client, fid, "c2", "note")
+    assert res.status_code == 422 and "D열(머리글 1행)" in res.text, res.text
+    res = client.post("/reviews", json={"file_ids": [fid]})
+    assert res.status_code == 422 and f"파일 #{fid} · 1번째 시트 · D열(머리글 1행)" in res.text, res.text
+    assert _decided(fid) == []
+
+
+def test_sheet_names_up_to_the_limit_and_over(client) -> None:
+    ok = _upload(client, "시트255.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 1]], sheets=("시" * 255,)))
+    assert _apply(client, ok, ("c0", "org_name")).status_code == 200
+    assert db_rows("select length(sheet_name) from mapping_decisions where source_file_id = ?", ok) == [(255,)]
+    fid = _upload(client, "시트256.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 1]], sheets=("시" * 256,)))
+    item = {"file_id": fid, "sheet_id": "s0", "column_id": "c0", "field_key": "org_name"}
+    plan = client.post("/mapping/batch/preview", json={"items": [item]}).json()
+    assert plan["items"][0]["sheet"] == "1번째 시트" and plan["items"][0]["action"] == "excluded", plan
+    res = _apply(client, fid, ("c0", "org_name"))
+    assert res.status_code == 409, res.text
+    problem = res.json()["detail"]["problems"][0]
+    assert problem.startswith(f"파일 #{fid} · 1번째 시트 · A열(머리글 1행): 시트 이름이 256자로"), problem
+    res = _put(client, fid, "c0", "org_name")
+    assert res.status_code == 422 and "1번째 시트 · A열(머리글 1행): 시트 이름이 256자로" in res.text, res.text
+    res = client.post("/reviews", json={"file_ids": [fid]})
+    assert res.status_code == 422 and f"파일 #{fid} · 1번째 시트: 시트 이름이 256자로" in res.text, res.text
+    for text in (json.dumps(plan, ensure_ascii=False), res.text):
+        _no_echo(text, "시" * 20)
+    assert _decided(fid) == []
+
+
+def test_sheet_place_counts_the_skipped_guide_sheet(client) -> None:
+    # 파서는 '작성 안내' 시트를 건너뛰지만, 위치는 원본 통합 문서의 탭 순번으로 알린다 (두 번째 탭)
+    fid = _upload(client, "안내시트.xlsx", _xlsx([["기관명", N256], ["행정안전부", 1]], sheets=("작성 안내", "현황")))
+    res = client.post("/reviews", json={"file_ids": [fid]})
+    assert res.status_code == 422 and f"파일 #{fid} · 2번째 시트 · B열(머리글 1행)" in res.text, res.text
+    assert "2번째 시트 · B열" in _apply(client, fid, ("c1", "note")).text
+
+
 def test_learning_skips_a_name_whose_key_grows_past_the_limit(client) -> None:
     name = "㍿" * 100  # 100자 — 정규화(NFKC) 키는 '株式会社' × 100 = 400자
     fid = _upload(client, "호환문자.xlsx", _xlsx([["기관명", name], ["행정안전부", "a"]]))
     approvals = _count("mapping_approvals")
-    res = client.put(
-        f"/files/{fid}/mapping/decisions",
-        json={"decisions": [{"sheet_id": "s0", "column_id": "c1", "field_key": "note"}]},
-    )
+    res = _put(client, fid, "c1", "note")
     assert res.status_code == 200 and res.json()["saved"] == 1, res.text
     assert res.json()["not_learned"][0]["reason"] == "열 이름이 길어 학습하지 않음 (저장 한도 255자)"
     assert _decided(fid) == [(name, "note")]  # 확정은 저장된다
@@ -193,27 +286,103 @@ def test_learning_skips_a_name_whose_key_grows_past_the_limit(client) -> None:
     assert res.status_code == 200 and res.json()["learned"] == 0 and _decided(other) == [(name, "note")], res.text
 
 
+def test_learning_key_boundary_255_is_learned_and_256_is_not(client) -> None:
+    at, over = "㍿" + "가" * 251, "㍿" + "가" * 252  # 원래 252·253자 — 키 '株式会社…' 255·256자
+    fid = _upload(client, "학습경계.xlsx", _xlsx([["기관명", at, over], ["행정안전부", 1, 2]]))
+    res = client.put(
+        f"/files/{fid}/mapping/decisions",
+        json={
+            "decisions": [
+                {"sheet_id": "s0", "column_id": "c1", "field_key": "note"},
+                {"sheet_id": "s0", "column_id": "c2", "field_key": "amount"},
+            ]
+        },  # fmt: skip
+    )
+    assert res.status_code == 200 and res.json()["saved"] == 2, res.text
+    assert len(res.json()["learned"]) == 1 and len(res.json()["not_learned"]) == 1, res.json()
+    rows = db_rows("select length(normalized), length(alias) from learned_aliases where source_file_id = ?", fid)
+    assert rows == [(255, 252)]  # 키 255자는 두 DB에 저장된다
+
+
+def test_nul_in_a_column_name_is_refused_the_same_on_both_databases(client) -> None:
+    text = "기관명,인구\x00수,정상 메모\n행정안전부,1,a\n"  # NUL은 지우거나 바꾸지 않는다 — 이름을 고쳐 올리게 한다
+    fid = _csv(client, "널머리글.csv", text)
+    before = _counts()
+    res = _put(client, fid, "c1", "population")
+    assert res.status_code == 422 and "1번째 시트 · B열(머리글 1행): 열 이름에 NUL(0x00) 문자가 있습니다" in res.text
+    assert "[NAME_HAS_NUL]" in res.text
+    res = _apply(client, fid, ("c1", "population"), ("c2", "note"))  # 정상 열과 섞여도 아무것도 저장하지 않는다
+    assert res.status_code == 409 and "[NAME_HAS_NUL]" in res.text, res.text
+    item = {"file_id": fid, "sheet_id": "s0", "column_id": "c1", "field_key": "population"}
+    plan = client.post("/mapping/batch/preview", json={"items": [item]}).json()
+    assert plan["items"][0]["action"] == "excluded" and plan["items"][0]["column"] == "B열(머리글 1행)", plan
+    res = client.post("/reviews", json={"file_ids": [fid]})
+    assert res.status_code == 422 and f"파일 #{fid} · 1번째 시트 · B열(머리글 1행)" in res.text, res.text
+    for text in (res.text, json.dumps(plan, ensure_ascii=False)):
+        _no_echo(text)
+    assert _decided(fid) == [] and _counts() == before  # 검증 기록도 남기지 않음 (PostgreSQL에서 500·고아 기록)
+
+
+def test_tabs_newlines_and_hangul_are_not_refused(client) -> None:
+    fid = _csv(client, "탭줄바꿈.csv", '기관명,"비고\t메모"\n행정안전부,"줄\n바꿈\t탭"\n')
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "note")).status_code == 200
+    review = _ready(client, [fid])
+    res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert res.status_code == 201 and res.json()["status"] == "done", res.text
+
+
 # ---------------------------------------------------------------- 검토·다시 검사·자동화
 
 
 def test_review_is_not_created_for_long_names_and_leaves_nothing(client) -> None:
     long = _upload(client, "검토긴이름.xlsx", _xlsx([["기관명", N256], ["행정안전부", 1]]))
-    ok = _upload(client, "검토정상.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 1]]))
     before = _counts()
     res = client.post("/reviews", json={"file_ids": [long]})
     assert res.status_code == 422, res.text
     detail = res.json()["detail"]
-    assert "검토를 만들지 않았습니다" in detail and "'검토긴이름.xlsx' · 시트 '현황' · B열(머리글 1행)" in detail
-    assert "열 이름 256자 (한도 255자)" in detail and N256[:20] not in res.text
+    assert detail.startswith("이름을 저장할 수 없어 검토를 만들지 않았습니다 — ")
+    assert f"파일 #{long} · 1번째 시트 · B열(머리글 1행): 열 이름이 256자로 저장 한도 255자를 넘습니다" in detail
+    assert detail.endswith("[NAME_TOO_LONG]")
+    _no_echo(res.text, RAW, "검토긴이름")
     assert _counts() == before  # 검증 기록·검토·항목을 남기지 않는다
-    # 전월 비교 자료에 있어도 같다
-    res = client.post("/reviews", json={"file_ids": [ok], "baseline_file_ids": [long]})
-    assert res.status_code == 422 and _counts() == before
-    # 다시 검사로 긴 이름 파일로 바꾸면 거절하고, 이전 검토는 그대로 (대체되지 않음)
+
+
+def test_review_is_created_at_255_characters(client) -> None:
+    fid = _upload(client, "검토255.xlsx", _xlsx([["기관명", N255], ["행정안전부", 1]]))
+    res = client.post("/reviews", json={"file_ids": [fid]})
+    assert res.status_code == 201, res.text
+    assert db_rows('select max(length("column")) from review_items where session_id = ?', res.json()["id"]) == [(255,)]
+
+
+def test_long_names_only_in_the_baseline_do_not_block_the_review(client) -> None:
+    # 전월 비교 자료의 이름은 값 비교에만 쓰고 저장하지 않는다 — 두 DB 모두 저장할 수 있는 검토를 막지 않는다
+    now = _upload(client, "이번달.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 10]]))
+    last = _upload(client, "지난달.xlsx", _xlsx([["기관명", "인구수", N256], ["행정안전부", 9, 1]]))
+    assert _apply(client, now, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    res = client.post("/reviews", json={"file_ids": [now], "baseline_file_ids": [last]})
+    assert res.status_code == 201, res.text
+    assert _over_limit() == []  # 한도를 넘는 값은 어디에도 저장되지 않았다
+    names = {i["column"] for i in res.json()["items"] if i["column"]}
+    assert N256 not in names and all(len(n) <= 255 for n in names)
+
+
+def test_recheck_keeps_the_old_review_when_the_new_file_has_long_names(client) -> None:
+    ok = _upload(client, "다시정상.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 1]]))
+    long = _upload(client, "다시긴이름.xlsx", _xlsx([["기관명", "인구수", N256], ["행정안전부", 2, 3]]))
+    assert _apply(client, ok, ("c0", "org_name"), ("c1", "population")).status_code == 200
     review = client.post("/reviews", json={"file_ids": [ok]}).json()
+    before = _counts()
     res = client.post(f"/reviews/{review['id']}/recheck", json={"replace": {str(ok): long}})
-    assert res.status_code == 422, res.text
+    assert res.status_code == 422 and "검토를 만들지 않았습니다" in res.text and RAW not in res.text, res.text
+    # 이전 파일의 확정을 새 파일로 옮긴 것도 남지 않는다 (확정 복사는 검토 생성과 한 트랜잭션)
+    assert _decided(long) == [] and _counts() == before
     assert client.get(f"/reviews/{review['id']}").json()["status"] == "in_review"
+    # 정상 파일로 바꾸면 확정을 이어받아 다시 검사한다
+    fixed = _upload(client, "다시고침.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 4]]))
+    res = client.post(f"/reviews/{review['id']}/recheck", json={"replace": {str(ok): fixed}})
+    assert res.status_code == 201, res.text
+    assert _decided(fixed) == _decided(ok) == [("기관명", "org_name"), ("인구수", "population")]
+    assert client.get(f"/reviews/{review['id']}").json()["status"] == "superseded"
 
 
 def test_automation_run_on_long_names_records_nothing(client) -> None:
@@ -222,13 +391,18 @@ def test_automation_run_on_long_names_records_nothing(client) -> None:
     review = _ready(client, [fid])
     run = client.post(f"/reviews/{review['id']}/integrate", json={})
     assert run.status_code == 201, run.text
-    saved = client.post(f"/runs/{run.json()['id']}/automation", json={"name": "길이 한도 자동화"})
+    saved = client.post(f"/runs/{run.json()['id']}/automation", json={"name": f"길이 한도 자동화 {fid}"})
     assert saved.status_code == 201, saved.text
     long = _upload(client, "자동화긴이름.xlsx", _xlsx([["기관명", "인구수", N256], ["행정안전부", 11, 1]]))
     before = _counts()
     res = client.post(f"/automations/{saved.json()['id']}/run", json={"file_ids": [long]})
-    assert res.status_code == 422 and "검토를 만들지 않았습니다" in res.text and N256[:20] not in res.text, res.text
+    assert res.status_code == 422 and "검토를 만들지 않았습니다" in res.text and RAW not in res.text, res.text
     assert _counts() == before  # 규칙 기록(확정)·검토·실행 기록을 만들지 않는다
+    # 저장할 값에 NUL이 있어도 같다 — 자동화 규칙 확정을 먼저 쓰지 않는다 (검사를 마친 뒤 한 번에 기록)
+    nul = _csv(client, "자동화널값.csv", "기관명,인구수\n행정안전부,  1\x00  \n")
+    res = client.post(f"/automations/{saved.json()['id']}/run", json={"file_ids": [nul]})
+    assert res.status_code == 422 and "[VALUE_HAS_NUL]" in res.text, res.text
+    assert _decided(nul) == [] and _counts() == before
 
 
 def test_entity_files_listed_across_many_files_fit_the_limit(client) -> None:
@@ -241,10 +415,102 @@ def test_entity_files_listed_across_many_files_fit_the_limit(client) -> None:
     assert shown[0].startswith(names[0]) and shown[0].endswith("개") and " 외 " in shown[0]
 
 
+def test_automation_entity_rule_item_lists_many_files_within_the_limit(client) -> None:
+    # 자동화의 이름 규칙으로 처리한 항목(category auto)도 파일 이름 목록을 한도 안으로 요약한다
+    first = _upload(client, "규칙원본.xlsx", _xlsx([["기관명", "인구수"], ["마바사아연구기관", 1]]))
+    assert _apply(client, first, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    review = client.post("/reviews", json={"file_ids": [first]}).json()
+    entity = next(i for i in review["items"] if i["kind"] == "entity" and i["category"] == "pending")
+    res = client.post(f"/reviews/{review['id']}/items/{entity['id']}/decision", json={"decision": "rejected"})
+    assert res.status_code == 200, res.text
+    _approve_pending(client, client.get(f"/reviews/{review['id']}").json())
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert run.status_code == 201, run.text
+    saved = client.post(f"/runs/{run.json()['id']}/automation", json={"name": f"규칙 파일 목록 {first}"})
+    assert saved.status_code == 201, saved.text
+    names = [f"규칙적용_통계자료_현황표_{i:02d}_2026년9월분.xlsx" for i in range(12)]
+    fids = [_upload(client, n, _xlsx([["기관명", "인구수"], ["마바사아연구기관", i]])) for i, n in enumerate(names)]
+    res = client.post(f"/automations/{saved.json()['id']}/run", json={"file_ids": fids})
+    assert res.status_code in (200, 201), res.text
+    session_id = res.json()["review_id"]
+    lengths = db_rows("select length(file_name) from review_items where session_id = ? and kind = 'entity'", session_id)
+    assert lengths and all(n <= 255 for (n,) in lengths), lengths
+
+
+def test_nul_in_a_stored_cell_value_refuses_the_review_with_its_place(client) -> None:
+    # 앞뒤 공백 정리 항목은 원래 칸 값을 검토 항목에 저장한다 — NUL이 있으면 아무것도 쓰기 전에 위치만 알려 거절
+    fid = _csv(client, "널칸값.csv", "기관명,비고\n행정안전부,  값\x00끝  \n")
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "note")).status_code == 200
+    before = _counts()
+    res = client.post("/reviews", json={"file_ids": [fid]})
+    assert res.status_code == 422, res.text
+    assert f"파일 #{fid} · 1번째 시트 · 2행 · B열" in res.text and "[VALUE_HAS_NUL]" in res.text
+    _no_echo(res.text)
+    assert _counts() == before  # 검증 기록도 남기지 않음 (PostgreSQL에서 500·고아 기록이던 경로)
+
+
+def test_nul_in_a_cell_that_is_only_read_is_refused_only_where_it_is_written(client) -> None:
+    # 저장하지 않는 칸 값(검토 항목에 들어가지 않음)은 검토를 막지 않고, 결과 파일에 쓰는 통합에서 위치만 알려 거절한다
+    fid = _csv(client, "널읽기.csv", "기관명,비고\n행정안전부,값\x00끝\n")
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "note")).status_code == 200
+    review = _ready(client, [fid])
+    before = _counts()
+    res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert res.status_code == 409 and f"파일 #{fid} · 1번째 시트 · 2행 · B열" in res.text, res.text
+    assert "[CELL_CONTROL_CHAR]" in res.text
+    _no_echo(res.text)
+    assert _counts() == before
+
+
+# ---------------------------------------------------------------- 검토 완료 학습
+
+
+def test_review_completion_skips_learning_an_unstorable_name_with_its_own_reason(client) -> None:
+    csv = "코드,정식명칭,유형\n9820001," + "다" * 255 + ",기관\n"
+    assert client.post("/glossary/import", files=[("file", ("g2.csv", csv.encode("utf-8"), "text/csv"))]).json()[
+        "applied"
+    ]
+    value = "다" * 256  # 셀 값 — 용어사전 후보(255자)와 비슷하지만 저장 한도를 넘어 별칭으로 학습할 수 없다
+    fid = _upload(client, "별칭학습.xlsx", _xlsx([["기관명", "인구수"], [value, 1]]))
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    review = client.post("/reviews", json={"file_ids": [fid]}).json()
+    target = next(i for i in review["items"] if i["kind"] == "entity" and i["before"] == value)
+    assert target["category"] == "pending", target
+    res = client.post(f"/reviews/{review['id']}/items/{target['id']}/decision",
+                      json={"decision": "approved", "choice": "9820001"})  # fmt: skip
+    assert res.status_code == 200, res.text
+    _approve_pending(client, res.json())
+    assert client.patch(f"/reviews/{review['id']}", json={"remember_format": True}).status_code == 200
+    done = client.post(f"/reviews/{review['id']}/complete")
+    assert done.status_code == 200, done.text
+    learned = done.json()["learned"]
+    assert learned["names"] == 0 and learned["names_not_storable"] == 1, learned
+    assert learned["names_skipped"] == 0 and learned["names_pii"] == 0  # 권한·개인정보 때문이 아님
+    assert db_rows("select count(*) from glossary_aliases where target_code = '9820001'") == [(0,)]
+    db_rows("delete from glossary_entries where code = '9820001'")
+
+
 # ---------------------------------------------------------------- 통합
 
 
-def test_integration_refuses_a_result_column_name_over_the_limit_before_a_run(client) -> None:
+def test_integration_allows_a_long_code_column_that_is_not_recorded(client) -> None:
+    # 기관명 열 두 개(두 번째 248자): 결과 열 '기관명 [<248자>]'(254자)은 변경 기록에 저장되고, '… 코드'(257자)는
+    # 결과 파일에만 쓴다 — 저장하지 않는 이름으로 막지 않는다 (두 DB 모두 저장)
+    second = _name(248, "기관명원문")
+    fid = _upload(client, "코드열.xlsx", _xlsx([["기관명", second, "인구수"], ["행정안전부", "행정안전부", 1]]))
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "org_name"), ("c2", "population")).status_code == 200
+    review = _ready(client, [fid])
+    res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert res.status_code == 201 and res.json()["status"] == "done", res.text
+    run_id = res.json()["id"]
+    assert db_rows('select max(length("column")) from run_changes where run_id = ?', run_id) == [(254,)]
+    wb = openpyxl.load_workbook(io.BytesIO(client.get(f"/runs/{run_id}/download").content))
+    labels = [c.value for c in next(wb["통합 데이터"].iter_rows(max_row=1))]
+    assert f"기관명 [{second}] 코드" in labels  # 결과 파일의 열 이름은 그대로 (257자)
+
+
+def test_integration_refuses_a_recorded_result_column_name_over_the_limit_before_a_run(client) -> None:
     second = _name(251, "비고원문")  # 같은 표준 항목의 두 번째 열 → 결과 열 이름 '비고 [<251자>]' = 256자
     fid = _upload(client, "통합긴열.xlsx", _xlsx([["기관명", "메모", second], ["행정안전부", "a", "b"]]))
     assert _apply(client, fid, ("c0", "org_name"), ("c1", "note"), ("c2", "note")).status_code == 200
@@ -252,9 +518,82 @@ def test_integration_refuses_a_result_column_name_over_the_limit_before_a_run(cl
     before = _counts()
     res = client.post(f"/reviews/{review['id']}/integrate", json={})
     assert res.status_code == 409, res.text
-    assert "번째 열의 이름이 256자로 저장 한도 255자를 넘어 통합하지 않았습니다" in res.text
-    assert second[:20] not in res.text and "INSERT" not in res.text
+    detail = res.json()["detail"]
+    assert detail.startswith("이름을 저장할 수 없어 통합하지 않았습니다 — ")
+    # 그 결과 열 이름을 만든 원본 위치(파일 번호·시트 순번·열)와 고칠 방법
+    assert f"파일 #{fid} · 1번째 시트 · C열(머리글 1행): 결과 열 이름이 256자로 저장 한도 255자를 넘습니다" in detail
+    assert "[NAME_TOO_LONG]" in detail and "다른 항목으로 다시 확정" in detail
+    _no_echo(res.text, second[4:24], "INSERT")
     assert _counts() == before  # 실행 기록·변경 기록을 만들기 전에 거절
+
+
+def test_integration_records_a_result_column_name_of_255_characters(client) -> None:
+    second = _name(250, "비고원문")  # '비고 [<250자>]' = 255자
+    fid = _upload(client, "통합255.xlsx", _xlsx([["기관명", "메모", second], ["행정안전부", "a", "b"]]))
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "note"), ("c2", "note")).status_code == 200
+    review = _ready(client, [fid])
+    res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert res.status_code == 201 and res.json()["status"] == "done", res.text
+    assert db_rows('select max(length("column")) from run_changes where run_id = ?', res.json()["id"]) == [(255,)]
+
+
+def test_integration_refuses_control_characters_before_a_run_without_echoing_the_cell(client, caplog) -> None:
+    fid = _csv(client, "제어문자.csv", f"기관명,비고\n행정안전부,담당 {PHONE}\x01메모\n")
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "note")).status_code == 200
+    review = _ready(client, [fid])  # 저장(DB)에는 문제가 없는 글자 — 결과 파일(엑셀)에만 쓸 수 없다
+    before = _counts()
+    with caplog.at_level(logging.INFO):
+        res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert res.status_code == 409, res.text
+    assert f"파일 #{fid} · 1번째 시트 · 2행 · B열" in res.text and "[CELL_CONTROL_CHAR]" in res.text
+    _no_echo(res.text, PHONE, "담당", "제어문자")
+    assert PHONE not in caplog.text and "\x01" not in caplog.text
+    assert _counts() == before  # 실행 기록(runs)을 만들기 전에 거절 — 실행 기록·목록에도 원문이 남지 않는다
+    assert PHONE not in client.get(f"/runs?review_id={review['id']}").text
+    # 머리글(열 이름)에 든 제어 문자도 위치만
+    other = _csv(client, "제어머리글.csv", "기관명,담당\x01메모\n행정안전부,a\n")
+    assert _apply(client, other, ("c0", "org_name"), ("c1", "note")).status_code == 200
+    res = client.post(f"/reviews/{_ready(client, [other])['id']}/integrate", json={})
+    assert res.status_code == 409 and f"파일 #{other} · 1번째 시트 · B열(머리글 1행): 열 이름" in res.text, res.text
+    _no_echo(res.text, "담당")
+
+
+def test_unexpected_integration_failure_keeps_raw_text_out_of_the_answer_record_and_log(
+    client, monkeypatch, caplog
+) -> None:
+    from app import integration
+    from app.integration import OUTPUT_DIR
+
+    done = _upload(client, "완성결과.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 7]]))
+    assert _apply(client, done, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    first = client.post(f"/reviews/{_ready(client, [done])['id']}/integrate", json={})
+    assert first.status_code == 201, first.text
+    kept = client.get(f"/runs/{first.json()['id']}/download").content
+    fid = _upload(client, "통합실패원문.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 3]]))
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    review = _ready(client, [fid])
+
+    def broken(*args: Any, **kwargs: Any) -> int:
+        raise ValueError(f"담당 {PHONE} 셀 원문 cannot be used in worksheets.")
+
+    monkeypatch.setattr(integration, "write_workbook", broken)
+    with caplog.at_level(logging.INFO):
+        res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    monkeypatch.undo()
+    assert res.status_code == 409, res.text
+    detail = res.json()["detail"]
+    run_id, error = db_rows("select id, error from runs where review_session_id = ?", review["id"])[0]
+    reason = "예기치 않은 오류 (ValueError)"
+    assert detail == f"통합 결과를 만들지 못했습니다 — {reason} (실행 #{run_id}). [INTEGRATION_FAILED]"
+    assert error == "예기치 않은 오류 (ValueError) [INTEGRATION_FAILED]"
+    _no_echo(res.text, PHONE, "셀 원문")
+    assert PHONE not in client.get(f"/runs?review_id={review['id']}").text
+    assert PHONE not in caplog.text and "셀 원문" not in caplog.text
+    assert f"integration run {run_id} failed: ValueError" in caplog.text  # 서버 기록: 종류·실행 번호·코드 위치만
+    leftovers = [p.name for p in OUTPUT_DIR.iterdir() if p.name.endswith(".tmp")]
+    assert leftovers == []  # 임시 파일은 실패를 기록한 뒤 지운다
+    # 이미 완성된 다른 결과는 그대로 (지우지 않음)
+    assert client.get(f"/runs/{first.json()['id']}/download").content == kept
 
 
 def test_integration_failure_reason_has_no_sql(client, monkeypatch) -> None:
@@ -275,33 +614,118 @@ def test_integration_failure_reason_has_no_sql(client, monkeypatch) -> None:
     monkeypatch.undo()
     assert res.status_code == 409 and "DB 오류 (Exception)" in res.text, res.text
     assert "INSERT" not in res.text and "varying" not in res.text
-    error = db_rows("select error from runs order by id desc limit 1")[0][0]
+    error = db_rows("select error from runs where review_session_id = ?", review["id"])[0][0]
     assert "INSERT" not in error and error.startswith("DB 오류"), error
+
+
+def test_unexpected_bundle_failure_keeps_raw_text_out(client, monkeypatch, caplog) -> None:
+    from app import runlease
+
+    fid = _upload(client, "묶기실패.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 5]]))
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    body = {"file_ids": [fid]}
+    plan = client.post("/bundle/plan", json=body).json()
+    assert plan["ready"], plan
+
+    def broken(*args: Any, **kwargs: Any) -> None:
+        raise ValueError(f"담당 {PHONE} 셀 원문")
+
+    monkeypatch.setattr(runlease, "prepare", broken)
+    with caplog.at_level(logging.INFO):
+        res = client.post("/bundle/run", json={**body, "expected_basis": plan["basis"]})
+    monkeypatch.undo()
+    assert res.status_code == 409, res.text
+    message = res.json()["detail"]["message"]
+    assert message.startswith("결과 파일을 만들지 못했습니다 — 예기치 않은 오류 (ValueError) (실행 #")
+    assert message.endswith("[BUNDLE_FAILED]")
+    _no_echo(res.text, PHONE, "셀 원문")
+    error = db_rows("select error from runs order by id desc limit 1")[0][0]
+    assert PHONE not in error and error == "예기치 않은 오류 (ValueError) [BUNDLE_FAILED]", error
+    assert PHONE not in caplog.text and "셀 원문" not in caplog.text
 
 
 # ---------------------------------------------------------------- 용어사전
 
 
-def test_glossary_import_reports_too_long_values_as_row_errors(client) -> None:
-    long = "가" * 256
-    csv = f"코드,정식명칭,유형,별칭\n9100001,{long},기관,\n9100002,정상기관,기관,{'㍿' * 70}\n"
+def test_glossary_import_reports_unstorable_values_as_row_errors(client) -> None:
+    previous = ";".join(str(1000000 + i) for i in range(63))  # 저장 형식(쉼표로 이음) 503자
+    rows = [
+        "코드,정식명칭,유형,별칭,이전코드,메모",
+        f"9810001,{'가' * 256},기관,,,",
+        f"9810002,정상기관,기관,짧은별칭;{'㍿' * 70},,",
+        f"9810004,{'㈜' * 100},기관,,,",
+        f"9810005,정상기관5,{'유' * 65},,,",
+        f"9810006,정상기관6,기관,,,{'메' * 501}",
+        f"9810007,정상기관7,기관,,{previous},",
+        "9810008,널\x00기관,기관,,,",
+    ]
+    csv = "\n".join(rows) + "\n"
     res = client.post("/glossary/import", files=[("file", ("길이.csv", csv.encode("utf-8"), "text/csv"))])
     report = res.json()
     assert res.status_code == 200 and report["applied"] is False, res.text
-    assert [e["row"] for e in report["errors"]] == [2, 3]
-    assert report["errors"][0]["message"].startswith("정식명칭 256자 — 저장 한도 255자를 넘습니다")
-    assert report["errors"][1]["message"].startswith("별칭 280자 — 저장 한도 255자를 넘습니다")  # 정규화 키
-    assert long not in res.text
-    assert db_rows("select count(*) from glossary_entries where code in ('9100001', '9100002')") == [(0,)]
-    ok = "코드,정식명칭\n9100003," + "나" * 255 + "\n"
+    messages = {e["row"]: e["message"] for e in report["errors"]}
+    assert sorted(messages) == [2, 3, 4, 5, 6, 7, 8], messages
+    assert messages[2].startswith("정식명칭 256자 — 저장 한도 255자를 넘습니다")
+    # 정규화로 길어진 이름은 사용자가 적은 글자 수와 늘어난 글자 수를 나눠 적고, 별칭이 여럿이면 순번을 적는다
+    assert messages[3].startswith("별칭 2번째 70자 — 호환 문자(㈜·㍿ 등)를 풀어 정규화하면 280자로 저장 한도 255자를")
+    assert messages[4].startswith("정식명칭 100자 — 호환 문자(㈜·㍿ 등)를 풀어 정규화하면 300자로")
+    assert messages[5].startswith("유형 65자 — 저장 한도 64자를 넘습니다")
+    assert messages[6].startswith("메모 501자 — 저장 한도 500자를 넘습니다")
+    assert messages[7].startswith("이전코드 503자 — 저장 한도 500자를 넘습니다")
+    assert messages[8].startswith("정식명칭에 NUL(0x00) 문자가 있습니다") and "[NAME_HAS_NUL]" in messages[8]
+    _no_echo(res.text, "가" * 20, "유유유유유", "메메메메메")
+    assert db_rows("select count(*) from glossary_entries where code like '981000%'") == [(0,)]
+    # 고유 한도까지는 반영된다
+    ok = f"코드,정식명칭,유형,메모\n9810003,{'나' * 255},{'형' * 64},{'모' * 500}\n"
     res = client.post("/glossary/import", files=[("file", ("한도.csv", ok.encode("utf-8"), "text/csv"))])
     assert res.json()["applied"] is True, res.text
-    # 직접 추가하는 별칭: 이름은 한도 안이어도 정규화한 키가 넘으면 거절
+    db_rows("delete from glossary_entries where code = '9810003'")
+
+
+def test_glossary_alias_api_refuses_unstorable_aliases(client) -> None:
     res = client.post("/glossary/aliases", json={"alias": "㍿" * 70, "target_code": "1741000"})
-    assert res.status_code == 422 and "280자로 저장 한도 255자" in res.text, res.text
+    assert res.status_code == 422 and "별칭을 정규화한 이름이 280자로 저장 한도 255자" in res.text, res.text
+    res = client.post("/glossary/aliases", json={"alias": "널\x00별칭", "target_code": "1741000"})
+    assert res.status_code == 422 and "[NAME_HAS_NUL]" in res.text, res.text
+    res = client.post("/glossary/aliases", json={"alias": "정상별칭메모", "target_code": "1741000", "note": "a\x00b"})
+    assert res.status_code == 422 and "[VALUE_HAS_NUL]" in res.text, res.text
+    assert db_rows("select count(*) from glossary_aliases where alias like '%별칭%'") == [(0,)]
 
 
-# ---------------------------------------------------------------- 한도 검사 전에 SQLite에 쌓인 자료 (그대로 둠)
+# ---------------------------------------------------------------- 업로드·남은 입력의 안전망
+
+
+def test_upload_refuses_a_file_name_with_nul(client) -> None:
+    # 시험 도구(httpx)는 파일 이름의 NUL을 보내지 않으므로 multipart 본문을 직접 만든다 (다른 도구는 보낼 수 있다)
+    boundary = "MOAJWOBOUNDARY"
+    body = (
+        f'--{boundary}\r\nContent-Disposition: form-data; name="files"; filename="널\x00이름.xlsx"\r\n'
+        f"Content-Type: {XLSX}\r\n\r\n".encode()
+        + _xlsx([["기관명"], ["a"]])
+        + f"\r\n--{boundary}--\r\n".encode()
+    )
+    before = _count("source_files")
+    res = client.post("/files", content=body, headers={"content-type": f"multipart/form-data; boundary={boundary}"})
+    result = res.json()[0]
+    assert res.status_code == 200 and result["id"] is None and "[NAME_HAS_NUL]" in result["error"], res.text
+    assert _count("source_files") == before  # 기록·원본 파일을 만들기 전에 거절
+
+
+def test_typed_text_with_nul_is_not_a_server_error_on_postgresql(client) -> None:
+    """앱이 쓰기 전에 거절하지 않는 직접 입력(자동화 이름 등)의 NUL — PostgreSQL은 안전망이 입력 오류(422)로 알리고,
+    SQLite는 그대로 저장한다 (남은 두 DB 차이 — app/main.py)."""
+    fid = _upload(client, "안전망.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 1]]))
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    run = client.post(f"/reviews/{_ready(client, [fid])['id']}/integrate", json={})
+    assert run.status_code == 201, run.text
+    res = client.post(f"/runs/{run.json()['id']}/automation", json={"name": f"널\x00자동화 {fid}"})
+    if POSTGRES:
+        assert res.status_code == 422 and "[VALUE_HAS_NUL]" in res.text, res.text
+    else:
+        assert res.status_code == 201, res.text
+
+
+# ---------------------------------------------------------------- 이름 규칙 전에 SQLite에 쌓인 자료 (그대로 둠)
 
 
 @pytest.mark.sqlite_only("SQLite에만 한도를 넘는 기존 자료가 있을 수 있음 (PostgreSQL은 쓸 수 없음)")
@@ -313,7 +737,10 @@ def test_existing_long_values_in_sqlite_are_left_as_they_are(client) -> None:
         N256,
         "note",
     )
-    assert client.get(f"/files/{fid}/mapping/latest").status_code == 200  # 기존 확정은 그대로 읽힌다
+    res = client.get(f"/files/{fid}/mapping/latest")  # 기존 확정은 그대로 읽히고 확정으로 보인다
+    assert res.status_code == 200, res.text
+    column = res.json()["sheets"][0]["columns"][1]
+    assert column["status"] == "confirmed" and column["field_key"] == "note", column
     assert _decided(fid) == [(N256, "note")]
     # 새 확정(지금 상태를 맞게 적고 덮어쓰기를 골라도)은 저장 한도로 거절하고, 이미 있던 행은 지우거나 바꾸지 않는다
     item = {"file_id": fid, "sheet_id": "s0", "column_id": "c1", "field_key": None, "expected_confirmed": True,
@@ -323,7 +750,7 @@ def test_existing_long_values_in_sqlite_are_left_as_they_are(client) -> None:
     assert _decided(fid) == [(N256, "note")]
 
 
-@pytest.mark.sqlite_only("한도 검사 전에 SQLite에서 만든 검토 항목 (PostgreSQL에는 생길 수 없음)")
+@pytest.mark.sqlite_only("이름 규칙 전에 SQLite에서 만든 검토 항목 (PostgreSQL에는 생길 수 없음)")
 def test_legacy_review_item_with_a_long_name_is_not_confirmed(client) -> None:
     fid = _upload(client, "기존검토.xlsx", _xlsx([["기관명", "옛 메모"], ["행정안전부", "a"]]))
     review = client.post("/reviews", json={"file_ids": [fid]}).json()
@@ -333,5 +760,62 @@ def test_legacy_review_item_with_a_long_name_is_not_confirmed(client) -> None:
     )
     before = _decided(fid)
     res = client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json={"decision": "rejected"})
-    assert res.status_code == 409 and "256자로 저장 한도 255자" in res.text and N256[:20] not in res.text, res.text
+    assert res.status_code == 409 and "256자로 저장 한도 255자" in res.text and RAW not in res.text, res.text
     assert _decided(fid) == before
+
+
+@pytest.mark.sqlite_only("이름 규칙 전에 SQLite에 쌓인 확정 (PostgreSQL에는 생길 수 없음)")
+def test_recheck_does_not_copy_a_legacy_long_decision(client) -> None:
+    a = _upload(client, "옛확정A.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 1]]))
+    b = _upload(client, "옛확정B.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 2]]))
+    assert _apply(client, a, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    review = client.post("/reviews", json={"file_ids": [a]}).json()
+    db_rows("insert into mapping_decisions (source_file_id, sheet_name, column_name, field_key) values (?, '현황', ?, "
+            "'note')", a, N256)  # fmt: skip
+    before = _counts()
+    res = client.post(f"/reviews/{review['id']}/recheck", json={"replace": {str(a): b}})
+    assert res.status_code == 422, res.text
+    detail = res.json()["detail"]
+    assert detail.startswith(f"다시 검사하지 않았습니다 — 바꾸기 전 파일 #{a}의 열 매핑 확정 중 이름을 저장할 수 없는")
+    assert "열 이름이 256자로 저장 한도 255자를 넘습니다" in detail and detail.endswith("[NAME_TOO_LONG]")
+    _no_echo(res.text, RAW)
+    # 하나도 옮기지 않았고(정상 확정 2개도) 이전 검토는 대체되지 않았다
+    assert _decided(b) == [] and _counts() == before
+    assert client.get(f"/reviews/{review['id']}").json()["status"] == "in_review"
+
+
+@pytest.mark.sqlite_only("이름 규칙 전에 SQLite에 쌓인 승격 후보 (PostgreSQL에는 생길 수 없음)")
+def test_promotion_approval_refuses_a_legacy_long_candidate(client) -> None:
+    db_rows("insert into promotion_candidates (normalized, column_name, field_key, approver_count, status) values "
+            "(?, ?, 'note', 3, 'pending')", N256, N256)  # fmt: skip
+    cid = db_rows("select max(id) from promotion_candidates")[0][0]
+    before = _counts()
+    res = client.post(f"/admin/promotions/{cid}/approve", json={})
+    assert res.status_code == 409, res.text
+    assert "후보의 정규화한 이름이 256자로 저장 한도 255자를 넘습니다" in res.text and "[NAME_TOO_LONG]" in res.text
+    assert db_rows("select status from promotion_candidates where id = ?", cid) == [("pending",)]
+    assert _counts() == before
+    assert db_rows("select count(*) from standard_terms where length(normalized) > 255") == [(0,)]
+    # 반려는 그대로 할 수 있다 (사전은 바꾸지 않음)
+    assert client.post(f"/admin/promotions/{cid}/reject", json={}).status_code == 200
+
+
+@pytest.mark.sqlite_only("이름 규칙 전에 SQLite에서 만든 검토 (PostgreSQL에는 생길 수 없음)")
+def test_legacy_review_with_a_long_source_name_is_refused_at_integration_with_its_place(client, monkeypatch) -> None:
+    from app import review as review_module
+
+    fid = _upload(client, "옛검토통합.xlsx", _xlsx([["기관명", N256], ["행정안전부", "a"]]))
+    assert _apply(client, fid, ("c0", "org_name")).status_code == 200
+    db_rows("insert into mapping_decisions (source_file_id, sheet_name, column_name, field_key) values (?, '현황', ?, "
+            "'note')", fid, N256)  # fmt: skip
+    monkeypatch.setattr(review_module, "check_files", lambda *a, **k: None)  # 이름 규칙 전에 만든 검토를 흉내
+    review = _ready(client, [fid])
+    monkeypatch.undo()
+    before = _counts()
+    res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert res.status_code == 409, res.text
+    detail = res.json()["detail"]
+    assert f"파일 #{fid} · 1번째 시트 · B열(머리글 1행): 원본 열 이름이 256자로 저장 한도 255자를 넘습니다" in detail
+    assert "검토에서 다시 검사해야 합니다" in detail
+    _no_echo(res.text, RAW)
+    assert _counts() == before

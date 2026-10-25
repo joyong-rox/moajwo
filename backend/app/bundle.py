@@ -43,6 +43,7 @@ from app.analysis_api import LEVEL_TEXT, level_conflict_text, source_columns_tex
 from app.auth import CurrentUser
 from app.config import DATA_DIR, MAX_OUTPUT_CELLS, MAX_OUTPUT_TEXT_CHARS
 from app.decisions import load_decisions
+from app.failures import failure_reason, log_failure
 from app.files import get_file_for, load_parsed
 from app.formulas import TOTAL_FORMULAS, check_totals, unique_columns
 from app.integration import KST, OUTPUT_DIR
@@ -56,6 +57,7 @@ logger = logging.getLogger(__name__)
 
 POLICY = "bundle-policy-1"  # 시트 구성·이름·쓰기 규칙이 바뀌면 올린다 (basis·실행 기록에 남음)
 MODE = "sheets"
+BUNDLE_FAILED = "BUNDLE_FAILED"  # 결과를 만드는 중 예기치 않은 실패 (예외 종류만 알림)
 MAX_FILES = 50  # 한 번에 고를 수 있는 파일 (홈 검사 대상 한도와 같음)
 MAX_SHEETS = 50  # 결과에 넣는 원본 시트
 MAX_ROWS = 300_000  # 결과에 넣는 행 합계 (데이터 분석 한도와 같음)
@@ -1069,15 +1071,17 @@ def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
     except runlease.RunUncertain:  # 결과 파일은 있고 완료 기록만 확인하지 못함 — 지우지 않고 503으로 알린다
         raise
     except Exception as exc:
-        logger.exception("bundle run %s failed", run.id)
+        # 응답·실행 기록·서버 기록 모두 원문 없이 — 예외 종류와 실행 번호만 (app/failures.py)
+        log_failure(logger, "bundle", run.id, exc)
+        reason = failure_reason(exc, (BundleError, runlease.RunError))
         try:
-            runlease.fail(db, run, tmp_path, str(exc), start_summary)
+            runlease.fail(db, run, tmp_path, f"{reason} [{BUNDLE_FAILED}]", start_summary)
         except runlease.RunDone:
             db.refresh(run)
             return run
         except runlease.RunSettled as settled:
             raise BundleError(str(settled)) from exc
-        raise BundleError(f"결과 파일을 만들지 못했습니다: {exc}") from exc
+        raise BundleError(f"결과 파일을 만들지 못했습니다 — {reason} (실행 #{run.id}). [{BUNDLE_FAILED}]") from exc
     finally:
         runlease.untrack(run.id)
     logger.info("bundle run=%s sheets=%d rows=%d summary=%s", run.id, len(plan.sheets), run.row_count, bool(plan.items))

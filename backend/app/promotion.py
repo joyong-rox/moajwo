@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.mapping import MappingEngine, split_column_name
 from app.models import MappingApproval, PromotionCandidate, StandardTerm
-from app.name_limits import LEARN_KEY_MAX, LEARN_NAME_MAX
+from app.name_limits import LEARN_KEY_MAX, LEARN_NAME_MAX, name_problem
 from app.pii import mask_text
 
 logger = logging.getLogger(__name__)
@@ -96,6 +96,15 @@ def approve(
 ) -> StandardTerm:
     if candidate.status != "pending":
         raise PromotionError("심사 대기 중인 후보만 처리할 수 있습니다.")
+    # 이름 규칙 전에 SQLite에 쌓인 후보는 저장할 수 없는 이름(한도 초과·NUL)일 수 있다 — 사전·후보를 바꾸기 전에 거절
+    # (record_approval은 이런 이름을 후보로 올리지 않는다 — app/name_limits.py)
+    problem = name_problem("정규화한 이름", candidate.normalized, LEARN_KEY_MAX) or name_problem(
+        "열 이름", candidate.column_name, LEARN_NAME_MAX
+    )
+    if problem is not None:
+        raise PromotionError(
+            f"후보의 {problem.text} — 전사 표준 사전에 반영할 수 없습니다. 반려하세요. [{problem.code}]"
+        )
     builtin = engine.exact_key(candidate.normalized)
     if builtin is not None and builtin != candidate.field_key:
         raise PromotionError("기본 표준 사전에서 다른 항목의 이름이라 반영할 수 없습니다. 반려하세요.")

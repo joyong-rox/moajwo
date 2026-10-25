@@ -36,7 +36,16 @@ from app.decisions import DecisionInput, load_decisions, save_decisions
 from app.files import column_id, get_file_for, load_parsed
 from app.mapping import TOTAL_WORDS, get_engine, split_column_name
 from app.models import MappingAnalysis, SourceFile
-from app.name_limits import COLUMN_MAX, FIX_HINT, SHEET_MAX, NameTooLong, column_place, too_long
+from app.name_limits import (
+    COLUMN_MAX,
+    SHEET_MAX,
+    NameNotStorable,
+    column_place,
+    hint,
+    name_problem,
+    sheet_column_problem,
+    sheet_place,
+)
 from app.pii import column_letter, mask_cell, mask_rrn_number, mask_text
 from app.promotion import record_approval
 from app.quantity import QUANTITY_FIELDS
@@ -78,6 +87,7 @@ VIEW_CACHE_MAX_BYTES = int(os.environ.get("MOAJWO_VIEW_CACHE_MIB") or 128) * 2**
 @dataclass
 class SheetView:
     name: str  # 원래 시트 이름 — 서버 안에서만 쓴다 (응답에는 가려서)
+    tab: int  # 원본 통합 문서의 시트 순번 (0부터, 건너뛴 설명 시트 포함)
     columns: list[str]  # 원래 열 이름 — 서버 안에서 확정값과 연결할 때만 쓴다 (응답에는 가려서)
     source_columns: list[int]
     header_row: int | None
@@ -154,6 +164,7 @@ def _build_view(db: Session, record: SourceFile, key: tuple[int, str]) -> FileVi
         sheets.append(
             SheetView(
                 name=s.name,
+                tab=s.tab,
                 columns=list(s.columns),
                 source_columns=list(s.source_columns or range(len(s.columns))),
                 header_row=s.header_row,
@@ -721,6 +732,7 @@ class _Target:
     sheet_label: str
     column_label: str
     problem: str | None  # 열·시트·표준 항목이 없음 등 (권한은 따로)
+    where: str | None = None  # 이름을 저장할 수 없는 대상의 위치 (파일 번호·시트 순번·열 위치 — 이름 없이)
 
 
 def _resolve(db: Session, user: CurrentUser, items: list[BatchItem], own: bool) -> list[_Target]:
@@ -740,20 +752,23 @@ def _resolve(db: Session, user: CurrentUser, items: list[BatchItem], own: bool) 
         sheet = found[1] if found else None
         index = int(item.column_id[1:]) if re.fullmatch(r"c\d+", item.column_id) else -1
         raw = sheet.columns[index] if sheet is not None and 0 <= index < len(sheet.columns) else None
-        problem = None
+        problem = where = None
         if raw is None:
             problem = "파일에 없는 시트·열"
-        elif (long := too_long(sheet.name, raw)) is not None:  # 저장 한도 — 쓰기 전에 두 DB에서 같게 (name_limits)
-            problem = f"{long} — 확정할 수 없습니다. {FIX_HINT}"
+        elif (bad := sheet_column_problem(sheet.name, raw)) is not None:  # 저장 규칙 — 쓰기 전에 두 DB에서 같게
+            problem = f"{bad.text} — 확정할 수 없습니다. {hint([bad])}"
+            where = f"파일 #{record.id} · {sheet_place(sheet)} · {column_place(sheet, index)}"
         elif item.field_key is not None and item.field_key not in labels:
             problem = "없는 표준 항목"
-        # 위치 표시: 한도를 넘는 이름은 원문(가린 이름) 대신 순번·원본 열 위치로 (긴 이름을 되돌려 보내지 않음)
+        # 위치 표시: 저장할 수 없는 이름(길이·NUL)은 원문(가린 이름) 대신 순번·원본 열 위치로 (되돌려 보내지 않음)
         sheet_label = item.sheet_id
-        if found is not None:
-            sheet_label = mask_text(sheet.name) if len(sheet.name) <= SHEET_MAX else f"{found[0] + 1}번째 시트"
+        if sheet is not None:
+            sheet_ok = name_problem("시트 이름", sheet.name, SHEET_MAX) is None
+            sheet_label = mask_text(sheet.name) if sheet_ok else sheet_place(sheet)
         column_label = item.column_id
         if raw is not None:
-            column_label = mask_text(raw) if len(raw) <= COLUMN_MAX else column_place(sheet, index)
+            column_ok = name_problem("열 이름", raw, COLUMN_MAX) is None
+            column_label = mask_text(raw) if column_ok else column_place(sheet, index)
         out.append(
             _Target(
                 item=item,
@@ -764,6 +779,7 @@ def _resolve(db: Session, user: CurrentUser, items: list[BatchItem], own: bool) 
                 sheet_label=sheet_label,
                 column_label=column_label,
                 problem=problem,
+                where=where,
             )
         )
     return out
@@ -861,6 +877,11 @@ class ApplyOut(BaseModel):
     files: int
 
 
+def _where(t: _Target) -> str:
+    """문제 목록의 대상 표시: 이름을 저장할 수 없는 대상은 위치만, 그 밖은 화면과 같은 (가린) 파일·시트·열."""
+    return t.where or f"{t.file_name} / {t.sheet_label} / {t.column_label}"
+
+
 def _conflict(problems: list[str]) -> HTTPException:
     detail = {"message": "적용하지 않았습니다 (일부만 반영하지 않음).", "problems": [mask_text(p) for p in problems]}
     return HTTPException(status.HTTP_409_CONFLICT, detail)
@@ -876,7 +897,7 @@ def batch_apply(body: ApplyIn, db: Annotated[Session, Depends(get_session)], use
     """
     items: list[ApplyItem] = list(body.items)
     targets = _resolve(db, user, list(items), own=True)  # 파싱은 여기 (잠금 밖)
-    problems = [f"{t.file_name} / {t.sheet_label} / {t.column_label}: {t.problem}" for t in targets if t.problem]
+    problems = [f"{_where(t)}: {t.problem}" for t in targets if t.problem]
     if problems:
         raise _conflict(problems)
     db.rollback()  # 읽기만 한 트랜잭션을 닫고, 아래에서 쓰기 잠금부터 잡는다
@@ -896,7 +917,7 @@ def batch_apply(body: ApplyIn, db: Annotated[Session, Depends(get_session)], use
         decisions = _state(db, targets)
         plan = [_plan_entry(t, decisions[t.item.file_id], labels, user) for t in targets]
         for item, t, entry in zip(items, targets, plan, strict=True):
-            where = f"{t.file_name} / {t.sheet_label} / {t.column_label}"
+            where = _where(t)
             if entry.current_confirmed != item.expected_confirmed or entry.current_field_key != item.expected_field_key:
                 if entry.action != "unchanged":  # 같은 값으로 이미 확정된 경우(중복 요청)는 충돌로 보지 않음
                     problems.append(
@@ -928,7 +949,7 @@ def batch_apply(body: ApplyIn, db: Annotated[Session, Depends(get_session)], use
         db.commit()
     except HTTPException:
         raise
-    except NameTooLong as exc:  # 위 대상 확인이 먼저 거절하므로 닿지 않는다 — 닿아도 500이 아니라 같은 409로
+    except NameNotStorable as exc:  # 위 대상 확인이 먼저 거절하므로 닿지 않는다 — 닿아도 500이 아니라 같은 409로
         db.rollback()
         raise _conflict([str(exc)]) from exc
     except Exception:

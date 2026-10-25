@@ -21,7 +21,15 @@ from sqlalchemy.orm import Session
 from app import admin_codes
 from app.glossary import normalize_name
 from app.models import GlossaryAlias, GlossaryEntry
-from app.name_limits import GLOSSARY_NAME_MAX, GLOSSARY_NOTE_MAX, GLOSSARY_PREVIOUS_MAX, GLOSSARY_TYPE_MAX
+from app.name_limits import (
+    GLOSSARY_NAME_MAX,
+    GLOSSARY_NOTE_MAX,
+    GLOSSARY_PREVIOUS_MAX,
+    GLOSSARY_TYPE_MAX,
+    HAS_NUL,
+    NUL,
+    TOO_LONG,
+)
 from app.parsing import Cell, ParseError, is_missing, parse_file
 
 COLUMNS = ["코드", "정식명칭", "유형", "시도코드", "시군구코드", "시작일", "종료일", "이전코드", "별칭", "메모"]
@@ -166,17 +174,19 @@ def _to_row(row_no: int, cells: list[Cell], get) -> ImportRow:  # noqa: ANN001
         raise ValueError(f"이전코드는 7자리여야 합니다: {', '.join(bad_prev)}")
     aliases = [a.strip() for a in _ALIAS_SPLIT.split(_text(get(cells, "별칭")) or "") if a.strip()]
     type_label, note = _text(get(cells, "유형")), _text(get(cells, "메모"))
-    # 저장 한도 (두 DB에서 같게 — app/name_limits.py). 이름은 정규화한 키도 같은 한도라 함께 본다. 값은 문구에 없음
-    checks = [
-        ("정식명칭", max(len(name), len(normalize_name(name))), GLOSSARY_NAME_MAX),
-        ("유형", len(type_label or ""), GLOSSARY_TYPE_MAX),
-        ("이전코드", len(",".join(previous)), GLOSSARY_PREVIOUS_MAX),
-        ("메모", len(note or ""), GLOSSARY_NOTE_MAX),
-        *(("별칭", max(len(a), len(normalize_name(a))), GLOSSARY_NAME_MAX) for a in aliases),
+    # 저장 규칙 (두 DB에서 같게 — app/name_limits.py): 저장 한도와 NUL. 이름은 정규화한 키도 저장되므로 함께 본다
+    # (정규화로 길어지면 원래 글자 수와 나눠 적는다). 값은 문구에 없음
+    fields: list[tuple[str, str | None, int, bool]] = [
+        ("정식명칭", name, GLOSSARY_NAME_MAX, True),
+        ("유형", type_label, GLOSSARY_TYPE_MAX, False),
+        ("이전코드", ",".join(previous), GLOSSARY_PREVIOUS_MAX, False),
+        ("메모", note, GLOSSARY_NOTE_MAX, False),
     ]
-    for label, length, limit in checks:
-        if length > limit:
-            raise ValueError(f"{label} {length:,}자 — 저장 한도 {limit}자를 넘습니다. 줄여서 다시 올리세요.")
+    fields += [(f"별칭 {i}번째" if len(aliases) > 1 else "별칭", a, GLOSSARY_NAME_MAX, True)
+               for i, a in enumerate(aliases, start=1)]  # fmt: skip
+    for label, value, limit, keyed in fields:
+        if value and (problem := _stored_problem(label, value, limit, keyed)) is not None:
+            raise ValueError(problem)
     return ImportRow(
         row_no,
         code,
@@ -190,6 +200,21 @@ def _to_row(row_no: int, cells: list[Cell], get) -> ImportRow:  # noqa: ANN001
         aliases,
         note,
     )
+
+
+def _stored_problem(label: str, value: str, limit: int, keyed: bool) -> str | None:
+    """사전에 저장할 칸 하나의 문제 (없으면 None). keyed: 정규화한 키도 저장되는 이름."""
+    if NUL in value:
+        return f"{label}에 NUL(0x00) 문자가 있습니다 — 지운 뒤 다시 올리세요. [{HAS_NUL}]"
+    if len(value) > limit:
+        return f"{label} {len(value):,}자 — 저장 한도 {limit}자를 넘습니다. 줄여서 다시 올리세요. [{TOO_LONG}]"
+    key = normalize_name(value) if keyed else value
+    if len(key) > limit:
+        return (
+            f"{label} {len(value):,}자 — 호환 문자(㈜·㍿ 등)를 풀어 정규화하면 {len(key):,}자로 저장 한도 {limit}자를 "
+            f"넘습니다. 줄여서 다시 올리세요. [{TOO_LONG}]"
+        )
+    return None
 
 
 def _region_warnings(session: Session, rows: list[ImportRow], report: ImportReport, codes: set[str]) -> None:

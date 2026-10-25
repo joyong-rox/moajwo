@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.mapping import KnownOrgCodes, MappingEngine, split_column_name
 from app.models import GlossaryEntry, LearnedAlias, MappingDecision
-from app.name_limits import FIX_HINT, LEARN_KEY_MAX, LEARN_NAME_MAX, NameTooLong, too_long
+from app.name_limits import LEARN_KEY_MAX, LEARN_NAME_MAX, NameNotStorable, refusal, sheet_column_problem
 from app.pii import mask_text
 
 _GENERATED_PREFIX = "열"
@@ -78,13 +78,13 @@ def save_decisions(
     (검토 패널에서 '다음부터 이 형식 기억하기'를 선택하지 않은 경우)
     commit=False면 커밋하지 않는다 — 여러 파일을 한 트랜잭션으로 확정하는 일괄 확정에서
     호출한 쪽이 커밋·되돌림을 맡는다.
-    시트·열 이름이 저장 한도를 넘는 항목이 하나라도 있으면 아무것도 쓰기 전에 NameTooLong (SQLite도 PostgreSQL과
-    같은 한도 — app/name_limits.py). 위치를 알리는 거절은 호출한 쪽이 먼저 하고, 이것은 마지막 방어선이다.
+    시트·열 이름을 저장할 수 없는(한도 초과·NUL) 항목이 하나라도 있으면 아무것도 쓰기 전에 NameNotStorable (SQLite도
+    PostgreSQL과 같은 규칙 — app/name_limits.py). 위치를 알리는 거절은 호출한 쪽이 먼저 하고, 이것은 마지막 방어선이다.
     """
     for item in items:
-        problem = too_long(item.sheet, item.column)
+        problem = sheet_column_problem(item.sheet, item.column)
         if problem is not None:
-            raise NameTooLong(f"{problem} — 확정하지 않았습니다. {FIX_HINT}")
+            raise NameNotStorable(refusal("확정하지 않았습니다", [("", problem)]))
     result = SaveResult()
     for item in items:
         decision = session.scalar(

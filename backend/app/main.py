@@ -8,7 +8,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from sqlalchemy.exc import DataError, DBAPIError, SQLAlchemyError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 
@@ -87,6 +87,13 @@ WRITE_UNCERTAIN = (
     " 이 요청이 반영됐는지는 확인하지 못했습니다 — 화면을 새로 고쳐 반영 여부를 확인한 뒤 필요하면 다시 하세요."
 )
 READ_METHODS = {"GET", "HEAD", "OPTIONS"}
+NUL_REFUSED = "저장할 글자에 NUL(0x00) 문자가 있어 처리하지 못했습니다 — 그 문자를 지운 뒤 다시 하세요. [VALUE_HAS_NUL]"
+
+
+def _nul_refused(exc: BaseException) -> bool:
+    """PostgreSQL 드라이버(psycopg)가 NUL이 든 글자를 보내지 않고 낸 오류 — SQLSTATE가 없는 DataError."""
+    orig = getattr(exc, "orig", None)
+    return isinstance(exc, DataError) and getattr(orig, "sqlstate", None) is None and "NUL (0x00)" in str(orig)
 
 
 def _db_error_name(exc: BaseException) -> str:
@@ -103,9 +110,16 @@ async def database_failure(request: Request, exc: SQLAlchemyError) -> JSONRespon
 
     - 쓰기 요청은 반영 여부를 확인하라고 안내한다. 서버도 화면도 자동으로 다시 보내지 않는다.
     - 데이터·코드·스키마 오류는 연결 장애로 감추지 않는다 — 그대로 500.
+    - 단, PostgreSQL이 NUL(0x00)이 든 글자를 받지 않은 경우는 입력 오류(422)로 알린다 — 앱이 쓰기 전에 거절하는
+      경로(파일에서 온 이름·값, app/name_limits.py)에 없는 입력의 안전망이다. SQLite는 그 글자를 저장하므로 이 경로들은
+      두 DB 차이가 남는다.
     - 주소·비밀번호·SQL·매개변수는 응답·기록에 넣지 않는다 (오류 종류·SQLSTATE만).
     """
     kind = db_failure(exc)
+    if kind is None and _nul_refused(exc):
+        logger.warning("database refused NUL: %s", _db_error_name(exc))
+        detail = NUL_REFUSED + (WRITE_UNCERTAIN if request.method not in READ_METHODS else "")
+        return JSONResponse({"detail": detail}, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
     if kind is None:
         raise exc
     logger.warning("database %s: %s", kind, _db_error_name(exc))
