@@ -49,6 +49,7 @@ class RunCounts(PeriodCount):
     failed: int
     review: int  # 검토 대기 (확인할 항목이 남아 결과 파일을 아직 만들지 않음)
     running: int
+    check: int  # 결과 확인 필요 (멈춘 실행을 정리할 때 결과를 확정할 근거가 모자람)
 
 
 class OverviewOut(BaseModel):
@@ -97,14 +98,14 @@ def overview(
         uploads.no_owner += owner is None
         uploads.inactive_accounts += owner in inactive
 
-    runs = RunCounts(total=0, inactive_accounts=0, no_owner=0, done=0, failed=0, review=0, running=0)
+    runs = RunCounts(total=0, inactive_accounts=0, no_owner=0, done=0, failed=0, review=0, running=0, check=0)
     for run in db.scalars(select(IntegrationRun)):
         if not lo <= _started(run) < hi:
             continue
         runs.total += 1
         runs.no_owner += run.user_id is None
         runs.inactive_accounts += run.user_id in inactive
-        if run.status in ("done", "failed", "review", "running"):
+        if run.status in ("done", "failed", "review", "running", "check"):
             setattr(runs, run.status, getattr(runs, run.status) + 1)
     return OverviewOut(
         start=start,

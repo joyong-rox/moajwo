@@ -34,3 +34,6 @@ PARSE_WAIT_S = _env_int("MOAJWO_PARSE_WAIT_S", 60)  # 읽기 차례를 기다리
 # 결과 파일(묶기·통합 Excel) 하나에 넣는 칸 수 — 결과는 메모리에 다 만든 뒤 저장한다 (칸 1천 개당 약 0.45MiB,
 # docs/MEMORY.md). 넘으면 실행 기록을 만들기 전에 거절한다. Render(512MiB) 권장 300,000
 MAX_OUTPUT_CELLS = _env_int("MOAJWO_MAX_OUTPUT_CELLS", 1_000_000)
+# 결과 만들기(묶기·통합·통계 요약·데이터 분석) 동시 실행 수 — 프로세스마다 (app/output_slot.py). 칸 예산은 요청 하나만
+# 막으므로, 한도 가까운 결과 둘이 동시에 만들어지지 않게 한다. 차례가 없으면 기다리지 않고 거절한다
+OUTPUT_SLOTS = _env_int("MOAJWO_OUTPUT_SLOTS", 1)

@@ -172,7 +172,9 @@ class IntegrationRun(Base):
     """실행 기록 (runs). 검토가 끝난 세션으로 새 결과 파일을 만든다 (원본은 덮어쓰지 않음).
 
     status: review(검토 대기 — 자동화 실행에서 확인할 항목이 남음) / running / done(완료) / failed(실패)
+            / check(확인 필요 — 멈춘 실행을 정리할 때 결과를 판정할 근거가 모자람, app/recovery.py)
     trigger: manual(검토 패널에서 직접) / automation(저장된 자동화로 실행)
+    worker·heartbeat_at: 결과를 만드는 서버 프로세스와 마지막 생존 신호 (app/runlease.py)
     """
 
     __tablename__ = "runs"
@@ -195,6 +197,8 @@ class IntegrationRun(Base):
     summary: Mapped[str] = mapped_column(Text, default="{}")  # JSON (처리 요약)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    worker: Mapped[str | None] = mapped_column(String(40))  # "<결과 폴더 식별자>-<프로세스 식별자>"
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # UTC
 
 
 class RunChange(Base):

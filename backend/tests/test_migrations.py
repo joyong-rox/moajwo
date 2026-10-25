@@ -473,5 +473,55 @@ def test_0019_analysis_runs_up_down_and_up_again(tmp_path: Path) -> None:
     _alembic(tmp_path, "upgrade", "head")
     db = sqlite3.connect(tmp_path / "moajwo.db")
     assert db.execute("SELECT count(*) FROM analysis_runs").fetchone()[0] == 0
-    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0019_analysis_runs"
+    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0020_run_worker_lease"
+    db.close()
+
+
+def _run_columns(db: sqlite3.Connection) -> set[str]:
+    return {r[1] for r in db.execute("PRAGMA table_info(runs)")}
+
+
+def test_0020_run_worker_lease_up_down_and_up_again(tmp_path: Path) -> None:
+    """0020: 실행 기록에 담당·생존 신호 열만 더하고 지운다. 실행·변경 기록·'결과 확인 필요' 행은 그대로이고, 실행 중인
+    행이 있으면 내리지 않는다 (이전 판 정리가 그 행을 시각만으로 실패로 바꾸지 않게)."""
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert {"worker", "heartbeat_at"} <= _run_columns(db)
+    run = (
+        "INSERT INTO runs (id, status, trigger, input_file_count, file_ids, row_count, change_count,"
+        " warning_count, summary, worker, heartbeat_at, output_path, error)"
+        " VALUES (?, ?, 'manual', 0, '[]', 0, 0, 0, '{}', ?, ?, ?, ?)"
+    )
+    db.execute(run, (1, "done", "aaaaaaaaaaaa-bbbbbbbbbbbb", "2026-10-25 01:00:00", "outputs/a.xlsx", None))
+    db.execute(run, (2, "check", None, None, None, "확인 필요"))
+    db.execute(
+        "INSERT INTO run_changes (run_id, file_name, sheet, output_row, column, source_column, kind, reason,"
+        " confidence) VALUES (1, 'a.xlsx', 's', 2, '인구수', '인구', 'number', '숫자 변환', 1.0)"
+    )
+    db.execute(run, (3, "running", None, None, None, None))
+    db.commit()
+    db.close()
+    try:
+        _alembic(tmp_path, "downgrade", "0019_analysis_runs")
+        raise AssertionError("실행 중인 행이 있는데 내려갔다")
+    except subprocess.CalledProcessError as exc:
+        assert "실행 중인 결과 실행이 1건" in exc.stderr.decode("utf-8", "replace")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0020_run_worker_lease"
+    db.execute("DELETE FROM runs WHERE id = 3")
+    db.commit()
+    db.close()
+    _alembic(tmp_path, "downgrade", "0019_analysis_runs")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert not {"worker", "heartbeat_at"} & _run_columns(db)
+    assert db.execute("SELECT id, status, output_path FROM runs ORDER BY id").fetchall() == [
+        (1, "done", "outputs/a.xlsx"),
+        (2, "check", None),
+    ]
+    assert db.execute("SELECT run_id, kind FROM run_changes").fetchall() == [(1, "number")]
+    db.close()
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert {"worker", "heartbeat_at"} <= _run_columns(db)
+    assert db.execute("SELECT worker, heartbeat_at FROM runs WHERE id = 1").fetchone() == (None, None)
     db.close()
