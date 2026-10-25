@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app import admin_codes
 from app.glossary import normalize_name
 from app.models import GlossaryAlias, GlossaryEntry
+from app.name_limits import GLOSSARY_NAME_MAX, GLOSSARY_NOTE_MAX, GLOSSARY_PREVIOUS_MAX, GLOSSARY_TYPE_MAX
 from app.parsing import Cell, ParseError, is_missing, parse_file
 
 COLUMNS = ["코드", "정식명칭", "유형", "시도코드", "시군구코드", "시작일", "종료일", "이전코드", "별칭", "메모"]
@@ -164,18 +165,30 @@ def _to_row(row_no: int, cells: list[Cell], get) -> ImportRow:  # noqa: ANN001
     if bad_prev:
         raise ValueError(f"이전코드는 7자리여야 합니다: {', '.join(bad_prev)}")
     aliases = [a.strip() for a in _ALIAS_SPLIT.split(_text(get(cells, "별칭")) or "") if a.strip()]
+    type_label, note = _text(get(cells, "유형")), _text(get(cells, "메모"))
+    # 저장 한도 (두 DB에서 같게 — app/name_limits.py). 이름은 정규화한 키도 같은 한도라 함께 본다. 값은 문구에 없음
+    checks = [
+        ("정식명칭", max(len(name), len(normalize_name(name))), GLOSSARY_NAME_MAX),
+        ("유형", len(type_label or ""), GLOSSARY_TYPE_MAX),
+        ("이전코드", len(",".join(previous)), GLOSSARY_PREVIOUS_MAX),
+        ("메모", len(note or ""), GLOSSARY_NOTE_MAX),
+        *(("별칭", max(len(a), len(normalize_name(a))), GLOSSARY_NAME_MAX) for a in aliases),
+    ]
+    for label, length, limit in checks:
+        if length > limit:
+            raise ValueError(f"{label} {length:,}자 — 저장 한도 {limit}자를 넘습니다. 줄여서 다시 올리세요.")
     return ImportRow(
         row_no,
         code,
         name,
-        _text(get(cells, "유형")),
+        type_label,
         sido,
         sigungu,
         valid_from,
         valid_to,
         previous,
         aliases,
-        _text(get(cells, "메모")),
+        note,
     )
 
 

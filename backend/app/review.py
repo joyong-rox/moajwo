@@ -37,6 +37,7 @@ from app.glossary import normalize_name
 from app.glossary_api import glossary_state
 from app.mapping import ColumnMapping, MappingEngine, get_engine, normalize, split_column_name
 from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile, User
+from app.name_limits import GLOSSARY_NAME_MAX, NameTooLong, check_files, fit_names
 from app.parsing import FileResult, SheetResult
 from app.pii import PII_LABEL, has_pii
 from app.promotion import load_standard, record_approval
@@ -65,6 +66,10 @@ class ReviewError(Exception):
 
 class ReviewPermissionError(ReviewError):
     """검토는 볼 수 있지만 원본 파일(매핑 확정·개인정보 확인)을 바꿀 권한이 없음 → 403."""
+
+
+class ReviewNameError(ReviewError):
+    """시트·열 이름이 저장 한도를 넘어 검토를 만들지 않음 → 422 (아무것도 기록하지 않음 — app/name_limits.py)."""
 
 
 def can_change_file(db: Session, file_id: int | None, user_id: int | None) -> bool:
@@ -200,9 +205,13 @@ class AutomationRules:
         )
 
 
-def _apply_column_rules(db: Session, engine: MappingEngine, file_id: int, rules: AutomationRules) -> None:
-    """자동화의 열 규칙을 이 파일의 매핑 확정으로 기록한다 (이 파일에서 사용자가 이미 확정한 열은 그대로 둔다)."""
-    _, parsed = load_parsed(db, file_id)
+def _apply_column_rules(
+    db: Session, engine: MappingEngine, file_id: int, rules: AutomationRules, parsed: FileResult | None = None
+) -> None:
+    """자동화의 열 규칙을 이 파일의 매핑 확정으로 기록한다 (이 파일에서 사용자가 이미 확정한 열은 그대로 둔다).
+    parsed: 이미 읽은 파일 (없으면 읽는다)."""
+    if parsed is None:
+        _, parsed = load_parsed(db, file_id)
     existing = load_decisions(db, file_id)
     inputs = [
         DecisionInput(sheet.name, column, rules.columns[column_rule_key(column)])
@@ -232,8 +241,10 @@ def _load(
     learned: dict[str, str],
     use_llm: bool,
     standard: dict[str, str] | None = None,
+    loaded: tuple[SourceFile, FileResult] | None = None,
 ) -> _Loaded:
-    record, parsed = load_parsed(db, file_id)
+    """loaded: 이미 읽은 (기록, 파일) — 없으면 읽는다."""
+    record, parsed = loaded if loaded is not None else load_parsed(db, file_id)
     decisions = load_decisions(db, file_id)
     org_codes = load_org_codes(db)
     mappings = {
@@ -290,16 +301,24 @@ def create_session(
     """
     params = {k: v for k, v in params.items() if k not in INTERNAL_PARAMS}  # 다시 검사면 새로 계산한다
     engine = get_engine()
+    target_ids = list(dict.fromkeys(params["file_ids"]))
+    baseline_ids = list(dict.fromkeys(params.get("baseline_file_ids", [])))
+    # 파일은 한 번만 읽는다. 시트·열 이름이 저장 한도를 넘으면 아무것도 기록하기 전에(자동화 규칙 기록·검증 기록보다
+    # 먼저) 거절한다 — 검토 항목의 이름은 확정 키로 다시 쓰이므로 자르지 않는다 (app/name_limits.py)
+    files_read = {fid: load_parsed(db, fid) for fid in dict.fromkeys([*target_ids, *baseline_ids])}
+    try:
+        check_files([(r.original_name, p.sheets) for r, p in files_read.values()], "검토를 만들지 않았습니다")
+    except NameTooLong as exc:
+        raise ReviewNameError(str(exc)) from exc
     rules = AutomationRules.of(automation) if automation is not None else None
     if rules is not None:
-        for fid in dict.fromkeys(params["file_ids"]):
+        for fid in target_ids:
             if can_change_file(db, fid, user_id):  # 남의 파일에는 규칙을 기록하지 않는다 (검토에서 확인 필요로 보임)
-                _apply_column_rules(db, engine, fid, rules)
+                _apply_column_rules(db, engine, fid, rules, files_read[fid][1])
     learned, standard = load_learned(db, user_id), load_standard(db)
-    targets = [_load(db, fid, engine, learned, use_llm, standard) for fid in dict.fromkeys(params["file_ids"])]
-    baseline = [
-        _load(db, fid, engine, learned, False, standard) for fid in dict.fromkeys(params.get("baseline_file_ids", []))
-    ]
+    targets = [_load(db, fid, engine, learned, use_llm, standard, files_read[fid]) for fid in target_ids]
+    baseline = [_load(db, fid, engine, learned, False, standard, files_read[fid]) for fid in baseline_ids]
+    del files_read
     vparams = ValidationParams(
         expected_period=params.get("expected_period"),
         required_entities=params.get("required_entities", []),
@@ -544,7 +563,7 @@ def _entity_items(
         first = e.candidates[0] if e.candidates else None
         ruled = _entity_rule_item(e.value, e.candidates, rules)
         if ruled is not None:
-            ruled.file_name = ", ".join(e.files)
+            ruled.file_name = fit_names(e.files)  # 여러 파일 이름은 표시 전용 — 저장 한도 안으로 '외 n개' 요약
             ruled.column = labels.get(e.field, e.field)
             ruled.payload = json.dumps(
                 {"status": e.status, "candidates": e.candidates, "field": e.field, "count": e.count},
@@ -558,7 +577,7 @@ def _entity_items(
                 "pending",
                 "entity",
                 entity_reason(e.status, e.value, e.note, e.candidates),
-                file_name=", ".join(e.files),
+                file_name=fit_names(e.files),
                 column=labels.get(e.field, e.field),
                 before=e.value,
                 after=f"{first['name']} ({first['code']})" if first else "(후보 없음)",
@@ -760,7 +779,10 @@ def _decide_mapping(
     else:
         key = None  # 거부 = 이 열은 매핑하지 않음('해당 없음')으로 확정
     assert item.file_id is not None and item.sheet is not None and item.column is not None
-    save_decisions(db, engine, item.file_id, [DecisionInput(item.sheet, item.column, key)], learn=False)
+    try:  # 이름 한도 검사 전에 SQLite에서 만든 검토면 긴 이름 항목이 있을 수 있다 — 저장하지 않고 알린다
+        save_decisions(db, engine, item.file_id, [DecisionInput(item.sheet, item.column, key)], learn=False)
+    except NameTooLong as exc:
+        raise ReviewError(str(exc)) from exc
     if key is not None:
         record_approval(db, engine, session.created_by, item.column, key)  # 전사 표준 사전 승격 집계
     item.choice = key
@@ -833,6 +855,9 @@ def complete(db: Session, session: ReviewSession, learn_names: bool = True) -> d
                     learned["names_skipped"] += 1
                     continue
                 normalized = normalize_name(item.before)
+                if len(item.before) > GLOSSARY_NAME_MAX or len(normalized) > GLOSSARY_NAME_MAX:
+                    learned["names_skipped"] += 1  # 저장 한도를 넘는 이름(셀 값)은 별칭으로 학습하지 않는다
+                    continue
                 exists = db.scalar(
                     select(GlossaryAlias.id).where(
                         GlossaryAlias.normalized == normalized, GlossaryAlias.target_code == item.choice

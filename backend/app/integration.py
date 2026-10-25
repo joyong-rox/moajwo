@@ -20,6 +20,7 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import runlease
@@ -39,6 +40,7 @@ from app.glossary import EntityRef, Resolution, entity_ref, normalize_name
 from app.glossary_api import glossary_state
 from app.mapping import ColumnMapping, get_engine
 from app.models import Automation, IntegrationRun, ReviewSession
+from app.name_limits import FILE_NAME_MAX, FIX_HINT, LABEL_MAX, too_long
 from app.output_slot import output_slot
 from app.parsing import Cell, is_missing
 from app.pii import mask_text
@@ -642,6 +644,38 @@ def _check_size(built: _Built) -> None:
         )
 
 
+def _check_names(built: _Built) -> None:
+    """변경 기록(run_changes)에 들어갈 이름이 저장 한도 안인지 — 결과 열 이름은 ' (원본 열)'·' [원래 이름]'이 붙어
+    원래 이름보다 길어질 수 있다. 실행 기록을 만들기 전에 거절한다 (SQLite도 같은 한도 — app/name_limits.py).
+    이름을 잘라 적지 않는다 (결과 파일의 열 이름과 기록이 달라짐)."""
+    for j, label in enumerate(built.labels):
+        if len(label) > LABEL_MAX:
+            raise IntegrationError(
+                f"결과 {j + 1}번째 열의 이름이 {len(label):,}자로 저장 한도 {LABEL_MAX}자를 넘어 통합하지 않았습니다 — "
+                f"{FIX_HINT} (같은 표준 항목으로 확정한 두 번째 열과 결과에 넣은 '해당 없음' 열은 원래 열 이름이 "
+                "결과 열 이름에 들어갑니다)"
+            )
+    # 한도 검사 전에 SQLite에서 만든 검토는 긴 원본 이름을 가질 수 있다 (새 검토는 만들 때 거절됨)
+    for file_name, sheet, source in {(ch.file_name, ch.sheet, ch.source_column) for ch in built.changes}:
+        problem = too_long(sheet, source)
+        if problem is None and len(file_name) > FILE_NAME_MAX:
+            problem = f"파일 이름이 {len(file_name):,}자로 저장 한도 {FILE_NAME_MAX}자를 넘습니다"
+        if problem is not None:
+            raise IntegrationError(f"원본 {problem} — 통합하지 않았습니다. {FIX_HINT} (다시 검사해야 합니다)")
+
+
+def _failure_reason(exc: Exception) -> str:
+    """예기치 않은 실패의 이유 (응답·실행 기록): DB 오류는 종류·SQLSTATE만, 파일 오류는 이유만 —
+    SQL 문장·값·경로를 넣지 않는다 (app/main.py의 DB 오류 처리와 같은 원칙)."""
+    if isinstance(exc, SQLAlchemyError):
+        orig = getattr(exc, "orig", None)
+        state = getattr(orig, "sqlstate", None)
+        return f"DB 오류 ({type(orig or exc).__name__}{f' {state}' if state else ''})"
+    if isinstance(exc, OSError) and exc.strerror:
+        return f"파일 오류 ({exc.strerror})"
+    return str(exc)
+
+
 def pending_run(db: Session, session: ReviewSession) -> IntegrationRun | None:
     """자동화 실행으로 만든 '검토 대기' 실행 기록 (다시 검사한 세션이면 이전 세션의 기록)."""
     current: ReviewSession | None = session
@@ -682,6 +716,7 @@ def _integrate(db: Session, session: ReviewSession, include_unmapped: bool | Non
         include_unmapped = include_unmapped_default(db, session)
     built = build(db, session, include_unmapped)
     _check_size(built)  # 결과는 메모리에 다 만든 뒤 저장한다 — '실행 중' 기록을 남기기 전에 거절 (docs/MEMORY.md)
+    _check_names(built)  # 변경 기록의 이름 저장 한도 — 같은 때 거절
     now = datetime.now(KST)
     items = session_items(db, session)
     warning_count = summarize(session, items).warnings
@@ -757,14 +792,15 @@ def _integrate(db: Session, session: ReviewSession, include_unmapped: bool | Non
         raise
     except Exception as exc:
         logger.exception("integration run %s failed", run.id)
+        reason = _failure_reason(exc)
         try:
-            runlease.fail(db, run, tmp_path, str(exc), "{}")
+            runlease.fail(db, run, tmp_path, reason, "{}")
         except runlease.RunDone:
             db.refresh(run)
             return run
         except runlease.RunSettled as settled:
             raise IntegrationError(str(settled)) from exc
-        raise IntegrationError(f"통합 결과를 만들지 못했습니다: {exc}") from exc
+        raise IntegrationError(f"통합 결과를 만들지 못했습니다: {reason}") from exc
     finally:
         runlease.untrack(run.id)
     logger.info("integration run=%s rows=%d changes=%d", run.id, run.row_count, run.change_count)

@@ -19,6 +19,7 @@ from app.db import get_session
 from app.glossary import AliasEntry, EntityRef, Entry, Glossary, normalize_name, period_end
 from app.glossary_import import CODE_PATTERN, export_csv, import_file, template_csv
 from app.models import GlossaryAlias, GlossaryEntry
+from app.name_limits import GLOSSARY_NAME_MAX
 from app.parsing import SUPPORTED_EXTENSIONS
 from app.pii import has_pii
 
@@ -341,6 +342,11 @@ def create_alias(body: AliasIn, session: Annotated[Session, Depends(get_session)
             "개인정보 형식(이메일·휴대전화·주민등록번호)이 든 이름은 별칭으로 등록할 수 없습니다.",
         )
     normalized = normalize_name(body.alias)
+    if len(normalized) > GLOSSARY_NAME_MAX:  # 이름은 한도 안이어도 정규화(NFKC)로 키가 길어질 수 있다
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"별칭을 정규화한 이름이 {len(normalized):,}자로 저장 한도 {GLOSSARY_NAME_MAX}자를 넘습니다.",
+        )
     # 유니크 제약은 유효기간이 비어 있으면(NULL) 중복을 막지 못하므로, 기간이 겹치는 같은 별칭을 직접 확인한다.
     for other in session.scalars(
         select(GlossaryAlias).where(

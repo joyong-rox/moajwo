@@ -36,6 +36,7 @@ from app.decisions import DecisionInput, load_decisions, save_decisions
 from app.files import column_id, get_file_for, load_parsed
 from app.mapping import TOTAL_WORDS, get_engine, split_column_name
 from app.models import MappingAnalysis, SourceFile
+from app.name_limits import COLUMN_MAX, FIX_HINT, SHEET_MAX, NameTooLong, column_place, too_long
 from app.pii import column_letter, mask_cell, mask_rrn_number, mask_text
 from app.promotion import record_approval
 from app.quantity import QUANTITY_FIELDS
@@ -742,8 +743,17 @@ def _resolve(db: Session, user: CurrentUser, items: list[BatchItem], own: bool) 
         problem = None
         if raw is None:
             problem = "파일에 없는 시트·열"
+        elif (long := too_long(sheet.name, raw)) is not None:  # 저장 한도 — 쓰기 전에 두 DB에서 같게 (name_limits)
+            problem = f"{long} — 확정할 수 없습니다. {FIX_HINT}"
         elif item.field_key is not None and item.field_key not in labels:
             problem = "없는 표준 항목"
+        # 위치 표시: 한도를 넘는 이름은 원문(가린 이름) 대신 순번·원본 열 위치로 (긴 이름을 되돌려 보내지 않음)
+        sheet_label = item.sheet_id
+        if found is not None:
+            sheet_label = mask_text(sheet.name) if len(sheet.name) <= SHEET_MAX else f"{found[0] + 1}번째 시트"
+        column_label = item.column_id
+        if raw is not None:
+            column_label = mask_text(raw) if len(raw) <= COLUMN_MAX else column_place(sheet, index)
         out.append(
             _Target(
                 item=item,
@@ -751,8 +761,8 @@ def _resolve(db: Session, user: CurrentUser, items: list[BatchItem], own: bool) 
                 sheet_name=sheet.name if sheet else None,
                 raw=raw,
                 file_name=mask_text(record.original_name),
-                sheet_label=mask_text(sheet.name) if sheet else item.sheet_id,
-                column_label=mask_text(raw) if raw is not None else item.column_id,
+                sheet_label=sheet_label,
+                column_label=column_label,
                 problem=problem,
             )
         )
@@ -918,6 +928,9 @@ def batch_apply(body: ApplyIn, db: Annotated[Session, Depends(get_session)], use
         db.commit()
     except HTTPException:
         raise
+    except NameTooLong as exc:  # 위 대상 확인이 먼저 거절하므로 닿지 않는다 — 닿아도 500이 아니라 같은 409로
+        db.rollback()
+        raise _conflict([str(exc)]) from exc
     except Exception:
         db.rollback()
         raise

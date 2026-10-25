@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.mapping import MappingEngine, split_column_name
 from app.models import MappingApproval, PromotionCandidate, StandardTerm
+from app.name_limits import LEARN_KEY_MAX, LEARN_NAME_MAX
 from app.pii import mask_text
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,8 @@ def record_approval(
     normalized = _key(column)
     if not normalized or (column.startswith(_GENERATED_PREFIX) and column[len(_GENERATED_PREFIX) :].isdigit()):
         return None
+    if len(normalized) > LEARN_KEY_MAX or len(column) > LEARN_NAME_MAX:
+        return None  # 저장 한도를 넘는 이름은 승격 근거로 남기지 않는다 (확정은 저장됨 — app/name_limits.py)
     if mask_text(column) != column:
         return None  # 개인정보가 든 열 이름은 모두가 보는 승격 심사·전사 사전으로 올리지 않는다
     if engine.exact_key(normalized) is not None:

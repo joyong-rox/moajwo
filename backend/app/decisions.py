@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.mapping import KnownOrgCodes, MappingEngine, split_column_name
 from app.models import GlossaryEntry, LearnedAlias, MappingDecision
+from app.name_limits import FIX_HINT, LEARN_KEY_MAX, LEARN_NAME_MAX, NameTooLong, too_long
 from app.pii import mask_text
 
 _GENERATED_PREFIX = "열"
@@ -77,7 +78,13 @@ def save_decisions(
     (검토 패널에서 '다음부터 이 형식 기억하기'를 선택하지 않은 경우)
     commit=False면 커밋하지 않는다 — 여러 파일을 한 트랜잭션으로 확정하는 일괄 확정에서
     호출한 쪽이 커밋·되돌림을 맡는다.
+    시트·열 이름이 저장 한도를 넘는 항목이 하나라도 있으면 아무것도 쓰기 전에 NameTooLong (SQLite도 PostgreSQL과
+    같은 한도 — app/name_limits.py). 위치를 알리는 거절은 호출한 쪽이 먼저 하고, 이것은 마지막 방어선이다.
     """
+    for item in items:
+        problem = too_long(item.sheet, item.column)
+        if problem is not None:
+            raise NameTooLong(f"{problem} — 확정하지 않았습니다. {FIX_HINT}")
     result = SaveResult()
     for item in items:
         decision = session.scalar(
@@ -113,6 +120,8 @@ def learn_column(
     normalized = name.primary
     if not normalized or (column.startswith(_GENERATED_PREFIX) and column[len(_GENERATED_PREFIX) :].isdigit()):
         return "헤더가 없는 열이라 이름을 학습하지 않음"
+    if len(normalized) > LEARN_KEY_MAX or len(column) > LEARN_NAME_MAX:  # 정규화로 길어진 키 (확정은 저장됨)
+        return f"열 이름이 길어 학습하지 않음 (저장 한도 {LEARN_KEY_MAX}자)"
     if mask_text(column) != column:
         return "열 이름에 개인정보 형식이 있어 이름을 학습하지 않음"
     builtin = engine.exact_key(normalized)

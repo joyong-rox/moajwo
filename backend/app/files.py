@@ -17,6 +17,7 @@ from app.db import get_session
 from app.decisions import DecisionInput, load_decisions, load_learned, load_org_codes, save_decisions
 from app.mapping import get_engine
 from app.models import MappingAnalysis, SourceFile
+from app.name_limits import FIX_HINT, NameTooLong, column_place, sheet_place, too_long
 from app.parsing import MAX_CELL_CHARS, SUPPORTED_EXTENSIONS, FileResult, ParseBusy, ParseError, parse_file
 from app.pii import mask_text
 from app.promotion import load_standard, record_approval
@@ -363,8 +364,19 @@ def save_mapping_decisions(
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 열입니다: {where} / {shown}")
         if d.field_key is not None and d.field_key not in valid_keys:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 표준 항목입니다: {d.field_key}")
+        problem = too_long(sheet, raw)  # 열 번호로 찾은 실제 이름까지 — 쓰기 전에 두 DB에서 같게 (name_limits)
+        if problem is not None:
+            si = next(i for i, s in enumerate(parsed.sheets) if s.name == sheet)
+            place = f"{sheet_place(sheet, si)} · {column_place(parsed.sheets[si], names.index(raw))}"
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"{place}: {problem} — 확정하지 않았습니다. {FIX_HINT}"
+            )
         inputs.append(DecisionInput(sheet, raw, d.field_key))
-    result = save_decisions(session, engine, file_id, inputs, user_id=user.id)
+    try:
+        result = save_decisions(session, engine, file_id, inputs, user_id=user.id)
+    except NameTooLong as exc:  # 위에서 먼저 거절하므로 닿지 않는다 — 닿아도 500이 아니라 같은 422로
+        session.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     for d in inputs:
         if d.field_key is not None:
             record_approval(session, engine, user.id, d.column, d.field_key)
