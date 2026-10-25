@@ -40,8 +40,8 @@ PARSE_WAIT_S = _env_int("MOAJWO_PARSE_WAIT_S", 60)  # 읽기 차례를 기다리
 MAX_OUTPUT_CELLS = _env_int("MOAJWO_MAX_OUTPUT_CELLS", 1_000_000)
 # 결과 파일 하나에 넣는 글자 수 합 (결과 칸 + 통합의 변경 기록 앞뒤 값·이유). 칸 수 예산은 글자 양을 보지 않아 긴 글자
 # 칸 몇천 개로도 메모리가 넘친다 (512MiB 격리 컨테이너에서 칸 몇천 개·약 6,390만 자 통합이 메모리 부족으로 종료 —
-# docs/MEMORY.md). 통합을 새 컨테이너에서: 셈한 글자 약 4,790만 → 346MiB, 약 9,580만 → 593MiB, 약 1억 4,370만 →
-# 800MiB. 묶기 약 9,580만 → 407MiB. Render(512MiB) 권장 48,000,000
+# docs/MEMORY.md). 셈한 글자에 따른 통합: 512MiB(Render 한도) 4,790만 → 346MiB, 9,580만 → 512MiB(한도에 닿음) /
+# 1GiB(로컬 기본 한도) 9,580만 → 593MiB, 1억 4,370만 → 800MiB. 묶기 9,580만 → 407MiB(512MiB). Render 권장 48,000,000
 MAX_OUTPUT_TEXT_CHARS = _env_int("MOAJWO_MAX_OUTPUT_TEXT_CHARS", 96_000_000)
 # 결과 만들기(묶기·통합·통계 요약·데이터 분석) 동시 실행 수 — 프로세스마다 (app/output_slot.py). 칸 예산은 요청 하나만
 # 막으므로, 한도 가까운 결과 둘이 동시에 만들어지지 않게 한다. 차례가 없으면 기다리지 않고 거절한다
