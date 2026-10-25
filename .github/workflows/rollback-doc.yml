@@ -1,0 +1,37 @@
+# 진단 전용: docs/DEPLOY.md 4장 B 롤백을 후보 트리의 문서 단계 상자 그대로 격리 러너(GitHub 호스트, 공개 저장소라 무료)에서
+# 리허설한다 — 실패 경로 6가지, 정상 0~7단계, 다시 후보, 이전 9장 명령의 수정 전 모습. 'ci/rollback-doc-*' 브랜치를 올릴 때만
+# 돈다 — main·PR에는 영향이 없다. 운영 PC·Render로 요청하지 않는다. 결과는 아티팩트(30일).
+name: rollback-doc (diagnostic)
+
+on:
+  push:
+    branches: ["ci/rollback-doc-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OLD: adebb6c4f5687b1eb6835e012755bcb5d490968e  # main
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: old → candidate (deploy.sh) → failure paths → rollback (docs chapter 4 B verbatim) → candidate → old chapter 9
+        run: |
+          NEW=$(git rev-parse HEAD^)   # 이 브랜치 = 후보 위에 이 워크플로 파일 하나
+          echo "candidate $NEW" | tee candidate.txt
+          cp diagnostics/ci/rollback_doc_rehearsal.sh diagnostics/ci/deploy_probe.py "$RUNNER_TEMP/"
+          docker compose version
+          bash "$RUNNER_TEMP/rollback_doc_rehearsal.sh" out "$OLD" "$NEW"
+          cat out/results.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: rollback-doc
+          path: out
+          retention-days: 30
