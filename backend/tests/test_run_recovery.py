@@ -774,6 +774,40 @@ def test_cli_recover_in_its_own_process_reports_what_still_blocks_the_downgrade(
     assert down.returncode == 0, down.stderr[-400:]
 
 
+def test_cli_on_a_database_before_0020_only_reads_counts_and_changes_nothing(tmp_path: Path) -> None:
+    """반영 전 운영 DB(0019)에 새 명령을 잘못 써도: status는 실행 기록의 상태별 건수만 읽고(종료 0), recover·resolve는
+    아무것도 바꾸지 않고 이유를 알린다(종료 1) — 담당·생존 신호 열이 없다는 오류 추적으로 끝나지 않는다."""
+    data = tmp_path / "data"
+    assert _cli(data, "-m", "alembic", "upgrade", "0019_analysis_runs").returncode == 0
+    con = sqlite3.connect(data / "moajwo.db")
+    for status in ("running", "done"):
+        con.execute(
+            "INSERT INTO runs (status, trigger, input_file_count, file_ids, row_count, change_count, warning_count,"
+            " summary) VALUES (?, 'manual', 0, '[]', 0, 0, 0, '{\"mode\": \"sheets\"}')",
+            (status,),
+        )
+    con.commit()
+    query = "SELECT id, status, error, summary, finished_at FROM runs ORDER BY id"
+    before = con.execute(query).fetchall()
+    con.close()
+    files = lambda: sorted(p.relative_to(data).as_posix() for p in data.rglob("*"))  # noqa: E731
+    files_before = files()
+    shown = _cli(data, "-m", "app.recovery", "status")
+    assert shown.returncode == 0, shown.stderr[-400:]
+    out = json.loads(shown.stdout)
+    assert (out["revision"], out["lease_columns"]) == ("0019_analysis_runs", False), out
+    assert out["runs_by_status"] == {"done": 1, "running": 1}, out
+    for args in (("recover",), ("resolve", "1", "--failed")):
+        refused = _cli(data, "-m", "app.recovery", *args)
+        assert refused.returncode == 1, (args, refused.stdout, refused.stderr[-400:])
+        assert "0020 이전 판(0019_analysis_runs)" in json.loads(refused.stdout)["error"]
+        assert "Traceback" not in refused.stderr
+    con = sqlite3.connect(data / "moajwo.db")
+    assert con.execute(query).fetchall() == before  # 행을 바꾸지 않음
+    con.close()
+    assert files() == files_before  # 잠금·디스크 식별 파일도 만들지 않음
+
+
 def test_heartbeat_runs_only_while_a_run_is_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
     from sqlalchemy import event
 

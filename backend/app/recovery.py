@@ -31,6 +31,8 @@
                                                실행 중 행 없음(downgrade 가능), 2 = 남음(blocking — next_s초 뒤 다시),
                                                1 = 오류
     python -m app.recovery resolve RUN_ID --failed   결과 확인 필요 → 실패 (조건부, 파일은 지우지 않고 경로만 알림)
+  세 명령 모두 먼저 이 DB에 0020의 담당·생존 신호 열이 있는지 읽기만 하고 본다. 0020 이전 판 DB(예: 반영 전 운영 DB
+  0019)면 status는 실행 기록의 상태별 건수만 읽어 보여 주고(종료 0), recover·resolve는 아무것도 바꾸지 않고 종료 1.
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, func, inspect, select, text, update
 from sqlalchemy.orm import Session
 
 from app import db as app_db
@@ -422,6 +424,37 @@ def resolve_failed(run_id: int) -> dict[str, Any]:
     return {"id": run_id, "changed": True, "left_file": row.output_path}
 
 
+def schema() -> tuple[bool, str | None]:
+    """이 DB에 0020의 담당·생존 신호 열(runs.worker·heartbeat_at)이 있는지와 리비전 — 읽기만 한다."""
+    with app_db.engine.connect() as c:
+        found = inspect(c)
+        columns = {col["name"] for col in found.get_columns("runs")} if found.has_table("runs") else set()
+        revision = (
+            c.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            if found.has_table("alembic_version")
+            else None
+        )
+    return {"worker", "heartbeat_at"} <= columns, revision
+
+
+def legacy_status(revision: str | None) -> dict[str, Any]:
+    """0020 이전 판 DB: 실행 기록의 상태별 건수만 (읽기만 — 담당·생존 신호가 없어 정리 대상인지 판단하지 않는다)."""
+    with app_db.engine.connect() as c:
+        rows = c.execute(text("SELECT status, count(*) FROM runs GROUP BY status ORDER BY status")).all()
+    return {
+        "revision": revision,
+        "lease_columns": False,
+        "runs_by_status": {status: count for status, count in rows},
+        "note": "0020 이전 판 DB입니다 — 담당·생존 신호 열이 없어 실행 기록의 상태별 건수만 보여 줍니다 (읽기만 함). "
+        "recover·resolve는 0020 DB에서만 씁니다.",
+    }
+
+
+def _print(out: dict[str, Any]) -> None:
+    encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "")
+    print(json.dumps(out, ensure_ascii=encoding != "utf8", indent=1, default=str))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m app.recovery", description="멈춘 결과 실행 확인·정리 (docs/DEPLOY.md)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -431,20 +464,33 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("run_id", type=int)
     r.add_argument("--failed", action="store_true", required=True)
     a = ap.parse_args(argv)
+    try:  # 0020 이전 판 DB에 새 명령을 잘못 써도 바꾸지 않게 열부터 본다 (읽기만)
+        lease, revision = schema()
+    except Exception as exc:  # noqa: BLE001 — DB에 닿지 못함 등. 이유만 (주소·SQL 없이)
+        _print({"error": f"DB를 확인하지 못했습니다 ({type(exc).__name__}) — 아무것도 바꾸지 않았습니다."})
+        return 1
+    if not lease:
+        if a.cmd == "status":
+            _print(legacy_status(revision))
+            return 0
+        error = (
+            f"이 DB는 0020 이전 판({revision or '리비전 없음'})입니다 — {a.cmd}는 0020 DB에서만 씁니다 "
+            "(담당·생존 신호 열이 없음). 아무것도 바꾸지 않았습니다 (docs/DEPLOY.md)."
+        )
+        _print({"revision": revision, "error": error})
+        return 1
     if a.cmd == "status":
-        out, ok = status(), True
+        out, ok = {"revision": revision, **status()}, True
     elif a.cmd == "recover":  # 0: 담당이 있는 실행 중 행 없음, 2: 남음(살아 있거나 근거를 기다림), 1: 오류
         out = recover()
         if out["complete"] and out["blocking"]:
-            encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "")
-            print(json.dumps(out, ensure_ascii=encoding != "utf8", indent=1, default=str))
+            _print(out)
             return 2
         ok = out["complete"] and out["blocking"] == 0
     else:
         out = resolve_failed(a.run_id)
         ok = out["changed"]
-    encoding = (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "")
-    print(json.dumps(out, ensure_ascii=encoding != "utf8", indent=1, default=str))
+    _print(out)
     return 0 if ok else 1
 
 
