@@ -15,7 +15,6 @@ import hashlib
 import io
 import json
 import os
-import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -71,9 +70,8 @@ def flows():
     for module in (files, validation_api, review, integration, automation):
         patch.setattr(module, "get_engine", lambda: mapping_engine)
     Base.metadata.create_all(engine)
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        before_codes = {r[0] for r in con.execute("select code from glossary_entries")}
-        before_aliases = {r[0] for r in con.execute("select id from glossary_aliases")}
+    before_codes = {r[0] for r in _sql("select code from glossary_entries")}
+    before_aliases = {r[0] for r in _sql("select id from glossary_aliases")}
     with TestClient(app, raise_server_exceptions=False) as c:
         glossary_csv = (
             "코드,정식명칭,유형,시도코드,시군구코드,별칭\n"
@@ -86,13 +84,24 @@ def flows():
         assert res.status_code == 200, res.text
         yield c
     patch.undo()
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:  # 같은 시험 DB를 쓰는 다른 모듈에 영향이 없게
-        for (alias_id,) in con.execute("select id from glossary_aliases").fetchall():
-            if alias_id not in before_aliases:
-                con.execute("delete from glossary_aliases where id = ?", (alias_id,))
-        for (code,) in con.execute("select code from glossary_entries").fetchall():
-            if code not in before_codes:
-                con.execute("delete from glossary_entries where code = ?", (code,))
+    # 같은 시험 DB를 쓰는 다른 모듈에 영향이 없게
+    for (alias_id,) in _sql("select id from glossary_aliases"):
+        if alias_id not in before_aliases:
+            _sql("delete from glossary_aliases where id = :i", i=alias_id)
+    for (code,) in _sql("select code from glossary_entries"):
+        if code not in before_codes:
+            _sql("delete from glossary_entries where code = :c", c=code)
+
+
+def _sql(sql: str, **params: Any) -> list[Any]:
+    """앱과 같은 DB에 바로 (SQLite·PostgreSQL 모두)."""
+    from sqlalchemy import text
+
+    from app.db import engine
+
+    with engine.begin() as con:
+        res = con.execute(text(sql), params)
+        return list(res) if res.returns_rows else []
 
 
 def _upload(c: TestClient, name: str, data: bytes) -> int:
@@ -152,16 +161,18 @@ def _run_of(res: Any) -> int:
 
 
 def _row(run_id: int) -> dict[str, Any]:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        con.row_factory = sqlite3.Row
-        row = con.execute("select * from runs where id = ?", (run_id,)).fetchone()
-        changes = con.execute("select count(*) from run_changes where run_id = ?", (run_id,)).fetchone()[0]
+    from sqlalchemy import text
+
+    from app.db import engine
+
+    with engine.connect() as con:
+        row = con.execute(text("select * from runs where id = :i"), {"i": run_id}).mappings().one()
+        changes = con.execute(text("select count(*) from run_changes where run_id = :i"), {"i": run_id}).scalar()
     return {**dict(row), "changes": changes}
 
 
 def _latest_run_id() -> int:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
-        return con.execute("select max(id) from runs").fetchone()[0] or 0
+    return _sql("select max(id) from runs")[0][0] or 0
 
 
 def _files_of(run_id: int) -> tuple[list[Path], list[Path]]:
