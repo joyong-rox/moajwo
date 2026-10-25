@@ -258,8 +258,11 @@ def run_validation(
     return _validation_out(run)
 
 
-def save_run(session: Session, params_json: str, result: ValidationResult, user_id: int | None = None) -> ValidationRun:
-    """검증 결과를 등급별로 분리한 그대로 기록한다 (검증 API와 검토 패널이 함께 사용)."""
+def save_run(
+    session: Session, params_json: str, result: ValidationResult, user_id: int | None = None, commit: bool = True
+) -> ValidationRun:
+    """검증 결과를 등급별로 분리한 그대로 기록한다 (검증 API와 검토 패널이 함께 사용).
+    commit=False면 번호만 받고(flush) 커밋은 호출한 쪽이 한다 — 검토 생성이 검토·항목과 한 트랜잭션으로 기록할 때."""
     payload = {
         "blocks": [_issue_out(i, BLOCK_LABEL).model_dump(mode="json") for i in result.blocks],
         "warnings": [_issue_out(i, WARNING_LABEL).model_dump(mode="json") for i in result.warnings],
@@ -271,7 +274,10 @@ def save_run(session: Session, params_json: str, result: ValidationResult, user_
         status=result.status, params=params_json, result=json.dumps(payload, ensure_ascii=False), created_by=user_id
     )
     session.add(run)
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     logger.info(
         "validation run=%s status=%s blocks=%d warnings=%d",
         run.id,

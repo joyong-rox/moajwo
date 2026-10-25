@@ -183,9 +183,9 @@ def test_bundle_counts_the_header_text(user, monkeypatch) -> None:
 
 
 def test_integration_counts_column_records_and_labels(user, monkeypatch) -> None:
-    """통합은 열 이름 매핑의 변경 기록(원본 열 이름·이유)과 결과 열 이름도 결과 글자로 센다. 열 이름은 매핑 확정
-    기록의 길이 한도(varchar 255 — PostgreSQL) 안으로: 240자 열 이름 하나가 변경 기록에 세 번(원본 열 이름·앞 값·이유)
-    들어간다."""
+    """통합은 열 이름 매핑의 변경 기록(원본 열 이름·이유)과 결과 열 이름도 결과 글자로 센다. 열 이름은 저장 한도
+    (255자 — 두 DB 같음, app/name_limits.py) 안으로: 240자 열 이름 하나가 변경 기록에 세 번(원본 열 이름·앞 값·이유)
+    들어간다. 한도를 넘는 이름의 거절은 tests/test_name_limits.py."""
     long_name = "인구" + "가" * 238
     rows = [["시도", "시군구", long_name], ["서울특별시", "종로구", 10]]
     fid = _upload(user, "ob-colname.xlsx", _xlsx({"colname": rows}))

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -34,11 +35,24 @@ from app.check_basis import (
 )
 from app.config import DATA_DIR, MAX_OUTPUT_CELLS, MAX_OUTPUT_TEXT_CHARS
 from app.decisions import load_decisions, load_learned, load_org_codes
+from app.failures import failure_reason, log_failure
 from app.files import load_parsed
 from app.glossary import EntityRef, Resolution, entity_ref, normalize_name
 from app.glossary_api import glossary_state
 from app.mapping import ColumnMapping, get_engine
 from app.models import Automation, IntegrationRun, ReviewSession
+from app.name_limits import (
+    COLUMN_MAX,
+    FILE_NAME_MAX,
+    LABEL_MAX,
+    SHEET_MAX,
+    Problem,
+    cell_place,
+    column_place,
+    hint,
+    name_problem,
+    sheet_place,
+)
 from app.output_slot import output_slot
 from app.parsing import Cell, is_missing
 from app.pii import mask_text
@@ -94,6 +108,10 @@ class IntegrationError(Exception):
     pass
 
 
+CONTROL_CHAR = "CELL_CONTROL_CHAR"  # 결과 파일(엑셀)에 쓸 수 없는 제어 문자 (NUL 포함)
+INTEGRATION_FAILED = "INTEGRATION_FAILED"  # 결과를 만드는 중 예기치 않은 실패 (예외 종류만 알림)
+
+
 @dataclass
 class Change:
     source_file_id: int | None
@@ -129,6 +147,11 @@ class _Built:
     dropped_columns: list[dict[str, Any]] = field(default_factory=list)
     unmapped_columns: list[str] = field(default_factory=list)  # 원래 이름으로 넣은 '해당 없음' 열
     text_chars: int = 0  # 결과 칸·변경 기록(앞뒤 값·이유)의 글자 수 합 — 결과 글자 예산 (쌓는 중에 센다)
+    # (파일 번호, 시트 이름, 원본 열 이름) → 위치 '파일 #n · N번째 시트 · C열(머리글 1행)' — 이름 없이 알릴 때
+    places: dict[tuple[int, str, str], str] = field(default_factory=dict)
+    # 결과 파일에 쓸 수 없는 제어 문자가 든 곳: 처음 3곳의 위치와 전체 수 (실행 기록을 만들기 전에 거절)
+    control: list[str] = field(default_factory=list)
+    control_count: int = 0
 
 
 # ---------------------------------------------------------------- 값 비교
@@ -231,6 +254,17 @@ def _display_name(ref: EntityRef, field_key: str, has_sido: bool = True) -> str:
     return ref.name
 
 
+def _bad_text(value: Any) -> bool:
+    """엑셀(XML)에 쓸 수 없는 제어 문자(NUL·\\x01 등)가 든 글자 — 줄바꿈·탭은 쓸 수 있다."""
+    return isinstance(value, str) and ILLEGAL_CHARACTERS_RE.search(value) is not None
+
+
+def _control_at(built: _Built, where: str) -> None:
+    built.control_count += 1
+    if len(built.control) < 3:
+        built.control.append(where)
+
+
 def _few(items: list[str], limit: int = 3) -> str:
     return "; ".join(items[:limit]) + (f" 외 {len(items) - limit}건" if len(items) > limit else "")
 
@@ -292,12 +326,23 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
         if fid in excluded:
             record, _ = load_parsed(db, fid)
             built.files.append({"id": fid, "name": record.original_name, "excluded": True, "sheets": []})
+            if _bad_text(record.original_name):  # 처리 요약 시트에 쓴다
+                _control_at(built, f"파일 #{fid}: 파일 이름")
     org_codes = load_org_codes(db)
     for fid in file_ids:
         record, parsed = load_parsed(db, fid)
         decisions = snapshot[fid]
         info: dict[str, Any] = {"id": fid, "name": record.original_name, "excluded": False, "sheets": []}
+        if _bad_text(record.original_name):
+            _control_at(built, f"파일 #{fid}: 파일 이름")
         for sheet in parsed.sheets:
+            # 시트·열 이름은 결과 파일(출처 열·변경 내역·처리 요약)에 그대로 쓴다 — 쓰지 않는 열 이름도 요약에 남는다
+            where = f"파일 #{fid} · {sheet_place(sheet)}"
+            if _bad_text(sheet.name):
+                _control_at(built, f"{where}: 시트 이름")
+            for j, name in enumerate(sheet.columns):
+                if _bad_text(name):
+                    _control_at(built, f"{where} · {column_place(sheet, j)}: 열 이름")
             mappings = engine.map_columns(
                 sheet.columns,
                 sheet.samples,
@@ -325,6 +370,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                 built.dropped_columns.append({"file": record.original_name, "sheet": sheet.name, **d})
                 built.text_chars += sum(len(v) for v in built.dropped_columns[-1].values() if isinstance(v, str))
             for c in columns:
+                built.places.setdefault((fid, sheet.name, c.source), f"{where} · {column_place(sheet, c.index)}")
                 column_at(c.label)
                 if c.field_key in ENTITY_FIELDS:
                     column_at(f"{c.label} 코드")
@@ -373,6 +419,8 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                             if shown != value:
                                 value, kind, reason, confidence = shown, "entity", why, conf
                     row[label_index[c.label]] = value
+                    if _bad_text(value) or _bad_text(original):  # 결과 칸·변경 내역(이전 값)에 쓸 수 없는 글자
+                        _control_at(built, f"{where} · {cell_place(sheet, entry['row'], c.index)}")
                     if same(original, value):
                         continue
                     if kind is None:
@@ -642,6 +690,57 @@ def _check_size(built: _Built) -> None:
         )
 
 
+def _check_names(built: _Built) -> None:
+    """변경 기록(run_changes)에 실제로 저장할 이름 — 결과 열 이름·원본 열 이름·시트 이름·파일 이름 — 이 저장 규칙
+    (한도·NUL)에 맞는지. 실행 기록을 만들기 전에 거절한다 (SQLite도 같은 규칙 — app/name_limits.py).
+
+    - 결과 열 이름은 ' (원본 열)'·' [원래 이름]'이 붙어 원래 이름보다 길어질 수 있다.
+    - 결과 파일에만 쓰고 기록하지 않는 이름(기관·지역 항목의 '<열> 코드' 열 등)은 보지 않는다 — 이름이 아니라
+      저장하는 곳으로 가린다.
+    - 원본 이름은 이름 규칙 전에 SQLite에서 만든 검토에서만 넘을 수 있다 (새 검토는 만들 때 거절됨).
+    - 이름을 잘라 적지 않는다 (결과 파일의 열 이름과 기록이 달라짐). 문구에는 그 이름을 만든 원본 위치만."""
+    problems: list[tuple[str, Problem]] = []
+    label_problem = False
+    stored = {(ch.source_file_id, ch.file_name, ch.sheet, ch.column, ch.source_column) for ch in built.changes}
+    for fid, file_name, sheet, label, source in sorted(stored, key=lambda k: (k[0] or 0, k[2], k[4], k[3])):
+        where = built.places.get((fid or 0, sheet, source)) or (f"파일 #{fid}" if fid is not None else "변경 기록")
+        if (p := name_problem("결과 열 이름", label, LABEL_MAX)) is not None:
+            problems.append((where, p))
+            label_problem = True
+        for p in (
+            name_problem("원본 열 이름", source, COLUMN_MAX),
+            name_problem("시트 이름", sheet, SHEET_MAX),
+            name_problem("파일 이름", file_name, FILE_NAME_MAX),
+        ):
+            if p is not None:
+                problems.append((where, p))
+    if not problems:
+        return
+    unique = list(dict.fromkeys(problems))
+    shown = " / ".join(f"{w}: {p.text}" for w, p in unique[:3]) + (
+        f" 외 {len(unique) - 3}곳" if len(unique) > 3 else ""
+    )
+    why = (
+        " 같은 표준 항목으로 확정한 두 번째 열과 결과에 넣은 '해당 없음' 열은 원래 열 이름이 결과 열 이름에 "
+        "들어갑니다 — 그 열을 다른 항목으로 다시 확정하거나 원본에서 이름을 줄여 올린 뒤 검토에서 다시 검사하세요."
+        if label_problem
+        else " 검토에서 다시 검사해야 합니다."
+    )
+    raise IntegrationError(f"이름을 저장할 수 없어 통합하지 않았습니다 — {shown}. {hint(p for _, p in unique)}{why}")
+
+
+def _check_text(built: _Built) -> None:
+    """결과 파일(엑셀)에 쓸 수 없는 제어 문자가 든 칸·이름이 있으면 실행 기록을 만들기 전에 거절한다 — 위치만 알린다
+    (값 원문은 응답·실행 기록·서버 기록 어디에도 넣지 않음). 값을 지우거나 바꿔 만들지 않는다."""
+    if built.control_count:
+        more = built.control_count - len(built.control)
+        raise IntegrationError(
+            "통합하지 않았습니다 — 결과 파일(엑셀)에 쓸 수 없는 제어 문자(NUL 등)가 있습니다: "
+            f"{' / '.join(built.control)}{f' 외 {more}곳' if more else ''}. "
+            f"원본 파일에서 그 문자를 지운 뒤 다시 올리고 검토에서 다시 검사하세요. [{CONTROL_CHAR}]"
+        )
+
+
 def pending_run(db: Session, session: ReviewSession) -> IntegrationRun | None:
     """자동화 실행으로 만든 '검토 대기' 실행 기록 (다시 검사한 세션이면 이전 세션의 기록)."""
     current: ReviewSession | None = session
@@ -682,17 +781,23 @@ def _integrate(db: Session, session: ReviewSession, include_unmapped: bool | Non
         include_unmapped = include_unmapped_default(db, session)
     built = build(db, session, include_unmapped)
     _check_size(built)  # 결과는 메모리에 다 만든 뒤 저장한다 — '실행 중' 기록을 남기기 전에 거절 (docs/MEMORY.md)
+    _check_names(built)  # 변경 기록에 저장할 이름의 저장 규칙 — 같은 때 거절
     now = datetime.now(KST)
     items = session_items(db, session)
     warning_count = summarize(session, items).warnings
     excluded = set(json.loads(session.excluded_file_ids))
     # 검증 경고의 내용 (합계 검사 불완전·산식·이상치 등) — 건수만이 아니라 무엇을 확인하지 못했는지 결과에 남긴다
+    shown = [i for i in items if i.category == "warning" and (i.file_id is None or i.file_id not in excluded)]
     warnings = [
         {"kind": WARNING_LABEL.get(i.kind, i.kind), "file": i.file_name, "sheet": i.sheet, "row": i.row,
          "column": i.column, "reason": mask_text(i.reason)}
-        for i in items
-        if i.category == "warning" and (i.file_id is None or i.file_id not in excluded)
+        for i in shown
     ]  # fmt: skip
+    for w, i in zip(warnings, shown, strict=True):  # 처리 요약 시트에 쓴다 (경고 사유에 칸 값이 들어갈 수 있음)
+        if any(_bad_text(v) for v in w.values()):
+            base = built.places.get((i.file_id or 0, i.sheet or "", i.column or "")) or f"파일 #{i.file_id}"
+            _control_at(built, f"{base}{f' · {i.row}행' if i.row else ''} (검증 경고)")
+    _check_text(built)  # 결과 파일에 쓸 수 없는 제어 문자 — 실행 기록을 만들기 전에 거절
     file_ids = [f["id"] for f in built.files if not f["excluded"]]
     # 자동화가 만든 '검토 대기' 행은 DB에서도 그 상태일 때만 이어 쓴다 (겹친 두 요청이 같은 행을 쓰지 않게)
     reuse = run is not None
@@ -756,15 +861,19 @@ def _integrate(db: Session, session: ReviewSession, include_unmapped: bool | Non
     except runlease.RunUncertain:  # 결과 파일은 있고 완료 기록만 확인하지 못함 — 지우지 않고 503으로 알린다
         raise
     except Exception as exc:
-        logger.exception("integration run %s failed", run.id)
+        # 응답·실행 기록·서버 기록 모두 원문 없이 — 예외 종류와 실행 번호만 (app/failures.py)
+        log_failure(logger, "integration", run.id, exc)
+        reason = failure_reason(exc, (IntegrationError, runlease.RunError))
         try:
-            runlease.fail(db, run, tmp_path, str(exc), "{}")
+            runlease.fail(db, run, tmp_path, f"{reason} [{INTEGRATION_FAILED}]", "{}")
         except runlease.RunDone:
             db.refresh(run)
             return run
         except runlease.RunSettled as settled:
             raise IntegrationError(str(settled)) from exc
-        raise IntegrationError(f"통합 결과를 만들지 못했습니다: {exc}") from exc
+        raise IntegrationError(
+            f"통합 결과를 만들지 못했습니다 — {reason} (실행 #{run.id}). [{INTEGRATION_FAILED}]"
+        ) from exc
     finally:
         runlease.untrack(run.id)
     logger.info("integration run=%s rows=%d changes=%d", run.id, run.row_count, run.change_count)

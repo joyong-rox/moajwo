@@ -18,6 +18,7 @@ from app.pii import mask_nested, mask_rrn_number, mask_text
 from app.review import (
     INTERNAL_PARAMS,
     ReviewError,
+    ReviewNameError,
     ReviewPermissionError,
     can_change_file,
     changes,
@@ -204,7 +205,11 @@ def create_review(body: ValidationIn, db: Annotated[Session, Depends(get_session
         )
     for fid in [*body.file_ids, *body.baseline_file_ids]:
         get_file_for(db, user, fid)
-    session = create_session(db, body.model_dump(), user_id=user.id)
+    try:
+        session = create_session(db, body.model_dump(), user_id=user.id)
+    except ReviewNameError as exc:  # 시트·열 이름이 저장 한도를 넘음 — 아무것도 기록하지 않았다
+        db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     return review_out(db, session, user=user)
 
 
@@ -447,6 +452,9 @@ def recheck_review(
     except ReviewPermissionError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    except ReviewNameError as exc:  # 바꾼 파일의 시트·열 이름이 저장 한도를 넘음 (이전 검토는 그대로)
+        db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     except ReviewError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc

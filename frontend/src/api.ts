@@ -455,7 +455,14 @@ export type Review = {
   files: { id: number; name: string; excluded: boolean }[]
   items: ReviewItem[]
   validation_run_id: number | null
-  learned: { columns: number; names: number; names_skipped?: number } | null
+  // names_skipped: 사전 관리 권한 없음 · names_pii: 개인정보 형식 · names_not_storable: 저장 한도 초과·NUL
+  learned: {
+    columns: number
+    names: number
+    names_skipped?: number
+    names_pii?: number
+    names_not_storable?: number
+  } | null
   parent_id: number | null
   child_id: number | null
   latest_id?: number | null // 대체된 검토면 다시 검사로 이어진 최신 검토

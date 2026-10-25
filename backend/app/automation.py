@@ -18,7 +18,15 @@ from app.integration import KST, IntegrationError, integrate
 from app.mapping import get_engine
 from app.models import Automation, IntegrationRun, ReviewSession, SourceFile
 from app.output_slot import output_slot
-from app.review import column_rule_key, complete, create_session, recheck_reasons, session_items, summarize
+from app.review import (
+    ReviewNameError,
+    column_rule_key,
+    complete,
+    create_session,
+    recheck_reasons,
+    session_items,
+    summarize,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +155,10 @@ def _run_automation(
         "entity_field": validation.get("entity_field"),
         "change_threshold": validation.get("change_threshold") or 0.5,
     }
-    session = create_session(db, params, use_llm=use_llm, automation=automation, user_id=user_id)
+    try:
+        session = create_session(db, params, use_llm=use_llm, automation=automation, user_id=user_id)
+    except ReviewNameError as exc:  # 시트·열 이름이 저장 한도를 넘음 — 규칙 기록·검토·실행 기록을 만들기 전
+        raise AutomationError(str(exc)) from exc
     run = IntegrationRun(
         review_session_id=session.id,
         automation_id=automation.id,

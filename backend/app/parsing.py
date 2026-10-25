@@ -72,6 +72,8 @@ class SheetResult:
     # 열별 원본 시트의 열 번호(0부터). 병합 복제 열을 버리면 원본 위치와 달라지므로
     # 미리보기의 열 위치(A, B…) 표시에 쓴다
     source_columns: list[int] = field(default_factory=list)
+    # 원본 통합 문서에서의 시트 순번(0부터) — 건너뛴 설명 시트도 센다. 이름 대신 위치로 알릴 때 ('N번째 시트')
+    tab: int = 0
 
 
 @dataclass
@@ -800,5 +802,9 @@ def _parse_file(path: Path, original_name: str | None) -> FileResult:
     skipped = [n for n in names if _INFO_SHEET.search(n)]
     if len(skipped) == len(names):  # 시트가 설명 시트뿐이면 그대로 읽는다
         skipped = []
-    sheet_results = [analyze_sheet(n, g, filled.get(n)) for n, g in sheets.items() if n not in skipped]
+    sheet_results = []
+    for tab, (n, g) in enumerate(sheets.items()):
+        if n not in skipped:
+            sheet_results.append(analyze_sheet(n, g, filled.get(n)))
+            sheet_results[-1].tab = tab
     return FileResult(sheets=sheet_results, encoding=encoding, skipped_sheets=skipped)
