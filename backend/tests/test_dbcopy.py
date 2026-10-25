@@ -483,6 +483,7 @@ def test_dry_run_and_apply_keep_the_source_and_copy_everything(pg_env, target, t
     code, out = _run(capsys, "--source", _src(pg_env), "--target", target, "--report", str(report))
     assert code == 0 and out["result"].startswith("dry-run") and _state(target) == before
     assert out["target_secret_in_args"] is bool(make_url(target).password) and out["tz_unverified_runs"] == 0
+    assert out["too_long_values"] == []
     assert json.loads(report.read_text(encoding="utf-8"))["tool"] == dbcopy.TOOL  # 정상 보고서 저장 유지
     assert out["source"]["unchanged"] and out["snapshot"]["integrity"] == "ok"
     # 적용: 주소는 환경 변수로만 (--target-env)
@@ -656,4 +657,66 @@ def test_runs_whose_time_zone_origin_needs_confirmation_stop_the_copy(pg_env, ta
             dbcopy.copy(f"sqlite:///{unverified.as_posix()}", target, apply=apply, report=report)
         assert report["tz_unverified_runs"] == 1 and report["db_applied"] == "no"
         assert "legacy_0009_runs" not in report
+    assert _state(target) == before
+
+
+def _with_long_values(path: Path) -> dict[str, int]:
+    """SQLite(길이를 강제하지 않음)에 대상 열 길이를 넘는 값을 넣는다 — 경계 255자(한글 765바이트)는 들어갈 값."""
+    eng = create_engine(f"sqlite:///{path.as_posix()}")
+    with Session(eng) as db:
+        fid = db.query(SourceFile.id).order_by(SourceFile.id).first()[0]
+        rows = {"edge": "세" + "가" * 254, "over": "예" + "가" * 255, "spaces": "끝" + "가" * 254 + " "}
+        ids = {}
+        for name, column in rows.items():
+            db.execute(
+                text("INSERT INTO mapping_decisions (source_file_id, sheet_name, column_name, field_key) "
+                     "VALUES (:f, '현황', :c, 'note')"),
+                {"f": fid, "c": column},
+            )  # fmt: skip
+            ids[name] = db.execute(text("SELECT max(id) FROM mapping_decisions")).scalar()
+        db.add(AppSetting(key="k" * 65, value="{}", updated_at=datetime.now(UTC)))  # 문자열 기본 키 (원문) 초과
+        db.commit()
+    eng.dispose()
+    return ids
+
+
+def test_values_longer_than_the_target_columns_are_found_without_reading_them(tmp_path) -> None:
+    """DB 없이: 대상 열 길이(varchar n)를 글자 수로 넘는 원천 값만 찾는다 — 255자 한글은 통과, 256자·끝 공백으로 넘는
+    값은 보고. 문자열 기본 키 표는 키가 원문이라 행 번호 없이 건수만. 보고에 값은 없다."""
+    source = tmp_path / "long.db"
+    _migrate(f"sqlite:///{source.as_posix()}")
+    _fill_source(source)
+    ids = _with_long_values(source)
+    eng = create_engine(f"sqlite:///{source.as_posix()}")
+    with eng.connect() as c:
+        found = dbcopy._too_long_values(c)
+    eng.dispose()
+    by = {(v["table"], v["column"]): v for v in found}
+    assert set(by) == {("mapping_decisions", "column_name"), ("app_settings", "key")}, found
+    decisions = by[("mapping_decisions", "column_name")]
+    assert (decisions["limit"], decisions["count"], decisions["longest"]) == (255, 2, 256)
+    assert decisions["ids"] == sorted([ids["over"], ids["spaces"]])  # 경계 255자 행은 없음
+    assert by[("app_settings", "key")] == {"table": "app_settings", "column": "key", "limit": 64, "count": 1,
+                                           "longest": 65}  # fmt: skip
+    assert "가" * 20 not in json.dumps(found, ensure_ascii=False) and "k" * 65 not in json.dumps(found)
+
+
+@pg
+def test_values_longer_than_the_target_columns_stop_the_copy(pg_env, target, tmp_path, capsys) -> None:
+    """원천 SQLite에 대상 열 길이를 넘는 값이 있으면 확인만·적용 모두 '확인' 단계에서 멈추고(종료 1, 적용 안 함) 대상은
+    그대로 — 지금(이 검사 전)은 확인만은 통과하고 적용 때 복사 중 22001로 되돌렸고, 보고에 표·열이 남지 않았다."""
+    long = tmp_path / "long.db"
+    shutil.copy(pg_env["source"], long)
+    ids = _with_long_values(long)
+    before = _state(target)
+    for args in ((), ("--apply",)):
+        code, out = _run(capsys, "--source", f"sqlite:///{long.as_posix()}", "--target", target, *args)
+        assert code == dbcopy.EXIT_NOT_APPLIED and out["stage"] == "확인" and out["db_applied"] == "no", out
+        assert (
+            "mapping_decisions.column_name(최대 255자) 2건" in out["error"]
+            and "app_settings.key(최대 64자) 1건" in out["error"]
+        )
+        decisions = next(v for v in out["too_long_values"] if v["column"] == "column_name")
+        assert decisions["ids"] == sorted([ids["over"], ids["spaces"]]) and decisions["longest"] == 256
+        assert "가" * 20 not in json.dumps(out, ensure_ascii=False)
     assert _state(target) == before
