@@ -31,8 +31,13 @@
                                                실행 중 행 없음(downgrade 가능), 2 = 남음(blocking — next_s초 뒤 다시),
                                                1 = 오류
     python -m app.recovery resolve RUN_ID --failed   결과 확인 필요 → 실패 (조건부, 파일은 지우지 않고 경로만 알림)
-  세 명령 모두 먼저 이 DB에 0020의 담당·생존 신호 열이 있는지 읽기만 하고 본다. 0020 이전 판 DB(예: 반영 전 운영 DB
-  0019)면 status는 실행 기록의 상태별 건수만 읽어 보여 주고(종료 0), recover·resolve는 아무것도 바꾸지 않고 종료 1.
+  세 명령 모두 먼저 이 DB의 리비전(alembic_version)과 runs 표의 0020 열(담당·생존 신호)을 읽기만 하고 맞춰 본다.
+  - 0020_run_worker_lease + 열 있음: 위 동작.
+  - 0019_analysis_runs + 열 없음(예: 반영 전 운영 DB): status는 실행 기록의 상태별 건수만 보여 주고(종료 0),
+    recover·resolve는 아무것도 바꾸지 않고 종료 1.
+  - 그 밖(리비전 없음·여러 개·이 판이 다루지 않는 리비전·리비전과 열이 맞지 않음·runs 표 없음): status를 포함해
+    진단만 알리고 종료 1 — 어느 판이라고 짐작하지 않고 아무것도 바꾸지 않는다. DB를 읽지 못해도 종료 1.
+  진단·오류에는 리비전 이름·열 이름·오류 종류만 (주소·SQL·값 없음).
 """
 
 from __future__ import annotations
@@ -424,29 +429,56 @@ def resolve_failed(run_id: int) -> dict[str, Any]:
     return {"id": run_id, "changed": True, "left_file": row.output_path}
 
 
-def schema() -> tuple[bool, str | None]:
-    """이 DB에 0020의 담당·생존 신호 열(runs.worker·heartbeat_at)이 있는지와 리비전 — 읽기만 한다."""
+LEASE_REVISION = "0020_run_worker_lease"  # 담당·생존 신호 열이 있는 판 — status·recover·resolve
+LEGACY_REVISION = "0019_analysis_runs"  # 그 바로 앞 판 — status는 상태별 건수만, 바꾸는 명령은 거절
+LEASE_COLUMNS = frozenset({"worker", "heartbeat_at"})
+
+
+def schema() -> dict[str, Any]:
+    """리비전(alembic_version의 모든 행)과 runs 표의 0020 열 — 읽기만 한다."""
     with app_db.engine.connect() as c:
         found = inspect(c)
-        columns = {col["name"] for col in found.get_columns("runs")} if found.has_table("runs") else set()
-        revision = (
-            c.execute(text("SELECT version_num FROM alembic_version")).scalar()
+        has_runs = found.has_table("runs")
+        columns = {col["name"] for col in found.get_columns("runs")} if has_runs else set()
+        revisions = (
+            [r for (r,) in c.execute(text("SELECT version_num FROM alembic_version"))]
             if found.has_table("alembic_version")
-            else None
+            else []
         )
-    return {"worker", "heartbeat_at"} <= columns, revision
+    return {"revisions": revisions, "runs_table": has_runs, "lease_columns": sorted(LEASE_COLUMNS & columns)}
 
 
-def legacy_status(revision: str | None) -> dict[str, Any]:
-    """0020 이전 판 DB: 실행 기록의 상태별 건수만 (읽기만 — 담당·생존 신호가 없어 정리 대상인지 판단하지 않는다)."""
+def schema_problem(info: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(판, 문제): 판은 'lease'(0020 + 열) · 'legacy'(0019 + 열 없음), 문제는 그 밖일 때의 진단 (원문 없이)."""
+    revisions, have = info["revisions"], set(info["lease_columns"])
+    if not revisions:
+        return None, "리비전 기록(alembic_version)이 없습니다"
+    if len(revisions) > 1:
+        return None, f"리비전이 {len(revisions)}개입니다 ({', '.join(revisions)})"
+    revision = revisions[0]
+    if revision not in (LEASE_REVISION, LEGACY_REVISION):
+        supported = f"{LEGACY_REVISION}·{LEASE_REVISION}"
+        return None, f"이 판의 복구 명령이 다루지 않는 리비전({revision})입니다 (다루는 리비전: {supported})"
+    if not info["runs_table"]:
+        return None, f"리비전은 {revision}인데 실행 기록 표(runs)가 없습니다"
+    if revision == LEASE_REVISION and have != LEASE_COLUMNS:
+        found = "일부만 있습니다" if have else "없습니다"
+        return None, f"리비전은 {LEASE_REVISION}인데 담당·생존 신호 열(runs.worker·heartbeat_at)이 {found}"
+    if revision == LEGACY_REVISION and have:
+        return None, f"리비전은 {LEGACY_REVISION}인데 0020의 담당·생존 신호 열({', '.join(sorted(have))})이 있습니다"
+    return ("lease" if revision == LEASE_REVISION else "legacy"), None
+
+
+def legacy_status(revision: str) -> dict[str, Any]:
+    """0019 DB: 실행 기록의 상태별 건수만 (읽기만 — 담당·생존 신호가 없어 정리 대상인지 판단하지 않는다)."""
     with app_db.engine.connect() as c:
         rows = c.execute(text("SELECT status, count(*) FROM runs GROUP BY status ORDER BY status")).all()
     return {
         "revision": revision,
         "lease_columns": False,
         "runs_by_status": {status: count for status, count in rows},
-        "note": "0020 이전 판 DB입니다 — 담당·생존 신호 열이 없어 실행 기록의 상태별 건수만 보여 줍니다 (읽기만 함). "
-        "recover·resolve는 0020 DB에서만 씁니다.",
+        "note": f"{LEGACY_REVISION} DB입니다 — 담당·생존 신호 열이 없어 실행 기록의 상태별 건수만 보여 줍니다 "
+        f"(읽기만 함). recover·resolve는 {LEASE_REVISION} DB에서만 씁니다.",
     }
 
 
@@ -464,18 +496,27 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("run_id", type=int)
     r.add_argument("--failed", action="store_true", required=True)
     a = ap.parse_args(argv)
-    try:  # 0020 이전 판 DB에 새 명령을 잘못 써도 바꾸지 않게 열부터 본다 (읽기만)
-        lease, revision = schema()
-    except Exception as exc:  # noqa: BLE001 — DB에 닿지 못함 등. 이유만 (주소·SQL 없이)
+    try:  # 다른 판 DB에 명령을 잘못 써도 바꾸지 않게 리비전과 열부터 맞춰 본다 (읽기만)
+        info = schema()
+        kind, problem = schema_problem(info)
+        if kind == "legacy" and a.cmd == "status":
+            _print(legacy_status(LEGACY_REVISION))
+            return 0
+    except Exception as exc:  # noqa: BLE001 — DB에 닿지 못함·DB가 아닌 파일 등. 종류만 (주소·SQL 없이)
         _print({"error": f"DB를 확인하지 못했습니다 ({type(exc).__name__}) — 아무것도 바꾸지 않았습니다."})
         return 1
-    if not lease:
-        if a.cmd == "status":
-            _print(legacy_status(revision))
-            return 0
+    revision = info["revisions"][0] if len(info["revisions"]) == 1 else None
+    if problem is not None:
         error = (
-            f"이 DB는 0020 이전 판({revision or '리비전 없음'})입니다 — {a.cmd}는 0020 DB에서만 씁니다 "
-            "(담당·생존 신호 열이 없음). 아무것도 바꾸지 않았습니다 (docs/DEPLOY.md)."
+            f"{problem} — 마이그레이션이 끝나지 않았거나 다른 판·손으로 바뀐 DB일 수 있어 {a.cmd}를 하지 않았습니다 "
+            "(아무것도 바꾸지 않음). 백업한 뒤 'alembic current'와 runs 표 구조를 확인하세요 (docs/DEPLOY.md)."
+        )
+        _print({"revisions": info["revisions"], "lease_columns": info["lease_columns"], "error": error})
+        return 1
+    if kind == "legacy":
+        error = (
+            f"이 DB는 {LEGACY_REVISION}입니다 — {a.cmd}는 {LEASE_REVISION} DB에서만 씁니다 (담당·생존 신호 열이 없음). "
+            "아무것도 바꾸지 않았습니다 (docs/DEPLOY.md)."
         )
         _print({"revision": revision, "error": error})
         return 1

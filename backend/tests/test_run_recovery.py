@@ -33,7 +33,7 @@ from typing import Any
 
 import openpyxl
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
 try:  # 시험 의존성은 httpx2 (Starlette TestClient와 같은 방식으로 가져온다)
@@ -498,6 +498,29 @@ def test_alive_other_disk_run_marked_check_can_still_complete(stack: Stack) -> N
 
 
 @pytest.fixture
+def head_revision():
+    """시험 DB는 create_all로 만들어 리비전 기록이 없다 — 운영 DB(기동 때 'alembic upgrade head')처럼 0020 리비전을
+    적어 두고(복구 명령은 리비전과 열이 맞을 때만 쓴다), 끝나면 그 전 상태로 되돌린다."""
+    from app.db import engine
+
+    with engine.begin() as c:
+        existed = inspect(c).has_table("alembic_version")
+        before = [r for (r,) in c.execute(text("SELECT version_num FROM alembic_version"))] if existed else None
+        if not existed:
+            c.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)"))
+        c.execute(text("DELETE FROM alembic_version"))
+        c.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0020_run_worker_lease')"))
+    yield
+    with engine.begin() as c:
+        if before is None:
+            c.execute(text("DROP TABLE alembic_version"))
+        else:
+            c.execute(text("DELETE FROM alembic_version"))
+            for r in before:
+                c.execute(text("INSERT INTO alembic_version (version_num) VALUES (:r)"), {"r": r})
+
+
+@pytest.fixture
 def dead_worker():
     """같은 결과 폴더의 죽은 담당 (잠금 파일은 있고 아무도 쥐지 않음)."""
     from app import runlease
@@ -800,12 +823,95 @@ def test_cli_on_a_database_before_0020_only_reads_counts_and_changes_nothing(tmp
     for args in (("recover",), ("resolve", "1", "--failed")):
         refused = _cli(data, "-m", "app.recovery", *args)
         assert refused.returncode == 1, (args, refused.stdout, refused.stderr[-400:])
-        assert "0020 이전 판(0019_analysis_runs)" in json.loads(refused.stdout)["error"]
+        assert "이 DB는 0019_analysis_runs입니다" in json.loads(refused.stdout)["error"]
         assert "Traceback" not in refused.stderr
     con = sqlite3.connect(data / "moajwo.db")
     assert con.execute(query).fetchall() == before  # 행을 바꾸지 않음
     con.close()
     assert files() == files_before  # 잠금·디스크 식별 파일도 만들지 않음
+
+
+def _odd_database(data: Path, case: str) -> None:
+    """지원하는 판(0019·0020)이 아니거나 리비전과 실제 열이 맞지 않는 DB를 만든다 (실행 기록 한 행 포함)."""
+    target = "0018_mapping_analyses" if case == "unsupported" else (
+        "0019_analysis_runs" if case == "0020_without_columns" else "head"
+    )  # fmt: skip
+    assert _cli(data, "-m", "alembic", "upgrade", target).returncode == 0
+    con = sqlite3.connect(data / "moajwo.db")
+    con.execute(
+        "INSERT INTO runs (status, trigger, input_file_count, file_ids, row_count, change_count, warning_count,"
+        " summary) VALUES ('running', 'manual', 0, '[]', 0, 0, 0, '{}')"
+    )
+    if case == "missing":
+        con.execute("DELETE FROM alembic_version")
+    elif case == "two":
+        con.execute("INSERT INTO alembic_version (version_num) VALUES ('0019_analysis_runs')")
+    elif case == "0020_without_columns":  # 0019 표 구조에 리비전만 0020 (열 없음)
+        con.execute("UPDATE alembic_version SET version_num = '0020_run_worker_lease'")
+    elif case == "0019_with_columns":  # 0020 표 구조에 리비전만 0019 (열 남음)
+        con.execute("UPDATE alembic_version SET version_num = '0019_analysis_runs'")
+    con.commit()
+    con.close()
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("missing", "리비전 기록(alembic_version)이 없습니다"),
+        ("two", "리비전이 2개입니다"),
+        ("unsupported", "이 판의 복구 명령이 다루지 않는 리비전(0018_mapping_analyses)입니다"),
+        (
+            "0020_without_columns",
+            "리비전은 0020_run_worker_lease인데 담당·생존 신호 열(runs.worker·heartbeat_at)이 없습니다",
+        ),
+        (
+            "0019_with_columns",
+            "리비전은 0019_analysis_runs인데 0020의 담당·생존 신호 열(heartbeat_at, worker)이 있습니다",
+        ),
+    ],
+)
+def test_cli_refuses_a_database_whose_revision_it_does_not_support_or_that_does_not_match(
+    tmp_path: Path, case: str, expected: str
+) -> None:
+    """지원하는 리비전과 필요한 열이 맞을 때만 쓴다: 리비전 없음·여러 개·다루지 않는 리비전·리비전과 열 불일치면
+    status를 포함해 진단만 알리고 종료 1 — 어느 판이라고 짐작하지 않고('0020 이전 판' 아님) 행·리비전·파일을 바꾸지
+    않는다."""
+    data = tmp_path / "data"
+    _odd_database(data, case)
+    db = data / "moajwo.db"
+    query = "SELECT id, status, error, summary, finished_at FROM runs ORDER BY id"
+
+    def state() -> tuple:
+        con = sqlite3.connect(db)
+        try:
+            return con.execute(query).fetchall(), con.execute("SELECT version_num FROM alembic_version").fetchall()
+        finally:
+            con.close()
+
+    before = state()
+    files_before = sorted(p.relative_to(data).as_posix() for p in data.rglob("*"))
+    for args in (("status",), ("recover",), ("resolve", "1", "--failed")):
+        res = _cli(data, "-m", "app.recovery", *args)
+        assert res.returncode == 1, (case, args, res.stdout, res.stderr[-400:])
+        out = json.loads(res.stdout)
+        assert expected in out["error"] and "아무것도 바꾸지 않음" in out["error"], (case, out)
+        assert "0020 이전 판" not in res.stdout and "Traceback" not in res.stderr
+        assert str(data) not in res.stdout and "SELECT" not in res.stdout  # 경로·SQL 없음
+    assert state() == before  # 실행 기록·리비전을 바꾸지 않음
+    assert sorted(p.relative_to(data).as_posix() for p in data.rglob("*")) == files_before
+
+
+def test_cli_reports_a_database_it_cannot_read_without_its_path(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "moajwo.db").write_bytes(b"not a database " * 64)
+    before = (data / "moajwo.db").read_bytes()
+    for args in (("status",), ("recover",)):
+        res = _cli(data, "-m", "app.recovery", *args)
+        assert res.returncode == 1, (args, res.stdout, res.stderr[-400:])
+        assert json.loads(res.stdout)["error"].startswith("DB를 확인하지 못했습니다 (DatabaseError)"), res.stdout
+        assert str(data) not in res.stdout and "Traceback" not in res.stderr
+    assert (data / "moajwo.db").read_bytes() == before
 
 
 def test_heartbeat_runs_only_while_a_run_is_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -842,7 +948,7 @@ def _get_heartbeat(run_id: int) -> Any:
     return _sql("SELECT heartbeat_at FROM runs WHERE id = :i", i=run_id)[0][0]
 
 
-def test_cli_status_and_resolve_only_change_a_check_run(dead_worker: tuple[str, str]) -> None:
+def test_cli_status_and_resolve_only_change_a_check_run(dead_worker: tuple[str, str], head_revision: None) -> None:
     from app import recovery
 
     check = _insert_run(status="check", error=recovery.CHECK_UNKNOWN, worker="0123456789ab-0123456789ab")
@@ -857,7 +963,7 @@ def test_cli_status_and_resolve_only_change_a_check_run(dead_worker: tuple[str, 
 
 
 def test_cli_recover_settles_finished_runs_while_servers_are_stopped(
-    dead_worker: tuple[str, str], capsys: pytest.CaptureFixture[str]
+    dead_worker: tuple[str, str], capsys: pytest.CaptureFixture[str], head_revision: None
 ) -> None:
     """롤백 전(서버를 멈춘 뒤) 한 번 정리: 같은 결과 폴더의 끝난 담당은 근거대로 확정하고, 이전 판 실행(담당 없음)은
     그대로 둔다 — 서버를 다시 띄우지 않아도 0020 downgrade 전에 정리할 수 있다."""
