@@ -749,3 +749,24 @@ def test_cli_status_and_resolve_only_change_a_check_run(dead_worker: tuple[str, 
     row = _get_run(check)
     assert row["status"] == "failed" and "관리자가 확인해 실패로 정리" in row["error"]
     assert recovery.main(["resolve", str(check), "--failed"]) == 1  # 한 번만
+
+
+def test_cli_recover_settles_finished_runs_while_servers_are_stopped(
+    dead_worker: tuple[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """롤백 전(서버를 멈춘 뒤) 한 번 정리: 같은 결과 폴더의 끝난 담당은 근거대로 확정하고, 이전 판 실행(담당 없음)은
+    그대로 둔다 — 서버를 다시 띄우지 않아도 0020 downgrade 전에 정리할 수 있다."""
+    from app import recovery
+
+    worker, proc = dead_worker
+    dead = _case(worker, proc, "cli_dead", None, None, b"partial")
+    legacy = _insert_run(worker=None)
+    capsys.readouterr()
+    assert recovery.main(["recover"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["failed"] >= 1 and out["complete"] is True and out["waiting"] >= 1
+    row = _get_run(dead["id"])
+    assert row["status"] == "failed" and row["error"] == recovery.FAILED_UNSAVED
+    assert not dead["tmp"].exists()  # 그 실행에 연결된 임시 파일만 지움
+    assert _get_run(legacy)["status"] == "running"  # 이전 판 실행은 시각만으로 바꾸지 않음
+    assert [r["id"] for r in recovery.status()["running"]].count(legacy) == 1

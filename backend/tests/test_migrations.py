@@ -482,8 +482,9 @@ def _run_columns(db: sqlite3.Connection) -> set[str]:
 
 
 def test_0020_run_worker_lease_up_down_and_up_again(tmp_path: Path) -> None:
-    """0020: 실행 기록에 담당·생존 신호 열만 더하고 지운다. 실행·변경 기록·'결과 확인 필요' 행은 그대로이고, 실행 중인
-    행이 있으면 내리지 않는다 (이전 판 정리가 그 행을 시각만으로 실패로 바꾸지 않게)."""
+    """0020: 실행 기록에 담당·생존 신호 열만 더하고 지운다. 실행·변경 기록·'결과 확인 필요' 행은 그대로이고, 이 판에서
+    시작해 실행 중인 행(담당 있음)이 있으면 내리지 않는다 (이전 판은 그 행을 정리하지 못함). 이 판 전에 시작한 실행 중
+    행(담당 없음)은 이전 판이 남긴 그대로라 막지 않는다 — 막으면 서버를 멈춘 롤백에서 정리할 길이 없다."""
     _alembic(tmp_path, "upgrade", "head")
     db = sqlite3.connect(tmp_path / "moajwo.db")
     assert {"worker", "heartbeat_at"} <= _run_columns(db)
@@ -498,17 +499,19 @@ def test_0020_run_worker_lease_up_down_and_up_again(tmp_path: Path) -> None:
         "INSERT INTO run_changes (run_id, file_name, sheet, output_row, column, source_column, kind, reason,"
         " confidence) VALUES (1, 'a.xlsx', 's', 2, '인구수', '인구', 'number', '숫자 변환', 1.0)"
     )
-    db.execute(run, (3, "running", None, None, None, None))
+    db.execute(run, (3, "running", None, None, None, None))  # 이 판 전에 시작 (담당 없음)
+    db.execute(run, (4, "running", "aaaaaaaaaaaa-cccccccccccc", "2026-10-25 02:00:00", None, None))
     db.commit()
     db.close()
     try:
         _alembic(tmp_path, "downgrade", "0019_analysis_runs")
-        raise AssertionError("실행 중인 행이 있는데 내려갔다")
+        raise AssertionError("이 판에서 시작한 실행 중인 행이 있는데 내려갔다")
     except subprocess.CalledProcessError as exc:
-        assert "실행 중인 결과 실행이 1건" in exc.stderr.decode("utf-8", "replace")
+        err = exc.stderr.decode("utf-8", "replace")
+        assert "실행 중인 결과 실행이 1건" in err and "python -m app.recovery recover" in err
     db = sqlite3.connect(tmp_path / "moajwo.db")
     assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0020_run_worker_lease"
-    db.execute("DELETE FROM runs WHERE id = 3")
+    db.execute("DELETE FROM runs WHERE id = 4")
     db.commit()
     db.close()
     _alembic(tmp_path, "downgrade", "0019_analysis_runs")
@@ -517,6 +520,7 @@ def test_0020_run_worker_lease_up_down_and_up_again(tmp_path: Path) -> None:
     assert db.execute("SELECT id, status, output_path FROM runs ORDER BY id").fetchall() == [
         (1, "done", "outputs/a.xlsx"),
         (2, "check", None),
+        (3, "running", None),
     ]
     assert db.execute("SELECT run_id, kind FROM run_changes").fetchall() == [(1, "number")]
     db.close()
