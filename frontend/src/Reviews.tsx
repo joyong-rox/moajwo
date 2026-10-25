@@ -235,6 +235,8 @@ function Reviews() {
                     <td data-label="결과">
                       {r.last_run_id ? (
                         <RunDownloadLink runId={r.last_run_id}>결과 #{r.last_run_id} 내려받기</RunDownloadLink>
+                      ) : r.pending_count ? (
+                        `실행 ${r.run_count}개 (만드는 중·결과 확인 필요 ${r.pending_count}개)`
                       ) : r.run_count ? (
                         `실행 ${r.run_count}개 (결과 파일 없음)`
                       ) : (

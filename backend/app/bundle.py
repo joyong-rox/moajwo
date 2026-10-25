@@ -19,10 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
-import stat
-import tempfile
 import threading
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
@@ -40,7 +37,7 @@ from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app import analysis
+from app import analysis, runlease
 from app.analysis import AGG_LABEL, MEASURE_FIELDS, NO_VALUE, AnalysisIn, Evaluation, TargetIn, label_of
 from app.analysis_api import LEVEL_TEXT, level_conflict_text, source_columns_text
 from app.auth import CurrentUser
@@ -481,6 +478,7 @@ def build_plan(db: Session, user: CurrentUser, req: BundleIn) -> Plan:
         problems.append(f"넣을 행이 {total:,}행으로 한 번에 넣을 수 있는 {MAX_ROWS:,}행을 넘습니다 — 나눠 만드세요.")
     # 결과는 메모리에 다 만든 뒤 저장한다 — 메모리 예산을 넘는 크기는 실행 기록을 만들기 전에 거절 (docs/MEMORY.md)
     cells = sum(o.rows * (o.sheet.columns + 2) for o in out_sheets)  # 결과 시트마다 '원본 행'·'행 종류' 두 열이 더 붙음
+    oversized = total > MAX_ROWS or cells > MAX_OUTPUT_CELLS or any(o.rows + 1 > EXCEL_MAX_ROWS for o in out_sheets)
     if cells > MAX_OUTPUT_CELLS:
         problems.append(
             f"결과에 넣을 칸이 {cells:,}개로 이 서버에서 한 번에 만들 수 있는 {MAX_OUTPUT_CELLS:,}칸을 넘습니다 — "
@@ -513,7 +511,7 @@ def build_plan(db: Session, user: CurrentUser, req: BundleIn) -> Plan:
     decisions = {fid: load_decisions(db, fid) for fid in per_file}
     warnings.extend(_formula_notes(db, records, out_sheets, decisions))
     fields = _fields(out_sheets, decisions)
-    items = None if req.summary is None else _summary(db, user, req.summary, out_sheets, problems)
+    items = None if req.summary is None else _summary(db, user, req.summary, out_sheets, problems, oversized)
     if req.summary is not None:
         warnings.extend(double_count_notes(req.summary))
     plan = Plan(req, files_out, out_sheets, items, fields, problems, warnings)
@@ -599,18 +597,37 @@ def _coverage(included: int, total: int, sheets: list[OutSheet]) -> str:
     return f"{total}개 {unit} 중 {included}개 포함"
 
 
-def _summary(
-    db: Session, user: CurrentUser, summary: SummaryIn, sheets: list[OutSheet], problems: list[str]
-) -> list[ItemPlan]:
-    """통계 요약 항목마다 데이터 분석 엔진으로 판정한다 (계산은 실행 때 compute로)."""
-    plans = []
-    seen: set[tuple[str, str | None]] = set()
-    placed = {(o.file.file_id, sheet_id(o.sheet.index)) for o in sheets}
+def _check_items(summary: SummaryIn, placed: set[tuple[int, str]]) -> None:
+    """요청 형식 검사 (422) — 무거운 평가를 하나라도 하기 전에 모든 항목을 본다."""
     for item in summary.items:
         if item.field_key not in MEASURE_FIELDS:
             raise _bad(f"통계 요약에 쓸 수 없는 항목입니다: {mask_text(item.field_key)} (확정한 수량 항목만)")
         if len(set(item.aggregates)) != len(item.aggregates):
             raise _bad("같은 계산 방식을 두 번 골랐습니다.")
+        label = label_of(item.field_key)
+        links = {(lk.file_id, lk.sheet_id) for lk in item.links}
+        if len(links) != len(item.links):
+            raise _bad(f"'{label}': 같은 시트의 연결을 두 번 보냈습니다.")
+        if stray := [k for k in links if k not in placed]:
+            raise _bad(f"'{label}': 결과에 넣지 않은 시트의 연결입니다 ({', '.join(f'#{f} {s}' for f, s in stray)}).")
+
+
+def _summary(
+    db: Session,
+    user: CurrentUser,
+    summary: SummaryIn,
+    sheets: list[OutSheet],
+    problems: list[str],
+    oversized: bool = False,
+) -> list[ItemPlan]:
+    """통계 요약 항목마다 데이터 분석 엔진으로 판정한다 (계산은 실행 때 compute로).
+    결과가 이미 크기 한도를 넘으면 요약은 평가하지 않는다 — 어차피 만들 수 없고, 항목마다 대상 행 전부를 읽는 평가가
+    메모리를 크게 쓴다 (512MiB에서 한도 넘는 4파일 × 요약 6항목 평가가 메모리 부족으로 죽었다 — docs/MEMORY.md)."""
+    plans = []
+    seen: set[tuple[str, str | None]] = set()
+    placed = {(o.file.file_id, sheet_id(o.sheet.index)) for o in sheets}
+    _check_items(summary, placed)
+    for item in summary.items:
         label = label_of(item.field_key)
         choices = shown_choices(item)
         item_problems: list[str] = []
@@ -618,14 +635,14 @@ def _summary(
             item_problems.append(f"'{label}' 항목을 두 번 골랐습니다 — 하나로 합쳐 계산 방식을 고르세요.")
         seen.add((item.field_key, choices["variant"]))
         links = {(lk.file_id, lk.sheet_id): lk for lk in item.links}
-        if len(links) != len(item.links):
-            raise _bad(f"'{label}': 같은 시트의 연결을 두 번 보냈습니다.")
-        if stray := [k for k in links if k not in placed]:
-            raise _bad(f"'{label}': 결과에 넣지 않은 시트의 연결입니다 ({', '.join(f'#{f} {s}' for f, s in stray)}).")
         dropped = {k for k, lk in links.items() if lk.exclude}
         used = [o for o in sheets if (o.file.file_id, sheet_id(o.sheet.index)) not in dropped]
         ev: Evaluation | None = None
-        if len(used) > analysis.MAX_TARGETS:
+        if oversized:
+            item_problems.append(
+                f"'{label}': 결과가 크기 한도를 넘어 통계 요약은 판정하지 않았습니다 — 먼저 파일·시트를 줄이세요."
+            )
+        elif len(used) > analysis.MAX_TARGETS:
             item_problems.append(
                 f"'{label}': 계산할 시트가 {len(used)}개로 "
                 f"통계 요약 한도({analysis.MAX_TARGETS}개, 데이터 통계 분석과 같음)를 "
@@ -813,7 +830,7 @@ def _plain(v: Any) -> Any:
 
 
 def _write_summary(
-    ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], processed_at: str, notes: list[str]
+    ws: Any, items: list[tuple[ItemPlan, dict[str, Any], dict[str, Any]]], processed_at: str, notes: list[str]
 ) -> list[dict[str, Any]]:
     row = 1
 
@@ -843,13 +860,12 @@ def _write_summary(
     for note in notes:  # 항목끼리의 관계 (합계와 그 구성 항목을 함께 고름 등)
         line("주의", note)
     saved = []
-    for plan, res in items:
+    for plan, res, cond in items:
         o = plan.out
         row += 1
         line(f"항목: {o['field_label']}", bold=True, size=12)
         # 표준 항목 이름('건수')만으로는 어느 지표를 계산했는지 알 수 없어 원본 열 이름을 바로 아래에 적는다
         line("원본 열 (계산한 지표)", source_columns_text(o["source_columns"]))
-        cond = analysis.conditions(plan.ev) if plan.ev else {}
         line("단위", cond.get("unit") or "-")
         line("기간", ", ".join(cond.get("periods") or []) or "-")
         if cond.get("base_dates"):
@@ -949,37 +965,39 @@ def _output_path(run_id: int, now: datetime) -> Path:
 
 def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
     """판정이 끝난(ready) 구성으로 결과 파일을 만든다.
-    요약을 켰으면 먼저 계산하고, 계산할 수 없으면 아무것도 만들지 않는다."""
+    요약을 켰으면 먼저 계산하고, 계산할 수 없으면 아무것도 만들지 않는다.
+    결과 파일을 확정하는 순서·오류 처리는 app/runlease.py (이름을 바꾼 결과 파일은 지우지 않는다)."""
     started = datetime.now(KST)
-    results: list[tuple[ItemPlan, dict[str, Any]]] = []
+    results: list[tuple[ItemPlan, dict[str, Any], dict[str, Any]]] = []
     for item in plan.items or []:
         assert item.ev is not None
         try:
-            results.append((item, analysis.compute(item.ev)))
+            results.append((item, analysis.compute(item.ev), analysis.conditions(item.ev)))
+            item.ev = None  # 계산이 끝난 평가(대상 행 전부)는 결과를 만드는 동안 쥐지 않는다
         except HTTPException as exc:
             raise BundleError(
                 f"통계 요약 '{item.out['field_label']}'을(를) 계산할 수 없어 결과 파일을 만들지 않았습니다: "
                 f"{_detail(exc)} — "
                 "요약 설정을 고치거나 '통계 요약 시트 추가'를 끄고 다시 만드세요."
             ) from exc
+    # 원본 기록을 먼저 읽어 잡아 둔다 — 결과를 만드는 동안 DB 질의·열린 트랜잭션이 없게 (외부 DB는 쉬는 트랜잭션을
+    # 60초 뒤 끊는다 — docs/EXTERNAL_DB.md 5장). 잡아 둔 객체는 commit 뒤에도 만료되지 않아 load_parsed가 질의 없이 쓴다
+    _held = [db.get(SourceFile, fid) for fid in dict.fromkeys(o.file.file_id for o in plan.sheets)]
+    start_summary = json.dumps({"mode": MODE, "stats_summary": plan.items is not None})
     run = IntegrationRun(
         trigger="manual",
         user_id=user.id,
-        status="running",
         started_at=started,
         file_ids=json.dumps(plan.req.file_ids),
         input_file_count=len(plan.req.file_ids),
         row_count=sum(o.rows for o in plan.sheets),
         warning_count=len(plan.warnings),
-        summary=json.dumps({"mode": MODE, "stats_summary": plan.items is not None}),
+        summary=start_summary,
     )
-    db.add(run)
-    db.commit()
     now = datetime.now(KST)
     processed_at = now.strftime("%Y-%m-%d %H:%M:%S (KST)")
-    target = _output_path(run.id, now)
+    target = runlease.begin(db, run, lambda run_id: _output_path(run_id, now))
     tmp_path: Path | None = None
-    moved = False  # 이번 실행이 만든 결과 파일만 지운다
     try:
         wb = Workbook()
         wb.remove(wb.active)
@@ -999,18 +1017,10 @@ def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
             if plan.items and plan.req.summary
             else []
         )
-        with tempfile.NamedTemporaryFile(dir=OUTPUT_DIR, suffix=".xlsx.tmp", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
+        tmp_path = runlease.new_temp(target)
         wb.save(tmp_path)
-        if target.exists():
-            raise BundleError(f"같은 이름의 결과 파일이 이미 있습니다: {target.name}")
-        os.replace(tmp_path, target)
-        tmp_path, moved = None, True
-        os.chmod(target, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-        run.status = "done"
-        run.output_path = target.relative_to(DATA_DIR).as_posix()
-        run.output_sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
-        run.summary = json.dumps(
+        del wb, parsed  # 해시·확정 동안 결과 통째와 원본 읽은 값을 쥐지 않는다
+        summary = json.dumps(
             {
                 "mode": MODE,
                 "mode_label": "파일별 시트",
@@ -1030,22 +1040,25 @@ def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
             ensure_ascii=False,
             default=str,
         )
-        run.finished_at = datetime.now(KST)
-        db.commit()
+        runlease.prepare(db, run, tmp_path, summary)
+        runlease.finish(db, run, tmp_path, target)
+    except runlease.RunDone:  # 정리가 이 실행을 이미 완료로 확정했다 (결과 파일 해시 일치)
+        db.refresh(run)
+    except runlease.RunSettled as exc:  # 다른 곳이 실패로 정했다 — 그 이유로 알린다
+        raise BundleError(str(exc)) from exc
+    except runlease.RunUncertain:  # 결과 파일은 있고 완료 기록만 확인하지 못함 — 지우지 않고 503으로 알린다
+        raise
     except Exception as exc:
-        db.rollback()
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
-        if moved and target.exists():
-            os.chmod(target, stat.S_IWUSR | stat.S_IRUSR)
-            target.unlink(missing_ok=True)
-        failed = db.get(IntegrationRun, run.id)
-        if failed is not None:
-            failed.status = "failed"
-            failed.error = str(exc)[:1000]
-            failed.finished_at = datetime.now(KST)
-            db.commit()
         logger.exception("bundle run %s failed", run.id)
+        try:
+            runlease.fail(db, run, tmp_path, str(exc), start_summary)
+        except runlease.RunDone:
+            db.refresh(run)
+            return run
+        except runlease.RunSettled as settled:
+            raise BundleError(str(settled)) from exc
         raise BundleError(f"결과 파일을 만들지 못했습니다: {exc}") from exc
+    finally:
+        runlease.untrack(run.id)
     logger.info("bundle run=%s sheets=%d rows=%d summary=%s", run.id, len(plan.sheets), run.row_count, bool(plan.items))
     return run

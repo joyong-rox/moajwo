@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { listAllRuns, type IntegrationRun } from './api'
 import { isManager, useAuth } from './authContext'
 import { navigate } from './router'
+import { RunOutcomeText } from './RunOutcome'
 import { formatDuration, formatTime, STATUS_CLASS } from './runFormat'
 import { RunDownloadLink } from './RunDownloadLink'
 
@@ -35,7 +36,7 @@ function Runs() {
       </div>
       <p className="upload-drop-hint">
         {showUser ? '전체 사용자의' : '내'} 통합 실행과 자동화 실행을 최신 순으로 보여줍니다. 상태: 완료 · 검토(확인할 항목이
-        남아 대기) · 실패.
+        남아 대기) · 실행 중 · 결과 확인 필요(멈춘 실행의 결과를 확정하지 못함 — 관리자 확인) · 실패.
       </p>
       {error && (
         <p className="upload-error" role="alert">
@@ -102,12 +103,10 @@ function Runs() {
                         </span>{' '}
                         <RunDownloadLink runId={r.id}>내려받기</RunDownloadLink>
                       </>
-                    ) : r.status === 'review' && r.review_session_id !== null ? (
-                      <span className="mw-muted">검토 대기</span>
-                    ) : r.status === 'failed' ? (
-                      <span className="upload-error">{r.error ?? '실패'}</span>
-                    ) : (
+                    ) : r.status === 'review' && r.review_session_id === null ? (
                       '-'
+                    ) : (
+                      <RunOutcomeText run={r} />
                     )}
                     {/* 통계 요약은 표준 항목 이름만으로는 어느 지표인지 알 수 없어 원본 열을 함께 적는다 (예전 실행은 원본 열 기록 없음) */}
                     {r.summary.summary_items?.map((i) => (

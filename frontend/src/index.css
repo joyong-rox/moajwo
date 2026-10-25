@@ -1498,6 +1498,17 @@ body {
   color: var(--block-text);
 }
 
+/* 결과 확인 필요: 실패가 아니라 결과를 확정하지 못한 실행 — 주의 색 */
+.runs-status.is-check {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.run-check {
+  color: var(--warning-text);
+}
+
 .runs-path code {
   font-size: 0.8rem;
 }

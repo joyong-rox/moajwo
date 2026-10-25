@@ -227,6 +227,7 @@ class ReviewListItem(BaseModel):
     latest_id: int  # 대체된 검토면 다시 검사로 이어진 최신 검토, 아니면 자기 자신
     run_count: int  # 이 검토로 만든 실행 기록 (실패·대기 포함)
     last_run_id: int | None  # 결과 파일이 있는 가장 최근 실행
+    pending_count: int  # 아직 결과가 정해지지 않은 실행 (실행 중·결과 확인 필요) — '결과 파일 없음'과 구분
     can_edit: bool  # 만든 사람만 승인·완료·통합 (최고 관리자도 남의 검토는 조회만)
 
 
@@ -290,6 +291,10 @@ def _list_item(db: Session, session: ReviewSession, user: CurrentUser, needs_rec
         latest_id=_latest(db, session) if session.status == "superseded" else session.id,
         run_count=db.scalar(select(func.count()).select_from(runs.subquery())) or 0,
         last_run_id=db.scalar(runs.where(IntegrationRun.status == "done").order_by(IntegrationRun.id.desc()).limit(1)),
+        pending_count=db.scalar(
+            select(func.count()).select_from(runs.where(IntegrationRun.status.in_(("running", "check"))).subquery())
+        )
+        or 0,
         can_edit=session.created_by == user.id or (session.created_by is None and user.is_manager),
     )
 

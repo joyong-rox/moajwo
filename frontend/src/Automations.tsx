@@ -3,6 +3,7 @@ import {
   deleteAutomation,
   listAutomations,
   listFiles,
+  outcomeText,
   runAutomation,
   uploadFiles,
   type Automation,
@@ -13,6 +14,7 @@ import ConfirmDialog from './ConfirmDialog'
 import { ProgressPanel } from './Progress'
 import { REVIEW_STAGES } from './progressStages'
 import ReviewPanel from './ReviewPanel'
+import { RunOutcomeText } from './RunOutcome'
 import { formatDuration, formatTime, STATUS_CLASS } from './runFormat'
 import { RunDownloadLink } from './RunDownloadLink'
 
@@ -153,7 +155,8 @@ function AutomationDetail({
       setResult(out)
       onChanged()
     } catch (err) {
-      setError(`실행 실패: ${errorText(err)}`)
+      setError(outcomeText(err, '실행 실패: ')) // 결과를 모르는 응답은 '실패'로 쓰지 않는다
+      onChanged() // 실행 기록·마지막 실행을 다시 읽는다
     } finally {
       setBusy(false)
       setRunning(false)
@@ -309,7 +312,11 @@ function AutomationDetail({
               소요 {formatDuration(result.run.duration_ms)}
             </p>
           )}
-          {result.run.status === 'failed' && <p className="upload-error">{result.run.error}</p>}
+          {(result.run.status === 'failed' || result.run.status === 'check' || result.run.status === 'running') && (
+            <p>
+              <RunOutcomeText run={result.run} />
+            </p>
+          )}
           {result.run.status === 'review' && (
             <button type="button" className="mapping-confirm" onClick={() => setOpenReview(result.review_id)}>
               확인할 항목 검토하기

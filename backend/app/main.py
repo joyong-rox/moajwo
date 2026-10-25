@@ -24,14 +24,15 @@ from app import (
     glossary_api,
     integration_api,
     mapping_review,
+    recovery,
     review_api,
     validation_api,
 )
-from app import db as app_db
 from app.auth import current_user
 from app.config import API_DOCS
 from app.db import db_failure, get_session
-from app.recovery import recover_interrupted
+from app.output_slot import OutputBusy
+from app.runlease import RunUncertain
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +54,10 @@ logging.getLogger("uvicorn.access").addFilter(QueryValueMask())
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    """기동할 때: 결과를 만드는 도중 멈춘 실행·쓰다 만 임시 결과를 정리한다 (app/recovery.py).
-    DB에 닿지 못해도 기동은 막지 않는다 — 요청은 DB 상태에 따라 따로 답한다."""
-    try:
-        with app_db.SessionLocal() as db:
-            recover_interrupted(db)
-    except SQLAlchemyError as exc:
-        logger.warning("startup recovery skipped: %s", type(exc).__name__)
+    """기동할 때: 담당 프로세스가 끝난 결과 실행을 근거가 있을 때만 정리한다 (app/recovery.py — 살아 있는 실행·완성된
+    결과 파일은 건드리지 않음). 어떤 오류도 기동을 막지 않는다 — 정리하지 못했으면 '미완료'로 기록하고 다시 볼
+    예약을 둔다."""
+    recovery.startup()
     yield
 
 
@@ -116,6 +114,22 @@ async def database_failure(request: Request, exc: SQLAlchemyError) -> JSONRespon
         detail += WRITE_UNCERTAIN
     return JSONResponse({"detail": detail}, status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                         headers={"Retry-After": "10"})  # fmt: skip
+
+
+@app.exception_handler(RunUncertain)
+async def run_uncertain(_: Request, exc: RunUncertain) -> JSONResponse:
+    """결과 파일은 저장했지만 완료 기록을 확인하지 못함(또는 실패 기록을 남기지 못함) — 실패가 아니다. 다시 실행을
+    권하지 않고 실행 기록에서 확인하게 한다. 서버는 곧 결과 파일과 기록을 맞춰 보고 확정한다 (app/recovery.py)."""
+    recovery.schedule(30)
+    body = {"detail": {"code": "run_uncertain", "run_id": exc.run_id, "message": str(exc)}}
+    return JSONResponse(body, status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+@app.exception_handler(OutputBusy)
+async def output_busy(_: Request, exc: OutputBusy) -> JSONResponse:
+    """결과 만들기 차례가 없음 — 시작하지 않았다 (기록·파일 없음). 다시 누르는 것은 사용자가 정한다."""
+    body = {"detail": {"code": "output_busy", "message": str(exc)}}
+    return JSONResponse(body, status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers={"Retry-After": "10"})
 
 
 # 로그인 없이 열리는 것은 /health 와 로그인 API(/auth/status·setup·login·logout)뿐이다

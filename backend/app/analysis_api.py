@@ -41,6 +41,7 @@ from app.analysis import (
 from app.auth import CurrentUserDep, ensure_view
 from app.db import get_session
 from app.models import AnalysisRun, MappingDecision, SourceFile, User
+from app.output_slot import output_slot
 from app.pii import mask_text
 from app.timefmt import utc_to_kst
 
@@ -112,15 +113,22 @@ def analysis_sources(
 
 @router.post("/preview")
 def analysis_preview(body: AnalysisIn, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> dict:
-    """대상·단위·기간·제외 사유·중복 의심을 확인한다 (계산·저장 없음)."""
-    ev = evaluate(db, user, body)
-    db.rollback()
-    return preview_out(ev)
+    """대상·단위·기간·제외 사유·중복 의심을 확인한다 (계산·저장 없음). 평가가 메모리를 크게 써서 결과 만들기 차례를
+    쥔다 (없으면 OutputBusy — app/output_slot.py)."""
+    with output_slot():
+        ev = evaluate(db, user, body)
+        db.rollback()
+        return preview_out(ev)
 
 
 @router.post("/run", status_code=status.HTTP_201_CREATED)
 def analysis_run(body: RunIn, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> dict:
-    """확인한 상태 그대로일 때만 계산하고 결과를 저장한다."""
+    """확인한 상태 그대로일 때만 계산하고 결과를 저장한다 (결과 만들기 차례를 쥔 채)."""
+    with output_slot():
+        return _analysis_run(body, db, user)
+
+
+def _analysis_run(body: RunIn, db: Session, user: CurrentUserDep) -> dict:
     ev = evaluate(db, user, body)
     db.rollback()  # 읽기만 한 트랜잭션을 닫는다 (계산 중 잠금을 잡지 않음)
     if ev.fingerprint != body.expected_fingerprint:
@@ -494,8 +502,10 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
 def analysis_download(run_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> Response:
     run = _get(db, user, run_id)
     name = f"분석결과_{run.id:04d}_{label_of(run.field_key)}.xlsx"
+    with output_slot():  # 결과 Excel을 메모리에서 통째로 만든다 — 결과 만들기 차례를 쥔 채 (app/output_slot.py)
+        body = workbook_bytes(run)
     return Response(
-        workbook_bytes(run),
+        body,
         media_type=XLSX,
         headers={
             "Content-Disposition": (

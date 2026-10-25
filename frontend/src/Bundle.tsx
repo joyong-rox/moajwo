@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import {
   AnalysisProblemError,
+  outcomeText,
+  outcomeUnknown,
   planBundle,
   runBundle,
   type AggKey,
@@ -52,7 +54,7 @@ type ItemDraft = {
 }
 // picks: 결과 시트 순서 ('파일:시트'). null이면 아직 정하지 않음 → 서버가 정한 기본 순서로 시작
 type Draft = { picks: string[] | null; summary: boolean; items: ItemDraft[] }
-type Failure = { message: string; problems: string[] }
+type Failure = { message: string; problems: string[]; unknown?: boolean } // unknown = 결과를 아직 모름 (실패 아님)
 type Invalid = { key: string; field_key: string; text: string }
 
 const EMPTY: Draft = { picks: null, summary: false, items: [] }
@@ -288,7 +290,7 @@ function Bundle() {
       setFailure(
         err instanceof AnalysisProblemError
           ? { message: err.message, problems: err.problems }
-          : { message: errorText(err), problems: [] },
+          : { message: outcomeText(err, ''), problems: [], unknown: outcomeUnknown(err) },
       )
       setVersion((v) => v + 1) // 지금 상태로 다시 확인
     } finally {
@@ -612,7 +614,7 @@ function Bundle() {
             </p>
           )}
           {failure && (
-            <div className="upload-error" role="alert">
+            <div className={failure.unknown ? 'mapping-warn' : 'upload-error'} role={failure.unknown ? 'status' : 'alert'}>
               <p>{failure.message}</p>
               {failure.problems.length > 0 && (
                 <ul>

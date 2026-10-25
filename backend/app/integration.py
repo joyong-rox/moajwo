@@ -8,12 +8,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import os
-import stat
-import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +22,7 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import runlease
 from app.check_basis import (
     BASIS_VERSION,
     CHECK_BASIS_KEY,
@@ -41,7 +38,8 @@ from app.files import load_parsed
 from app.glossary import EntityRef, Resolution, entity_ref, normalize_name
 from app.glossary_api import glossary_state
 from app.mapping import ColumnMapping, get_engine
-from app.models import Automation, IntegrationRun, ReviewSession, RunChange
+from app.models import Automation, IntegrationRun, ReviewSession
+from app.output_slot import output_slot
 from app.parsing import Cell, is_missing
 from app.pii import mask_text
 from app.promotion import load_standard
@@ -393,6 +391,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                         )
                     )
                 built.rows.append(row)
+                _check_cells(built)  # 쌓는 중에도 — 한도를 넘는 입력은 다 읽기 전에 멈춘다 (값은 늘기만 한다)
             info["sheets"].append(
                 {
                     "name": sheet.name,
@@ -612,6 +611,17 @@ def _output_path(run_id: int, now: datetime) -> Path:
     return OUTPUT_DIR / f"통합결과_{run_id:04d}_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
 
 
+def _check_cells(built: _Built) -> None:
+    """결과에 넣을 칸 — 메모리 예산(MAX_OUTPUT_CELLS)을 넘으면 거절한다. 쌓는 중에도 부르므로(값은 늘기만 함) 다 읽기
+    전에 멈추고, 실행 기록을 만들기 전이라 남는 기록·파일이 없다."""
+    cells = len(built.rows) * len(built.labels) + len(built.changes) * len(CHANGE_HEADER)
+    if cells > MAX_OUTPUT_CELLS:
+        raise IntegrationError(
+            f"결과에 넣을 칸이 {cells:,}개 이상으로 이 서버에서 한 번에 만들 수 있는 "
+            f"{MAX_OUTPUT_CELLS:,}칸을 넘습니다 — 통합할 파일을 나눠 다시 검토하세요."
+        )
+
+
 def pending_run(db: Session, session: ReviewSession) -> IntegrationRun | None:
     """자동화 실행으로 만든 '검토 대기' 실행 기록 (다시 검사한 세션이면 이전 세션의 기록)."""
     current: ReviewSession | None = session
@@ -638,19 +648,20 @@ def include_unmapped_default(db: Session, session: ReviewSession) -> bool:
 
 
 def integrate(db: Session, session: ReviewSession, include_unmapped: bool | None = None) -> IntegrationRun:
-    """include_unmapped: None이면 자동화 설정(없으면 False)을 따른다."""
+    """include_unmapped: None이면 자동화 설정(없으면 False)을 따른다.
+    결과 만들기 차례(app/output_slot.py)를 쥐고 만든다 — 차례가 없으면 OutputBusy (시작하지 않음, 기록 없음).
+    결과 파일을 확정하는 순서·오류 처리는 app/runlease.py (이름을 바꾼 결과 파일은 지우지 않는다)."""
+    with output_slot():
+        return _integrate(db, session, include_unmapped)
+
+
+def _integrate(db: Session, session: ReviewSession, include_unmapped: bool | None) -> IntegrationRun:
     started = datetime.now(KST)
     run = pending_run(db, session)
     if include_unmapped is None:
         include_unmapped = include_unmapped_default(db, session)
     built = build(db, session, include_unmapped)
-    # 결과는 메모리에 다 만든 뒤 저장한다 — 메모리 예산을 넘는 크기는 '실행 중' 기록을 남기기 전에 거절 (docs/MEMORY.md)
-    cells = len(built.rows) * len(built.labels) + len(built.changes) * len(CHANGE_HEADER)
-    if cells > MAX_OUTPUT_CELLS:
-        raise IntegrationError(
-            f"결과에 넣을 칸이 {cells:,}개로 이 서버에서 한 번에 만들 수 있는 {MAX_OUTPUT_CELLS:,}칸을 넘습니다 — "
-            "통합할 파일을 나눠 다시 검토하세요."
-        )
+    _check_cells(built)  # 결과는 메모리에 다 만든 뒤 저장한다 — '실행 중' 기록을 남기기 전에 거절 (docs/MEMORY.md)
     now = datetime.now(KST)
     items = session_items(db, session)
     warning_count = summarize(session, items).warnings
@@ -663,6 +674,8 @@ def integrate(db: Session, session: ReviewSession, include_unmapped: bool | None
         if i.category == "warning" and (i.file_id is None or i.file_id not in excluded)
     ]  # fmt: skip
     file_ids = [f["id"] for f in built.files if not f["excluded"]]
+    # 자동화가 만든 '검토 대기' 행은 DB에서도 그 상태일 때만 이어 쓴다 (겹친 두 요청이 같은 행을 쓰지 않게)
+    reuse = run is not None
     if run is None:
         run = IntegrationRun(
             trigger="automation" if session.automation_id else "manual",
@@ -670,15 +683,17 @@ def integrate(db: Session, session: ReviewSession, include_unmapped: bool | None
             user_id=session.created_by,
             started_at=started,
         )
-        db.add(run)
     run.review_session_id = session.id
-    run.status = "running"
     run.file_ids = json.dumps(file_ids)
     run.input_file_count = len(json.loads(session.file_ids))
     run.row_count = len(built.rows)
     run.warning_count = warning_count
+    run.change_count = 0
     run.summary = "{}"
-    db.commit()
+    try:
+        target = runlease.begin(db, run, lambda run_id: _output_path(run_id, now), "review" if reuse else None)
+    except runlease.RunError as exc:
+        raise IntegrationError(str(exc)) from exc
 
     cell_changes = [c for c in built.changes if c.output_col is not None]
     counts: dict[str, int] = {}
@@ -702,45 +717,35 @@ def integrate(db: Session, session: ReviewSession, include_unmapped: bool | None
         "include_unmapped": include_unmapped,
         "unmapped_columns": built.unmapped_columns,
     }
-    target = _output_path(run.id, now)
     tmp_path: Path | None = None
-    moved = False  # 이번 실행이 만든 결과 파일만 지운다 (원래 있던 파일은 절대 건드리지 않음)
     try:
-        with tempfile.NamedTemporaryFile(dir=OUTPUT_DIR, suffix=".xlsx.tmp", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
+        tmp_path = runlease.new_temp(target)
         painted = write_workbook(tmp_path, built, summary)
         if painted != len(cell_changes):  # 색칠한 셀 = 셀 단위 변경 기록 (빠진 기록이 있으면 실패)
             raise IntegrationError(f"변경 기록 불일치: 칠한 셀 {painted}개, 기록 {len(cell_changes)}개")
-        if target.exists():
-            raise IntegrationError(f"같은 이름의 결과 파일이 이미 있습니다: {target.name}")
-        os.replace(tmp_path, target)  # 같은 디렉터리 안 이동 (위에서 대상 없음 확인)
-        tmp_path, moved = None, True
-        os.chmod(target, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-        db.add_all(
-            RunChange(run_id=run.id, **{k: v for k, v in asdict(ch).items() if k != "output_col"})
-            for ch in built.changes
-        )
-        run.status = "done"
-        run.output_path = target.relative_to(DATA_DIR).as_posix()
-        run.output_sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
-        run.change_count = len(built.changes)
-        run.summary = json.dumps(summary, ensure_ascii=False, default=str)
-        run.finished_at = datetime.now(KST)
-        db.commit()
+        changes = [
+            {"run_id": run.id, **{k: v for k, v in asdict(ch).items() if k != "output_col"}} for ch in built.changes
+        ]
+        text_summary = json.dumps(summary, ensure_ascii=False, default=str)
+        runlease.prepare(db, run, tmp_path, text_summary, len(built.changes), changes)
+        runlease.finish(db, run, tmp_path, target)
+    except runlease.RunDone:  # 정리가 이 실행을 이미 완료로 확정했다 (결과 파일 해시 일치)
+        db.refresh(run)
+    except runlease.RunSettled as exc:  # 다른 곳이 실패로 정했다 — 그 이유로 알린다
+        raise IntegrationError(str(exc)) from exc
+    except runlease.RunUncertain:  # 결과 파일은 있고 완료 기록만 확인하지 못함 — 지우지 않고 503으로 알린다
+        raise
     except Exception as exc:
-        db.rollback()
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
-        if moved and target.exists():
-            os.chmod(target, stat.S_IWUSR | stat.S_IRUSR)
-            target.unlink(missing_ok=True)
-        failed = db.get(IntegrationRun, run.id)
-        if failed is not None:
-            failed.status = "failed"
-            failed.error = str(exc)[:1000]
-            failed.finished_at = datetime.now(KST)
-            db.commit()
         logger.exception("integration run %s failed", run.id)
+        try:
+            runlease.fail(db, run, tmp_path, str(exc), "{}")
+        except runlease.RunDone:
+            db.refresh(run)
+            return run
+        except runlease.RunSettled as settled:
+            raise IntegrationError(str(settled)) from exc
         raise IntegrationError(f"통합 결과를 만들지 못했습니다: {exc}") from exc
+    finally:
+        runlease.untrack(run.id)
     logger.info("integration run=%s rows=%d changes=%d", run.id, run.row_count, run.change_count)
     return run

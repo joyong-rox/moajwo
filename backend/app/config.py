@@ -83,8 +83,15 @@ MAX_UPLOAD_MIB = _env_int("MOAJWO_MAX_UPLOAD_MIB", 50)  # 파일 하나의 크�
 # xlsx를 풀었을 때의 크기 — 읽는 동안 1MiB당 약 10MiB를 쓴다 (docs/MEMORY.md)
 MAX_XLSX_UNCOMPRESSED_MIB = _env_int("MOAJWO_MAX_XLSX_UNCOMPRESSED_MIB", 32)
 MAX_FILE_CELLS = _env_int("MOAJWO_MAX_FILE_CELLS", 800_000)  # 파일 하나의 칸 수 (모든 시트, 빈 칸 포함)
+# 파일 하나의 글자 수 합 (모든 칸의 글자 길이) — 읽은 값을 정리할 때 칸마다 글자 사본이 생긴다. Excel의 공유 문자열
+# (같은 글자를 파일에 한 번만 저장)·병합 범위는 작은 파일로도 수천 칸이 같은 긴 글자를 가리키게 해, 칸 수·압축 해제
+# 한도로는 막지 못한다 (10.7KB 파일의 32,000자 × 800칸이 읽을 때 최고 98.8MiB — docs/MEMORY.md). Render 권장 16,000,000
+MAX_FILE_TEXT_CHARS = _env_int("MOAJWO_MAX_FILE_TEXT_CHARS", 64_000_000)
 PARSE_SLOTS = _env_int("MOAJWO_PARSE_SLOTS", 1)  # 동시에 읽는(파싱하는) 파일 수 — 서로 다른 파일도 포함
 PARSE_WAIT_S = _env_int("MOAJWO_PARSE_WAIT_S", 60)  # 읽기 차례를 기다리는 최대 시간 (초)
 # 결과 파일(묶기·통합 Excel) 하나에 넣는 칸 수 — 결과는 메모리에 다 만든 뒤 저장한다 (칸 1천 개당 약 0.45MiB,
 # docs/MEMORY.md). 넘으면 실행 기록을 만들기 전에 거절한다. Render(512MiB) 권장 300,000
 MAX_OUTPUT_CELLS = _env_int("MOAJWO_MAX_OUTPUT_CELLS", 1_000_000)
+# 결과 만들기(묶기·통합·통계 요약·데이터 분석) 동시 실행 수 — 프로세스마다 (app/output_slot.py). 칸 예산은 요청 하나만
+# 막으므로, 한도 가까운 결과 둘이 동시에 만들어지지 않게 한다. 차례가 없으면 기다리지 않고 거절한다
+OUTPUT_SLOTS = _env_int("MOAJWO_OUTPUT_SLOTS", 1)
