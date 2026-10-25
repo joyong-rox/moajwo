@@ -1,5 +1,14 @@
 import { useEffect, useState } from 'react'
-import { integrateReview, listRuns, runDownloadUrl, saveAutomation, type Automation, type IntegrationRun } from './api'
+import {
+  integrateReview,
+  listRuns,
+  outcomeText,
+  runDownloadUrl,
+  saveAutomation,
+  type Automation,
+  type IntegrationRun,
+} from './api'
+import { RunOutcomeText } from './RunOutcome'
 
 const CHANGE_LABEL: Record<string, string> = {
   ffill: '병합 셀 채움',
@@ -49,7 +58,8 @@ function IntegrationResult({
       const created = await integrateReview(reviewId, includeUnmapped)
       setRuns((prev) => [created, ...prev])
     } catch (err) {
-      setError(`통합 실패: ${err instanceof Error ? err.message : String(err)}`)
+      // 결과를 모르는 응답(503·504·응답 없음)은 '실패'로 쓰지 않는다 — 아래에서 실행 목록을 다시 읽어 상태를 보인다
+      setError(outcomeText(err, '통합 실패: '))
       onFailed?.()
       listRuns(reviewId)
         .then(setRuns)
@@ -65,6 +75,8 @@ function IntegrationResult({
 
   const latest = runs.find((r) => r.status === 'done')
   const finished = runs.filter((r) => r.status !== 'review')
+  // 만드는 중인 실행이 있으면 새로 만들지 않게 한다 (끝나거나 정리되면 목록을 새로 읽을 때 풀린다)
+  const making = runs.find((r) => r.status === 'running')
   return (
     <div className="integration">
       <label className="integration-option">
@@ -77,10 +89,33 @@ function IntegrationResult({
         표준 항목이 없는 열도 원래 이름으로 포함 (검토에서 '해당 없음'으로 정한 열)
       </label>
       <div className="review-actions">
-        <button type="button" className="mapping-run" disabled={busy || blocked !== null} onClick={() => void run()}>
+        <button
+          type="button"
+          className="mapping-run"
+          disabled={busy || blocked !== null || making !== undefined}
+          onClick={() => void run()}
+        >
           {busy ? '통합 결과 만드는 중…' : '통합 결과 만들기 (엑셀)'}
         </button>
+        {making && !busy && (
+          <button
+            type="button"
+            className="mapping-confirm"
+            onClick={() =>
+              void listRuns(reviewId)
+                .then(setRuns)
+                .catch(() => undefined)
+            }
+          >
+            실행 #{making.id} 상태 새로고침
+          </button>
+        )}
       </div>
+      {making && !busy && (
+        <p className="upload-drop-hint" role="note">
+          실행 #{making.id}의 결과를 만드는 중입니다 — 끝나면 이 목록에 결과가 보입니다. 끝나기 전에는 새로 만들지 않습니다.
+        </p>
+      )}
       {blocked && (
         <p className="upload-error" role="note">
           {blocked}
@@ -125,19 +160,15 @@ function IntegrationResult({
         </div>
       )}
       {latest && <SaveAutomation run={latest} />}
-      {finished.length > 1 && (
+      {finished.length > (latest ? 1 : 0) && (
         <details className="integration-history">
           <summary>이 검토로 만든 결과 {finished.length}개</summary>
           <ul>
             {finished.map((r) => (
               <li key={r.id}>
                 #{r.id} ·{' '}
-                {r.status === 'done' ? (
-                  <a href={runDownloadUrl(r.id)}>{r.file_name}</a>
-                ) : (
-                  <span className="upload-error">실패: {r.error}</span>
-                )}{' '}
-                · {r.row_count}행 · 변경 {r.change_count}건
+                {r.status === 'done' ? <a href={runDownloadUrl(r.id)}>{r.file_name}</a> : <RunOutcomeText run={r} />}{' '}
+                · {r.row_count}행{r.status === 'done' && ` · 변경 ${r.change_count}건`}
               </li>
             ))}
           </ul>

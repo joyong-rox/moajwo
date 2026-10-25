@@ -35,4 +35,27 @@ export const STATUS_CLASS: Record<IntegrationRun['status'], string> = {
   review: 'is-review',
   failed: 'is-failed',
   running: 'is-running',
+  check: 'is-check',
 }
+
+/** 결과 파일이 없는 실행의 짧은 설명과 색 (done은 화면마다 내려받기를 그린다). 상태를 더하면 tsc가 여기서 알린다. */
+export function runOutcome(r: IntegrationRun): { text: string; tone: 'muted' | 'warn' | 'error' } | null {
+  switch (r.status) {
+    case 'done':
+      return null
+    case 'review':
+      return { text: '검토 대기', tone: 'muted' }
+    case 'running':
+      return { text: '만드는 중 (끝나면 새로고침)', tone: 'muted' }
+    case 'check':
+      return { text: `결과 확인 필요 — ${r.error ?? '관리자 확인이 필요합니다.'}`, tone: 'warn' }
+    case 'failed':
+      return { text: r.error ?? '실패', tone: 'error' }
+    default: {
+      const unknown: never = r.status
+      return unknown
+    }
+  }
+}
+
+export const OUTCOME_CLASS = { muted: 'mw-muted', warn: 'run-check', error: 'upload-error' } as const

@@ -177,21 +177,65 @@ export function uploadFiles(files: File[], onProgress?: (fraction: number) => vo
   })
 }
 
+/** 서버 오류 응답 — 상태 코드와 구분 값(code·run_id)을 함께 전해, 화면이 확정 실패와 '결과를 아직 모름'을 나눈다. */
+export class ApiError extends Error {
+  status: number
+  code: string | null
+  runId: number | null
+  constructor(message: string, status: number, code: string | null = null, runId: number | null = null) {
+    super(message)
+    this.status = status
+    this.code = code
+    this.runId = runId
+  }
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const detail = await res.json().then(
-      (j: { detail?: unknown }) => j.detail,
+      (j: { detail?: unknown } | null) => j?.detail,
       () => null,
     )
+    if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+      const d = detail as { message?: unknown; code?: unknown; run_id?: unknown }
+      throw new ApiError(
+        typeof d.message === 'string' ? d.message : `HTTP ${res.status}`,
+        res.status,
+        typeof d.code === 'string' ? d.code : null,
+        typeof d.run_id === 'number' ? d.run_id : null,
+      )
+    }
     const message =
       typeof detail === 'string'
         ? detail
         : Array.isArray(detail)
           ? detail.map((d: { msg?: string }) => d.msg ?? '').join(', ')
           : `HTTP ${res.status}`
-    throw new Error(message)
+    throw new ApiError(message, res.status)
   }
   return (await res.json()) as T
+}
+
+/** 결과가 정해지지 않은 응답에 쓰는 안내 — '실패'라고 쓰지 않고, 다시 만들기 전에 실행 기록에서 확인하게 한다. */
+export const OUTCOME_UNKNOWN =
+  '결과를 아직 확인하지 못했습니다 — 실행 기록에서 이 실행의 상태를 확인하세요 (서버가 결과 파일과 기록을 맞춰 보고 확정합니다).'
+
+/** 결과를 만드는 요청(통합·묶기·자동화)의 오류 문구. 확정 실패만 failPrefix('… 실패: ')를 붙인다.
+ *  결과를 모르는 응답(503·502·504·응답 없음)은 서버 안내 또는 OUTCOME_UNKNOWN, 차례 없음(output_busy)은 서버 안내 그대로
+ *  (시작하지 않았으므로 다시 눌러도 됨). */
+export function outcomeText(err: unknown, failPrefix: string): string {
+  if (err instanceof ApiError && (err.code === 'output_busy' || err.code === 'run_uncertain')) return err.message
+  if (outcomeUnknown(err)) return OUTCOME_UNKNOWN
+  return `${failPrefix}${err instanceof Error ? err.message : String(err)}`
+}
+
+/** 결과가 정해지지 않은 응답인가 (확정 실패도, 시작하지 않음도 아님) — 실행 목록을 다시 읽어 상태를 보여 줄 때 */
+export function outcomeUnknown(err: unknown): boolean {
+  if (err instanceof ApiError) {
+    if (err.code === 'run_uncertain') return true
+    return err.code !== 'output_busy' && (err.status === 502 || err.status === 503 || err.status === 504)
+  }
+  return err instanceof TypeError // 응답을 받지 못함 (연결 끊김 — 서버는 계속 만들 수 있다)
 }
 
 export type StoredFile = {
@@ -496,7 +540,7 @@ export async function recheckReview(reviewId: number, replace: Record<number, nu
 export type IntegrationRun = {
   id: number
   review_session_id: number | null
-  status: 'done' | 'failed' | 'running' | 'review'
+  status: 'done' | 'failed' | 'running' | 'review' | 'check' // check = 결과 확인 필요 (멈춘 실행의 결과를 확정하지 못함)
   status_label: string
   trigger: 'manual' | 'automation'
   automation_id: number | null
@@ -565,6 +609,7 @@ export type ReviewListItem = {
   latest_id: number
   run_count: number
   last_run_id: number | null
+  pending_count: number // 아직 결과가 정해지지 않은 실행 (실행 중·결과 확인 필요)
   can_edit: boolean
 }
 
@@ -776,7 +821,7 @@ export type AdminOverview = {
   users: { status: AccountStatus; label: string; count: number }[]
   owners: number
   uploads: PeriodCount
-  runs: PeriodCount & { done: number; failed: number; review: number; running: number }
+  runs: PeriodCount & { done: number; failed: number; review: number; running: number; check: number }
 }
 
 export async function fetchAdminOverview(start: string, end: string): Promise<AdminOverview> {
