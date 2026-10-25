@@ -11,7 +11,15 @@
   - 비밀번호가 든 --target 주소도 호환으로 그대로 동작하지만 stderr로 경고한다. 보고에는 주소 없이
     target_secret_in_args(참·거짓)만 남긴다.
 - 기본은 확인만 한다 (dry-run): 원천 스냅숏의 리비전·무결성·표별 건수, 대상 리비전·건수, 대상이 비었는지,
-  시간대 출처 확인이 필요한 실행 기록 후보.
+  시간대 출처 확인이 필요한 실행 기록 후보, 대상 열 길이를 넘는 원천 값, NUL(0x00)이 든 원천 글자.
+- 대상 열 길이(varchar n — 모델 정의, PostgreSQL head와 같음)를 넘는 원천 값이 있으면 적용하지 않고 멈춘다 (보고
+  too_long_values — 표·열·한도·건수·가장 긴 글자 수·정수 행 번호, 값은 읽지 않음). SQLite는 길이를 강제하지 않아
+  들어 있을 수 있고, PostgreSQL은 그 행에서 복사가 실패한다 (넘는 글자가 모두 공백이면 오류 없이 잘라 내용이
+  달라진다). 자르거나 고쳐서 옮기지 않는다 — 원천 사본을 고칠지·스키마를 넓힐지는 소유자가 정한다.
+- NUL(0x00)이 든 원천 글자가 있으면 적용하지 않고 멈춘다 (보고 nul_values — 표·열·건수·가장 긴 바이트 수·정수 행
+  번호, 값은 읽지 않음). PostgreSQL은 NUL이 든 글자를 저장하지 못한다 (드라이버가 보내지 않음 — 길이 제한이 없는
+  Text 열도 같다). SQLite의 length()는 글자를 NUL 앞까지만 세므로 NUL 뒤가 긴 값은 길이 검사로 보이지 않는다 —
+  그래서 바이트로 바꿔(CAST AS BLOB) 따로 찾는다 (값을 파이썬으로 읽어 세지 않음). 지우거나 바꿔서 옮기지 않는다.
 - 원천 보호: 원천 파일은 읽기 전용으로만 연다. SQLite 백업 API(한 읽기 트랜잭션으로 모든 페이지 복사 — 한 시점)로
   임시 스냅숏을 만들고, 스냅숏의 무결성을 검사한 뒤 스냅숏에서 읽는다 (쓰기 중인 파일을 그대로 복사하지 않음).
   스냅숏 해시와 원천 파일 해시(앞뒤)를 보고한다. 원천 앱의 쓰기를 멈추는 일은 이 도구가 아니라 전환 절차의 단계다.
@@ -35,7 +43,8 @@
   (이관 뒤 다시 로그인).
 - 시간: SQLite는 시간대 없이 저장한다. 통합 실행 시작·끝과 자동화 수정 시각은 KST 벽시계, 나머지는 UTC다
   (app/timefmt.py). 이 규칙으로 시간대를 붙여 옮겨 9시간 밀리지 않게 한다.
-- 보고·오류에는 건수·해시·표 이름·오류 종류(SQLSTATE·제약 이름)만 적는다 (원문 값·SQL 매개변수·주소·비밀번호 없음).
+- 보고·오류에는 건수·해시·표·열 이름·정수 행 번호·오류 종류(SQLSTATE·제약 이름)만 적는다 (원문 값·문자열 기본 키·
+  SQL 매개변수·주소·비밀번호 없음).
 
 종료 코드: 0 성공 (확인만, 또는 적용하고 보고 저장) · 1 적용하지 않음 (확인됨) · 3 적용했으나 보고 파일 저장 실패
           · 4 적용 여부를 확인하지 못함 (다시 실행하지 말고 대상을 조회)
@@ -63,7 +72,22 @@ from urllib.parse import quote, urlsplit
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import Boolean, Connection, DateTime, Engine, Integer, Table, create_engine, func, select, text
+from sqlalchemy import (
+    Boolean,
+    Connection,
+    DateTime,
+    Engine,
+    Integer,
+    LargeBinary,
+    String,
+    Table,
+    cast,
+    create_engine,
+    func,
+    literal,
+    select,
+    text,
+)
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
@@ -272,6 +296,56 @@ def _tz_unverified_runs(conn: Connection) -> int:
     ).scalar() or 0  # fmt: skip
 
 
+TOO_LONG_IDS = 20  # 보고에 남기는 행 번호 수 (표·열마다)
+
+
+def _too_long_values(conn: Connection) -> list[dict[str, Any]]:
+    """대상 열 길이를 넘는 원천 값 — 표·열·한도·건수·가장 긴 글자 수와 정수 기본 키(앞 TOO_LONG_IDS개)만 센다.
+    값은 읽지 않는다 (길이는 DB의 length()로 — 글자 수). 문자열 기본 키 표(app_settings)는 키가 원문이라 건수만."""
+    out = []
+    for t in _tables():
+        pk = list(t.primary_key.columns)
+        serial = pk[0] if len(pk) == 1 and isinstance(pk[0].type, Integer) else None
+        for col in t.columns:
+            limit = getattr(col.type, "length", None)
+            if not isinstance(col.type, String) or not limit:  # Text·길이 없는 열은 제외 (Text도 String의 하위형)
+                continue
+            over = func.length(col) > limit
+            count, longest = conn.execute(select(func.count(), func.max(func.length(col))).where(over)).one()
+            if not count:
+                continue
+            item: dict[str, Any] = {"table": t.name, "column": col.name, "limit": limit, "count": count,
+                                    "longest": longest}  # fmt: skip
+            if serial is not None:
+                item["ids"] = list(conn.scalars(select(serial).where(over).order_by(serial).limit(TOO_LONG_IDS)))
+            out.append(item)
+    return out
+
+
+def _nul_values(conn: Connection) -> list[dict[str, Any]]:
+    """NUL(0x00)이 든 원천 글자 — 표·열·건수·가장 긴 바이트 수와 정수 기본 키(앞 TOO_LONG_IDS개)만 센다. 값은 읽지
+    않는다. 길이 제한이 없는 Text 열도 본다 (PostgreSQL은 어느 글자 열에도 NUL을 저장하지 못함). SQLite length()는
+    NUL 앞까지만 세므로 바이트로 바꿔 찾는다. 문자열 기본 키 표(app_settings)는 키가 원문이라 건수만."""
+    out = []
+    nul = literal(b"\x00", LargeBinary)
+    for t in _tables():
+        pk = list(t.primary_key.columns)
+        serial = pk[0] if len(pk) == 1 and isinstance(pk[0].type, Integer) else None
+        for col in t.columns:
+            if not isinstance(col.type, String):  # varchar·Text (Text도 String의 하위형)
+                continue
+            raw = cast(col, LargeBinary)
+            has = func.instr(raw, nul) > 0
+            count, longest = conn.execute(select(func.count(), func.max(func.length(raw))).where(has)).one()
+            if not count:
+                continue
+            item: dict[str, Any] = {"table": t.name, "column": col.name, "count": count, "longest_bytes": longest}
+            if serial is not None:
+                item["ids"] = list(conn.scalars(select(serial).where(has).order_by(serial).limit(TOO_LONG_IDS)))
+            out.append(item)
+    return out
+
+
 def _marker(conn: Connection) -> dict[str, Any] | None:
     raw = conn.execute(select(AppSetting.value).where(AppSetting.key == MARKER)).scalar()
     return json.loads(raw) if raw else None
@@ -361,12 +435,30 @@ def _copy(src: Engine, dst: Engine, report: dict[str, Any], apply: bool, fail_at
             raise CopyError(
                 "원천·대상 리비전이 최신(head)이 아닙니다 — 둘 다 'alembic upgrade head'로 맞춘 뒤 다시 하세요"
             )
+        # 원천 검사 세 가지는 모두 보고에 채운 뒤 한 번에 멈춘다 (하나를 고친 뒤 다른 하나로 다시 멈추지 않게)
+        report["too_long_values"] = too_long = _too_long_values(s)
+        report["nul_values"] = nul_values = _nul_values(s)
         report["tz_unverified_runs"] = unverified = _tz_unverified_runs(s)
+        problems = []
+        if too_long:
+            where = ", ".join(f"{v['table']}.{v['column']}(최대 {v['limit']}자) {v['count']}건" for v in too_long)
+            problems.append(
+                f"원천에 대상 열 길이를 넘는 값이 있습니다 — {where}. 자르거나 고쳐서 옮기지 않으므로 적용하지 "
+                "않습니다 (보고 too_long_values — docs/EXTERNAL_DB.md 8-2)"
+            )
+        if nul_values:
+            where = ", ".join(f"{v['table']}.{v['column']} {v['count']}건" for v in nul_values)
+            problems.append(
+                f"원천에 NUL(0x00) 문자가 든 값이 있습니다 — {where}. PostgreSQL은 NUL이 든 글자를 저장하지 못하고 "
+                "지우거나 바꿔서 옮기지 않으므로 적용하지 않습니다 (보고 nul_values — docs/EXTERNAL_DB.md 8-2)"
+            )
         if unverified:
-            raise CopyError(
+            problems.append(
                 f"원천에 시간대 출처 확인이 필요한 실행 기록 후보가 {unverified}건 있습니다 (시작 시각 = 생성 시각 — "
                 "0009가 생성 시각(UTC)으로 채웠을 수 있음). 9시간 보정을 추정해서 하지 않으므로 적용하지 않습니다"
             )
+        if problems:
+            raise CopyError(" / ".join(problems))
         counts = {t.name: {"source": _count(s, t.name), "target_before": _count(d, t.name)} for t in tables}
         report["counts"] = counts
         _refuse_if_busy(d, report)
