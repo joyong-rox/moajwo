@@ -265,6 +265,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
     def column_at(label: str) -> int:
         if label not in label_index:
             built.labels.append(label)
+            built.text_chars += len(label)  # 결과 열 이름 (통합 데이터 시트 1행·처리 요약)
             label_index[label] = len(built.labels) - 1
         return label_index[label]
 
@@ -303,13 +304,15 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                     built.unmapped_columns.append(c.label)
             for d in dropped:
                 built.dropped_columns.append({"file": record.original_name, "sheet": sheet.name, **d})
+                built.text_chars += sum(len(v) for v in built.dropped_columns[-1].values() if isinstance(v, str))
             for c in columns:
                 column_at(c.label)
                 if c.field_key in ENTITY_FIELDS:
                     column_at(f"{c.label} 코드")
                 if normalize_name(c.source) != normalize_name(c.label):
                     reason, _ = mapping_reason(c.mapping)
-                    built.changes.append(
+                    _record(
+                        built,
                         Change(
                             fid,
                             record.original_name,
@@ -323,7 +326,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                             c.label,
                             f"열 이름 매핑: {reason}",
                             round(float(c.mapping.score if c.mapping.score is not None else 1.0), 4),
-                        )
+                        ),
                     )
             sido_col = next((c for c in columns if c.field_key == "sido"), None)
             used_rows = 0
@@ -355,23 +358,24 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                         continue
                     if kind is None:
                         kind, reason = _classify(original, value, c)
-                    change = Change(
-                        fid,
-                        record.original_name,
-                        sheet.name,
-                        entry["row"],
-                        out_row,
-                        c.label,
-                        c.source,
-                        kind,
-                        text(original),
-                        text(value),
-                        reason,
-                        confidence,
-                        output_col=label_index[c.label] + 1,
+                    _record(
+                        built,
+                        Change(
+                            fid,
+                            record.original_name,
+                            sheet.name,
+                            entry["row"],
+                            out_row,
+                            c.label,
+                            c.source,
+                            kind,
+                            text(original),
+                            text(value),
+                            reason,
+                            confidence,
+                            output_col=label_index[c.label] + 1,
+                        ),
                     )
-                    built.changes.append(change)
-                    built.text_chars += len(change.before or "") + len(change.after or "") + len(change.reason)
                 built.rows.append(row)
                 built.text_chars += sum(len(v) for v in row if isinstance(v, str))
                 _check_size(built)  # 쌓는 중에도 — 한도를 넘는 입력은 다 읽기 전에 멈춘다 (값은 늘기만 한다)
@@ -564,6 +568,15 @@ def _write_summary(ws: Any, built: _Built, summary: dict[str, Any]) -> None:
 def _output_path(run_id: int, now: datetime) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     return OUTPUT_DIR / f"통합결과_{run_id:04d}_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+
+def _record(built: _Built, change: Change) -> None:
+    """변경 기록을 더하고 그 글자를 결과 글자 예산에 센다 — 변경 내역 시트·run_changes에 그대로 들어가는 글자
+    (파일·시트·열 이름, 앞뒤 값, 이유)."""
+    built.changes.append(change)
+    fields = (change.file_name, change.sheet, change.column, change.source_column, change.before, change.after,
+              change.reason)  # fmt: skip
+    built.text_chars += sum(len(v) for v in fields if v)
 
 
 def _check_size(built: _Built) -> None:

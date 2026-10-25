@@ -47,7 +47,7 @@ from app.files import get_file_for, load_parsed
 from app.integration import KST, OUTPUT_DIR
 from app.mapping_review import sheet_id
 from app.models import IntegrationRun, SourceFile
-from app.parsing import FileResult
+from app.parsing import SheetResult
 from app.pii import mask_text
 from app.validation_api import pii_out
 
@@ -142,7 +142,9 @@ class SheetInfo:
     formula_missing: int  # 수식인데 저장된 결과값이 없는 칸
     formula_cached: int  # 저장된 결과값을 쓰는 수식 칸
     long_numbers: int  # 엑셀 숫자 칸이 정확히 담지 못하는 15자리 넘는 정수
-    text_chars: int = 0  # 결과에 넣는 행(데이터·소계·주석) 칸의 글자 수 합 — 결과 글자 예산 (MAX_OUTPUT_TEXT_CHARS)
+    text_chars: int = (
+        0  # 결과에 넣는 열 이름과 행(데이터·소계·주석) 칸의 글자 수 합 — 결과 글자 예산 (MAX_OUTPUT_TEXT_CHARS)
+    )
 
 
 @dataclass
@@ -207,7 +209,8 @@ def file_info(db: Session, record: SourceFile) -> FileInfo:
     for i, s in enumerate(parsed.sheets):
         cells = formulas.get(s.name, set())
         kinds = {"data": s.data_rows, "subtotal": s.subtotal_rows, "note": s.note_rows, "empty": s.empty_rows}
-        missing = cached = long_numbers = text_chars = 0
+        missing = cached = long_numbers = 0
+        text_chars = sum(len(n) for n in s.columns if isinstance(n, str))  # 결과 1행(열 이름)도 결과 글자
         for entry in s.body:
             if entry["kind"] == "empty":
                 continue
@@ -732,8 +735,7 @@ def _clean(value: Any, stats: Counter[str]) -> Any:
     return value
 
 
-def _write_sheet(ws: Any, o: OutSheet, parsed: FileResult, formulas: dict[str, set[tuple[int, int]]]) -> dict[str, Any]:
-    sheet = parsed.sheets[o.sheet.index]
+def _write_sheet(ws: Any, o: OutSheet, sheet: SheetResult, formulas: dict[str, set[tuple[int, int]]]) -> dict[str, Any]:
     cells = formulas.get(sheet.name, set())
     stats: Counter[str] = Counter()
     header = [*LEAD, *sheet.columns]
@@ -944,7 +946,12 @@ def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
     try:
         wb = Workbook()
         wb.remove(wb.active)
-        parsed: dict[int, tuple[SourceFile, FileResult, dict[str, set[tuple[int, int]]]]] = {}
+        chosen: dict[int, set[int]] = {}
+        for o in plan.sheets:
+            chosen.setdefault(o.file.file_id, set()).add(o.sheet.index)
+        # 파일마다 고른 시트만 쥔다 — 고르지 않은 시트(결과 글자 예산에 세지 않음)의 읽은 값은 다음 파일을 읽기
+        # 전에 놓는다
+        parsed: dict[int, tuple[dict[int, SheetResult], dict[str, set[tuple[int, int]]]]] = {}
         sheets_out = []
         for o in plan.sheets:
             fid = o.file.file_id
@@ -952,9 +959,10 @@ def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
                 record, result = load_parsed(db, fid)
                 if record.sha256 != o.file.sha256:
                     raise BundleError("결과 구성 확인 뒤 파일 내용이 바뀌었습니다 — 다시 확인하세요.")
-                parsed[fid] = (record, result, formula_cells(_file_path(record)))
-            _, result, formulas = parsed[fid]
-            sheets_out.append(_write_sheet(wb.create_sheet(o.name), o, result, formulas))
+                parsed[fid] = ({i: result.sheets[i] for i in chosen[fid]}, formula_cells(_file_path(record)))
+                del result
+            kept, formulas = parsed[fid]
+            sheets_out.append(_write_sheet(wb.create_sheet(o.name), o, kept[o.sheet.index], formulas))
         summary_items = _write_summary(wb.create_sheet(SUMMARY_SHEET), results, processed_at) if plan.items else []
         tmp_path = runlease.new_temp(target)
         wb.save(tmp_path)

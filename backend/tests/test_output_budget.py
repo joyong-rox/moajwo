@@ -173,6 +173,68 @@ def test_integration_with_more_text_than_the_budget_stops_before_a_running_recor
     assert user.post(f"/reviews/{rid}/integrate", json={"include_unmapped": True}).status_code == 201
 
 
+def test_bundle_counts_the_header_text(user, monkeypatch) -> None:
+    """묶기 결과의 1행(열 이름)도 결과 글자다 — 긴 열 이름 다섯 개에 본문 두 행이어도 예산을 넘으면 계획에서 거절."""
+    head = [f"{n}열" + "가" * 3000 for n in range(5)]
+    fid = _upload(user, "ob-head.xlsx", _xlsx({"head": [head, *[[f"v{i}{j}" for j in range(5)] for i in range(2)]]}))
+    monkeypatch.setattr(bundle, "MAX_OUTPUT_TEXT_CHARS", 1_000)
+    over = _plan(user, {"file_ids": [fid]})
+    assert not over["ready"] and any("결과에 넣을 글자가" in p for p in over["problems"]), over["problems"]
+
+
+def test_integration_counts_column_records_and_labels(user, monkeypatch) -> None:
+    """통합은 열 이름 매핑의 변경 기록(원본 열 이름·이유)과 결과 열 이름도 결과 글자로 센다."""
+    long_name = "인구" + "가" * 3000
+    rows = [["시도", "시군구", long_name], ["서울특별시", "종로구", 10]]
+    fid = _upload(user, "ob-colname.xlsx", _xlsx({"colname": rows}))
+    _confirm(user, fid, {"시도": "sido", "시군구": "sigungu", long_name: "population"})
+    rid = _review_of(user, [fid])
+    monkeypatch.setattr(integration, "MAX_OUTPUT_TEXT_CHARS", 1_000)
+    before = _state()
+    res = user.post(f"/reviews/{rid}/integrate", json={})
+    assert res.status_code == 409 and "결과에 넣을 글자가" in res.json()["detail"], res.text
+    assert _state() == before
+
+
+def test_bundle_keeps_only_the_chosen_sheets_while_making(user, monkeypatch) -> None:
+    """묶기는 고른 시트만 쥔다 — 고르지 않은 시트(글자 예산에 세지 않음)의 읽은 값은 다음 파일을 읽기 전에 놓는다."""
+    import gc
+    import weakref
+
+    from app import files as files_module
+
+    fids = []
+    for n in range(2):
+        big = [["시도", "비고"], *[["서울특별시", "나" * 2000] for _ in range(20)]]
+        fid = _upload(user, f"ob-unchosen-{n}.xlsx", _xlsx({"pick": [HEAD, ["서울특별시", "종로구", 10]], "skip": big}))
+        _confirm(user, fid, MAP)
+        fids.append(fid)
+    unchosen: list[weakref.ref] = []
+    real_load = files_module.load_parsed
+
+    def tracking(session: Any, file_id: int) -> Any:
+        record, result = real_load(session, file_id)
+        unchosen.append(weakref.ref(result.sheets[1]))  # 'skip' 시트
+        return record, result
+
+    seen_alive: list[bool] = []
+    real_write = bundle._write_sheet
+
+    def writing(*args: Any) -> Any:
+        gc.collect()
+        seen_alive.extend(r() is not None for r in unchosen[:-1])  # 지금 쓰는 파일보다 앞 파일의 고르지 않은 시트
+        return real_write(*args)
+
+    monkeypatch.setattr(bundle, "load_parsed", tracking)
+    monkeypatch.setattr(bundle, "_write_sheet", writing)
+    sheets = [{"file_id": f, "sheet_id": "s0"} for f in fids]
+    plan = _plan(user, {"file_ids": fids, "sheets": sheets})
+    assert plan["ready"], plan["problems"]
+    res = user.post("/bundle/run", json={"file_ids": fids, "sheets": sheets, "expected_basis": plan["basis"]})
+    assert res.status_code == 201, res.text
+    assert seen_alive and not any(seen_alive), "앞 파일의 고르지 않은 시트를 다음 파일을 쓰는 동안에도 쥐고 있었다"
+
+
 def test_a_second_result_is_refused_while_one_is_being_made_and_leaves_nothing(user, monkeypatch) -> None:
     """결과 만들기 차례(동시 1개): 다른 결과를 만드는 동안 온 요청은 기다리지 않고 503 — 실행 기록·파일을 만들지 않는다.
     차례는 끝나면(예외 포함) 돌려준다."""
