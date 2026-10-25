@@ -1,8 +1,15 @@
 """SQLite → PostgreSQL 이관 (O-03, docs/EXTERNAL_DB.md 8장) — 계정·권한·관계 기록을 그대로 옮긴다.
 
 사용법 (backend 폴더에서):
-    python -m app.dbcopy --source <SQLite 주소> --target <PostgreSQL 직접 연결 주소> [--apply] [--report 파일]
+    python -m app.dbcopy --source <SQLite 주소> --target-env <환경 변수 이름> [--apply] [--report 파일]
+    python -m app.dbcopy --source <SQLite 주소> --target 'postgresql:///?service=<이름>' [--apply] [--report 파일]
 
+- 대상은 PostgreSQL 직접 연결·소유 계정이다. 비밀번호를 명령 인자에 두지 않는다 (셸 기록·프로세스 목록에 남는다):
+  - --target-env NAME: 환경 변수 NAME에서 대상 주소를 읽는다 (--target과 둘 중 하나만).
+  - --target 'postgresql:///?service=이름': libpq 서비스 파일(PGSERVICEFILE)의 접속 정보와 비밀번호 파일
+    (PGPASSFILE)의 비밀번호로 접속한다 (docs/EXTERNAL_DB.md 3-1).
+  - 비밀번호가 든 --target 주소도 호환으로 그대로 동작하지만 stderr로 경고한다. 보고에는 주소 없이
+    target_secret_in_args(참·거짓)만 남긴다.
 - 기본은 확인만 한다 (dry-run): 원천 스냅숏의 리비전·무결성·표별 건수, 대상 리비전·건수, 대상이 비었는지,
   지원 범위.
 - 원천 보호: 원천 파일은 읽기 전용으로만 연다. SQLite 백업 API(한 읽기 트랜잭션으로 모든 페이지 복사 — 한 시점)로
@@ -54,6 +61,7 @@ from urllib.parse import quote
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import Boolean, Connection, DateTime, Engine, Integer, Table, create_engine, func, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
@@ -537,15 +545,53 @@ def _dump(report: dict[str, Any], ascii_only: bool = False) -> str:
     return json.dumps(report, ensure_ascii=ascii_only, indent=1, default=str)
 
 
+SECRET_IN_ARGS_WARNING = (
+    "경고: --target 주소에 비밀번호가 들어 있습니다. 명령 인자는 셸 기록과 프로세스 목록에 남을 수 있습니다 — "
+    "서비스 주소(postgresql:///?service=이름, 비밀번호는 PGPASSFILE 비밀번호 파일)나 --target-env(환경 변수 이름)를 "
+    "쓰세요 (docs/EXTERNAL_DB.md 3-1). 이번 실행은 그대로 진행하며 보고에 주소를 남기지 않습니다."
+)
+
+
+def has_password(raw: str) -> bool:
+    """주소에 비밀번호가 있는지 (사용자 정보의 비밀번호 또는 ?password= 매개변수). 해석하지 못하면 글자로 찾는다."""
+    try:
+        url = make_url(raw)
+    except Exception:  # 해석하지 못하는 주소는 어차피 접속 전에 거절된다 — 경고 여부만 보수적으로 정한다
+        return "password" in raw.lower()
+    return bool(url.password) or any(key.lower() == "password" for key in url.query)
+
+
+def _target_input(a: argparse.Namespace) -> dict[str, Any]:
+    """대상 주소를 어디서 받았는지와, 명령 인자에 비밀번호가 있었는지(참·거짓)만 보고에 남긴다 — 주소는 남기지 않는다.
+    비밀번호가 든 --target은 호환으로 그대로 쓰되 stderr로 경고한다 (DB에 닿기 전에)."""
+    if a.target_env is not None:
+        return {"target_input": "--target-env", "target_secret_in_args": False}
+    secret = has_password(a.target)
+    if secret:
+        print(SECRET_IN_ARGS_WARNING, file=sys.stderr, flush=True)
+    return {"target_input": "--target", "target_secret_in_args": secret}
+
+
+def _target_url(a: argparse.Namespace) -> str:
+    if a.target_env is None:
+        return a.target
+    raw = os.environ.get(a.target_env, "").strip()
+    if not raw:
+        raise CopyError(f"환경 변수 {a.target_env}에 대상 주소가 없습니다 — 이관하지 않았습니다")
+    return raw
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m app.dbcopy", description=__doc__.splitlines()[0])
     ap.add_argument("--source", required=True)
-    ap.add_argument("--target", required=True)
+    target = ap.add_mutually_exclusive_group(required=True)
+    target.add_argument("--target", help="대상 주소 — 비밀번호 없이 (예: postgresql:///?service=moajwo-migrate)")
+    target.add_argument("--target-env", metavar="NAME", help="대상 주소를 읽을 환경 변수 이름")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--report")
     ap.add_argument("--lock-timeout-s", type=int, default=30, help="잠금 대기 최대 시간 (초)")
     a = ap.parse_args(argv)
-    report: dict[str, Any] = {"tool": TOOL}
+    report: dict[str, Any] = {"tool": TOOL, **_target_input(a)}
     sink = None
     try:  # 보고 파일 경로부터 확인한다 — DB에 닿기 전에 (원천을 덮어쓰거나, 이관을 커밋한 뒤 보고만 못 쓰는 일이 없게)
         path = source_path(a.source)
@@ -556,11 +602,12 @@ def main(argv: list[str] | None = None) -> int:
         error = f"보고 파일을 쓸 수 없습니다 ({safe_error(exc)}) — 이관하지 않았습니다"
         return _emit({**report, "db_applied": "no", "error": error}, None, EXIT_NOT_APPLIED)
     try:
-        copy(a.source, a.target, apply=a.apply, lock_timeout_s=a.lock_timeout_s, report=report)
+        copy(a.source, _target_url(a), apply=a.apply, lock_timeout_s=a.lock_timeout_s, report=report)
         code = EXIT_OK
     except Exception as exc:  # 알 수 없는 오류도 종류만 적는다
         stage = report.get("stage", "준비")
         report["error"] = safe_error(exc) if isinstance(exc, CopyError) else f"[{stage}] {safe_error(exc)}"
+        report.setdefault("db_applied", "no")  # 대상 주소를 읽기 전에 멈춘 경우 (copy를 시작하지 않음)
         code = EXIT_UNKNOWN if report.get("db_applied") in ("yes", "unknown") else EXIT_NOT_APPLIED
     return _emit(report, sink, code)
 

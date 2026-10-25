@@ -105,6 +105,32 @@ def pg_database(name: str, drop: bool = False) -> str:
     return admin.set(database=name).render_as_string(hide_password=False)
 
 
+def pg_service_files(directory, name: str, url: str) -> dict[str, str]:  # noqa: ANN001
+    """시험용 libpq 서비스 파일·비밀번호 파일을 만들고 그 경로 환경 변수(PGSERVICEFILE·PGPASSFILE)를 돌려준다.
+    서비스 파일에는 비밀번호를 넣지 않는다 (비밀번호 파일에만 — docs/EXTERNAL_DB.md 3-1). 비밀번호 파일의 DB 칸은 *라
+    서비스 주소에서 DB 이름을 바꿔도(postgresql:///다른DB?service=이름) 맞는다. 접속 주소는 postgresql:///?service=이름."""
+    from pathlib import Path
+
+    from sqlalchemy.engine import make_url
+
+    url_ = make_url(url)
+    port = str(url_.port or 5432)
+    lines = [f"[{name}]", f"host={url_.host}", f"port={port}", f"dbname={url_.database}", f"user={url_.username}"]
+    lines += [f"{key}={value}" for key, value in url_.query.items() if isinstance(value, str)]  # sslmode 등
+
+    def esc(value: str) -> str:  # 비밀번호 파일 형식: 칸 안의 : 와 \ 는 \ 로 이스케이프
+        return value.replace("\\", "\\\\").replace(":", "\\:")
+
+    folder = Path(directory)
+    service, passfile = folder / "pg_service.conf", folder / "pgpass.conf"
+    service.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    passfile.write_text(f"{esc(url_.host)}:{port}:*:{esc(url_.username)}:{esc(url_.password)}\n", encoding="utf-8",
+                        newline="\n")  # fmt: skip
+    if os.name != "nt":
+        passfile.chmod(0o600)  # 유닉스 libpq는 그룹·다른 사용자 권한이 있는 비밀번호 파일을 무시한다
+    return {"PGSERVICEFILE": str(service), "PGPASSFILE": str(passfile)}
+
+
 def db_dump() -> str:
     """앱 DB의 모든 표·모든 행을 글자로 (SQLite iterdump 대신 — 두 DB에서 같게). '원문이 어디에도 없음' 확인용."""
     from sqlalchemy import inspect, text
