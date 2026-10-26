@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -60,6 +59,7 @@ from app.promotion import load_standard
 from app.quantity import confirmed_quantity_indexes, quantity_sheet
 from app.review import mapping_reason, session_items, summarize
 from app.validation import WARNING_LABEL, EntityResolver
+from app.xmltext import has_illegal, printable
 
 logger = logging.getLogger(__name__)
 
@@ -230,11 +230,12 @@ class _EntityNormalizer:
         glossary = self.resolver.glossary
         if glossary is None:
             return None, "", 0.0
-        code = self.choices.get(name)
+        lookup = f"{sido} {name}" if field_key == "sigungu" and sido else name
+        # 확인 항목의 값은 row_entity_names가 만든 꼴(시도와 합친 시군구)이다 — 승인한 연결도 그 키로 찾는다
+        code = self.choices.get(lookup) or self.choices.get(name)
         if code and code in glossary.entries:
             ref = entity_ref(glossary.entries[code])
             return ref, f"검토 #{self.review_id}에서 사용자가 '{name}' → '{ref.name}'({code}) 연결을 승인했습니다.", 1.0
-        lookup = f"{sido} {name}" if field_key == "sigungu" and sido else name
         res: Resolution | None = self.resolver.resolve(lookup, field_key)
         if res is None or res.status != "resolved" or res.ref is None or res.note:
             return None, "", 0.0
@@ -258,8 +259,8 @@ def _display_name(ref: EntityRef, field_key: str, has_sido: bool = True) -> str:
 
 
 def _bad_text(value: Any) -> bool:
-    """엑셀(XML)에 쓸 수 없는 제어 문자(NUL·\\x01 등)가 든 글자 — 줄바꿈·탭은 쓸 수 있다."""
-    return isinstance(value, str) and ILLEGAL_CHARACTERS_RE.search(value) is not None
+    """엑셀(XML)에 쓸 수 없는 글자(NUL·\\x01 등 제어 문자, U+FFFE·U+FFFF)가 든 글자 — 줄바꿈·탭은 쓸 수 있다."""
+    return has_illegal(value)
 
 
 def _control_at(built: _Built, where: str, glossary: bool = False) -> None:
@@ -410,7 +411,9 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                 sido_value = entry["cells"][sido_col.index] if sido_col else None
                 for c in columns:
                     original: Cell | Any = entry["original"][c.index]
-                    value: Any = entry["cells"][c.index]
+                    cell_text: Any = entry["cells"][c.index]  # 병합 칸 채움이면 원본 칸은 비고 채운 값이 여기 있다
+                    value: Any = cell_text
+                    ref = None
                     if isinstance(original, datetime | date):
                         value = original  # 날짜는 원본 형식 그대로 둔다 (변환하지 않음)
                     kind, reason, confidence = None, "", 1.0
@@ -425,12 +428,13 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                                 value, kind, reason, confidence = shown, "entity", why, conf
                     row[label_index[c.label]] = value
                     place = f"{where} · {cell_place(sheet, entry['row'], c.index)}"
-                    # 결과 칸·변경 내역(이전 값)에 쓸 수 없는 글자 — 원본 칸에서 왔는지, 칸 값을 바꾼 용어사전 표시
-                    # 이름에서 왔는지 나눠 알린다 (용어사전 글자는 원본을 고쳐도 남는다). 시군구는 결과 칸에 정식명칭의
-                    # 시도 뒤만 쓰지만 변경 사유(변경 내역 '근거'·셀 메모)에는 정식명칭 전체가 들어가므로 사유도 본다
-                    if _bad_text(original) or (kind != "entity" and _bad_text(value)):
+                    # 결과 칸·변경 내역(이전 값·사유)에 쓸 수 없는 글자 — 원본 칸(병합으로 채운 값 포함)에서 왔는지,
+                    # 칸 값을 바꾼 용어사전 이름에서 왔는지 나눠 알린다 (용어사전 글자는 원본을 고쳐도 남는다). 시군구는
+                    # 결과 칸에 정식명칭의 시도 뒤만 쓰지만 변경 사유(변경 내역 '근거'·셀 메모)에는 정식명칭 전체가
+                    # 들어간다
+                    if _bad_text(original) or _bad_text(cell_text) or (kind != "entity" and _bad_text(value)):
                         _control_at(built, place)
-                    elif _bad_text(value) or (kind == "entity" and _bad_text(reason)):
+                    elif ref is not None and (_bad_text(value) or _bad_text(ref.name)):
                         _control_at(built, f"용어사전 {ref.code} 항목의 이름 ({place}에 쓰려던 값)", glossary=True)
                     if same(original, value):
                         continue
@@ -527,9 +531,9 @@ def _as_text(ws: Any) -> None:
 
 
 def _printable(value: Any) -> Any:
-    """처리 요약의 설명 글(검증 경고 사유·기준 기간)에서 엑셀(XML)에 쓸 수 없는 제어 문자를 '�'로 — 이 글은 이미
+    """처리 요약의 설명 글(검증 경고 사유·기준 기간)에서 엑셀(XML)에 쓸 수 없는 글자를 '�'로 — 이 글은 이미
     개인정보를 가린 설명이고 원본 값이 아니다. 결과 칸·이름·변경 내역의 글자는 build가 그 자리로 거절한다."""
-    return ILLEGAL_CHARACTERS_RE.sub("\ufffd", value) if isinstance(value, str) else value
+    return printable(value)
 
 
 def write_workbook(path: Path, built: _Built, summary: dict[str, Any]) -> int:

@@ -396,18 +396,22 @@ def _check_item_values(items: list[ReviewItem], targets: list[_Loaded], automati
     """검토 항목에 저장할 글자(칸 값·이전/이후 값·사유)에 NUL이 있으면 아무것도 쓰기 전에 거절한다 — PostgreSQL은 NUL이
     든 글자를 받지 않고(500) SQLite는 저장한다. 값은 지우거나 바꾸지 않는다 (같은 값을 다시 찾는 키로도 쓰임).
     이름(파일·시트·열)은 check_files가 먼저 본다. 문구에는 위치만 (값 원문 없음). NUL이 어디서 왔는지에 따라 알린다:
-    - 칸 값(이전·이후 값)이면 그 칸. 여러 파일을 묶은 기관·지역 이름 확인 항목은 파일 번호가 없어 그 값(시도와 합친
-      시군구 이름이면 NUL이 든 쪽)이 든 칸을 찾고, 찾지 못한 값이 남으면 '검토 항목'도 알린다
+    - 칸 값(이전·이후 값)이면 그 칸. 여러 파일을 묶은 기관·지역 이름 확인 항목은 파일 번호가 없어 그 값이 든 칸을 찾는다
+      (시도와 합친 시군구 이름이면 NUL이 든 쪽). 찾지 못한 값이 남으면 '검토 항목'도 알린다
     - 사유에 옮겨 적힌 칸 값(검증 경고의 못 읽은 값·합계 행 이름·기관 이름, 제목 행 등)이면 그 칸 (못 찾으면 행까지)
-    - 자동화 이름(설정 — 규칙 항목의 사유 '자동화 '<이름>'…')이면 그 설정, 필수 기관(검토 조건)이면 그 조건
-    칸 찾기는 항목 수 × 칸 수가 되지 않게 한다: 기관·지역 이름은 값 집합으로 한 번(못 찾은 값만 한 번 더), 사유에 옮겨
-    적힌 칸은 그 항목의 행과 사유에 적힌 'N행'만 본다."""
+    - 검토 조건(필수 기관·기준 기간)이나 자동화 이름(규칙 항목의 사유 "자동화 '<이름>'")이면 그 조건·설정. 자동화로
+      실행할 때는 저장된 설정이라 고칠 수 없으므로 자동화를 다시 저장하라고 알린다
+    칸 찾기는 항목 수 × 칸 수가 되지 않게 한다 (_cells_holding·_cells_quoted)."""
     sheets = {(t.record.id, s.name): s for t in targets for s in t.parsed.sheets}
     marker = f"자동화 '{automation_name}'" if automation_name and NUL in automation_name else None
+
+    def in_before(item: ReviewItem) -> bool:
+        return bool(item.before and NUL in item.before)
+
     cells: list[str] = []
     wanted: set[str] = set()  # 파일 번호 없는 항목의 NUL 값
     quoted: dict[tuple[int, str], list[tuple[int | None, str]]] = {}  # 시트 → (항목의 행, 사유) — 사유에만 NUL
-    condition = setting = False
+    condition = period = setting = False
     for item in items:
         reason = item.reason or ""
         if marker and marker in reason:  # 규칙 항목이 사유 앞에 적는 자동화 이름 — 칸 글자와 섞이지 않게 그 꼴만 뺀다
@@ -419,6 +423,8 @@ def _check_item_values(items: list[ReviewItem], targets: list[_Loaded], automati
         sheet = sheets.get((item.file_id, item.sheet or "")) if item.file_id is not None else None
         if item.kind == "required_entity_missing":
             condition = True
+        elif item.kind == "period_mismatch" and item.after and NUL in item.after and not in_before(item):
+            period = True  # 이후 값의 기준 기간은 검토 조건이다 — 파일의 연·월 칸이 아님 (제목 행의 글자는 사유로 찾음)
         elif item.file_id is None:
             if item.before and NUL in item.before:
                 wanted.add(item.before)
@@ -437,84 +443,110 @@ def _check_item_values(items: list[ReviewItem], targets: list[_Loaded], automati
         cells += found + (["검토 항목"] if missing else [])
     for (fid, name), held in quoted.items():
         cells += _cells_quoted(fid, sheets[(fid, name)], held)
-    if cells or condition or setting:
+    if cells or condition or period or setting:
         places, fixes = [], []
+        resave = (  # 자동화의 조건·이름은 고치는 API가 없다 — 지우고 처음 저장한 실행 기록에서 다시 저장해야 한다
+            "자동화의 조건·이름은 바꿀 수 없으니 그 자동화를 지운 뒤, 처음 저장한 실행 기록에서 NUL 없는 값으로"
+            " 다시 저장해 실행하세요"
+            if automation_name is not None
+            else None
+        )
         if condition:
             places.append("검토 조건 '필수 기관'")
-            fixes.append("필수 기관 조건에서 NUL 문자를 지운 뒤 검토를 다시 만드세요")
+            fixes.append(resave or "필수 기관 조건에서 NUL 문자를 지운 뒤 검토를 다시 만드세요")
+        if period:
+            places.append("검토 조건 '기준 기간'")
+            fixes.append(resave or "기준 기간에서 NUL 문자를 지운 뒤 검토를 다시 만드세요")
         if setting:
             places.append("자동화 이름 (원본 칸이 아니라 규칙 항목의 사유에 들어가는 설정)")
-            fixes.append(
-                "자동화 이름은 바꿀 수 없으니 그 자동화를 지운 뒤, 처음 저장한 실행 기록에서 NUL 없는 이름으로"
-                " 다시 저장해 실행하세요"
-            )
+            fixes.append(resave or "자동화 이름에서 NUL 문자를 지운 뒤 다시 실행하세요")
         if cells:
             places += cells
             fixes.append("원본 파일에서 그 칸의 NUL 문자를 지운 뒤 다시 올리세요")
         unique = list(dict.fromkeys(places))
         shown = " / ".join(unique[:3]) + (f" 외 {len(unique) - 3}곳" if len(unique) > 3 else "")
         raise ReviewNameError(
-            f"검토를 만들지 않았습니다 — 저장할 값에 NUL(0x00) 문자가 있습니다: {shown}. {' · '.join(fixes)}. "
-            f"[{VALUE_HAS_NUL}]"
+            f"검토를 만들지 않았습니다 — 저장할 값에 NUL(0x00) 문자가 있습니다: {shown}. "
+            f"{' · '.join(dict.fromkeys(fixes))}. [{VALUE_HAS_NUL}]"
         )
 
 
 def _cells_holding(targets: list[_Loaded], values: set[str]) -> tuple[list[str], bool]:
-    """그 값들이 든 칸의 위치와, 칸을 찾지 못한 값이 남았는지 (거절 문구용 — 값은 쓰지 않음). 기관·지역 열을 먼저 보고,
-    거기서 못 찾은 값만 모든 칸에서 한 번 더 찾는다. 시도와 합친 시군구 이름('<시도> <시군구>' — row_entity_names)은
-    NUL이 든 쪽(시도 칸 또는 시군구 칸)을 찾는다. 칸은 차례마다 한 번만 훑고 값은 사전으로 찾는다 (값 수 × 칸 수가
-    되지 않게)."""
-    holding: dict[str, set[str]] = {}  # 칸에 있을 글자 → 그 글자가 든 값
-    for value in values:
-        holding.setdefault(value, set()).add(value)
-        for i, ch in enumerate(value):
-            if ch == " ":
-                for part in (value[:i], value[i + 1 :]):
-                    if NUL in part:
-                        holding.setdefault(part, set()).add(value)
+    """그 값들이 든 칸의 위치와, 칸을 찾지 못한 값이 남았는지 (거절 문구용 — 값은 쓰지 않음).
+    확인 항목의 값은 row_entity_names가 만든 그대로다: 기관·지역 칸 글자, 시군구는 같은 행의 시도와 합친
+    '<시도> <시군구>'.
+    그래서 행마다 그 꼴을 다시 만들어 값 집합에 있는지만 본다 (행마다 집합 조회 — 값을 쪼개거나 값마다 칸을 훑지 않음).
+    검사에 쓴(확정·자동) 기관·지역 열을 먼저 보고, 거기서 못 찾은 값만 모든 칸에서 글자 그대로 한 번 더 찾는다."""
     places: list[str] = []
-    found: set[str] = set()
-
-    def scan(keys: dict[str, set[str]], entity_only: bool) -> None:
+    left = set(values)
+    for t in targets:
+        for s in t.parsed.sheets:
+            mapped = t.mappings.get(s.name, [])
+            entity = [(j, m.field_key) for j, m in enumerate(mapped)
+                      if m.field_key in ENTITY_FIELDS and m.status in ("confirmed", "auto")]  # fmt: skip
+            sido_cols = [j for j, key in entity if key == "sido"]
+            if not entity:
+                continue
+            where = f"파일 #{t.record.id} · {sheet_place(s)}"
+            for entry in s.body:
+                cells = entry["cells"]
+                sido_j = next((j for j in sido_cols if j < len(cells) and isinstance(cells[j], str)), None)
+                sido = cells[sido_j] if sido_j is not None else None
+                for j, key in entity:
+                    cell = cells[j] if j < len(cells) else None
+                    if not isinstance(cell, str):
+                        continue
+                    if cell in values:
+                        left.discard(cell)
+                        if NUL in cell:
+                            places.append(f"{where} · {cell_place(s, entry['row'], j)}")
+                    elif key == "sigungu" and sido and f"{sido} {cell}" in values:
+                        left.discard(f"{sido} {cell}")
+                        for k, text in ((sido_j, sido), (j, cell)):  # NUL이 든 쪽(시도 칸·시군구 칸)을 알린다
+                            if NUL in text:
+                                places.append(f"{where} · {cell_place(s, entry['row'], k)}")
+    if left:
+        rest = set(left)
         for t in targets:
             for s in t.parsed.sheets:
-                mapped = t.mappings.get(s.name, [])
-                columns = {j for j, m in enumerate(mapped) if m.field_key in ENTITY_FIELDS} if entity_only else None
-                if columns is not None and not columns:
-                    continue
+                where = f"파일 #{t.record.id} · {sheet_place(s)}"
                 for entry in s.body:
                     for j, cell in enumerate(entry["cells"]):
-                        if isinstance(cell, str) and cell in keys and (columns is None or j in columns):
-                            places.append(f"파일 #{t.record.id} · {sheet_place(s)} · {cell_place(s, entry['row'], j)}")
-                            found.update(keys[cell])
-
-    scan(holding, entity_only=True)
-    rest = {k: v - found for k, v in holding.items() if v - found}
-    if rest:
-        scan(rest, entity_only=False)
-    return places, bool(values - found)
+                        if isinstance(cell, str) and cell in rest:
+                            left.discard(cell)
+                            places.append(f"{where} · {cell_place(s, entry['row'], j)}")
+    return places, bool(left)
 
 
-_ROW_REF = re.compile(r"(\d+)행")
+# 검증 문구가 다른 행의 칸 값을 옮겨 적는 꼴 "N행 '값'" — '하위 3행 합계' 같은 행 수는 행 번호가 아니다
+_ROW_REF = re.compile(r"(\d+)행 '")
+_QUOTED = re.compile(r"'([^']*)'")
+_TITLE_HEAD = 30  # 기간 근거는 제목의 앞 30자만 옮겨 적는다 (validation.collect_period)
 
 
 def _cells_quoted(fid: int, sheet: SheetResult, held: list[tuple[int | None, str]]) -> list[str]:
-    """사유에 옮겨 적힌 칸 가운데 NUL이 든 칸의 위치. 항목마다 그 항목의 행과 사유에 적힌 'N행'만 본다 (사유 수 × 칸
-    수가 되지 않게). 개인정보 형식은 사유에 가려 적히므로 가린 글자로도 맞춘다. 머리글 위 제목 행에서 왔으면 그 행으로,
-    찾지 못한 항목은 그 항목의 행까지만."""
+    """사유에 옮겨 적힌 칸 가운데 NUL이 든 칸의 위치. 항목의 행은 사유에서 글자 그대로 찾고(기관 이름은 따옴표 없이
+    적힘), 사유에 "N행 '값'"으로 적힌 다른 행은 따옴표 안 글자 집합으로 찾는다 — 사유가 길어도 행·칸마다 사유를 다시
+    훑지 않는다. 개인정보 형식은 사유에 가려 적히므로 가린 글자로도 맞춘다. 머리글 위 제목 행은 앞 30자만 옮겨
+    적히므로 그 머리로 맞춘다. 찾지 못한 항목은 그 항목의 행까지만."""
     base = f"파일 #{fid} · {sheet_place(sheet)}"
     rows = {entry["row"]: entry for entry in sheet.body}
     places: list[str] = []
     for row, reason in held:
         hit = False
-        refs = {int(n) for n in _ROW_REF.findall(reason)} | ({row} if row is not None else set())
-        for r in sorted(refs):
+        quoted = set(_QUOTED.findall(reason))
+        own = rows.get(row) if row is not None else None
+        for j, cell in enumerate(own["cells"] if own else []):
+            if _nul_text(cell) and (cell in reason or _masked(cell) in reason):
+                places.append(f"{base} · {cell_place(sheet, row, j)}")
+                hit = True
+        for r in sorted({int(n) for n in _ROW_REF.findall(reason)} - {row}):
             entry = rows.get(r)
             for j, cell in enumerate(entry["cells"] if entry else []):
-                if _quoted_in(cell, reason):
+                if _nul_text(cell) and (cell in quoted or _masked(cell) in quoted):
                     places.append(f"{base} · {cell_place(sheet, r, j)}")
                     hit = True
-        if not hit and any(_quoted_in(t, reason) for t in sheet.title_texts):
+        if not hit and any(_title_quoted(t, reason, quoted) for t in sheet.title_texts):
             places.append(f"{base} · 머리글 위 제목·단위 행")
             hit = True
         if not hit:
@@ -522,12 +554,20 @@ def _cells_quoted(fid: int, sheet: SheetResult, held: list[tuple[int | None, str
     return places
 
 
-def _quoted_in(cell: object, reason: str) -> bool:
-    """NUL이 든 칸 글자(NUL·공백만 있는 칸은 빼고)가 사유에 그대로 또는 가려(mask_cell) 적혔는지."""
-    if not isinstance(cell, str) or NUL not in cell or not cell.strip(NUL + " "):
-        return False
+def _title_quoted(title: str, reason: str, quoted: set[str]) -> bool:
+    """머리글 위 제목 행의 글자가 사유에 옮겨 적혔는지 — 기간 근거는 앞 30자만 따옴표 안에 적는다."""
+    head = title[:_TITLE_HEAD]
+    return (NUL in title and title in reason) or (NUL in head and head in quoted)
+
+
+def _nul_text(cell: object) -> bool:
+    """NUL이 든 칸 글자인지 (NUL·공백만 있는 칸은 뺌 — 저장하지 않아 검토를 막지 않는 칸)."""
+    return isinstance(cell, str) and NUL in cell and bool(cell.strip(NUL + " "))
+
+
+def _masked(cell: str) -> str:
     masked = mask_cell(cell)
-    return cell in reason or (isinstance(masked, str) and masked != cell and masked in reason)
+    return masked if isinstance(masked, str) else cell
 
 
 def _item(category: str, kind: str, reason: str, *, source: str = "rule", **fields: Any) -> ReviewItem:

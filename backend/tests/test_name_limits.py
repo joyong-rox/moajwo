@@ -9,7 +9,10 @@ PostgreSQL은 varchar(255)보다 긴 이름을 쓰는 순간 DB 오류(500)를 �
 import io
 import json
 import logging
+import tracemalloc
 import warnings
+import xml.parsers.expat
+import zipfile
 from typing import Any
 
 import openpyxl
@@ -135,6 +138,20 @@ def _approve_pending(c: TestClient, review: dict) -> None:
             assert res.status_code == 200, res.text
 
 
+def _ready_settled(c: TestClient, fids: list[int]) -> dict:
+    """검토를 만들고 기관·개인정보 항목은 거부, 나머지는 승인해 완료한다 (후보 없는 기관 이름은 선택 없이 승인 불가)."""
+    res = c.post("/reviews", json={"file_ids": fids})
+    assert res.status_code == 201, res.text
+    review = res.json()
+    for i in review["items"]:
+        if i["category"] == "pending" and i["decision"] is None:
+            body = {"decision": "rejected"} if i["kind"] in ("entity", "pii") else {"decision": "approved"}
+            assert c.post(f"/reviews/{review['id']}/items/{i['id']}/decision", json=body).status_code == 200, i
+    res = c.post(f"/reviews/{review['id']}/complete")
+    assert res.status_code == 200, res.text
+    return review
+
+
 def _ready(c: TestClient, fids: list[int]) -> dict:
     """검토를 만들고 (확인 필요 항목은 승인해) 완료한다."""
     res = c.post("/reviews", json={"file_ids": fids})
@@ -143,6 +160,62 @@ def _ready(c: TestClient, fids: list[int]) -> dict:
     res = c.post(f"/reviews/{res.json()['id']}/complete")
     assert res.status_code == 200, res.text
     return res.json()
+
+
+def _xml_problems(content: bytes) -> list[str]:
+    """xlsx 안의 XML 부분 가운데 XML 1.0으로 읽히지 않는 것 (openpyxl은 쓸 수 없는 글자를 예외 없이 저장할 수 있다)."""
+    bad = []
+    with zipfile.ZipFile(io.BytesIO(content)) as z:
+        for name in z.namelist():
+            if name.endswith((".xml", ".vml")):
+                parser = xml.parsers.expat.ParserCreate()
+                try:
+                    parser.Parse(z.read(name), True)
+                except xml.parsers.expat.ExpatError as exc:
+                    bad.append(f"{name}: {exc}")
+    return bad
+
+
+def _xls(sheet: str, rows: list[list], merges: tuple[tuple[int, int, int, int, Any], ...] = ()) -> bytes:
+    """xls 합성 자료 — xlsx(XML)에는 넣을 수 없는 제어 문자를 시트 이름·칸에 둘 때 쓴다."""
+    xlwt = pytest.importorskip("xlwt")
+    wb = xlwt.Workbook(encoding="utf-8")
+    ws = wb.add_sheet(sheet)
+    for r, row in enumerate(rows):
+        for j, v in enumerate(row):
+            if v is not None:
+                ws.write(r, j, v)
+    for r1, r2, c1, c2, v in merges:
+        ws.write_merge(r1, r2, c1, c2, v)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _bundle(c: TestClient, body: dict) -> tuple[Any, bytes | None]:
+    """묶기 계획 → 실행 → 내려받기. (실행 응답, 내려받은 xlsx 바이트 또는 None)."""
+    plan = c.post("/bundle/plan", json=body)
+    assert plan.status_code == 200 and plan.json()["ready"], plan.text
+    res = c.post("/bundle/run", json={**body, "expected_basis": plan.json()["basis"]})
+    if res.status_code != 201:
+        return res, None
+    dl = c.get(f"/runs/{res.json()['id']}/download")
+    assert dl.status_code == 200, dl.text
+    return res, dl.content
+
+
+def _glossary_seoul(c: TestClient) -> None:
+    g = (
+        "코드,정식명칭,유형,시도코드,시군구코드\n6110000,서울특별시,광역자치단체,11,\n"
+        "3150000,서울특별시 강서구,기초자치단체,11,500\n3010000,서울특별시 중구,기초자치단체,11,140\n"
+    )
+    res = c.post("/glossary/import", files=[("file", ("서울.csv", g.encode("utf-8"), "text/csv"))])
+    assert res.json()["applied"] is True, res.text
+
+
+def _drop_glossary_seoul() -> None:
+    db_rows("delete from glossary_aliases where target_code in ('6110000', '3150000', '3010000')")
+    db_rows("delete from glossary_entries where code in ('6110000', '3150000', '3010000')")
 
 
 def _no_echo(text: str, *raws: str) -> None:
@@ -574,8 +647,58 @@ def test_nul_from_an_automation_name_is_not_blamed_on_a_cell(client) -> None:
     assert res.status_code == 422, res.text
     detail = res.json()["detail"]
     assert "자동화 이름 (원본 칸이 아니라 규칙 항목의 사유에 들어가는 설정)" in detail, detail
-    assert "자동화 이름은 바꿀 수 없으니 그 자동화를 지운 뒤" in detail and "원본 파일에서" not in detail, detail
+    assert "자동화의 조건·이름은 바꿀 수 없으니 그 자동화를 지운 뒤" in detail and "원본 파일에서" not in detail, detail
     assert f"파일 #{oct_}" not in detail, detail  # NUL이 없는 칸을 지목하지 않음
+
+
+@pytest.mark.sqlite_only("PostgreSQL은 NUL이 든 글자를 저장하지 않음 — 저장된 자동화 설정에 NUL이 있는 경우는 SQLite뿐")
+def test_nul_in_a_stored_automation_condition_tells_to_save_the_automation_again(client) -> None:
+    # 자동화의 필수 기관은 저장된 설정에서만 오고 고치는 API가 없다 — '검토를 다시 만드세요' 대신 자동화를 다시
+    # 저장하라고 알린다 (검증 지적 F8). 기준 기간도 같은 검토 조건으로 알린다 (옛 저장값 — 지금은 두 API 모두 형식만)
+    header = "기관명,인구수\n"
+    sept = _csv(client, "조건자동화9월.csv", header + "가나다라연구소,5\n")
+    assert _apply(client, sept, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    review = client.post("/reviews", json={"file_ids": [sept]}).json()
+    for item in [i for i in review["items"] if i["category"] == "pending" and i["decision"] is None]:
+        body = {"decision": "rejected"}
+        assert client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json=body).status_code == 200
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = client.post(f"/reviews/{review['id']}/integrate", json={}).json()
+    auto = client.post(f"/runs/{run['id']}/automation", json={"name": "조건 자동화"}).json()
+    with db_connect() as con:
+        (stored,) = con.execute("select validation from automations where id = ?", (auto["id"],)).fetchone()
+        validation = json.loads(stored)
+        validation["required_entities"] = ["없는\x00기관"]
+        con.execute("update automations set validation = ? where id = ?", (json.dumps(validation), auto["id"]))
+    oct_ = _csv(client, "조건자동화10월.csv", header + "가나다라연구소,7\n")
+    res = client.post(f"/automations/{auto['id']}/run", json={"file_ids": [oct_]})
+    assert res.status_code == 422, res.text
+    detail = res.json()["detail"]
+    assert "검토 조건 '필수 기관'" in detail and "자동화의 조건·이름은 바꿀 수 없으니 그 자동화를 지운 뒤" in detail, (
+        detail
+    )
+    assert "검토를 다시 만드세요" not in detail and f"파일 #{oct_}" not in detail, detail
+
+
+def test_nul_in_the_review_period_is_named_as_a_condition_not_as_the_file_cell() -> None:
+    # 기간 불일치 차단 항목의 이후 값·사유에 든 기준 기간은 검토 조건이다 — 파일의 연·월 칸(NUL 없음)을 지목하지 않는다.
+    # 두 API는 이제 형식을 검사하므로 옛 저장값(자동화 설정)에서만 생긴다 (반박 검증 F2 (a))
+    from app import review as review_module
+    from app.models import ReviewItem
+
+    item = ReviewItem(category="block", kind="period_mismatch", file_id=1, sheet="현황", row=2, column="월",
+                      before="2026-09", after="2026-10\x00 (기준 기간)",
+                      reason="자료의 기간 2026-09이(가) 기준 기간 2026-10\x00과(와) 다릅니다.")  # fmt: skip
+    with pytest.raises(review_module.ReviewNameError) as exc:
+        review_module._check_item_values([item], [])
+    detail = str(exc.value)
+    assert "검토 조건 '기준 기간'" in detail and "기준 기간에서 NUL 문자를 지운 뒤 검토를 다시 만드세요" in detail, (
+        detail
+    )
+    assert "파일 #1" not in detail, detail
+    with pytest.raises(review_module.ReviewNameError) as exc:
+        review_module._check_item_values([item], [], automation_name="월간")
+    assert "자동화의 조건·이름은 바꿀 수 없으니" in str(exc.value), str(exc.value)
 
 
 @pytest.mark.sqlite_only("PostgreSQL은 NUL이 든 자동화 이름을 저장하지 않음 (422 — 직접 입력 글자의 안전망)")
@@ -656,6 +779,108 @@ def test_nul_quoted_into_month_over_month_warnings_points_at_each_rows_cell(clie
     assert "옮겨 적힌 칸" not in detail, detail
 
 
+def test_nul_in_a_long_title_row_is_named_as_the_title_row(client) -> None:
+    # 기간 근거는 제목의 앞 30자만 옮겨 적는다 — 30자가 넘는 제목(앞 30자 안에 NUL)도 제목 행으로 알린다 (검증 지적 F3)
+    title = "2026년 9월 시도별\x00 주민등록 인구 및 세대 현황 보고서"
+    assert len(title) > 30 and "\x00" in title[:30]
+    fid = _csv(client, "긴제목널.csv", f"{title}\n기관명,인구수\n행정안전부,5\n행정안전부,3\n")
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    res = client.post("/reviews", json={"file_ids": [fid], "expected_period": "2026-10"})
+    assert res.status_code == 422, res.text
+    detail = res.json()["detail"]
+    assert f"파일 #{fid} · 1번째 시트 · 머리글 위 제목·단위 행" in detail and "옮겨 적힌 칸" not in detail, detail
+
+
+def test_a_row_count_in_a_reason_is_not_read_as_a_row_number(client) -> None:
+    # 소계 차단 사유의 '하위 3행 합계'는 행 수다 — 그 행(3행)의 같은 NUL 글자 칸을 함께 지목하지 않는다 (검증 지적 F4)
+    fid = _csv(
+        client, "하위3행.csv", "시도,구분,인구수\n서울\x00,소계,20\n서울\x00,가,3\n서울\x00,나,3\n서울\x00,다,3\n"
+    )
+    assert _apply(client, fid, ("c0", None), ("c1", None), ("c2", "population")).status_code == 200
+    res = client.post("/reviews", json={"file_ids": [fid]})
+    assert res.status_code == 422, res.text
+    detail = res.json()["detail"]
+    assert f"파일 #{fid} · 1번째 시트 · 2행 · A열" in detail, detail
+    assert "3행" not in detail and "4행" not in detail and "5행" not in detail, detail
+
+
+def test_a_row_count_is_not_a_row_reference_even_when_that_row_holds_the_quoted_text() -> None:
+    # 사유의 '하위 3행'은 행 수다 — 그 3행에 사유에 옮겨 적힌 것과 같은 NUL 글자가 있어도, "N행 '값'" 꼴이 아니면
+    # 그 행을 보지 않는다 (검증 지적 F4). "N행 '값'" 꼴은 그 행의 같은 글자를 지목한다
+    from types import SimpleNamespace
+
+    from app import review as review_module
+
+    body = [
+        {"row": 2, "kind": "subtotal", "cells": ["서울\x00", "소계", 20]},
+        {"row": 3, "kind": "data", "cells": ["서울\x00", "가", 3]},
+        {"row": 4, "kind": "data", "cells": ["서울\x00", "나", 3]},
+    ]
+    sheet = SimpleNamespace(name="s", tab=0, columns=["시도", "구분", "인구수"], source_columns=[], header_row=1,
+                            header_row_end=None, body=body, title_texts=[])  # fmt: skip
+    counted = "'서울\x00' 행의 '인구수' 값 20이(가) 하위 3행 합계 6과 다릅니다"
+    assert review_module._cells_quoted(7, sheet, [(2, counted)]) == ["파일 #7 · 1번째 시트 · 2행 · A열"]
+    referenced = "'서울\x00' 행의 '인구수' 값과 4행 '서울\x00'이(가) 다릅니다"
+    assert review_module._cells_quoted(7, sheet, [(2, referenced)]) == [
+        "파일 #7 · 1번째 시트 · 2행 · A열",
+        "파일 #7 · 1번째 시트 · 4행 · A열",
+    ]
+
+
+def test_long_entity_value_with_many_spaces_is_looked_up_in_linear_memory() -> None:
+    # 값을 공백마다 쪼개 사전 키로 두면 값 길이의 제곱만큼 메모리를 쓴다 (반박 검증 F1 — 16,000자 값 하나에 약 124MiB).
+    # 행마다 '<시도> <시군구>'를 다시 만들어 집합에서 찾으므로 값 길이에 비례하는 메모리만 쓴다
+    from types import SimpleNamespace
+
+    from app import review as review_module
+
+    value = " ".join(["가"] * 8000) + " 끝\x00"  # 16,002자 · 공백 8,000개
+    body = [{"row": 2, "kind": "data", "cells": [value, 1]}]
+    sheet = SimpleNamespace(name="s", tab=0, columns=["기관", "값"], source_columns=[], header_row=1,
+                            header_row_end=None, body=body, title_texts=[])  # fmt: skip
+    mapped = [SimpleNamespace(field_key="org_name", status="confirmed"),
+              SimpleNamespace(field_key="population", status="confirmed")]  # fmt: skip
+    target = SimpleNamespace(
+        record=SimpleNamespace(id=1), parsed=SimpleNamespace(sheets=[sheet]), mappings={"s": mapped}
+    )
+    tracemalloc.start()
+    try:
+        places, missing = review_module._cells_holding([target], {value})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert places == ["파일 #1 · 1번째 시트 · 2행 · A열"] and not missing, (places, missing)
+    assert peak < 2 * 2**20, f"{peak / 2**20:.1f}MiB"
+
+
+def test_quoted_cells_in_a_long_reason_are_found_through_the_quoted_set_not_by_rescanning() -> None:
+    # 합계 검사 불완전 사유는 읽지 못한 행을 모두 "N행 '값'"으로 적는다 — 그 행들은 따옴표 안 글자 집합으로 찾고, 사유를
+    # 다시 훑는 것은 항목의 행 칸뿐이다 (검증 지적 F5: 예전에는 행마다·칸마다 긴 사유를 훑어 행 수의 제곱)
+    from types import SimpleNamespace
+
+    from app import review as review_module
+
+    class Reason(str):
+        checks = 0
+
+        def __contains__(self, item: object) -> bool:
+            Reason.checks += 1
+            return super().__contains__(item)
+
+    n = 300
+    body = [{"row": 2, "kind": "subtotal", "cells": ["합계", "5"]}]
+    body += [{"row": r, "kind": "data", "cells": [f"행{r}", f"값{r}\x00"]} for r in range(3, n + 3)]
+    sheet = SimpleNamespace(name="s", tab=0, columns=["구분", "값"], source_columns=[], header_row=1,
+                            header_row_end=None, body=body, title_texts=[])  # fmt: skip
+    listing = ", ".join(f"{r}행 '값{r}\x00'" for r in range(3, n + 3))
+    reason = Reason(
+        f"'합계' 행의 '값': 하위 {n}행 중 {n}개 값({listing})을 숫자로 읽지 못해 나머지 0행만 더해 비교했습니다"
+    )
+    places = review_module._cells_quoted(1, sheet, [(2, reason)])
+    assert len(places) == n and places[0] == "파일 #1 · 1번째 시트 · 3행 · B열", places[:2]
+    assert Reason.checks <= 4, Reason.checks
+
+
 def test_quoted_cells_are_looked_up_only_in_the_rows_a_reason_names() -> None:
     # 사유에 옮겨 적힌 칸은 그 항목의 행과 사유에 적힌 'N행'만 본다 — 칸 글자를 사유에서 찾는 횟수가 항목 수에 비례하고
     # 항목 수 × NUL 칸 수가 되지 않는다 (예전: NUL 칸마다 모든 사유)
@@ -685,32 +910,42 @@ def test_quoted_cells_find_rows_named_in_the_reason_title_rows_and_masked_values
 
     from app import review as review_module
 
+    long_title = "2026년 9월 시도별\x00 주민등록 인구 및 세대 현황 보고서"  # 기간 근거는 앞 30자만 적는다
     body = [
         {"row": 2, "kind": "data", "cells": ["\x00", "가\x00나"]},  # NUL만 든 칸은 지목하지 않음
         {"row": 3, "kind": "data", "cells": ["담당 010-1234-5678\x00", 1]},  # 사유에는 가려 적힘
         {"row": 4, "kind": "data", "cells": ["다\x00라", 2]},  # 첫 값의 행(3)이 아니라 사유에 적힌 4행
+        {"row": 6, "kind": "subtotal", "cells": ["서울\x00 소계", 20]},
+        {"row": 7, "kind": "data", "cells": ["서울\x00 가", 3]},  # '하위 7행 합계'의 7은 행 번호가 아니다
+        {"row": 27, "kind": "data", "cells": ["마\x00바", 4]},  # 두 자리 행 번호
     ]
     sheet = SimpleNamespace(name="s", tab=0, columns=["가", "나"], source_columns=[], header_row=1, header_row_end=None,
-                            body=body, title_texts=["2026년\x009월 현황"])  # fmt: skip
+                            body=body, title_texts=["2026년\x009월 현황", long_title])  # fmt: skip
     held = [
         (2, "'가\x00나' 값"),
-        (3, "'담당 010-****-5678\x00' 값, 4행 '다\x00라'"),
+        (3, "'담당 010-****-5678\x00' 값, 27행 '마\x00바'"),
         (None, "제목 '2026년\x009월 현황'의 기간이 다름"),
+        (None, f"제목 '{long_title[:30]}'의 기간 2026-09이(가) 기준 기간 2026-10과(와) 다릅니다."),
+        (6, "'서울\x00 소계' 행의 '나' 값 20이(가) 하위 7행 합계 3과(와) 다릅니다"),
         (5, "어디에도 없는 \x00 글자"),
     ]
     places = review_module._cells_quoted(7, sheet, held)
     assert places == [
         "파일 #7 · 1번째 시트 · 2행 · B열",
         "파일 #7 · 1번째 시트 · 3행 · A열",
-        "파일 #7 · 1번째 시트 · 4행 · A열",
+        "파일 #7 · 1번째 시트 · 27행 · A열",
         "파일 #7 · 1번째 시트 · 머리글 위 제목·단위 행",
+        "파일 #7 · 1번째 시트 · 머리글 위 제목·단위 행",
+        "파일 #7 · 1번째 시트 · 6행 · A열",
         "파일 #7 · 1번째 시트 · 5행 (검토 항목의 사유에 옮겨 적힌 칸)",
     ], places
 
 
 def test_entity_values_are_found_with_one_pass_over_the_values_entity_columns_first() -> None:
-    # 값은 한 번만 훑어 사전으로 찾고(칸마다 값을 훑지 않음 — 검증 지적 F2), 기관·지역 열에서 찾은 값은 읽기만 하는
-    # 다른 열의 같은 글자를 지목하지 않으며, 못 찾은 값이 남으면 알린다. 시도와 합친 시군구 값은 시군구 칸을 찾는다
+    # 값은 집합으로 한 번만 받고(값마다 칸을 훑지 않음 — 검증 지적 F2), 행마다 '<시도> <시군구>'를 다시 만들어
+    # 찾으므로 값을 쪼개지 않는다. 검사에 쓴(확정·자동) 기관·지역 열에서 찾은 값은 읽기만 하는 열이나 제안만 된
+    # 열의 같은 글자를 지목하지 않고, 못 찾은 값이 남으면 알린다. 시도와 합친 시군구 값은 NUL이 든 쪽(시군구 칸
+    # 또는 시도 칸)을 찾는다
     from types import SimpleNamespace
 
     from app import review as review_module
@@ -725,29 +960,46 @@ def test_entity_values_are_found_with_one_pass_over_the_values_entity_columns_fi
     class Cell(str):
         eqs = 0
 
-        def __eq__(self, other: object) -> bool:  # 칸 글자를 값과 견줄 때마다 센다 (사전 찾기는 칸마다 한두 번)
+        def __eq__(self, other: object) -> bool:  # 칸 글자를 값과 견줄 때마다 센다 (집합 조회는 칸마다 한두 번)
             Cell.eqs += 1
             return str.__eq__(self, other)
 
         __hash__ = str.__hash__
 
     body = [
-        {"row": 2, "kind": "data", "cells": [Cell("가\x00나"), 1, Cell("가\x00나")]},
-        {"row": 3, "kind": "data", "cells": [Cell("강\x00서구"), 2, None]},
+        {
+            "row": 2,
+            "kind": "data",
+            "cells": [Cell("가\x00나"), Cell("서울특별시"), Cell("강\x00서구"), 1, Cell("강\x00서구"), Cell("다라")],
+        },
+        {
+            "row": 3,
+            "kind": "data",
+            "cells": [Cell("다라"), Cell("부\x00산"), Cell("해운대구"), 2, Cell("가\x00나"), Cell("가\x00나")],
+        },
     ]
-    sheet = SimpleNamespace(name="s", tab=0, columns=["기관", "값", "메모"], source_columns=[], header_row=1,
-                            header_row_end=None, body=body, title_texts=[])  # fmt: skip
-    mapped = [SimpleNamespace(field_key="org_name"), SimpleNamespace(field_key="population"),
-              SimpleNamespace(field_key=None)]  # fmt: skip
+    sheet = SimpleNamespace(name="s", tab=0, columns=["기관", "시도", "시군구", "값", "메모", "제안 기관"],
+                            source_columns=[], header_row=1, header_row_end=None, body=body,
+                            title_texts=[])  # fmt: skip
+    mapped = [
+        SimpleNamespace(field_key="org_name", status="confirmed"),
+        SimpleNamespace(field_key="sido", status="confirmed"),
+        SimpleNamespace(field_key="sigungu", status="auto"),
+        SimpleNamespace(field_key="population", status="confirmed"),
+        SimpleNamespace(field_key=None, status="unresolved"),
+        SimpleNamespace(field_key="org_name", status="review"),  # 제안만 된 열 — 검사에 쓰지 않음 (U1)
+    ]
     target = SimpleNamespace(
         record=SimpleNamespace(id=3), parsed=SimpleNamespace(sheets=[sheet]), mappings={"s": mapped}
     )
-    values = Values({"가\x00나", "서울특별시 강\x00서구", "없는\x00값", *(f"다른{k}\x00값" for k in range(30))})
+    values = Values({"가\x00나", "서울특별시 강\x00서구", "부\x00산 해운대구", "없는\x00값",
+                     *(f"다른{k}\x00값" for k in range(30))})  # fmt: skip
     places, missing = review_module._cells_holding([target], values)
-    assert places == ["파일 #3 · 1번째 시트 · 2행 · A열", "파일 #3 · 1번째 시트 · 3행 · A열"], places
-    assert missing is True
-    assert Values.walks == 1, Values.walks
-    assert Cell.eqs <= 2 * 3 * 2, Cell.eqs  # 칸 3개 × 두 차례 — 값(30여 개)마다 견주지 않음
+    assert places == ["파일 #3 · 1번째 시트 · 2행 · A열", "파일 #3 · 1번째 시트 · 2행 · C열",
+                      "파일 #3 · 1번째 시트 · 3행 · B열"], places  # fmt: skip
+    assert missing is True  # '없는\x00값' 등은 어느 칸에도 없음
+    assert Values.walks <= 1, Values.walks  # set(values) 복사는 __iter__를 거치지 않는다 — 값마다 돌지 않으면 된다
+    assert Cell.eqs <= 20, Cell.eqs  # 글자 칸 10개 × 두 차례 안 — 값(30여 개)마다 견주지 않음
 
 
 def test_nul_in_a_cell_that_is_only_read_is_refused_only_where_it_is_written(client) -> None:
@@ -965,6 +1217,142 @@ def test_glossary_sigungu_name_with_a_control_character_in_its_sido_part_is_refu
     finally:
         db_rows("delete from glossary_aliases where target_code = '9830002'")
         db_rows("delete from glossary_entries where code = '9830002'")
+
+
+def test_approved_sigungu_link_is_applied_when_a_sido_column_is_present(client) -> None:
+    # 확인 항목의 값은 '<시도> <시군구>'인데 통합은 승인한 연결을 칸 값으로만 찾아 승인이 조용히 무시됐다 (반박 검증
+    # IM-1). 이제 같은 키로 찾아 코드·정식명칭·변경 기록이 생긴다
+    _glossary_seoul(client)
+    try:
+        fid = _csv(client, "승인시군구.csv", "시도,시군구,인구수\n서울특별시,강서,5\n")
+        assert _apply(client, fid, ("c0", "sido"), ("c1", "sigungu"), ("c2", "population")).status_code == 200
+        review = client.post("/reviews", json={"file_ids": [fid]}).json()
+        approved = 0
+        for i in review["items"]:
+            if i["category"] != "pending" or i["decision"] is not None:
+                continue
+            body: dict[str, Any] = {"decision": "approved"}
+            if i["kind"] == "entity" and i["before"] == "서울특별시 강서":
+                assert "3150000" in [c["code"] for c in i["payload"]["candidates"]], i["payload"]
+                body["choice"] = "3150000"
+                approved += 1
+            assert client.post(f"/reviews/{review['id']}/items/{i['id']}/decision", json=body).status_code == 200
+        assert approved == 1
+        assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+        res = client.post(f"/reviews/{review['id']}/integrate", json={})
+        assert res.status_code == 201, res.text
+        wb = openpyxl.load_workbook(io.BytesIO(client.get(f"/runs/{res.json()['id']}/download").content))
+        from app.integration import SHEET_CHANGES, SHEET_DATA
+
+        rows = list(wb[SHEET_DATA].iter_rows(values_only=True))
+        head = {name: k for k, name in enumerate(rows[0])}
+        assert rows[1][head["시군구"]] == "강서구" and rows[1][head["시군구 코드"]] == "3150000", rows[:2]
+        reasons = [r[10] for r in wb[SHEET_CHANGES].iter_rows(min_row=2, values_only=True)]
+        assert any(f"검토 #{review['id']}에서 사용자가" in (r or "") and "3150000" in r for r in reasons), reasons
+    finally:
+        _drop_glossary_seoul()
+
+
+def test_merged_cell_fill_with_a_control_character_is_blamed_on_the_cell_not_the_glossary(client) -> None:
+    # xls 병합 칸을 채운 값(원본 칸은 비어 있음)에 제어 문자가 있고 그 값이 용어사전 약칭으로 풀리면, 예전에는 용어사전
+    # 탓으로만 안내했다 (ee8f2bb의 사유 검사 — 반박 검증 IM-6). 원본 칸 자리로 알리고 원본을 고치라고 안내한다
+    _glossary_seoul(client)
+    try:
+        rows = [["시도", "시군구", "인구수"], [None, "소계", 300], [None, "강서구", 100], [None, "중구", 200]]
+        data = _xls("현황", rows, merges=((1, 3, 0, 0, "서\x1f울"),))  # A2:A4 병합 — 맨 위(2행)는 소계 행
+        fid = _upload(client, "병합약칭.xls", data, "application/vnd.ms-excel")
+        assert _apply(client, fid, ("c0", "sido"), ("c1", "sigungu"), ("c2", "population")).status_code == 200
+        review = client.post("/reviews", json={"file_ids": [fid]}).json()
+        for i in review["items"]:
+            if i["category"] == "pending" and i["decision"] is None:
+                body = {"decision": "rejected"} if i["kind"] in ("entity", "pii") else {"decision": "approved"}
+                assert client.post(f"/reviews/{review['id']}/items/{i['id']}/decision", json=body).status_code == 200
+        assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+        before = _counts()
+        res = client.post(f"/reviews/{review['id']}/integrate", json={})
+        assert res.status_code == 409, res.text
+        detail = res.json()["detail"]
+        assert (
+            f"파일 #{fid} · 1번째 시트 · 3행 · A열" in detail and f"파일 #{fid} · 1번째 시트 · 4행 · A열" in detail
+        ), detail
+        assert "용어사전" not in detail and "원본 파일에서 그 문자를 지운 뒤" in detail, detail
+        assert _counts() == before
+    finally:
+        _drop_glossary_seoul()
+
+
+def test_noncharacters_are_refused_like_control_characters(client) -> None:
+    # U+FFFE·U+FFFF는 openpyxl의 검사에 없어 예외 없이 저장되고, 그 파일은 XML 1.0으로 읽히지 않는다 (반박 검증 IM-4) —
+    # 결과 칸·열 이름이면 거절하고, 묶기 자료 시트에서는 제어 문자처럼 뺀다
+    from app.xmltext import has_illegal, printable
+
+    assert has_illegal("가\ufffe나") and has_illegal("\uffff") and has_illegal("\ud800") and has_illegal("a\x1fb")
+    assert not has_illegal("줄\n바꿈\t탭") and not has_illegal("\ufffd") and not has_illegal(5)
+    assert printable("가\uffff나\x01") == "가\ufffd나\ufffd"
+    fid = _csv(client, "비문자칸.csv", "기관명,인구수\n가나\uffff다,5\n")
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    review = _ready_settled(client, [fid])
+    before = _counts()
+    res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert res.status_code == 409 and f"파일 #{fid} · 1번째 시트 · 2행 · A열" in res.json()["detail"], res.text
+    assert _counts() == before
+    fid = _csv(client, "비문자열.csv", "기관명,인구\ufffe수\n가나다,5\n")
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    review = _ready_settled(client, [fid])
+    before = _counts()
+    res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert res.status_code == 409 and f"파일 #{fid} · 1번째 시트 · B열(머리글 1행): 열 이름" in res.json()["detail"], (
+        res.text
+    )
+    assert _counts() == before
+    fid = _csv(client, "비문자묶기.csv", "시도,인구수\n서울\uffff특별시,5\n")
+    assert _apply(client, fid, ("c0", "sido"), ("c1", "population")).status_code == 200
+    run, content = _bundle(client, {"file_ids": [fid]})
+    assert run.status_code == 201 and content is not None, run.text
+    assert _xml_problems(content) == [] and openpyxl.load_workbook(io.BytesIO(content))
+
+
+def test_bundle_summary_and_comment_drop_characters_that_cannot_be_written(client) -> None:
+    # 묶기의 통계 요약 시트(열 이름)와 A1 메모(시트 이름)에 쓸 수 없는 글자가 있으면 예전에는 IllegalCharacterError로
+    # 실행이 'failed'이거나 열리지 않는 파일이었다 (반박 검증 IM-2·IM-5). 자료 시트와 같은 규칙으로 빼고 수를 적는다
+    from app.bundle import SUMMARY_SHEET
+
+    title = "주민등록 인구 현황 2026년 9월 (단위: 명)"
+    fid = _csv(client, "묶기요약.csv", f"{title}\n시도,인\x01구수\n서울특별시,5\n부산광역시,6\n")
+    assert _apply(client, fid, ("c0", "sido"), ("c1", "population")).status_code == 200
+    item = {"field_key": "population", "aggregates": ["sum"]}
+    run, content = _bundle(client, {"file_ids": [fid], "summary": {"items": [item]}})
+    assert run.status_code == 201 and content is not None, run.text
+    assert _xml_problems(content) == []
+    wb = openpyxl.load_workbook(io.BytesIO(content))
+    texts = [v for row in wb[SUMMARY_SHEET].iter_rows(values_only=True) for v in row if isinstance(v, str)]
+    assert any("인구수" in t for t in texts) and not any("\x01" in t for t in texts), texts[:12]
+    assert any(t.startswith("엑셀에 쓸 수 없는 글자") and "개를 이 시트에서 뺐습니다" in t for t in texts), texts[-3:]
+    fid = _upload(client, "묶기시트.xls", _xls("현\x01황", [[title], ["시도", "인구수"], ["서울특별시", 5]]),
+                  "application/vnd.ms-excel")  # fmt: skip
+    run, content = _bundle(client, {"file_ids": [fid]})
+    assert run.status_code == 201 and content is not None, run.text
+    assert _xml_problems(content) == [] and openpyxl.load_workbook(io.BytesIO(content))
+
+
+def test_analysis_download_replaces_characters_that_cannot_be_written(client) -> None:
+    # 데이터 통계 분석의 결과 엑셀은 열 이름·구분 값을 그대로 넣어 내려받기가 500이었다 (반박 검증 IM-3). 저장된 결과는
+    # 그대로 두고 내려받는 파일에서만 '�'로 바꾼 뒤 몇 개인지 적는다
+    text = "주민등록 인구 현황 2026년 9월 (단위: 명)\n시도,인\x01구수\n서울특별시,5\n부산광역시,60\n"
+    fid = _csv(client, "분석열이름.csv", text)
+    assert _apply(client, fid, ("c0", "sido"), ("c1", "population")).status_code == 200
+    req = {"field_key": "population", "targets": [{"file_id": fid}], "group_by": ["sido"]}
+    pv = client.post("/analysis/preview", json=req)
+    assert pv.status_code == 200, pv.text
+    res = client.post("/analysis/run", json={**req, "expected_fingerprint": pv.json()["fingerprint"]})
+    assert res.status_code == 201, res.text
+    dl = client.get(f"/analysis/runs/{res.json()['id']}/download")
+    assert dl.status_code == 200, dl.text[:200]
+    assert _xml_problems(dl.content) == []
+    wb = openpyxl.load_workbook(io.BytesIO(dl.content))
+    texts = [v for ws in wb.worksheets for row in ws.iter_rows(values_only=True) for v in row if isinstance(v, str)]
+    assert any("인\ufffd구수" in t for t in texts) and not any("\x01" in t for t in texts), texts[:20]
+    assert any(t == "엑셀에 쓸 수 없는 글자" for t in texts), texts[:20]
 
 
 def test_stored_review_period_with_a_control_character_is_written_replaced(client) -> None:
