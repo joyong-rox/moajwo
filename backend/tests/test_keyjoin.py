@@ -616,10 +616,12 @@ def _no_raw(text: str, raws: tuple[str, ...]) -> None:
 
 def test_masked_collision_keys_stay_apart_and_raw_values_never_leave_the_result_file(kj, caplog) -> None:
     u = kj["kj-user1"]
-    raws = ("kim1@example.com", "kim2@example.com", "010-1234-5678", "010-9999-5678")
-    a = _csv(u, "가림a.csv", [["이메일", "값"], ["가팀 kim1@example.com", "a1"], ["가팀 kim2@example.com", "a2"],
-                              ["010-1234-5678", "a3"], ["010-9999-5678", "a4"]])  # fmt: skip
-    b = _csv(u, "가림b.csv", [["mail", "값"], ["가팀 kim2@example.com", "b2"], ["010-9999-5678", "b4"]])
+    # 원문 표식은 이 시험만의 값으로 둔다 — 공유 시험 DB에는 다른 시험(가린 구분 분석 등)이 kim1@example.com 같은 글자를
+    # 열 이름으로 남겨 두므로, db_dump 전체에서 '없음'을 보려면 다른 시험과 겹치지 않는 글자여야 한다.
+    raws = ("kjz1@example.test", "kjz2@example.test", "010-7701-4455", "010-9909-4455")
+    a = _csv(u, "가림a.csv", [["이메일", "값"], ["가팀 kjz1@example.test", "a1"], ["가팀 kjz2@example.test", "a2"],
+                              ["010-7701-4455", "a3"], ["010-9909-4455", "a4"]])  # fmt: skip
+    b = _csv(u, "가림b.csv", [["mail", "값"], ["가팀 kjz2@example.test", "b2"], ["010-9909-4455", "b4"]])
     caplog.set_level("DEBUG")
     for fid in (a, b):
         plan = _plan(u, _body([_input(a), _input(b)]))
@@ -630,12 +632,14 @@ def test_masked_collision_keys_stay_apart_and_raw_values_never_leave_the_result_
     collision = _first(plan, "KEYJOIN_MASKED_COLLISION", "warnings")
     assert collision["count"] == 2 and "가림 구분" in collision["text"]
     assert [r["key"] for r in plan["preview"]["rows"]] == [
-        ["가팀 k***@example.com (가림 구분 1)"], ["가팀 k***@example.com (가림 구분 2)"],
-        ["010-****-5678 (가림 구분 1)"], ["010-****-5678 (가림 구분 2)"],
+        ["가팀 k***@example.test (가림 구분 1)"], ["가팀 k***@example.test (가림 구분 2)"],
+        ["010-****-4455 (가림 구분 1)"], ["010-****-4455 (가림 구분 2)"],
     ]  # fmt: skip
     assert [r["cells"] for r in plan["preview"]["rows"]] == [["a1", None], ["a2", "b2"], ["a3", None], ["a4", "b4"]]
-    assert _grid(wb["연결 결과"])[1:] == [["가팀 kim1@example.com", "a1", None], ["가팀 kim2@example.com", "a2", "b2"],
-                                       ["010-1234-5678", "a3", None], ["010-9999-5678", "a4", "b4"]]  # fmt: skip
+    assert _grid(wb["연결 결과"])[1:] == [
+        ["가팀 kjz1@example.test", "a1", None], ["가팀 kjz2@example.test", "a2", "b2"],
+        ["010-7701-4455", "a3", None], ["010-9909-4455", "a4", "b4"],
+    ]  # fmt: skip
     _no_raw(json.dumps(plan, ensure_ascii=False), raws)
     _no_raw(json.dumps(run, ensure_ascii=False), raws)
     _no_raw(u.get(f"/runs/{run['id']}").text + u.get("/runs").text, raws)
@@ -644,7 +648,7 @@ def test_masked_collision_keys_stay_apart_and_raw_values_never_leave_the_result_
     _no_raw(caplog.text, raws)
     summary_text = "\n".join(str(v) for row in _grid(wb["연결 요약"]) for v in row if v is not None)
     _no_raw(summary_text, raws)
-    assert "k***@example.com" not in summary_text  # 요약 시트에는 가린 key도 없다 (개수·설정만)
+    assert "k***@example.test" not in summary_text  # 요약 시트에는 가린 key도 없다 (개수·설정만)
 
 
 def test_pii_acknowledgement_is_required_and_checked_without_parsing(kj, monkeypatch) -> None:
