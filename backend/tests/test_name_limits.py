@@ -804,6 +804,29 @@ def test_a_row_count_in_a_reason_is_not_read_as_a_row_number(client) -> None:
     assert "3행" not in detail and "4행" not in detail and "5행" not in detail, detail
 
 
+def test_a_row_count_is_not_a_row_reference_even_when_that_row_holds_the_quoted_text() -> None:
+    # 사유의 '하위 3행'은 행 수다 — 그 3행에 사유에 옮겨 적힌 것과 같은 NUL 글자가 있어도, "N행 '값'" 꼴이 아니면
+    # 그 행을 보지 않는다 (검증 지적 F4). "N행 '값'" 꼴은 그 행의 같은 글자를 지목한다
+    from types import SimpleNamespace
+
+    from app import review as review_module
+
+    body = [
+        {"row": 2, "kind": "subtotal", "cells": ["서울\x00", "소계", 20]},
+        {"row": 3, "kind": "data", "cells": ["서울\x00", "가", 3]},
+        {"row": 4, "kind": "data", "cells": ["서울\x00", "나", 3]},
+    ]
+    sheet = SimpleNamespace(name="s", tab=0, columns=["시도", "구분", "인구수"], source_columns=[], header_row=1,
+                            header_row_end=None, body=body, title_texts=[])  # fmt: skip
+    counted = "'서울\x00' 행의 '인구수' 값 20이(가) 하위 3행 합계 6과 다릅니다"
+    assert review_module._cells_quoted(7, sheet, [(2, counted)]) == ["파일 #7 · 1번째 시트 · 2행 · A열"]
+    referenced = "'서울\x00' 행의 '인구수' 값과 4행 '서울\x00'이(가) 다릅니다"
+    assert review_module._cells_quoted(7, sheet, [(2, referenced)]) == [
+        "파일 #7 · 1번째 시트 · 2행 · A열",
+        "파일 #7 · 1번째 시트 · 4행 · A열",
+    ]
+
+
 def test_long_entity_value_with_many_spaces_is_looked_up_in_linear_memory() -> None:
     # 값을 공백마다 쪼개 사전 키로 두면 값 길이의 제곱만큼 메모리를 쓴다 (반박 검증 F1 — 16,000자 값 하나에 약 124MiB).
     # 행마다 '<시도> <시군구>'를 다시 만들어 집합에서 찾으므로 값 길이에 비례하는 메모리만 쓴다
@@ -920,8 +943,9 @@ def test_quoted_cells_find_rows_named_in_the_reason_title_rows_and_masked_values
 
 def test_entity_values_are_found_with_one_pass_over_the_values_entity_columns_first() -> None:
     # 값은 집합으로 한 번만 받고(값마다 칸을 훑지 않음 — 검증 지적 F2), 행마다 '<시도> <시군구>'를 다시 만들어
-    # 찾으므로 값을 쪼개지 않는다. 검사에 쓴 기관·지역 열에서 찾은 값은 읽기만 하는 다른 열의 같은 글자를 지목하지
-    # 않고, 못 찾은 값이 남으면 알린다. 시도와 합친 시군구 값은 NUL이 든 쪽(시군구 칸 또는 시도 칸)을 찾는다
+    # 찾으므로 값을 쪼개지 않는다. 검사에 쓴(확정·자동) 기관·지역 열에서 찾은 값은 읽기만 하는 열이나 제안만 된
+    # 열의 같은 글자를 지목하지 않고, 못 찾은 값이 남으면 알린다. 시도와 합친 시군구 값은 NUL이 든 쪽(시군구 칸
+    # 또는 시도 칸)을 찾는다
     from types import SimpleNamespace
 
     from app import review as review_module
@@ -946,18 +970,24 @@ def test_entity_values_are_found_with_one_pass_over_the_values_entity_columns_fi
         {
             "row": 2,
             "kind": "data",
-            "cells": [Cell("가\x00나"), Cell("서울특별시"), Cell("강\x00서구"), 1, Cell("강\x00서구")],
+            "cells": [Cell("가\x00나"), Cell("서울특별시"), Cell("강\x00서구"), 1, Cell("강\x00서구"), Cell("다라")],
         },
-        {"row": 3, "kind": "data", "cells": [Cell("다라"), Cell("부\x00산"), Cell("해운대구"), 2, Cell("가\x00나")]},
+        {
+            "row": 3,
+            "kind": "data",
+            "cells": [Cell("다라"), Cell("부\x00산"), Cell("해운대구"), 2, Cell("가\x00나"), Cell("가\x00나")],
+        },
     ]
-    sheet = SimpleNamespace(name="s", tab=0, columns=["기관", "시도", "시군구", "값", "메모"], source_columns=[],
-                            header_row=1, header_row_end=None, body=body, title_texts=[])  # fmt: skip
+    sheet = SimpleNamespace(name="s", tab=0, columns=["기관", "시도", "시군구", "값", "메모", "제안 기관"],
+                            source_columns=[], header_row=1, header_row_end=None, body=body,
+                            title_texts=[])  # fmt: skip
     mapped = [
         SimpleNamespace(field_key="org_name", status="confirmed"),
         SimpleNamespace(field_key="sido", status="confirmed"),
         SimpleNamespace(field_key="sigungu", status="auto"),
         SimpleNamespace(field_key="population", status="confirmed"),
         SimpleNamespace(field_key=None, status="unresolved"),
+        SimpleNamespace(field_key="org_name", status="review"),  # 제안만 된 열 — 검사에 쓰지 않음 (U1)
     ]
     target = SimpleNamespace(
         record=SimpleNamespace(id=3), parsed=SimpleNamespace(sheets=[sheet]), mappings={"s": mapped}
@@ -969,7 +999,7 @@ def test_entity_values_are_found_with_one_pass_over_the_values_entity_columns_fi
                       "파일 #3 · 1번째 시트 · 3행 · B열"], places  # fmt: skip
     assert missing is True  # '없는\x00값' 등은 어느 칸에도 없음
     assert Values.walks <= 1, Values.walks  # set(values) 복사는 __iter__를 거치지 않는다 — 값마다 돌지 않으면 된다
-    assert Cell.eqs <= 12, Cell.eqs  # 칸 8개 × 두 차례 안 — 값(30여 개)마다 견주지 않음
+    assert Cell.eqs <= 20, Cell.eqs  # 글자 칸 10개 × 두 차례 안 — 값(30여 개)마다 견주지 않음
 
 
 def test_nul_in_a_cell_that_is_only_read_is_refused_only_where_it_is_written(client) -> None:
