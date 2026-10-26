@@ -28,7 +28,7 @@ build() {  # build <이름> <컨텍스트> [Dockerfile]
   fi
 }
 # 기반 이미지를 먼저 받아 둔다 — 빌드가 같은 판을 쓰고, 아래에서 그 판의 digest·패키지를 읽는다
-for base in nginx:1.30-alpine node:24-alpine python:3.11-slim; do docker pull -q "$base" >> "$LOG" 2>&1; done
+for base in nginx:1.30-alpine node:24.22.1-alpine python:3.11-slim; do docker pull -q "$base" >> "$LOG" 2>&1; done
 build backend backend
 build frontend frontend
 build frontend-render frontend frontend/Dockerfile.render
@@ -42,7 +42,7 @@ done
 
 # ---------------------------------------------------------------- 기반 이미지·설치 패키지 (두 nginx 최종 이미지 — 로컬 frontend·Render)
 # 기반 태그는 떠도는 태그라 빌드 때 받은 판의 digest를 남긴다. 패키지는 기반 nginx 이미지 대비 바뀐 것만 따로 (apk info -v)
-for base in nginx:1.30-alpine node:24-alpine python:3.11-slim; do
+for base in nginx:1.30-alpine node:24.22.1-alpine python:3.11-slim; do
   docker image inspect "$base" --format "$base {{.Id}} {{json .RepoDigests}}" >> "$OUT/bases.txt" 2>&1
 done
 res base_nginx "$(grep '^nginx:' "$OUT/bases.txt" | cut -d' ' -f3- | cut -c1-120)" "기반 nginx:1.30-alpine digest (bases.txt)"
@@ -115,19 +115,85 @@ res render_uid "$(docker exec render id -u)" "id -u"
 res render_index "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/)" "GET / (8080)"
 docker rm -f render > /dev/null
 
-# Render 앞단 → https API → backend 흐름을 격리로: 같은 이름(moajwo-test-api.onrender.com)의 대역 TLS 앞단(자체 서명)을 이 망
-# 안에 두고 그 뒤에 위 backend를 둔다 — 실제 Render로 요청하지 않는다. 로그인(이미 만든 ci-owner)·쿠키·보안 헤더·상류 검증 설정
+# Render 앞단 → https API → backend 흐름을 격리로: 같은 이름(moajwo-test-api.onrender.com)의 대역 TLS 앞단을 이 망 안에 두고
+# 그 뒤에 위 backend를 둔다 — 실제 Render로 요청하지 않는다. 앞단(nginx.render.conf)은 상류 인증서를 검증하므로(proxy_ssl_verify on)
+# 시험용 CA(뿌리 → 중간 → 서버)를 만들어 서버 인증서를 그 CA로 서명하고, 앞단 컨테이너의 신뢰 묶음 파일 자리에 그 뿌리 CA만 든
+# 묶음을 읽기 전용으로 덮어 띄운다(이미지 자체는 그대로). 그 다음 신뢰하지 않는 CA·만료·이름 불일치·중간 인증서 누락을 차례로
+# 대역 API에 꽂아 앞단이 요청을 전달하지 않는지(502, 오류 기록에 verify 실패, backend에 그 경로의 요청 없음)와, 정상 체인으로
+# 돌아오면 로그인·쿠키·헤더·업로드·내려받기가 되는지 본다. 검증을 끄거나 http로 돌아가는 우회는 설정에 없다(nginx -T로 셈).
+# 이 대역 시험은 검증 기능 자체의 시험이다 — 실제 eMudhra 차단의 증명은 아래 '공개 검증 호스트' 항목으로 따로 본다.
 RT=$(mktemp -d)
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=moajwo-test-api.onrender.com" \
-  -keyout "$RT/k.pem" -out "$RT/c.pem" > /dev/null 2>&1 && chmod 644 "$RT"/*.pem
-printf 'server { listen 443 ssl; ssl_certificate /t/c.pem; ssl_certificate_key /t/k.pem;\n  location / { proxy_pass http://backend:8000; } }\n' > "$RT/tls.conf"
+chmod 755 "$RT"
+mkca() {  # mkca <이름> <CN> [서명 CA 이름] → $RT/<이름>.key·.crt (서명 CA가 없으면 자체 서명 뿌리)
+  local n=$1 cn=$2 by=${3:-}
+  openssl genrsa -out "$RT/$n.key" 2048 > /dev/null 2>&1
+  if [ -z "$by" ]; then
+    openssl req -x509 -new -key "$RT/$n.key" -days 2 -subj "/CN=$cn" -addext "basicConstraints=critical,CA:TRUE" \
+      -addext "keyUsage=critical,keyCertSign,cRLSign" -out "$RT/$n.crt" > /dev/null 2>&1
+  else
+    openssl req -new -key "$RT/$n.key" -subj "/CN=$cn" -out "$RT/$n.csr" > /dev/null 2>&1
+    printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n' > "$RT/$n.ext"
+    openssl x509 -req -in "$RT/$n.csr" -CA "$RT/$by.crt" -CAkey "$RT/$by.key" -CAcreateserial -days 2 -extfile "$RT/$n.ext" \
+      -out "$RT/$n.crt" > /dev/null 2>&1
+  fi
+}
+mkleaf() {  # mkleaf <이름> <CN> <서명 CA 이름> [시작 YYYYMMDDHHMMSSZ 끝 YYYYMMDDHHMMSSZ] → $RT/<이름>.key·.crt (SAN=DNS:CN)
+  local n=$1 cn=$2 by=$3 nb=${4:-} na=${5:-}
+  openssl genrsa -out "$RT/$n.key" 2048 > /dev/null 2>&1
+  openssl req -new -key "$RT/$n.key" -subj "/CN=$cn" -out "$RT/$n.csr" > /dev/null 2>&1
+  mkdir -p "$RT/db-$n"; : > "$RT/db-$n/index.txt"; echo 1000 > "$RT/db-$n/serial"
+  printf '[ca]\ndefault_ca=d\n[d]\ndir=%s\ndatabase=$dir/index.txt\nserial=$dir/serial\nnew_certs_dir=$dir\ndefault_md=sha256\npolicy=p\nx509_extensions=leaf\ndefault_days=2\nunique_subject=no\n[p]\ncommonName=supplied\n[leaf]\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:%s\n' \
+    "$RT/db-$n" "$cn" > "$RT/db-$n/ca.cnf"
+  openssl ca -batch -config "$RT/db-$n/ca.cnf" -keyfile "$RT/$by.key" -cert "$RT/$by.crt" -in "$RT/$n.csr" -out "$RT/$n.crt" -notext \
+    ${nb:+-startdate "$nb"} ${na:+-enddate "$na"} > /dev/null 2>&1
+}
+mkca root "Moajwo CI Test Root CA"
+mkca inter "Moajwo CI Test Intermediate CA" root
+mkca other "Moajwo CI Other Root CA"            # 앞단이 믿지 않는 다른 CA
+mkleaf good moajwo-test-api.onrender.com inter                                   # 정상: 중간 CA가 서명, 이름 일치
+mkleaf wrongname wrong-name.example.test inter                                   # 이름 불일치
+mkleaf expired moajwo-test-api.onrender.com inter 20260101000000Z 20260102000000Z  # 만료
+mkleaf untrusted moajwo-test-api.onrender.com other                              # 신뢰하지 않는 CA(자체 서명 뿌리)가 서명
+cat "$RT/good.crt" "$RT/inter.crt" > "$RT/good-chain.crt"       # 서버 + 중간 (보통 체인)
+cat "$RT/wrongname.crt" "$RT/inter.crt" > "$RT/wrongname-chain.crt"
+cat "$RT/expired.crt" "$RT/inter.crt" > "$RT/expired-chain.crt"
+cp "$RT/root.crt" "$RT/trust.pem"                               # 앞단에 줄 신뢰 묶음: 시험 뿌리 CA 하나뿐
+chmod 644 "$RT"/*.crt "$RT"/*.key "$RT"/*.pem
+res tls_chain_depth "$(openssl verify -CAfile "$RT/root.crt" -untrusted "$RT/inter.crt" "$RT/good.crt" 2>&1 | tail -1) · 체인 뿌리→중간→서버 (중간 1)" \
+  "시험 체인의 깊이 — nginx proxy_ssl_verify_depth 3(중간 최대 2)은 이 체인과 공개 CA의 보통 체인을 받음"
+
+tls_case() {  # tls_case <이름> <서버 인증서 파일> <키> <설명> → 앞단 /api/<이름> 요청의 상태·앞단 오류 기록·backend 도달 여부
+  local name=$1 crt=$2 key=$3 why=$4
+  printf 'server { listen 443 ssl; ssl_certificate /t/%s; ssl_certificate_key /t/%s;\n  location / { proxy_pass http://backend:8000; } }\n' "$crt" "$key" > "$RT/tls-$name.conf"
+  docker run -d --name api-tls --network mnet --network-alias moajwo-test-api.onrender.com -v "$RT:/t:ro" \
+    -v "$RT/tls-$name.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.30-alpine > /dev/null
+  docker run -d --name render-chain --network mnet -p 127.0.0.1:18082:8080 \
+    -v "$RT/trust.pem:/etc/ssl/certs/ca-certificates.crt:ro" moajwo-frontend-render:check > /dev/null
+  for _ in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18082/ && break; sleep 1; done
+  local code err hit
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18082/api/health?case=$name"); sleep 1
+  code="$code/$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18082/api/health?case=$name")"   # 다시 시도도 같은 결과여야
+  err=$(docker logs render-chain 2>&1 | grep -iE 'upstream SSL|certificate|verify|handshake' | sed -E 's/^[^ ]+ [^ ]+ //' | cut -c1-160 | tail -1)
+  hit=$(docker logs backend 2>&1 | grep -c "case=$name")   # backend 접근 기록에 그 경로가 있으면 요청이 전달된 것
+  res "tls_$name" "$code · backend 도달 $hit · ${err:-오류 기록 없음}" "$why"
+  docker rm -f render-chain api-tls > /dev/null
+}
+tls_case trusted      good-chain.crt good.key       "신뢰 CA + 올바른 서버 이름 → 200/200, backend 도달 2"
+tls_case untrusted    untrusted.crt  untrusted.key  "신뢰하지 않는 CA(자체 서명) → 502/502, 도달 0, verify 실패"
+tls_case expired      expired-chain.crt expired.key "만료 인증서 → 502/502, 도달 0"
+tls_case wrongname    wrongname-chain.crt wrongname.key "서버 이름 불일치 → 502/502, 도달 0"
+tls_case nointer      good.crt       good.key       "필수 중간 인증서 누락(서버 인증서만 보냄) → 502/502, 도달 0"
+tls_case recovered    good-chain.crt good.key       "정상 체인으로 복구 → 200/200 (검증을 끄지 않고 복구)"
+
+# 복구된 체인으로 기존 흐름(로그인·쿠키·보안 헤더·업로드·내려받기)이 그대로인지 — 앞단은 시험 뿌리 CA 묶음으로
+printf 'server { listen 443 ssl; ssl_certificate /t/good-chain.crt; ssl_certificate_key /t/good.key;\n  location / { proxy_pass http://backend:8000; } }\n' > "$RT/tls.conf"
 docker run -d --name api-tls --network mnet --network-alias moajwo-test-api.onrender.com -v "$RT:/t:ro" \
   -v "$RT/tls.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.30-alpine > /dev/null
-sleep 2
-docker run -d --name render-chain --network mnet -p 127.0.0.1:18082:8080 moajwo-frontend-render:check > /dev/null
+docker run -d --name render-chain --network mnet -p 127.0.0.1:18082:8080 \
+  -v "$RT/trust.pem:/etc/ssl/certs/ca-certificates.crt:ro" moajwo-frontend-render:check > /dev/null
 for _ in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18082/ && break; sleep 1; done
 R=http://127.0.0.1:18082
-res render_chain_health "$(curl -s $R/api/health)" "앞단 /api/health → https 대역 API → backend"
+res render_chain_health "$(curl -s $R/api/health)" "앞단 /api/health → https 대역 API(시험 CA 체인) → backend"
 RJ="$RT/cookies"
 res render_chain_login "$(curl -s -c "$RJ" -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
   -d "{\"username\":\"ci-owner\",\"password\":\"$PW\"}" $R/api/auth/login) · me $(curl -s -b "$RJ" -o /dev/null -w '%{http_code}' $R/api/auth/me)" \
@@ -136,9 +202,49 @@ res render_chain_cookie "$(grep -c moajwo "$RJ" 2>/dev/null)개 · $(curl -s -D 
   "로그인 쿠키 속성 (값은 지움 — Secure는 MOAJWO_COOKIE_SECURE를 켠 Render에서만)"
 res render_chain_headers "$(curl -sI $R/ | grep -ciE '^(content-security-policy|x-frame-options|x-content-type-options|referrer-policy):')/4" "GET / 보안 헤더 4종"
 res render_chain_api_headers "$(curl -sI $R/api/health | grep -ciE '^(content-security-policy|x-frame-options|x-content-type-options|referrer-policy):')/4" "GET /api/health 보안 헤더 (앞단이 API 응답에 붙이는지)"
-res render_upstream_verify "$(docker exec render-chain nginx -T 2>/dev/null | grep -cE '^\s*proxy_ssl_verify\s+on')" \
-  "상류 인증서 검증 설정 수 (0 = nginx 기본값 off — 자체 서명 대역 API로도 통과함)"
+UP2=$(curl -s -b "$RJ" -F "files=@$OUT/ci.csv;type=text/csv" $R/api/files)
+FID2=$(echo "$UP2" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])' 2>/dev/null)
+res render_chain_upload "${FID2:+id=$FID2}" "앞단을 거친 업로드 (multipart)"
+res render_chain_download "$(curl -s -b "$RJ" -o /dev/null -w '%{http_code} %{content_type}' $R/api/runs/$RID/download)" "앞단을 거친 내려받기 (앞서 만든 묶기 결과 #$RID)"
+res render_upstream_verify "$(docker exec render-chain nginx -T 2>/dev/null | grep -cE '^\s*proxy_ssl_verify\s+on') · off $(docker exec render-chain nginx -T 2>/dev/null | grep -cE '^\s*proxy_ssl_verify\s+off')" \
+  "상류 인증서 검증 설정 수 (on 1·off 0이어야 — 끄는 우회 없음)"
+res render_upstream_name "$(docker exec render-chain nginx -T 2>/dev/null | grep -E '^\s*proxy_ssl_(name|server_name|verify_depth|trusted_certificate|protocols)' | sed 's/^\s*//' | tr '\n' ' ')" "SNI·검증 이름·깊이·신뢰 묶음·프로토콜"
 docker rm -f render-chain api-tls > /dev/null
+rm -f "$RJ"
+
+# 공개 검증 호스트 (Render 안내가 가리키는 커뮤니티 시험 호스트 — 손상된 eMudhra 체인을 내놓음): 같은 최종 이미지의 nginx가 자기 OS
+# 신뢰 묶음(마운트 없음)으로 그 호스트에 붙으면 verify 실패로 502여야 한다. 반대로 정상 공개 호스트는 200이어야 한다.
+# DNS 실패·연결 시간 초과·404는 인증서 거절로 세지 않는다 — 오류 기록의 verify 문구로만 판정한다. 인증 정보 없이 GET 한 번씩.
+pubcase() {  # pubcase <이름> <호스트> <설명>
+  local name=$1 host=$2 why=$3
+  printf 'resolver 1.1.1.1 8.8.8.8 valid=60s ipv6=off;\nserver { listen 8080; location / { set $u https://%s/; proxy_pass $u; proxy_ssl_verify on; proxy_ssl_verify_depth 3; proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt; proxy_ssl_server_name on; proxy_ssl_name %s; proxy_ssl_protocols TLSv1.2 TLSv1.3; proxy_set_header Host %s; proxy_connect_timeout 15s; proxy_read_timeout 20s; } }\n' "$host" "$host" "$host" > "$RT/pub-$name.conf"
+  docker run -d --name pub -p 127.0.0.1:18083:8080 -v "$RT/pub-$name.conf:/etc/nginx/conf.d/default.conf:ro" moajwo-frontend-render:check > /dev/null
+  sleep 2
+  local code err kind
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 40 http://127.0.0.1:18083/)
+  err=$(docker logs pub 2>&1 | grep -iE 'upstream SSL|certificate|verify|resolve|timed out|connect\(\)' | sed -E 's/^[^ ]+ [^ ]+ //' | cut -c1-200 | tail -1)
+  case "$err" in
+    *verify*|*certificate*) kind="verify 실패";;
+    *resolve*|*"timed out"*|*"connect()"*) kind="연결·DNS 문제 (인증서 거절로 세지 않음 — 미검증)";;
+    *) kind="오류 기록 없음";;
+  esac
+  res "pub_$name" "$code · $kind · ${err:-}" "$why"
+  docker rm -f pub > /dev/null
+  docker run --rm moajwo-frontend-render:check sh -c "wget -q -O /dev/null https://$host/ 2>&1; echo exit=\$?" | tail -1 | sed "s/^/wget(busybox, OS CA) /" | tee -a "$LOG"
+}
+pubcase emudhra-g3b dv-g3b-emudhra.we-have-a-problem.com "손상된 eMudhra 체인 (Render 안내의 시험 호스트) → verify 실패·502이어야"
+pubcase emudhra-g3b-aaa dv-g3b-aaa-emudhra.we-have-a-problem.com "손상된 eMudhra 체인 (다른 중간) → verify 실패·502이어야"
+pubcase control example.com "대조군 — 정상 공개 체인 → 200 (연결이 되는 러너인지)"
+
+# 신뢰 저장소 조사: 최종 이미지의 OS CA 묶음에 emSign·eMudhra 이름의 인증서가 남았는지(0이어야), 묶음 크기, 패키지 판
+for n in frontend-render backend; do
+  docker run --rm --entrypoint cat "moajwo-$n:check" /etc/ssl/certs/ca-certificates.crt > "$OUT/ca-bundle-$n.pem" 2>/dev/null
+  SUBJ=$(openssl crl2pkcs7 -nocrl -certfile "$OUT/ca-bundle-$n.pem" 2>/dev/null | openssl pkcs7 -print_certs -noout 2>/dev/null | grep '^subject')
+  res "ca_bundle_$n" "인증서 $(echo "$SUBJ" | grep -c .)개 · emSign/eMudhra $(echo "$SUBJ" | grep -ciE 'emsign|emudhra')개 · sha256 $(sha256sum "$OUT/ca-bundle-$n.pem" | cut -c1-16)" "OS CA 묶음 /etc/ssl/certs/ca-certificates.crt"
+done
+res ca_pkg_frontend-render "$(grep -E '^ca-certificates' "$OUT/apk-frontend-render.txt" | tr '\n' ' ')" "Alpine ca-certificates 패키지 판 (기반: $(grep -E '^ca-certificates' "$OUT/apk-base-nginx.txt" | tr '\n' ' '))"
+res ca_pkg_backend "$(docker run --rm --entrypoint dpkg-query moajwo-backend:check -W -f '${Package} ${Version}' ca-certificates 2>/dev/null)" "Debian ca-certificates 패키지 판"
+res build_versions "$(grep -hoE 'node root certificates [0-9]+ emSign/eMudhra [0-9]+|^#[0-9]+ [0-9.]+ (v[0-9.]+|[0-9]+\.[0-9]+\.[0-9]+)$|pip [0-9.]+ from|pip-vendored certifi [0-9.]+|Python 3\.[0-9.]+|ca-certificates [0-9+a-z~.]+' "$OUT"/build-frontend-render.log "$OUT"/build-backend.log | sed -E 's/^#[0-9]+ [0-9.]+ //' | sort -u | tr '\n' ' ')" "빌드 기록의 node·npm·뿌리 인증서 수·python·pip·pip 내장 certifi·Debian ca-certificates"
 rm -rf "$RT"
 
 # ---------------------------------------------------------------- 메모리 제한 컨테이너의 읽기 한도 (Render 무료와 같은 512MiB)
