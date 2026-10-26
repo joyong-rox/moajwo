@@ -534,6 +534,69 @@ def test_nul_in_an_entity_name_across_files_is_refused_at_its_cell_and_a_conditi
     assert _counts() == before
 
 
+def test_nul_entity_names_are_looked_up_in_one_pass_over_the_cells(client, monkeypatch) -> None:
+    # 파일 번호 없는 항목이 많아도 칸은 한 번만 훑는다 (항목마다 모든 칸을 훑으면 항목 수 × 칸 수 — 검토 지적 R1)
+    from app import review as review_module
+
+    calls: list[int] = []
+    real = review_module._cells_holding
+
+    def counted(targets: Any, values: set[str]) -> list[str]:
+        calls.append(len(values))
+        return real(targets, values)
+
+    monkeypatch.setattr(review_module, "_cells_holding", counted)
+    rows = "".join(f"가나다\x00연구원{k},{k}\n" for k in range(40))
+    fid = _csv(client, "널기관여럿.csv", "기관명,인구수\n" + rows)
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    res = client.post("/reviews", json={"file_ids": [fid]})
+    assert res.status_code == 422, res.text
+    assert calls == [40], calls  # 한 번 — 값 40개를 한꺼번에
+    assert f"파일 #{fid} · 1번째 시트 · 2행 · A열" in res.text and " 외 37곳" in res.text, res.text
+
+
+@pytest.mark.sqlite_only("PostgreSQL은 NUL이 든 자동화 이름을 저장하지 않음 (422 — 직접 입력 글자의 안전망)")
+def test_nul_from_an_automation_name_is_not_blamed_on_a_cell(client) -> None:
+    # 자동화 이름의 NUL은 규칙 항목의 사유에 들어간다 — 같은 값의 칸(NUL 없음)을 지목하지 않고 설정을 고치라고 알린다
+    header = "기관명,인구수\n"
+    sept = _csv(client, "규칙이름9월.csv", header + "가나다라연구소,5\n")
+    assert _apply(client, sept, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    review = client.post("/reviews", json={"file_ids": [sept]}).json()
+    for item in [i for i in review["items"] if i["category"] == "pending" and i["decision"] is None]:
+        body = {"decision": "rejected"}
+        assert client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json=body).status_code == 200
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = client.post(f"/reviews/{review['id']}/integrate", json={}).json()
+    auto = client.post(f"/runs/{run['id']}/automation", json={"name": "규칙\x00이름"})
+    assert auto.status_code == 201, auto.text  # SQLite는 직접 입력 글자의 NUL을 저장한다 (남은 두 DB 차이)
+    oct_ = _csv(client, "규칙이름10월.csv", header + "가나다라연구소,7\n")
+    res = client.post(f"/automations/{auto.json()['id']}/run", json={"file_ids": [oct_]})
+    assert res.status_code == 422, res.text
+    detail = res.json()["detail"]
+    assert "자동화 이름 (원본 칸이 아니라 규칙 항목의 사유에 들어가는 설정)" in detail, detail
+    assert "자동화 이름에서 NUL 문자를 지운 뒤 다시 실행하세요" in detail and "원본 파일에서" not in detail, detail
+    assert f"파일 #{oct_}" not in detail, detail  # NUL이 없는 칸을 지목하지 않음
+
+
+def test_nul_quoted_into_a_warning_reason_is_pointed_at_its_own_cell(client) -> None:
+    # 숫자로 읽지 못한 값 경고는 첫 값의 행을 가리키고 사유에 값을 3개까지 옮겨 적는다 — NUL이 둘째 값에 있으면 경고의
+    # 행(첫 값의 칸)이 아니라 그 값의 칸을 알리고, 설정이 아니라 원본 파일을 고치라고 안내한다
+    body = "기관명,인구수\n가나다연구원,abc\n라마바연구원,x{c}y\n사아자연구원,5\n"
+    probe = _csv(client, "사유제어.csv", body.format(c="\x01"))  # NUL 대신 \x01 — 검토가 만들어져 항목 모양을 본다
+    assert _apply(client, probe, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    items = client.post("/reviews", json={"file_ids": [probe]}).json()["items"]
+    assert not any("\x01" in (i["before"] or "") + (i["after"] or "") for i in items), items  # 이전·이후 값에는 없음
+    assert any(i["category"] == "warning" and i["row"] == 2 and "\x01" in (i["reason"] or "") for i in items), items
+    fid = _csv(client, "사유널.csv", body.format(c="\x00"))
+    assert _apply(client, fid, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    res = client.post("/reviews", json={"file_ids": [fid]})
+    assert res.status_code == 422, res.text
+    detail = res.json()["detail"]
+    assert f"파일 #{fid} · 1번째 시트 · 3행 · B열" in detail, detail
+    assert "2행" not in detail, detail
+    assert "원본 파일에서 그 칸의 NUL 문자를 지운 뒤" in detail and "자동화" not in detail, detail
+
+
 def test_nul_in_a_cell_that_is_only_read_is_refused_only_where_it_is_written(client) -> None:
     # 저장하지 않는 칸 값(검토 항목에 들어가지 않음)은 검토를 막지 않고, 결과 파일에 쓰는 통합에서 위치만 알려 거절한다
     fid = _csv(client, "널읽기.csv", "기관명,비고\n행정안전부,값\x00끝\n")
@@ -657,7 +720,9 @@ def test_control_character_from_a_glossary_name_is_reported_as_the_glossary_entr
         assert res.status_code == 409 and "[CELL_CONTROL_CHAR]" in res.text, res.text
         detail = res.json()["detail"]
         assert f"용어사전 9830001 항목의 이름 (파일 #{fid} · 1번째 시트 · 2행 · A열에 쓰려던 값)" in detail, detail
-        assert "용어사전에서 고친 뒤" in detail and "원본 파일에서" not in detail, detail
+        # 용어사전을 고치면 검사 기준(용어사전)이 바뀌므로 다시 검사를 거쳐야 통합된다 — 그 단계까지 안내
+        assert "용어사전에서 고친 뒤 검토에서 다시 검사하고 통합하세요" in detail, detail
+        assert "원본 파일에서" not in detail, detail
         _no_echo(res.text, "제어기관")
         assert _counts() == before
     finally:
@@ -679,6 +744,39 @@ def test_control_character_in_a_warning_reason_names_the_row_not_another_column(
     detail = res.json()["detail"]
     assert f"파일 #{fid} · 1번째 시트 · 2행 (검증 경고 사유 — 그 행의 칸에서 온 글자)" in detail, detail
     assert "B열" not in detail, detail
+
+
+def test_control_character_in_a_column_name_is_not_blamed_on_a_warning_row(client) -> None:
+    # 열 이름의 제어 문자는 그 열 이름의 자리로 알린다 — 그 열을 가리키는 경고가 있어도 경고의 행을 지목하지 않는다
+    fid = _csv(client, "열이름경고.csv", "구분,인\x1f구수\n가,5\n나,abc\n")
+    assert _apply(client, fid, ("c0", None), ("c1", "population")).status_code == 200
+    review = client.post("/reviews", json={"file_ids": [fid]}).json()
+    # 경고 사유에 그 열 이름(제어 문자 포함)이 들어간다
+    assert any(i["category"] == "warning" and "\x1f" in (i["reason"] or "") for i in review["items"]), review["items"]
+    _approve_pending(client, review)
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert res.status_code == 409, res.text
+    detail = res.json()["detail"]
+    assert f"파일 #{fid} · 1번째 시트 · B열(머리글 1행): 열 이름" in detail, detail
+    assert "검증 경고 사유" not in detail, detail
+
+
+def test_control_character_in_a_warning_row_is_still_named_beside_a_bad_column_name(client) -> None:
+    # 열 이름을 뺀 뒤에도 사유에 남은 글자(합계 행의 이름 칸)는 그 행으로 알린다 — 두 곳 모두. 합계 행은 공백류 제어
+    # 문자(\x1c~\x1f)를 공백으로 읽어야 합계로 알아보므로 행 이름에는 \x1e, 열 이름에는 \x1f를 쓴다
+    fid = _csv(client, "둘다제어.csv", "구분,인\x1f구수\n합\x1e계,9\n가,-\n나,5\n")
+    assert _apply(client, fid, ("c0", None), ("c1", "population")).status_code == 200
+    review = client.post("/reviews", json={"file_ids": [fid]}).json()
+    reasons = [i["reason"] or "" for i in review["items"] if i["category"] == "warning"]
+    assert any("\x1e" in r and "\x1f" in r for r in reasons), reasons
+    _approve_pending(client, review)
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    res = client.post(f"/reviews/{review['id']}/integrate", json={})
+    assert res.status_code == 409, res.text
+    detail = res.json()["detail"]
+    assert f"파일 #{fid} · 1번째 시트 · B열(머리글 1행): 열 이름" in detail, detail
+    assert f"파일 #{fid} · 1번째 시트 · 2행 (검증 경고 사유 — 그 행의 칸에서 온 글자)" in detail, detail
 
 
 def test_unexpected_integration_failure_keeps_raw_text_out_of_the_answer_record_and_log(

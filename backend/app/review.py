@@ -355,7 +355,7 @@ def create_session(
         items += _mapping_items(loaded, rules)
         items += _correction_items(loaded)
     items += _entity_items(result, files, EntityResolver(glossary, name_period), labels, rules)
-    _check_item_values(items, targets)
+    _check_item_values(items, targets, rules.name if rules is not None else None)
     # 여기부터 기록 — 한 트랜잭션 (중간에 실패하면 호출한 쪽이 모두 되돌린다)
     for fid, inputs in ruled.items():
         # 규칙은 확정이 없던 열에만 — 검사하는 동안 누가 확정한 열은 덮지 않는다 (검사 기준과 달라 '다시 검사'로 드러남)
@@ -390,37 +390,59 @@ def create_session(
     return session
 
 
-def _check_item_values(items: list[ReviewItem], targets: list[_Loaded]) -> None:
+def _check_item_values(items: list[ReviewItem], targets: list[_Loaded], automation_name: str | None = None) -> None:
     """검토 항목에 저장할 글자(칸 값·이전/이후 값·사유)에 NUL이 있으면 아무것도 쓰기 전에 거절한다 — PostgreSQL은 NUL이
     든 글자를 받지 않고(500) SQLite는 저장한다. 값은 지우거나 바꾸지 않는다 (같은 값을 다시 찾는 키로도 쓰임).
-    이름(파일·시트·열)은 check_files가 먼저 본다. 문구에는 위치만 (값 원문 없음). 여러 파일을 묶은 기관·지역 이름
-    확인 항목은 파일 번호가 없어 그 값이 든 칸을 찾아 알리고, 필수 기관(검토 조건 — 사용자가 넣은 값)은 조건을 고치라고
-    알린다."""
+    이름(파일·시트·열)은 check_files가 먼저 본다. 문구에는 위치만 (값 원문 없음). NUL이 어디서 왔는지에 따라 알린다:
+    - 칸 값(이전·이후 값)이면 그 칸. 여러 파일을 묶은 기관·지역 이름 확인 항목은 파일 번호가 없어 그 값이 든 칸을 찾는다
+    - 사유에 옮겨 적힌 칸 값(검증 경고의 못 읽은 값·합계 행 이름 등)이면 그 항목의 시트에서 그 칸 (못 찾으면 행까지)
+    - 자동화 이름(설정 — 규칙 항목의 사유에 들어감)이면 그 설정, 필수 기관(검토 조건 — 사용자가 넣은 값)이면 그 조건
+    칸은 찾는 종류마다 한 번만 훑는다 (항목 수 × 칸 수가 되지 않게)."""
     sheets = {(t.record.id, s.name): s for t in targets for s in t.parsed.sheets}
-    places: list[str] = []
-    condition = False
+    named = automation_name if automation_name and NUL in automation_name else None
+    cells: list[str] = []
+    wanted: set[str] = set()  # 파일 번호 없는 항목의 NUL 값
+    quoted: dict[tuple[int, str], list[tuple[int | None, str]]] = {}  # 시트 → (항목의 행, 사유) — 사유에만 NUL
+    condition = setting = False
     for item in items:
-        if not any(v and NUL in v for v in (item.before, item.after, item.reason)):
+        reason = item.reason or ""
+        if named and named in reason:
+            setting = True
+            reason = reason.replace(named, "")  # 남은 글자에 NUL이 또 있으면 그것은 따로 알린다
+        in_value = any(v and NUL in v for v in (item.before, item.after))
+        if not in_value and NUL not in reason:
             continue
+        sheet = sheets.get((item.file_id, item.sheet or "")) if item.file_id is not None else None
         if item.kind == "required_entity_missing":
             condition = True
-            continue
-        if item.file_id is not None:
+        elif item.file_id is None:
+            if item.before and NUL in item.before:
+                wanted.add(item.before)
+            else:
+                cells.append("검토 항목")
+        elif in_value or sheet is None:
             parts = [f"파일 #{item.file_id}"]
-            sheet = sheets.get((item.file_id, item.sheet or ""))
             if sheet is not None:
                 column = sheet.columns.index(item.column) if item.column in sheet.columns else None
                 parts += [sheet_place(sheet), cell_place(sheet, item.row, column)]
-            places.append(" · ".join(p for p in parts if p))
+            cells.append(" · ".join(p for p in parts if p))
         else:
-            places += _cells_holding(targets, item.before) or ["검토 항목"]
-    if places or condition:
-        fixes = []
-        if places:
-            fixes.append("원본 파일에서 그 칸의 NUL 문자를 지운 뒤 다시 올리세요")
+            quoted.setdefault((item.file_id, item.sheet or ""), []).append((item.row, reason))
+    if wanted:
+        cells += _cells_holding(targets, wanted) or ["검토 항목"]
+    for (fid, name), held in quoted.items():
+        cells += _cells_quoted(fid, sheets[(fid, name)], held)
+    if cells or condition or setting:
+        places, fixes = [], []
         if condition:
-            places.insert(0, "검토 조건 '필수 기관'")
+            places.append("검토 조건 '필수 기관'")
             fixes.append("필수 기관 조건에서 NUL 문자를 지운 뒤 검토를 다시 만드세요")
+        if setting:
+            places.append("자동화 이름 (원본 칸이 아니라 규칙 항목의 사유에 들어가는 설정)")
+            fixes.append("자동화 이름에서 NUL 문자를 지운 뒤 다시 실행하세요")
+        if cells:
+            places += cells
+            fixes.append("원본 파일에서 그 칸의 NUL 문자를 지운 뒤 다시 올리세요")
         unique = list(dict.fromkeys(places))
         shown = " / ".join(unique[:3]) + (f" 외 {len(unique) - 3}곳" if len(unique) > 3 else "")
         raise ReviewNameError(
@@ -429,18 +451,31 @@ def _check_item_values(items: list[ReviewItem], targets: list[_Loaded]) -> None:
         )
 
 
-def _cells_holding(targets: list[_Loaded], value: str | None) -> list[str]:
-    """그 값이 든 칸의 위치 (거절 문구용 — 값은 쓰지 않음). 값이 없거나 찾지 못하면 빈 목록."""
-    if not value:
-        return []
+def _cells_holding(targets: list[_Loaded], values: set[str]) -> list[str]:
+    """그 값들이 든 칸의 위치 (거절 문구용 — 값은 쓰지 않음). 칸은 한 번만 훑는다 (값 수 × 칸 수가 되지 않게).
+    찾지 못하면 빈 목록."""
     return [
         f"파일 #{t.record.id} · {sheet_place(s)} · {cell_place(s, entry['row'], j)}"
         for t in targets
         for s in t.parsed.sheets
         for entry in s.body
         for j, cell in enumerate(entry["cells"])
-        if cell == value
+        if isinstance(cell, str) and cell in values
     ]
+
+
+def _cells_quoted(fid: int, sheet: SheetResult, held: list[tuple[int | None, str]]) -> list[str]:
+    """사유에 옮겨 적힌 칸 가운데 NUL이 든 칸의 위치 (시트는 한 번만 훑는다). 찾지 못하면 (가려 적힌 값 등) 그 항목의
+    행까지만."""
+    reasons = [reason for _, reason in held]
+    base = f"파일 #{fid} · {sheet_place(sheet)}"
+    found = [
+        f"{base} · {cell_place(sheet, entry['row'], j)}"
+        for entry in sheet.body
+        for j, cell in enumerate(entry["cells"])
+        if isinstance(cell, str) and NUL in cell and any(cell in reason for reason in reasons)
+    ]
+    return found or [f"{base}{f' · {row}행' if row else ''} (검토 항목의 사유에 옮겨 적힌 칸)" for row, _ in held]
 
 
 def _item(category: str, kind: str, reason: str, *, source: str = "rule", **fields: Any) -> ReviewItem:

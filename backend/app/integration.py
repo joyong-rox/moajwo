@@ -155,6 +155,7 @@ class _Built:
     control: list[str] = field(default_factory=list)
     control_count: int = 0
     control_glossary: int = 0
+    control_names: set[str] = field(default_factory=set)  # 그 가운데 이름(파일·시트·열)으로 알린 글자
 
 
 # ---------------------------------------------------------------- 값 비교
@@ -332,6 +333,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
             built.files.append({"id": fid, "name": record.original_name, "excluded": True, "sheets": []})
             if _bad_text(record.original_name):  # 처리 요약 시트에 쓴다
                 _control_at(built, f"파일 #{fid}: 파일 이름")
+                built.control_names.add(record.original_name)
     org_codes = load_org_codes(db)
     for fid in file_ids:
         record, parsed = load_parsed(db, fid)
@@ -339,15 +341,18 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
         info: dict[str, Any] = {"id": fid, "name": record.original_name, "excluded": False, "sheets": []}
         if _bad_text(record.original_name):
             _control_at(built, f"파일 #{fid}: 파일 이름")
+            built.control_names.add(record.original_name)
         for sheet in parsed.sheets:
             # 시트·열 이름은 결과 파일(출처 열·변경 내역·처리 요약)에 그대로 쓴다 — 쓰지 않는 열 이름도 요약에 남는다
             where = f"파일 #{fid} · {sheet_place(sheet)}"
             built.sheets[(fid, sheet.name)] = where
             if _bad_text(sheet.name):
                 _control_at(built, f"{where}: 시트 이름")
+                built.control_names.add(sheet.name)
             for j, name in enumerate(sheet.columns):
                 if _bad_text(name):
                     _control_at(built, f"{where} · {column_place(sheet, j)}: 열 이름")
+                    built.control_names.add(name)
             mappings = engine.map_columns(
                 sheet.columns,
                 sheet.samples,
@@ -748,7 +753,7 @@ def _check_text(built: _Built) -> None:
         if built.control_count > built.control_glossary:
             fixes.append("원본 파일에서 그 문자를 지운 뒤 다시 올리고 검토에서 다시 검사하세요")
         if built.control_glossary:
-            fixes.append("용어사전 항목의 이름은 용어사전에서 고친 뒤 다시 통합하세요")
+            fixes.append("용어사전 항목의 이름은 용어사전에서 고친 뒤 검토에서 다시 검사하고 통합하세요")
         raise IntegrationError(
             "통합하지 않았습니다 — 결과 파일(엑셀)에 쓸 수 없는 제어 문자(NUL 등)가 있습니다: "
             f"{' / '.join(built.control)}{f' 외 {more}곳' if more else ''}. {' · '.join(fixes)}. [{CONTROL_CHAR}]"
@@ -808,8 +813,13 @@ def _integrate(db: Session, session: ReviewSession, include_unmapped: bool | Non
         for i in shown
     ]  # fmt: skip
     for w, i in zip(warnings, shown, strict=True):  # 처리 요약 시트에 쓴다 (경고 사유에 칸 값이 들어갈 수 있음)
-        if any(_bad_text(v) for v in w.values()):
-            # 사유의 글자는 경고가 가리킨 열이 아니라 그 행의 다른 칸(합계 행의 이름 칸 등)에서 왔을 수 있어 행까지만
+        # 사유에 든 파일·시트·열 이름의 글자는 build가 그 이름의 자리로 이미 알렸다 — 그 이름을 뺀 나머지로 본다 (이름을
+        # 뺄 때는 build가 이미 거절할 곳을 셌으므로 통과하지 않는다). 남은 글자는 경고가 가리킨 열이 아니라 그 행의 다른
+        # 칸(합계 행의 이름 칸 등)에서 왔을 수 있어 행까지만
+        rest = w["reason"]
+        for name in built.control_names:
+            rest = rest.replace(name, "")
+        if _bad_text(rest):
             base = built.sheets.get((i.file_id or 0, i.sheet or "")) or f"파일 #{i.file_id}"
             _control_at(built, f"{base}{f' · {i.row}행' if i.row else ''} (검증 경고 사유 — 그 행의 칸에서 온 글자)")
     _check_text(built)  # 결과 파일에 쓸 수 없는 제어 문자 — 실행 기록을 만들기 전에 거절
