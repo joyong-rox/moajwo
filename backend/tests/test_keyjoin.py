@@ -977,3 +977,136 @@ def test_output_cells_count_the_source_sheet_and_the_summary(kj, abcd) -> None:
     n, k, picked, rows = 4, 1, 4, 3
     assert plan["budget"]["output_cells"] == rows * (k + picked + 1 + n) + 40 + 16 * n
     assert plan["budget"]["index_cells"] == 3 * 3 * (k + 1)  # 기준이 아닌 입력 3개 × 3행 × (key 1 + 선택 열 1)
+
+
+# ---------------------------------------------------------------- 독립 검토 보완 (2026-10-26 — 반박 검증을 거친 지적)
+
+
+def test_file_id_out_of_range_and_zero_width_names_are_422_before_any_read(kj, abcd) -> None:
+    """PRIVACY-3·PRIVACY-4: 정수 범위 밖 파일 번호는 DB에 닿기 전에 422(500 아님), 폭 0 서식 문자만의 이름은 빈 이름."""
+    u = kj["kj-user1"]
+    inputs = abcd["inputs"]
+    before = _state()
+    huge = [{**inputs[0], "file_id": 2**70}, inputs[1]]
+    res = u.post("/keyjoin/plan", json=_body(huge, base={"file_id": inputs[1]["file_id"], "sheet_id": "s0"}))
+    assert res.status_code == 422, res.text
+    zero = u.post("/keyjoin/plan", json={**_body(inputs[:2]), "key_names": ["\u200b\ufeff"]})
+    assert zero.status_code == 422 and "KEYJOIN_NAME_BLANK" in zero.text and "\u200b" not in zero.text
+    named = _body([_input(inputs[0]["file_id"], names={"c1": "\u2060"}), inputs[1]])
+    res = u.post("/keyjoin/plan", json=named)
+    assert res.status_code == 422 and "KEYJOIN_NAME_BLANK" in res.text
+    assert _state() == before
+
+
+def test_error_code_text_stays_text_and_merged_value_cells_are_announced(kj) -> None:
+    """KEYS-3: '#N/A' 같은 글자는 오류 칸이 아니라 글자 칸. KEYS-2: 가져올 열의 병합 채움은 값을 두되 경고로 알린다."""
+    u = kj["kj-user1"]
+    a = _csv(u, "오류코드.csv", [["사번", "상태"], ["001", "#N/A"], ["002", "#REF!"], ["003", "N/A"]])
+    b = _csv(u, "오류코드b.csv", [["사번", "건수"], ["001", "1"], ["002", "2"], ["003", "3"]])
+    _, wb, plan = _make(u, _body([_input(a), _input(b)]))
+    ws = wb["연결 결과"]
+    assert [(c.value, c.data_type) for c in ws["B"][1:]] == [("#N/A", "s"), ("#REF!", "s"), ("N/A", "s")]
+    assert plan["preview"]["rows"][0]["cells"][0] == "#N/A"
+    rows = [["사번", "부서"], ["001", "총무"], ["002", None], ["003", "기획"]]
+    merged = _upload(u, "값병합.xlsx", _xlsx_bytes({"k": rows}, {"k": ("B2:B3",)}))
+    _, wb, plan = _make(u, _body([_input(merged), _input(b)]))
+    filled = _first(plan, "KEYJOIN_VALUE_FILLED", "warnings")
+    assert filled["rows"] == [3] and filled["count"] == 1 and filled["column"] == "B" and filled["input"] == 0
+    assert "병합" in filled["text"] and "총무" not in filled["text"]  # 값 원문은 문구에 없다
+    assert _grid(wb["연결 결과"])[1:] == [["001", "총무", 1], ["002", "총무", 2], ["003", "기획", 3]]
+    assert "병합 칸" in _texts(wb)  # 연결 요약 시트의 '주의'·'안내'에 채움 규칙이 적힌다
+    assert plan["inputs"][0]["key_columns"][0]["kinds"]["filled"] == 0  # key 열의 병합 채움과는 별개
+
+
+def test_subtotal_warning_names_the_judging_column_even_if_unselected(kj) -> None:
+    """KEYS-1(설계대로 파서 분류를 쓰되 안내 보강): 선택하지 않은 열의 'Total'로 빠진 행은 판정 칸의 열을 알린다."""
+    u = kj["kj-user1"]
+    a = _csv(
+        u,
+        "구분소계.csv",
+        [["사번", "부서", "구분"], ["001", "총무", "일반"], ["002", "기획", "Total"], ["003", "정보", "일반"]],
+    )
+    b = _csv(u, "구분소계b.csv", [["사번", "건수"], ["001", "1"], ["002", "2"], ["003", "3"]])
+    _, wb, plan = _make(u, _body([_input(a), _input(b)]))
+    skipped = _first(plan, "KEYJOIN_NONDATA_ROWS_SKIPPED", "warnings")
+    assert skipped["rows"] == [3] and skipped["column"] == "C" and "판정 칸 C열" in skipped["text"]
+    assert "선택하지 않은 열" in skipped["text"] and "Total" not in skipped["text"] and "기획" not in skipped["text"]
+    assert _grid(wb["연결 결과"])[1:] == [["001", "총무", 1], ["003", "정보", 3]]
+
+
+def test_resend_must_be_well_formed_and_a_request_being_made_is_refused_even_with_two_slots(
+    kj, abcd, monkeypatch
+) -> None:
+    """PRIVACY-2: 같은 번호의 재전송도 형식 검사(422)가 먼저. SAFETY-1: 같은 번호가 만들어지는 중이면
+    차례가 2개여도 둘째는 503 하나 — 실행·파일은 하나, 끝난 뒤 재전송은 200."""
+    from app import keyjoin_api, output_slot
+
+    u = kj["kj-user1"]
+    body = abcd["body"]
+    plan = _plan(u, body)
+    rid = uuid.uuid4().hex
+    assert _run(u, body, plan["basis"], rid).status_code == 201
+    mid = _state()
+    bad = u.post("/keyjoin/run", json={**body, "inputs": [], "expected_basis": plan["basis"], "request_id": rid})
+    assert bad.status_code == 422 and "KEYJOIN_INPUTS_TOO_FEW" in bad.text
+    assert _state() == mid
+
+    monkeypatch.setattr(output_slot, "_SLOTS", threading.BoundedSemaphore(2))
+    entered, release = threading.Event(), threading.Event()
+    real = keyjoin_api.build_plan
+
+    def slow_plan(*a: Any, **k: Any) -> Any:
+        if not entered.is_set():  # 첫 요청만 계획 단계에서 붙잡아 둔다 (둘째가 그 사이에 온다)
+            entered.set()
+            release.wait(30)
+        return real(*a, **k)
+
+    monkeypatch.setattr(keyjoin_api, "build_plan", slow_plan)
+    rid2 = uuid.uuid4().hex
+    first: list[Any] = []
+    th = threading.Thread(target=lambda: first.append(_run(u, body, plan["basis"], rid2)), daemon=True)
+    th.start()
+    assert entered.wait(10)
+    try:
+        second = _run(u, body, plan["basis"], rid2)
+        assert second.status_code == 503, second.text
+        assert (
+            second.json()["detail"]["code"] == "output_busy" and "같은 요청 번호" in second.json()["detail"]["message"]
+        )
+    finally:
+        release.set()
+        th.join(60)
+    assert first and first[0].status_code == 201, first and first[0].text
+    after = _state()
+    assert after["runs"] == mid["runs"] + 1 and len(after["files"]) == len(mid["files"]) + 1
+    monkeypatch.setattr(keyjoin_api, "build_plan", real)
+    assert _run(u, body, plan["basis"], rid2).status_code == 200  # 끝난 뒤의 재전송은 그 실행
+
+
+def test_pii_item_sheet_names_are_masked_and_run_makes_no_preview(kj, abcd, monkeypatch) -> None:
+    """PRIVACY-1: 개인정보 탐지 항목의 시트 이름도 가린다. SAFETY-5: 미리보기는 확인(plan)에만 만든다."""
+    from app import keyjoin
+
+    u = kj["kj-user1"]
+    sheet = "kjr1@example.test"
+    rows = [["사번", "이메일"], ["001", "kjr2@example.test"], ["002", "kjr3@example.test"]]
+    p = _upload(u, "연락처.xlsx", _xlsx_bytes({sheet: rows}))
+    b = _csv(u, "연락처b.csv", [["사번", "건수"], ["001", "1"]])
+    plan = _plan(u, _body([_input(p), _input(b)]))
+    assert plan["inputs"][0]["pii"] == "needs_ack" and "KEYJOIN_PII_ACK_REQUIRED" in _codes(plan)
+    items = plan["inputs"][0]["pii_summary"]["items"]
+    assert items and all(it["sheet"] != sheet for it in items)
+    assert sheet not in json.dumps(plan, ensure_ascii=False) and "kjr2@example.test" not in json.dumps(plan)
+
+    calls: list[str] = []
+    real = keyjoin._preview
+
+    def counted(*a: Any, **k: Any) -> Any:
+        calls.append("preview")
+        return real(*a, **k)
+
+    monkeypatch.setattr(keyjoin, "_preview", counted)
+    plan = _plan(u, abcd["body"])
+    assert calls == ["preview"] and plan["preview"]["shown"] == 3
+    assert _run(u, abcd["body"], plan["basis"]).status_code == 201
+    assert calls == ["preview"]  # run은 미리보기를 만들지 않는다 (가림 충돌 경고는 두 경로 모두)

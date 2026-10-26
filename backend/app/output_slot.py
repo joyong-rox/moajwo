@@ -31,8 +31,8 @@ BUSY = (
 class OutputBusy(Exception):
     """결과 만들기 차례가 없음 — 시작하지 않았다 (다시 눌러도 됨)."""
 
-    def __init__(self) -> None:
-        super().__init__(BUSY)
+    def __init__(self, message: str = BUSY) -> None:
+        super().__init__(message)
 
 
 @contextmanager

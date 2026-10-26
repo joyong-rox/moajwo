@@ -22,6 +22,7 @@ import { Toggle } from './components/tailgrids/core/toggle'
 import PiiNotice from './PiiNotice'
 import { navigate, replaceSearch, useSearch } from './router'
 import { RunDownloadLink } from './RunDownloadLink'
+import { TableRegion } from './Analysis' // 넘칠 때만 이름(region)·Tab 정지점을 받는 표 래퍼 (키보드 가로 스크롤)
 import { KEYJOIN_SCOPE_LABEL } from './runFormat'
 import { Banner, NavLink, WorkflowSteps, type Step } from './Workflow'
 
@@ -34,6 +35,8 @@ const KEY_HELP =
   "이름이 달라도 됩니다. 정수 123은 글자 '123'과 연결되고 '00123'과는 다릅니다. 날짜·참거짓·소수·16자리 이상 숫자 칸은 쓸 수 없습니다 — 글자(텍스트)로 저장해 올리세요."
 const STALE_TEXT = '확인하는 동안 설정이 바뀌어 이전 설정의 결과는 쓰지 않았습니다 — 지금 설정으로 다시 확인하세요.'
 const SCOPES: KeyJoinScope[] = ['base', 'all', 'common']
+// 같은 요청 번호의 재전송(200)이 돌려준 실행이 아직 끝나지 않았을 때의 상태 글자 (내려받기는 done에만)
+const RUN_STATE: Record<string, string> = { running: '만드는 중', check: '결과 확인 필요', failed: '실패', review: '검토 중' }
 const SCOPE_HELP: Record<KeyJoinScope, string> = {
   base: '기준 입력의 key 집합 (기본값) — 다른 입력에 없는 사용자는 그 입력의 열이 빈 칸',
   all: '모든 입력의 합집합 — 기준 입력 순서 뒤에 나머지 입력에서 처음 나온 순서',
@@ -118,6 +121,7 @@ function kindsText(k: KeyJoinKinds | null): string {
   if (k.date) parts.push(`날짜 ${k.date}`)
   if (k.missing_mark) parts.push(`결측 표기 ${k.missing_mark}`)
   if (k.precision) parts.push(`자릿수 보존 불가 ${k.precision}`)
+  if (k.illegal) parts.push(`쓸 수 없는 글자 ${k.illegal}`)
   return parts.join(' · ')
 }
 
@@ -160,10 +164,21 @@ function inputsOf(
 }
 
 /** 지금 설정으로 보낼 요청과 고쳐야 할 입력. 빠진 파일·바꾼 시트의 key·열 설정은 보내지 않는다 (서버 422는 최종 방어). */
-function buildRequest(files: number[], draft: Draft, meta: Record<number, SheetPreview>) {
+function buildRequest(
+  files: number[],
+  draft: Draft,
+  meta: Record<number, SheetPreview>,
+  metaError: Record<number, string> = {},
+) {
   const { refs, waiting, unpicked } = inputsOf(files, draft, meta)
   const invalid: Invalid[] = []
-  for (const fid of waiting) invalid.push({ key: String(fid), text: `#${fid}: 시트·열 목록을 읽는 중입니다.` })
+  for (const fid of waiting)
+    invalid.push({
+      key: String(fid),
+      text: metaError[fid]
+        ? `#${fid}: 시트·열 목록을 읽지 못했습니다 — 1단계에서 '다시 읽기'를 누르거나 이 파일을 빼세요.`
+        : `#${fid}: 시트·열 목록을 읽는 중입니다.`,
+    })
   for (const fid of unpicked) invalid.push({ key: String(fid), text: `#${fid}: 연결할 시트를 고르세요.` })
   if (files.length < MIN_INPUTS)
     invalid.push({ key: null, text: `파일이 ${MIN_INPUTS}개 이상 있어야 연결할 수 있습니다 — 홈에서 파일을 더 고르세요.` })
@@ -241,9 +256,10 @@ function KeyJoin() {
   const metaRef = useRef(meta)
   const busyRef = useRef<Busy>(null)
   const planAbort = useRef<AbortController | null>(null)
+  const filesLegendRef = useRef<HTMLLegendElement | null>(null) // 파일을 빼면 사라진 단추 대신 1단계 제목이 초점을 받는다
   const ids = useId()
 
-  const { request, invalid, refs, baseKey } = buildRequest(files, draft, meta)
+  const { request, invalid, refs, baseKey } = buildRequest(files, draft, meta, metaError)
   const reqKey = JSON.stringify(request)
   // fresh: 지금 설정으로 받은 확인 결과 (만들기의 근거). view: 마지막으로 받은 확인 결과 (결과 영역을 그리는 데만 씀)
   const fresh = checked?.key === reqKey ? checked.plan : null
@@ -369,6 +385,9 @@ function KeyJoin() {
     setMeta((m) => without(m, fid))
     setMetaError((e) => without(e, fid))
     replaceSearch(q.toString() ? `?${q.toString()}` : '')
+    // 누른 단추는 곧 사라지므로 초점이 body로 떨어지지 않게 같은 단계의 제목으로 먼저 옮긴다 (스크롤은 그대로).
+    // 프레임 콜백에 미루면 headless·백그라운드 창에서 늦어질 수 있어 바로 옮긴다 — 제목 요소는 다시 그려도 그대로다
+    filesLegendRef.current?.focus({ preventScroll: true })
   }
 
   function setBusyState(b: Busy) {
@@ -412,9 +431,11 @@ function KeyJoin() {
     }
   }
 
-  /** 엑셀 만들기. resend: 결과를 모르는 요청을 같은 요청 번호로 다시 보냄 (서버가 기존 실행을 200으로 돌려줌). 새 클릭은 새 번호 */
-  async function make(resend: boolean) {
+  /** 엑셀 만들기. resend: 결과를 모르는 요청을 같은 요청 번호로 다시 보냄 (서버가 기존 실행을 200으로 돌려줌). 새 클릭은 새 번호.
+   * 같은 설정으로 이미 만들었으면 기본 단추는 다시 만들지 않는다 — again(명시적 '한 번 더')만 새 번호·새 실행 */
+  async function make(resend: boolean, again = false) {
     if (busyRef.current || !fresh || !fresh.ready || invalid.length) return
+    if (made?.key === reqKey && !resend && !again) return
     const key = reqKey
     const id = resend && pending?.key === key ? pending.id : newRequestId()
     setBusyState('run')
@@ -464,6 +485,8 @@ function KeyJoin() {
     return `입력 ${i + 1} · #${r.fid} ${m?.original_name ?? ''}${sheet}`
   }
   const keyCount = refs[0]?.draft.key_columns.length ?? 0
+  const keyNameProblems = invalid.filter((x) => x.about === 'key_names')
+  const keyNameIds = keyNameProblems.map((_, n) => `${ids}-kn-${n}`)
   const baseRef = refs.find((r) => r.key === baseKey)
   const baseMeta = baseRef ? metaOf(baseRef) : undefined
 
@@ -476,6 +499,14 @@ function KeyJoin() {
   else if (fresh.problems.length) why = `만들 수 없는 이유 ${fresh.problems.length}건을 먼저 해결하세요 (5단계 목록).`
   else if (fresh.result.rows === 0) why = '연결 결과가 0행입니다 — 범위나 key 열을 바꾸세요.'
   else if (!fresh.ready) why = '지금 설정으로는 만들 수 없습니다 (5단계 확인 결과).'
+  // 같은 설정으로 이미 만든 실행이 있으면 기본 단추는 막는다 — 다시 누르면 같은 결과가 하나 더 생기므로 '한 번 더'는 따로 고른다
+  const madeHere = made?.key === reqKey ? made : null
+  const madeFinal = madeHere !== null && madeHere.run.status === 'done'
+  const madeWhy = madeHere
+    ? madeFinal
+      ? `이 설정으로 이미 만들었습니다 (실행 #${madeHere.run.id}) — 7단계에서 내려받으세요. 같은 설정으로 한 번 더 만들려면 아래 단추를 누르세요.`
+      : `실행 #${madeHere.run.id}는 아직 '${RUN_STATE[madeHere.run.status] ?? madeHere.run.status}' 상태입니다 — 실행 기록에서 확인하세요 (새로 만들지 않음).`
+    : null
 
   // 상태 알림 한 곳: 진행 중 > 지금 설정의 마지막 일 > 설정 바뀜. 글자가 바뀔 때만 읽힌다 (입력마다 바뀌지 않음)
   const statusText =
@@ -533,7 +564,9 @@ function KeyJoin() {
 
       {files.length > 0 && (
         <fieldset className="an-step bd-step">
-          <legend>1. 파일·시트 ({files.length}개 파일)</legend>
+          <legend ref={filesLegendRef} tabIndex={-1}>
+            1. 파일·시트 ({files.length}개 파일)
+          </legend>
           <p className="mw-muted">
             파일마다 연결할 시트 하나가 입력이 됩니다. 같은 이름의 파일은 번호(#)로, 같은 이름의 시트는 순번으로 구분합니다. 빼면 그
             파일의 key·열 설정도 지웁니다.
@@ -616,6 +649,8 @@ function KeyJoin() {
             const vin = viewInput(r)
             const compound = Boolean(r.draft.compound) || r.draft.key_columns.length > 1
             const problems = invalid.filter((x) => x.key === r.key)
+            const noteIds = problems.map((_, n) => `${ids}-fix-${i}-${n}`) // 고칠 것 문구 ↔ key 선택란 (aria-describedby)
+            const describedBy = noteIds.length ? noteIds.join(' ') : undefined
             return (
               <div key={r.key} className={`kj-input${problems.length ? ' needs-fix' : ''}`}>
                 <p className="kj-input-title">{label}</p>
@@ -632,6 +667,8 @@ function KeyJoin() {
                     <select
                       className="kj-select"
                       aria-label={`${label} key 열`}
+                      aria-invalid={problems.length > 0}
+                      aria-describedby={describedBy}
                       value={r.draft.key_columns[0] ?? ''}
                       onChange={(e) => setKeys(r, e.target.value ? [e.target.value] : [])}
                     >
@@ -686,6 +723,8 @@ function KeyJoin() {
                         <select
                           className="kj-select"
                           aria-label={`${label} key 열 추가`}
+                          aria-invalid={problems.length > 0}
+                          aria-describedby={describedBy}
                           value=""
                           onChange={(e) => e.target.value && setKeys(r, [...r.draft.key_columns, e.target.value])}
                         >
@@ -709,8 +748,8 @@ function KeyJoin() {
                     {vin.key_columns.map((k) => `${k.letter}열 ${k.name} — ${kindsText(k.kinds)}`).join(' · ')}
                   </p>
                 )}
-                {problems.map((p) => (
-                  <p key={p.text} className="wk-why" role="note">
+                {problems.map((p, n) => (
+                  <p key={p.text} id={noteIds[n]} className="wk-why" role="note" aria-live="polite">
                     <strong>고칠 것</strong> {p.text}
                   </p>
                 ))}
@@ -813,6 +852,8 @@ function KeyJoin() {
                         type="text"
                         className="bd-input"
                         aria-label={`key ${n + 1} 결과 이름`}
+                        aria-invalid={keyNameProblems.length > 0}
+                        aria-describedby={keyNameIds.length ? keyNameIds.join(' ') : undefined}
                         placeholder={baseMeta?.columns.find((c) => c.column_id === baseRef?.draft.key_columns[n])?.name ?? ''}
                         maxLength={OUT_NAME_MAX}
                         value={draft.key_names_input?.[n] ?? ''}
@@ -824,13 +865,11 @@ function KeyJoin() {
               </ol>
             </div>
           )}
-          {invalid
-            .filter((x) => x.about === 'key_names')
-            .map((p) => (
-              <p key={p.text} className="wk-why" role="note">
-                <strong>고칠 것</strong> {p.text}
-              </p>
-            ))}
+          {keyNameProblems.map((p, n) => (
+            <p key={p.text} id={keyNameIds[n]} className="wk-why" role="note" aria-live="polite">
+              <strong>고칠 것</strong> {p.text}
+            </p>
+          ))}
         </fieldset>
       )}
 
@@ -911,9 +950,10 @@ function KeyJoin() {
                 예산: 결과 칸 {view.budget.output_cells.toLocaleString('ko-KR')} + 인덱스 칸{' '}
                 {view.budget.index_cells.toLocaleString('ko-KR')} = {view.budget.cells_weighted.toLocaleString('ko-KR')} /{' '}
                 {view.limits.cells.toLocaleString('ko-KR')} · 글자 {view.budget.text_chars.toLocaleString('ko-KR')} /{' '}
-                {view.limits.text_chars.toLocaleString('ko-KR')} (출처 시트 포함 — 넘으면 일부만 만들지 않고 만들지 않음)
+                {view.limits.text_chars.toLocaleString('ko-KR')} (출처 시트 포함 — 넘으면 일부만 만들지 않고 아예 만들지 않습니다. 파일·열을
+                나눠 만드세요)
               </p>
-              <div className="upload-table-wrap">
+              <TableRegion label="입력별 확인 결과 표 (가로 스크롤)">
                 <table className="upload-table kj-table" aria-label="입력별 확인 결과">
                   <thead>
                     <tr>
@@ -957,7 +997,7 @@ function KeyJoin() {
                     })}
                   </tbody>
                 </table>
-              </div>
+              </TableRegion>
               {view.problems.length > 0 && (
                 <div className="an-problems" role="alert">
                   <strong>만들 수 없는 이유 {view.problems.length}건</strong>
@@ -975,7 +1015,7 @@ function KeyJoin() {
               </h3>
               <p className="mw-muted">{view.preview.note} 값은 가린 표시이며 결과 파일에는 원래 값이 들어갑니다.</p>
               {view.preview.rows.length > 0 ? (
-                <div className="upload-table-wrap">
+                <TableRegion label="연결 결과 미리보기 표 (가로 스크롤)">
                   <table className="upload-table kj-table kj-preview" aria-label="연결 결과 미리보기">
                     <thead>
                       <tr>
@@ -1004,12 +1044,12 @@ function KeyJoin() {
                           {row.cells.map((c, j) => (
                             <td key={j}>{cellText(c)}</td>
                           ))}
-                          <td>{row.sources.map((s) => (s.row === null ? '—' : String(s.row))).join(' / ')}</td>
+                          <td>{view.inputs.map((i) => row.sources.find((s) => s.input === i.index)?.row ?? '—').join(' / ')}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </TableRegion>
               ) : (
                 <p className="mw-muted">보일 행이 없습니다{view.inputs.some((i) => i.keys === null) ? ' — 위 문제를 해결하면 key를 분석합니다' : ''}.</p>
               )}
@@ -1044,7 +1084,12 @@ function KeyJoin() {
             빠집니다 — 확인 결과의 행 번호를 확인하세요. 만들기는 확인한 설정(basis)으로만 되고, 바뀌었으면 서버가 거절합니다.
           </p>
           <div className="admin-actions kj-actions">
-            <button type="button" className="mapping-run" aria-disabled={why !== null || busy !== null} onClick={() => void make(false)}>
+            <button
+              type="button"
+              className="mapping-run"
+              aria-disabled={why !== null || madeWhy !== null || busy !== null}
+              onClick={() => void make(false)}
+            >
               {busy === 'run'
                 ? '만드는 중…'
                 : `엑셀 만들기${fresh ? ` (결과 ${fresh.result.rows.toLocaleString('ko-KR')}행 · 열 ${fresh.result.columns}개)` : ''}`}
@@ -1054,10 +1099,15 @@ function KeyJoin() {
                 같은 요청 다시 보내기 (이미 만들어졌으면 그 실행을 돌려받음)
               </button>
             )}
+            {madeFinal && why === null && (
+              <button type="button" className="mapping-confirm" aria-disabled={busy !== null} onClick={() => void make(false, true)}>
+                같은 설정으로 한 번 더 만들기 (새 실행 — 같은 결과 파일이 하나 더 생김)
+              </button>
+            )}
           </div>
-          {why && busy === null && (
+          {(why ?? madeWhy) && busy === null && (
             <p className="wk-why" role="note">
-              <strong>누를 수 없음</strong> {why}
+              <strong>누를 수 없음</strong> {why ?? madeWhy}
             </p>
           )}
           {failure && (
@@ -1079,7 +1129,11 @@ function KeyJoin() {
                 </ul>
               )}
               {!failure.unknown && failure.code !== null && (
-                <p className="mw-muted">실행을 새로 만들지 않았습니다. 지금 설정으로 다시 확인했으니 5단계 결과를 보고 다시 만드세요.</p>
+                <p className="mw-muted">
+                  {failure.code === 'KEYJOIN_FAILED' || failure.code === 'KEYJOIN_REQUEST_USED'
+                    ? '새 결과 파일은 만들지 않았습니다 — 위 실행은 실패로 기록된 실행입니다. 지금 설정으로 다시 확인했으니 5단계 결과를 보고 다시 만드세요.'
+                    : '실행을 새로 만들지 않았습니다. 지금 설정으로 다시 확인했으니 5단계 결과를 보고 다시 만드세요.'}
+                </p>
               )}
             </div>
           )}
@@ -1092,8 +1146,21 @@ function KeyJoin() {
           {made ? (
             <div className="bd-made">
               <p>
-                <strong>{made.created ? `실행 #${made.run.id} 완료` : `이미 만든 실행 #${made.run.id}`}</strong>
-                {made.run.file_name && ` — ${made.run.file_name}`} · <RunDownloadLink runId={made.run.id}>내려받기</RunDownloadLink> ·{' '}
+                <strong>
+                  {made.run.status !== 'done'
+                    ? `실행 #${made.run.id} — ${RUN_STATE[made.run.status] ?? made.run.status}`
+                    : made.created
+                      ? `실행 #${made.run.id} 완료`
+                      : `이미 만든 실행 #${made.run.id}`}
+                </strong>
+                {made.run.status === 'done' ? (
+                  <>
+                    {made.run.file_name && ` — ${made.run.file_name}`} · <RunDownloadLink runId={made.run.id}>내려받기</RunDownloadLink>
+                  </>
+                ) : (
+                  ' — 결과가 확정되면 실행 기록에서 내려받을 수 있습니다 (같은 요청 번호로 먼저 시작된 실행)'
+                )}{' '}
+                ·{' '}
                 <a href="/runs" onClick={toRuns}>
                   실행 기록에서 보기
                 </a>

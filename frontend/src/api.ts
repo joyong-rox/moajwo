@@ -1741,6 +1741,7 @@ export type KeyJoinKinds = {
   filled: number // 병합 채움 (위 행 값을 복사하지 않고 차단)
   missing_mark: number
   precision: number
+  illegal: number // 엑셀에 쓸 수 없는 글자 (차단)
 }
 export type KeyJoinPlanInput = {
   index: number
@@ -1770,8 +1771,9 @@ export type KeyJoinPlanInput = {
   } | null
   problems: KeyJoinProblem[]
 }
-// 미리보기 행: key는 가린 정규형 (가린 표시가 같은 서로 다른 key에는 서버가 '(가림 구분 n)'을 붙임), sources는 입력별 원본 행 (미연결 null)
-export type KeyJoinPreviewRow = { key: string[]; cells: Cell[]; sources: { input: number; row: number | null }[] }
+// 미리보기 행: key는 가린 정규형 (가린 표시가 같은 서로 다른 key에는 서버가 '(가림 구분 n)'을 붙임), sources는 연결된 입력의 원본 행만
+// (미연결 입력은 항목이 없다 — 화면은 input 번호로 입력 순서에 맞춰 보인다)
+export type KeyJoinPreviewRow = { key: string[]; cells: Cell[]; sources: { input: number; row: number }[] }
 export type KeyJoinPlan = {
   mode: 'keyjoin'
   policy: string

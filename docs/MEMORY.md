@@ -234,7 +234,7 @@ rows_i 데이터 행, B 기준 입력, 범위 `base`/`common`은 기준 입력�
 | 칸 예산 | out + `INDEX_WEIGHT`(1.0) × index ≤ `MOAJWO_MAX_OUTPUT_CELLS` | `KEYJOIN_TOO_MANY_CELLS` |
 | 글자 예산 | `TEXT_WEIGHT`(2) × (Σ 선택·key 열의 데이터 행 글자 수 + Σ 머리글 글자 수) ≤ `MOAJWO_MAX_OUTPUT_TEXT_CHARS` | `KEYJOIN_TOO_MANY_CHARS` |
 
-- 파일을 읽기 전에 `file_info`(내용 해시로 기억한 시트별 개수·열별 글자 수)로 먼저 거절하고(넘으면 읽지 않음), 읽은 뒤 정확한 out·index로 다시 센다
+- 파일을 읽기 전에 `file_info`(내용 해시로 기억한 시트별 개수·열별 글자 수)로 먼저 거절하고(기억한 개수가 있으면 읽지 않음 — 처음 보는·캐시에서 밀린 파일은 개수를 세려고 한 번 읽음), 읽은 뒤 정확한 out·index로 다시 센다
   (줄어들 수만 있다). 응답의 `budget{output_cells, index_cells, text_chars, cells_weighted, text_weighted}`가 그 값이다.
 - 행마다 key 튜플(56B) + 부분 문자열(49B + 글자) + dict 항목(약 100B) ≈ 150~250B로 추정했다 — **측정 전 값**. `INDEX_WEIGHT`·`TEXT_WEIGHT`·
   `MAX_RESULT_COLUMNS`는 아래 K 측정 뒤 같은 PR에서 조정한다 (상수를 바꾸면 basis가 바뀌어 확인 뒤 생성은 다시 확인해야 한다).

@@ -1064,7 +1064,7 @@ function usePage<T>(id: number, kind: 'groups' | 'excluded' | 'detail', offset: 
 
 /** 분석 표의 가로·세로 스크롤 영역. 내용이 실제로 넘칠 때만 이름(region)과 Tab 정지점을 준다 —
  * 칸 안에 조작 요소가 없는 표라 키보드로 스크롤하려면 영역에 초점이 필요하다. 넘치지 않으면(모바일 카드 모양 등) Tab 정지점을 더하지 않는다. */
-function TableRegion({ label, children }: { label: string; children: ReactNode }) {
+export function TableRegion({ label, children }: { label: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null)
   const [scrolls, setScrolls] = useState(false)
   useEffect(() => {
