@@ -54,10 +54,11 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from sqlalchemy import delete, func, inspect, select, text, update
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from sqlalchemy.util import asbool
 
 from app import db as app_db
 from app import runlease
@@ -437,11 +438,21 @@ LEASE_COLUMNS = frozenset({"worker", "heartbeat_at"})
 
 
 def _sqlite_file() -> Path | None:
-    """SQLite면 그 DB 파일 (메모리 DB면 None) — 출력에는 쓰지 않는다."""
+    """SQLite면 그 DB 파일 (메모리 DB면 None) — 출력에는 쓰지 않는다. 'uri=true' 주소의 'file:경로'는 SQLite처럼 URI의
+    경로로 읽는다 (file:/data/moajwo.db?mode=ro · file:///C:/… · 퍼센트 인코딩)."""
     url = app_db.engine.url
-    if url.get_backend_name() != "sqlite" or url.database in (None, "", ":memory:"):
+    if url.get_backend_name() != "sqlite":
         return None
-    return Path(url.database)
+    database = url.database or ""
+    if asbool(url.query.get("uri", False)) and database.startswith("file:"):
+        if url.query.get("mode") == "memory" or database.startswith("file::memory:"):
+            return None
+        database = unquote(urlsplit(database).path)
+        if len(database) > 2 and database[0] == "/" and database[2] == ":":  # file:///C:/… (Windows 드라이브)
+            database = database[1:]
+    if database in ("", ":memory:"):
+        return None
+    return Path(database)
 
 
 def schema() -> dict[str, Any]:
@@ -551,7 +562,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         _print({"revision": revision, "error": error})
         return 1
-    try:  # 확인 뒤의 조회·쓰기 실패(잠김·연결 끊김 등)도 종류만 알린다 — 오류 추적(SQL·매개변수)을 내보내지 않는다
+    after = "읽기만 하는 명령이라 바뀐 것은 없습니다" if a.cmd == "status" else "status로 실행 상태를 확인하세요"
+    try:  # 확인 뒤의 실패(잠김·연결 끊김·결과 폴더 등)도 종류만 알린다 — 오류 추적(SQL·매개변수·경로)을 내보내지 않는다
         if a.cmd == "status":
             out, ok = {"revision": revision, **status()}, True
         elif a.cmd == "recover":  # 0: 담당이 있는 실행 중 행 없음, 2: 남음(살아 있거나 근거를 기다림), 1: 오류
@@ -563,8 +575,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             out = resolve_failed(a.run_id)
             ok = out["changed"]
-    except (SQLAlchemyError, OSError) as exc:
-        after = "읽기만 하는 명령이라 바뀐 것은 없습니다" if a.cmd == "status" else "status로 실행 상태를 확인하세요"
+    except runlease.DiskIdError as exc:  # 이 앱이 정한 문구 (경로·값 없음) — 원인을 그대로 알린다
+        _print({"revision": revision, "error": f"{a.cmd}를 끝내지 못했습니다 — {exc}. {after}."})
+        return 1
+    except Exception as exc:  # noqa: BLE001 — 종류만 (SQLAlchemyError·OSError·그 밖의 예외 모두)
         _print({"revision": revision, "error": f"{a.cmd}를 끝내지 못했습니다 ({_error_kind(exc)}) — {after}."})
         return 1
     _print(out)

@@ -81,6 +81,10 @@ class RunUncertain(Exception):
         self.run_id = run_id
 
 
+class DiskIdError(RuntimeError):
+    """결과 폴더 식별자(outputs/.disk-id)를 쓸 수 없음 — 문구는 원인만 (경로·값 없음, 복구 명령이 그대로 알린다)."""
+
+
 class RunError(Exception):
     """확정 실패 (기록됨) — 묶기·통합이 각자의 오류(409)로 바꿔 알린다."""
 
@@ -156,7 +160,7 @@ def disk_id() -> str:
             break
         time.sleep(0.01)
     if not _HEX12.match(value):
-        raise RuntimeError("결과 폴더 식별자(outputs/.disk-id)의 형식이 맞지 않습니다 — 정리하지 않습니다")
+        raise DiskIdError("결과 폴더 식별자(outputs/.disk-id)의 형식이 맞지 않습니다 — 정리하지 않습니다")
     return value
 
 

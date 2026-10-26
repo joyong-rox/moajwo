@@ -735,10 +735,13 @@ def test_one_run_failing_to_settle_makes_the_report_incomplete(
     assert not lock.exists()  # 그 담당의 실행이 모두 끝난 뒤에야 지운다
 
 
-def _cli(data: Path, *args: str) -> subprocess.CompletedProcess:
-    """격리 데이터 폴더(SQLite)로 backend 명령을 별도 프로세스로 — 서버를 멈춘 뒤 운영자가 치는 것과 같게."""
+def _cli(data: Path, *args: str, url: str | None = None) -> subprocess.CompletedProcess:
+    """격리 데이터 폴더(SQLite)로 backend 명령을 별도 프로세스로 — 서버를 멈춘 뒤 운영자가 치는 것과 같게. url이 있으면
+    DATABASE_URL로 넘긴다 (데이터 폴더는 그대로)."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("MOAJWO_", "DATABASE_URL"))}
     env.update({"MOAJWO_DATA_DIR": str(data), "PYTHONIOENCODING": "utf-8", "OLLAMA_BASE_URL": "http://127.0.0.1:9"})
+    if url is not None:
+        env["DATABASE_URL"] = url
     return subprocess.run([sys.executable, *args], cwd=BACKEND, env=env, capture_output=True, text=True,
                           encoding="utf-8", timeout=180)  # fmt: skip
 
@@ -1011,6 +1014,60 @@ def test_cli_failure_after_the_check_reports_only_the_kind(tmp_path: Path) -> No
     _no_raw(res, data)
     assert con.execute("SELECT status FROM runs WHERE id = ?", (rid,)).fetchone()[0] == "check"
     con.close()
+
+
+@pytest.mark.parametrize("form", ["file:", "file:///"])
+def test_cli_reads_a_sqlite_uri_address_as_its_file(tmp_path: Path, form: str) -> None:
+    """'uri=true' 주소(file:경로?mode=ro)도 그 파일로 확인한다 — 예전에는 'file:…'을 파일 이름으로 보아 있는 DB를 'DB
+    파일이 없습니다'로 거절했다 (검토 지적 R6). 없는 파일이면 열지 않아(mode가 없으면 SQLite가 만든다) 같은 안내,
+    메모리 DB는 파일로 보지 않는다."""
+    data = tmp_path / "data"
+    assert _cli(data, "-m", "alembic", "upgrade", "head").returncode == 0
+
+    def address(path: Path, query: str) -> str:
+        posix = path.as_posix()
+        return f"sqlite:///{form}{posix.removeprefix('/') if form == 'file:///' else posix}?{query}"
+
+    res = _cli(data, "-m", "app.recovery", "status", url=address(data / "moajwo.db", "mode=ro&uri=true"))
+    assert res.returncode == 0, (res.stdout, res.stderr[-400:])
+    assert json.loads(res.stdout)["revision"] == "0020_run_worker_lease", res.stdout
+    _no_raw(res, data)
+    other = tmp_path / "other"
+    other.mkdir()
+    res = _cli(data, "-m", "app.recovery", "status", url=address(other / "moajwo.db", "uri=true"))
+    assert res.returncode == 1, (res.stdout, res.stderr[-400:])
+    assert json.loads(res.stdout)["error"].startswith("DB 파일이 없습니다"), res.stdout
+    _no_raw(res, other)
+    assert list(other.iterdir()) == []
+    res = _cli(data, "-m", "app.recovery", "status", url="sqlite:///file:rec-memory?mode=memory&uri=true")
+    assert res.returncode == 1, (res.stdout, res.stderr[-400:])
+    assert "리비전 기록(alembic_version)이 없습니다" in json.loads(res.stdout)["error"], res.stdout
+    assert not (BACKEND / "rec-memory").exists()
+
+
+def test_cli_reports_a_broken_output_folder_id_by_its_cause_without_a_trace(tmp_path: Path) -> None:
+    """확인은 통과했는데 결과 폴더 식별자(outputs/.disk-id)가 깨져 있으면: 오류 추적 대신 그 원인(이 앱의 문구 — 경로·값
+    없음)만 알리고 종료 1. 실행 기록은 그대로 (검토 지적 N2: 예전에는 RuntimeError 오류 추적이 그대로 나왔다)."""
+    data = tmp_path / "data"
+    assert _cli(data, "-m", "alembic", "upgrade", "head").returncode == 0
+    con = sqlite3.connect(data / "moajwo.db")
+    con.execute(
+        "INSERT INTO runs (status, trigger, input_file_count, file_ids, row_count, change_count, warning_count,"
+        " summary, worker) VALUES ('running', 'manual', 0, '[]', 0, 0, 0, '{}', 'abcdefabcdef-123456789012')"
+    )
+    con.commit()
+    con.close()
+    (data / "outputs").mkdir(exist_ok=True)
+    (data / "outputs" / ".disk-id").write_bytes(b"not-hex")
+    before = _sha(data / "moajwo.db")
+    for args, after in ((("status",), "읽기만 하는 명령이라"), (("recover",), "status로 실행 상태를")):
+        res = _cli(data, "-m", "app.recovery", *args)
+        assert res.returncode == 1, (args, res.stdout, res.stderr[-400:])
+        error = json.loads(res.stdout)["error"]
+        cause = "결과 폴더 식별자(outputs/.disk-id)의 형식이 맞지 않습니다"
+        assert f"{args[0]}를 끝내지 못했습니다 — {cause}" in error and after in error, error
+        _no_raw(res, data)
+    assert _sha(data / "moajwo.db") == before
 
 
 def test_heartbeat_runs_only_while_a_run_is_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
