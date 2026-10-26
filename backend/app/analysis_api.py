@@ -44,6 +44,7 @@ from app.models import AnalysisRun, MappingDecision, SourceFile, User
 from app.output_slot import output_slot
 from app.pii import mask_text
 from app.timefmt import utc_to_kst
+from app.xmltext import ILLEGAL_RE, printable
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 PAGE_MAX = 200
@@ -268,6 +269,22 @@ def _put(ws: Any, row: int, col: int, value: Any, bold: bool = False) -> None:
         cell.font = Font(bold=True)
 
 
+def _printable_tree(value: Any) -> tuple[Any, int]:
+    """저장된 결과(JSON)의 글자 가운데 엑셀에 쓸 수 없는 글자(제어 문자·U+FFFE·U+FFFF)를 '�'로 바꾼 사본과 바꾼 글자
+    수 — 열 이름·구분 값처럼 파일에서 온 글자가 있다. 저장된 결과(화면)는 그대로 두고 내려받는 파일에서만 바꾼다
+    (openpyxl은 칸에 넣는 순간 검사하므로 쓰기 전에 바꿔야 한다 — 예전: 내려받기가 500)."""
+    if isinstance(value, str):
+        n = len(ILLEGAL_RE.findall(value))
+        return (printable(value) if n else value), n
+    if isinstance(value, list):
+        items = [_printable_tree(v) for v in value]
+        return [v for v, _ in items], sum(n for _, n in items)
+    if isinstance(value, dict):
+        items = {k: _printable_tree(v) for k, v in value.items()}
+        return {k: v for k, (v, _) in items.items()}, sum(n for _, n in items.values())
+    return value, 0
+
+
 def _rows(ws: Any, start: int, rows: list[list[Any]], header: bool = False) -> int:
     for i, values in enumerate(rows):
         for j, v in enumerate(values):
@@ -347,7 +364,10 @@ def _state_text(res: dict[str, Any]) -> str:
 
 
 def workbook_bytes(run: AnalysisRun) -> bytes:
-    cond, inp, res = (shown(json.loads(x)) for x in (run.conditions, run.inputs, run.result))
+    (cond, n1), (inp, n2), (res, n3) = (
+        _printable_tree(shown(json.loads(x))) for x in (run.conditions, run.inputs, run.result)
+    )
+    replaced = n1 + n2 + n3
     wb = Workbook()
     ws = wb.active
     ws.title = "결과"
@@ -493,6 +513,9 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
     if res["detail_total"] > len(res["detail"]):
         detail.append([f"처음 {len(res['detail'])}행만 적음 (계산은 전체 {res['detail_total']}행으로 함)"])
     _rows(wd, 1, detail, header=True)
+    if replaced:
+        note = f"{replaced}개를 '\ufffd'로 바꿔 적었습니다 (화면의 결과 값은 그대로)"
+        _rows(wc, wc.max_row + 1, [["엑셀에 쓸 수 없는 글자", note]])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

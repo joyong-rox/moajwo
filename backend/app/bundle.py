@@ -30,7 +30,6 @@ from typing import Any, Literal
 import openpyxl
 from fastapi import HTTPException
 from openpyxl import Workbook
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -52,6 +51,7 @@ from app.models import IntegrationRun, SourceFile
 from app.parsing import SheetResult
 from app.pii import mask_text
 from app.validation_api import pii_out
+from app.xmltext import ILLEGAL_RE
 
 logger = logging.getLogger(__name__)
 
@@ -787,10 +787,10 @@ def _put(ws: Any, row: int, col: int, value: Any) -> Any:
 
 
 def _clean(value: Any, stats: Counter[str]) -> Any:
-    """엑셀(XML)에 넣을 수 없는 제어 문자는 빼고 몇 개인지 센다 (그 밖의 값은 그대로)."""
-    if isinstance(value, str) and ILLEGAL_CHARACTERS_RE.search(value):
-        stats["control_chars"] += len(ILLEGAL_CHARACTERS_RE.findall(value))
-        return ILLEGAL_CHARACTERS_RE.sub("", value)
+    """엑셀(XML)에 넣을 수 없는 글자(제어 문자·U+FFFE·U+FFFF 등)는 빼고 몇 개인지 센다 (그 밖의 값은 그대로)."""
+    if isinstance(value, str) and ILLEGAL_RE.search(value):
+        stats["control_chars"] += len(ILLEGAL_RE.findall(value))
+        return ILLEGAL_RE.sub("", value)
     return value
 
 
@@ -802,8 +802,8 @@ def _write_sheet(ws: Any, o: OutSheet, sheet: SheetResult, formulas: dict[str, s
         c = _put(ws, 1, j, _clean(name, stats))
         c.font, c.fill = Font(bold=True), HEAD_FILL
     ws.freeze_panes = "A2"
-    ws["A1"].comment = Comment(
-        f"원본: #{o.file.file_id} {mask_text(o.file.name)} / {mask_text(sheet.name)}\n"
+    ws["A1"].comment = Comment(  # 메모도 XML이다 — 파일·시트 이름의 쓸 수 없는 글자는 뺀다
+        f"원본: #{o.file.file_id} {_clean(mask_text(o.file.name), stats)} / {_clean(mask_text(sheet.name), stats)}\n"
         "앱이 읽은 값·열만 옮겼습니다 (서식·병합·차트·그림·수식은 옮기지 않음). "
         "병합 칸은 앱이 읽은 대로 값을 채웠습니다.",
         "Moajwo",
@@ -849,11 +849,12 @@ def _write_summary(
     ws: Any, items: list[tuple[ItemPlan, dict[str, Any], dict[str, Any]]], processed_at: str, notes: list[str]
 ) -> list[dict[str, Any]]:
     row = 1
+    stats: Counter[str] = Counter()  # 열 이름·구분 값 등 원본에서 온 글자에 든 쓸 수 없는 글자 (자료 시트와 같은 규칙)
 
     def line(*values: Any, bold: bool = False, size: int | None = None) -> None:
         nonlocal row
         for j, v in enumerate(values, start=1):
-            c = _put(ws, row, j, v)
+            c = _put(ws, row, j, _clean(v, stats))
             if bold or size:
                 c.font = Font(bold=bold, size=size or 11)
         row += 1
@@ -971,6 +972,9 @@ def _write_summary(
     ws.column_dimensions["A"].width = 18
     for col in "BCDEFGHI":
         ws.column_dimensions[col].width = 16
+    if stats["control_chars"]:
+        n = stats["control_chars"]
+        line("주의", f"엑셀에 쓸 수 없는 글자 {n}개를 이 시트에서 뺐습니다 (자료 시트의 수는 각 시트 기록에)")
     return saved
 
 

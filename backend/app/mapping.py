@@ -28,6 +28,7 @@ from app.glossary import parse_date_value
 from app.mail_fields import MAIL_MB_FIELDS
 from app.parsing import Cell
 from app.pii import mask_text
+from app.xmltext import ILLEGAL_RE
 
 logger = logging.getLogger(__name__)
 
@@ -455,13 +456,10 @@ def org_code_evidence(column: str, samples: list[Cell], known: KnownOrgCodes | N
 _FOREIGN_SCRIPT = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
-_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")  # 저장(NUL)·엑셀(XML)에 쓸 수 없는 글자
-
-
 def clean_reason(text: str) -> str:
     """모델이 만든 근거 문장 다듬기 — 다른 문자 체계 뒤는 자르고, 저장·엑셀에 쓸 수 없는 제어 문자는 지운다 (원본 값이
     아니라 모델 출력이라 지워도 된다 — 남기면 원본 파일에 없는 글자 때문에 검토가 거절된다)."""
-    text = _CONTROL_CHARS.sub("", text)
+    text = ILLEGAL_RE.sub("", text)
     match = _FOREIGN_SCRIPT.search(text)
     if match:
         text = text[: match.start()]
