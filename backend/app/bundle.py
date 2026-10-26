@@ -1073,7 +1073,8 @@ def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
     except Exception as exc:
         # 응답·실행 기록·서버 기록 모두 원문 없이 — 예외 종류와 실행 번호만 (app/failures.py)
         log_failure(logger, "bundle", run.id, exc)
-        reason = failure_reason(exc, (BundleError, runlease.RunError))
+        # HTTPException은 원본 읽기(load_parsed)가 앱 문구로 낸 것 — 읽기 차례 없음(다시 시도)·원본 없음·읽기 실패
+        reason = failure_reason(exc, (BundleError, runlease.RunError, HTTPException))
         try:
             runlease.fail(db, run, tmp_path, f"{reason} [{BUNDLE_FAILED}]", start_summary)
         except runlease.RunDone:

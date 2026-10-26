@@ -358,8 +358,11 @@ def create_session(
     _check_item_values(items, targets)
     # 여기부터 기록 — 한 트랜잭션 (중간에 실패하면 호출한 쪽이 모두 되돌린다)
     for fid, inputs in ruled.items():
-        if inputs:
-            save_decisions(db, engine, fid, inputs, learn=False, commit=False)
+        # 규칙은 확정이 없던 열에만 — 검사하는 동안 누가 확정한 열은 덮지 않는다 (검사 기준과 달라 '다시 검사'로 드러남)
+        now = load_decisions(db, fid)
+        fresh = [d for d in inputs if d.column not in now.get(d.sheet, {})]
+        if fresh:
+            save_decisions(db, engine, fid, fresh, learn=False, commit=False)
     run = save_run(db, json.dumps(params, ensure_ascii=False), result, user_id, commit=False)
     # 검사 기준: 이 검사에 적용한 매핑 (검토 대상 + 전월 비교 자료) — 완료·통합 전에 지금 매핑과 비교한다
     basis = build_basis(
@@ -390,25 +393,54 @@ def create_session(
 def _check_item_values(items: list[ReviewItem], targets: list[_Loaded]) -> None:
     """검토 항목에 저장할 글자(칸 값·이전/이후 값·사유)에 NUL이 있으면 아무것도 쓰기 전에 거절한다 — PostgreSQL은 NUL이
     든 글자를 받지 않고(500) SQLite는 저장한다. 값은 지우거나 바꾸지 않는다 (같은 값을 다시 찾는 키로도 쓰임).
-    이름(파일·시트·열)은 check_files가 먼저 본다. 문구에는 위치만 (값 원문 없음)."""
+    이름(파일·시트·열)은 check_files가 먼저 본다. 문구에는 위치만 (값 원문 없음). 여러 파일을 묶은 기관·지역 이름
+    확인 항목은 파일 번호가 없어 그 값이 든 칸을 찾아 알리고, 필수 기관(검토 조건 — 사용자가 넣은 값)은 조건을 고치라고
+    알린다."""
     sheets = {(t.record.id, s.name): s for t in targets for s in t.parsed.sheets}
     places: list[str] = []
+    condition = False
     for item in items:
         if not any(v and NUL in v for v in (item.before, item.after, item.reason)):
             continue
-        parts = [f"파일 #{item.file_id}"] if item.file_id is not None else []
-        sheet = sheets.get((item.file_id or 0, item.sheet or ""))
-        if sheet is not None:
-            column = sheet.columns.index(item.column) if item.column in sheet.columns else None
-            parts += [sheet_place(sheet), cell_place(sheet, item.row, column)]
-        places.append(" · ".join(p for p in parts if p) or "검토 항목")
-    if places:
+        if item.kind == "required_entity_missing":
+            condition = True
+            continue
+        if item.file_id is not None:
+            parts = [f"파일 #{item.file_id}"]
+            sheet = sheets.get((item.file_id, item.sheet or ""))
+            if sheet is not None:
+                column = sheet.columns.index(item.column) if item.column in sheet.columns else None
+                parts += [sheet_place(sheet), cell_place(sheet, item.row, column)]
+            places.append(" · ".join(p for p in parts if p))
+        else:
+            places += _cells_holding(targets, item.before) or ["검토 항목"]
+    if places or condition:
+        fixes = []
+        if places:
+            fixes.append("원본 파일에서 그 칸의 NUL 문자를 지운 뒤 다시 올리세요")
+        if condition:
+            places.insert(0, "검토 조건 '필수 기관'")
+            fixes.append("필수 기관 조건에서 NUL 문자를 지운 뒤 검토를 다시 만드세요")
         unique = list(dict.fromkeys(places))
         shown = " / ".join(unique[:3]) + (f" 외 {len(unique) - 3}곳" if len(unique) > 3 else "")
         raise ReviewNameError(
-            f"검토를 만들지 않았습니다 — 저장할 값에 NUL(0x00) 문자가 있습니다: {shown}. "
-            f"원본 파일에서 그 칸의 NUL 문자를 지운 뒤 다시 올리세요. [{VALUE_HAS_NUL}]"
+            f"검토를 만들지 않았습니다 — 저장할 값에 NUL(0x00) 문자가 있습니다: {shown}. {' · '.join(fixes)}. "
+            f"[{VALUE_HAS_NUL}]"
         )
+
+
+def _cells_holding(targets: list[_Loaded], value: str | None) -> list[str]:
+    """그 값이 든 칸의 위치 (거절 문구용 — 값은 쓰지 않음). 값이 없거나 찾지 못하면 빈 목록."""
+    if not value:
+        return []
+    return [
+        f"파일 #{t.record.id} · {sheet_place(s)} · {cell_place(s, entry['row'], j)}"
+        for t in targets
+        for s in t.parsed.sheets
+        for entry in s.body
+        for j, cell in enumerate(entry["cells"])
+        if cell == value
+    ]
 
 
 def _item(category: str, kind: str, reason: str, *, source: str = "rule", **fields: Any) -> ReviewItem:

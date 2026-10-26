@@ -30,6 +30,7 @@ from app.models import (
     PromotionCandidate,
     ReviewItem,
     RunChange,
+    SourceFile,
     StandardTerm,
 )
 from app.pii import column_letter
@@ -45,7 +46,9 @@ COLUMN_MAX = _limit(
     MappingDecision.__table__.c.column_name, ReviewItem.__table__.c.column, RunChange.__table__.c.source_column
 )
 LABEL_MAX = RunChange.__table__.c.column.type.length  # 결과 파일의 열 이름 (변경 기록)
-FILE_NAME_MAX = _limit(ReviewItem.__table__.c.file_name, RunChange.__table__.c.file_name)
+FILE_NAME_MAX = _limit(
+    SourceFile.__table__.c.original_name, ReviewItem.__table__.c.file_name, RunChange.__table__.c.file_name
+)
 # 학습·승격: 정규화한 키와 사용자가 본 이름 (키는 NFKC 정규화로 원래 이름보다 길어질 수 있다 — '㍿' 1자 → 4자)
 LEARN_KEY_MAX = _limit(
     LearnedAlias.__table__.c.normalized,

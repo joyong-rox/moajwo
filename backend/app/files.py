@@ -18,8 +18,10 @@ from app.decisions import DecisionInput, load_decisions, load_learned, load_org_
 from app.mapping import get_engine
 from app.models import MappingAnalysis, SourceFile
 from app.name_limits import (
+    FILE_NAME_MAX,
     HAS_NUL,
     NUL,
+    TOO_LONG,
     NameNotStorable,
     column_place,
     refusal,
@@ -113,6 +115,12 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
     if NUL in name:  # 파일 이름은 그대로 저장한다 — NUL은 PostgreSQL이 받지 않으므로 두 DB에서 같게 저장 전에 거절
         error = f"파일 이름에 NUL(0x00) 문자가 있어 올리지 않았습니다 — 이름을 바꿔 다시 올리세요. [{HAS_NUL}]"
         return UploadResultOut(original_name=name.replace(NUL, ""), error=error)
+    if len(name) > FILE_NAME_MAX:  # 자르지 않는다 — 두 DB에서 같게 저장 전에 거절 (이름 원문은 문구에 넣지 않음)
+        error = (
+            f"파일 이름이 {len(name):,}자로 저장 한도 {FILE_NAME_MAX}자를 넘어 올리지 않았습니다 — 이름을 줄여 다시 "
+            f"올리세요. [{TOO_LONG}]"
+        )
+        return UploadResultOut(original_name=name, error=error)
 
     try:
         stored = store_original(upload.file, ext)
