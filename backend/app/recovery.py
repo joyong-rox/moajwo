@@ -113,14 +113,23 @@ def _kst(value: datetime | None) -> datetime:
     return (_aware(value) or datetime.now(UTC)).astimezone(KST)
 
 
+KEYJOIN_START_KEYS = ("mode", "mode_label", "policy", "request_id", "basis", "scope", "inputs", "input_count")
+
+
 def _start_summary(summary: str | None) -> str:
-    """실패로 돌릴 때 요약을 시작 때 값으로 (묶기는 방식·요약 여부, 통합은 빈 요약 — 결과 내용은 남기지 않는다)."""
+    """실패로 돌릴 때 요약을 시작 때 값으로 (묶기는 방식·요약 여부, key 연결은 방식·요청 번호·범위 — 결과 내용은 남기지
+    않는다, 통합은 빈 요약)."""
     try:
         s = json.loads(summary or "{}")
     except ValueError:
         return "{}"
     if isinstance(s, dict) and s.get("mode") == "sheets":
         return json.dumps({"mode": "sheets", "stats_summary": s.get("stats_summary")})
+    if isinstance(s, dict) and s.get("mode") == "keyjoin":
+        inputs = s.get("inputs")
+        start = {k: s.get(k) for k in KEYJOIN_START_KEYS}
+        start["inputs"] = len(inputs) if isinstance(inputs, list) else inputs  # 완료 요약의 입력 목록은 개수로
+        return json.dumps(start, ensure_ascii=False)
     return "{}"
 
 

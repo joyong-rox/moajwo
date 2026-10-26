@@ -12,6 +12,10 @@ D. (사례마다 새 컨테이너, 예산 30만 칸) D1 묶기+묶기 동시 · 
 E. 최종 Render 권장값(결과 글자 3,200만·결과 차례 1개·읽기 차례 1개)에서 남은 경계: E1 칸마다 다른 긴 한글 여러 파일(묶기·
    통합 허용·초과 거절·거절 뒤 다음 정상 요청) · E2 결과 한 건(통합, 예산 바로 아래) + 큰 xlsx 올리기를 같은 순간에 · E3A~C
    읽기 차례를 기다리는 요청 — 파일 셋을 읽는 검토 생성(A)·큰 업로드(B)를 따로, 그리고 겹쳐(C) 잰다.
+K. 공통 key 연결(/keyjoin, docs/MEMORY.md '공통 key 연결'): K1 6행 합성 4파일 plan→run→download를 cold/warm으로 · K2 큰 key 인덱스(기준
+   20,000/28,000/29,000행 + 입력 3 × 3,000행 — 칸 예산 바로 아래/위)·긴 값(500행 × 5열 × 2,000자 × 2/3/4파일 — 글자 예산)·다수 열
+   (49열 × 4입력 × 500/1,000행 — 인덱스 가중) · K3 생성(예산 바로 아래) + 큰 xlsx 올리기 같은 순간, plan 중 plan(둘째 503) · KL1 로컬
+   기본 한도(1GiB·100만 칸)에서 기준 95,000(허용)/100,000(거절)행. 거절은 ready False·run 409·잔여 0을 기록한다.
 중단 기준: 컨테이너가 죽으면(B에서) 더 큰 단계는 하지 않는다. 합성 자료만 쓴다. 비밀번호는 실행 때 만들고 출력하지 않는다.
 사용법: python3 output_memory.py <A|B> <backend 주소> <컨테이너 이름> <합성 파일 폴더> <출력 폴더>
 """
@@ -647,6 +651,106 @@ def part_e3c(c: Client) -> None:
     _small_ok(c, "E3C")
 
 
+# ---------------------------------------------------------------- 부분 K — 공통 key 연결 (app/keyjoin.py)
+KJ_SMALL = ["kj_a.csv", "kj_b.csv", "kj_c.csv", "kj_d.csv"]
+
+
+def _kj_body(fids: list[int], scope: str = "base", picks: int = 1) -> dict:
+    """모든 입력의 첫 열(c0)이 key, 그다음 picks개 열을 가져온다. 기준 입력은 첫 파일."""
+    inputs = [{"file_id": f, "sheet_id": "s0", "key_columns": ["c0"],
+               "columns": [{"column_id": f"c{j}"} for j in range(1, picks + 1)]} for f in fids]  # fmt: skip
+    return {"inputs": inputs, "scope": scope, "base": {"file_id": fids[0], "sheet_id": "s0"}}
+
+
+def keyjoin(c: Client, label: str, fids: list[int], scope: str = "base", picks: int = 1) -> int:
+    """연결 확인(plan) → 만들기(run) → 내려받기. 확인에서 막히면(한도 등) run을 보내 409와 잔여 없음을 기록한다."""
+    body = _kj_body(fids, scope, picks)
+    t = time.monotonic()
+    s, plan = c.call("POST", "/keyjoin/plan", body)
+    plan_ms = round((time.monotonic() - t) * 1000)
+    ok = s == 200 and isinstance(plan, dict)
+    info = {"result": plan.get("result"), "budget": plan.get("budget")} if ok else {"raw": str(plan)[:160]}
+    if not ok or not plan.get("ready"):
+        problems = [p.get("text") for p in plan.get("problems", [])][:2] if ok else None
+        basis = plan.get("basis", "x" * 16) if ok else "x" * 16
+        run_body = {**body, "expected_basis": basis, "request_id": secrets.token_hex(16)}
+        rs, run = c.call("POST", "/keyjoin/run", run_body) if ok else (None, None)
+        log(case=label, kind="keyjoin", plan=s, ready=False, problems=problems, run=rs,
+            run_detail=str(run)[:160] if run else None, plan_ms=plan_ms, **info, **mem(), state=state())  # fmt: skip
+        return 409
+    t = time.monotonic()
+    s, run = c.call("POST", "/keyjoin/run", {**body, "expected_basis": plan["basis"], "request_id": secrets.token_hex(16)})
+    ms = round((time.monotonic() - t) * 1000)
+    size = None
+    if s == 201:
+        ds, raw = c.call("GET", f"/runs/{run['id']}/download")
+        size = len(raw) if ds == 200 and isinstance(raw, bytes) else f"download {ds}"
+    log(case=label, kind="keyjoin", status=s, ms=ms, plan_ms=plan_ms, bytes=size,
+        detail=None if s == 201 else str(run)[:160], **info, **mem(), state=state())  # fmt: skip
+    return s
+
+
+def part_k1(c: Client) -> None:
+    """6행 합성 4파일: 처음(cold — 파일을 읽어 file_info·인덱스) → 같은 요청 다시(warm — file_info 캐시 적중, 인덱스는 다시) → 세 범위."""
+    fids = upload(c, KJ_SMALL, confirm=False)
+    keyjoin(c, "K1 공통 key 연결 6행 4파일 (cold)", fids)
+    keyjoin(c, "K1 같은 요청 다시 (warm — file_info 캐시 적중)", fids)
+    keyjoin(c, "K1 all 범위", fids, "all")
+    keyjoin(c, "K1 common 범위", fids, "common")
+
+
+def part_k2(c: Client) -> None:
+    """큰 key 인덱스·긴 값·다수 열을 칸·글자 예산 바로 아래/위로 (Render 권장 30만 칸·3,200만 자 — 값은 docs/MEMORY.md 표)."""
+    ins = upload(c, [f"kj_in_{i}.csv" for i in range(3)], confirm=False)
+    for n in (20000, 28000, 29000):  # 결과 칸 n × 10 + 104, 인덱스 18,000 → 28,000은 298,104(바로 아래), 29,000은 308,104(위)
+        base = upload(c, [f"kj_base_{n}.csv"], confirm=False)
+        keyjoin(c, f"K2 큰 key 기준 {n:,}행 + 입력 3 × 3,000행", base + ins)
+        if not alive():
+            return
+    long = upload(c, [f"kj_long_{i}.csv" for i in range(4)], confirm=False)
+    for n in (2, 3, 4):  # 글자 추정 n × 500 × 5 × 2,000 × 2(TEXT_WEIGHT): 3파일 3,000만(안), 4파일 4,000만(위)
+        keyjoin(c, f"K2 긴 값 500행 × 5열 × 2,000자 × {n}파일", long[:n], picks=5)
+        if not alive():
+            return
+    for rows in (500, 1000):  # 결과 열 1 + 196, 인덱스 3 × rows × 50: 500행 176,104(안), 1,000행 352,104(위)
+        wide = upload(c, [f"kj_wide{rows}_{i}.csv" for i in range(4)], confirm=False)
+        keyjoin(c, f"K2 다수 열 49열 × 4입력 × {rows:,}행", wide, picks=49)
+        if not alive():
+            return
+    _small_ok(c, "K2")
+
+
+def part_k3(c: Client) -> None:
+    """생성(예산 바로 아래) + 큰 xlsx(풀었을 때 14.8MiB) 올리기를 같은 순간에, 그리고 plan 중 plan (둘째는 503 output_busy)."""
+    ins = upload(c, [f"kj_in_{i}.csv" for i in range(3)], confirm=False)
+    base = upload(c, ["kj_base_28000.csv"], confirm=False)
+    body = _kj_body(base + ins)
+    s, plan = c.call("POST", "/keyjoin/plan", body)
+    ok = s == 200 and isinstance(plan, dict)
+    log(case="K3 준비", plan=s, ready=plan.get("ready") if ok else None, budget=plan.get("budget") if ok else None, **mem())
+    if not ok or not plan.get("ready"):
+        return
+    run_body = {**body, "expected_basis": plan["basis"], "request_id": secrets.token_hex(16)}
+    res = _together({"key 연결 28,000행 (예산 바로 아래)": ("POST", "/keyjoin/run", run_body),
+                     "큰 xlsx 올리기": ("UPLOAD", "/files", [FILES / "x_big.xlsx"])})  # fmt: skip
+    log(case="K3 key 연결 + 큰 xlsx 올리기 동시", results=res, **mem(), state=state())
+    if not alive():
+        return
+    res = _together({"plan 1": ("POST", "/keyjoin/plan", body), "plan 2": ("POST", "/keyjoin/plan", body)})
+    log(case="K3 plan 중 plan (둘째는 503 output_busy)", results=res, **mem(), state=state())
+    _small_ok(c, "K3")
+
+
+def part_kl1(c: Client) -> None:
+    """로컬 기본 한도(1GiB 컨테이너, 100만 칸): 기준 95,000행(968,104칸 — 허용) / 100,000행(1,018,104칸 — 거절)."""
+    ins = upload(c, [f"kj_in_{i}.csv" for i in range(3)], confirm=False)
+    for n in (95000, 100000):
+        base = upload(c, [f"kj_base_{n}.csv"], confirm=False)
+        keyjoin(c, f"KL1 로컬 기본 한도 기준 {n:,}행 + 입력 3 × 3,000행", base + ins)
+        if not alive():
+            return
+
+
 MAIN = Client()
 
 
@@ -665,7 +769,7 @@ def main() -> None:
         {"A": part_a, "B": part_b, "C": part_c, "D1": part_d1, "D2": part_d2, "D3": part_d3, "D4": part_d4,
          "D5": part_d5, "D6": part_d6, "D7": part_d7, "D3L": part_d3l, "D8": part_d8, "D9": part_d9,
          "A3": lambda cl: part_a(cl, 15), "D12": part_d12, "E1": part_e1, "E2": part_e2, "E3A": part_e3a,
-         "E3B": part_e3b, "E3C": part_e3c}[PART](c)  # fmt: skip
+         "E3B": part_e3b, "E3C": part_e3c, "K1": part_k1, "K2": part_k2, "K3": part_k3, "KL1": part_kl1}[PART](c)  # fmt: skip
     except _Done:
         pass
     except RuntimeError as exc:

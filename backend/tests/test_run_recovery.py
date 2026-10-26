@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -258,12 +259,29 @@ def _bundle_ready(c: httpx.Client, tag: str) -> dict[str, Any]:
     return {"file_ids": [fid], "expected_basis": plan["basis"]}
 
 
-def _start(c: httpx.Client, body: dict[str, Any]) -> tuple[threading.Thread, dict[str, Any]]:
+def _keyjoin_ready(c: httpx.Client, tag: str) -> dict[str, Any]:
+    """공통 key 연결 요청 본문 (확인 끝, request_id 포함) — 두 파일을 사번으로."""
+    fids = []
+    for name, rows in (
+        ("a", [["사번", "부서"], ["001", "총무"], ["002", "기획"]]),
+        ("b", [["사번", "건수"], ["001", 10]]),
+    ):
+        up = c.post("/files", files=[("files", (f"{tag}-{name}.xlsx", _xlsx(rows, f"{tag}{name}"), XLSX))])
+        assert up.status_code == 200, up.text
+        fids.append(up.json()[0]["id"])
+    inputs = [{"file_id": f, "sheet_id": "s0", "key_columns": ["c0"], "columns": [{"column_id": "c1"}]} for f in fids]
+    body = {"inputs": inputs, "scope": "base", "base": {"file_id": fids[0], "sheet_id": "s0"}}
+    plan = c.post("/keyjoin/plan", json=body).json()
+    assert plan["ready"], plan
+    return {**body, "expected_basis": plan["basis"], "request_id": uuid.uuid4().hex}
+
+
+def _start(c: httpx.Client, body: dict[str, Any], path: str = "/bundle/run") -> tuple[threading.Thread, dict[str, Any]]:
     out: dict[str, Any] = {}
 
     def go() -> None:
         try:
-            out["res"] = c.post("/bundle/run", json=body)
+            out["res"] = c.post(path, json=body)
         except httpx.HTTPError as exc:  # 그 서버를 강제 종료한 경우
             out["error"] = exc
 
@@ -404,6 +422,32 @@ def test_killed_server_only_its_run_and_temp_are_cleaned(stack: Stack) -> None:
     assert out2["res"].status_code == 201, out2["res"].text
     assert stack.row(alive_id)["status"] == "done"
     t1.join(1)
+
+
+def test_killed_keyjoin_run_is_failed_and_its_record_keeps_the_mode(stack: Stack) -> None:
+    """공통 key 연결 실행 중(임시 파일 저장 뒤·준비 전) 담당 프로세스를 강제 종료 → 재기동 정리가 '실패'로 두고 그 임시
+    파일을 지운다. 실패 기록의 요약은 시작 값(방식 keyjoin·요청 번호·범위·입력 수)이라 실행 기록에서 'key 취합'으로
+    남는다."""
+    a = stack.server("a")
+    ca = a.client()
+    _owner(ca)
+    body = _keyjoin_ready(ca, "kj")
+    a.pause_at("saved")
+    t, _ = _start(ca, body, "/keyjoin/run")
+    a.wait_paused()
+    (run_id,) = stack.running()
+    temps = _temps(stack.data)
+    assert temps and json.loads(stack.row(run_id)["summary"])["mode"] == "keyjoin"
+    a.kill()
+    stack.server("b")
+    row = stack.row(run_id)
+    assert row["status"] == "failed" and "결과 파일은 저장되지 않았습니다" in (row["error"] or ""), row
+    assert row["output_path"] is None and row["output_sha256"] is None and row["changes"] == 0
+    assert not (temps & _temps(stack.data)), "죽은 담당의 임시 파일이 남았다"
+    summary = json.loads(row["summary"])
+    assert summary["mode"] == "keyjoin" and summary["request_id"] == body["request_id"] and summary["scope"] == "base"
+    assert summary["inputs"] == 2 and "header" not in summary and "basis" in summary
+    t.join(1)
 
 
 def test_killed_after_rename_is_completed_from_the_saved_file(stack: Stack) -> None:

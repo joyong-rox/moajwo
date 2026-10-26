@@ -21,6 +21,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/mapping', label: '열 매핑', roles: ALL, inMenu: true },
   { path: '/mapping/common', label: '공통 항목 검토', roles: ALL, inMenu: false },
   { path: '/bundle', label: '파일별 시트로 묶기', roles: ALL, inMenu: false },
+  { path: '/keyjoin', label: '공통 key로 연결하기', roles: ALL, inMenu: false },
   // '열 매핑 분석'(열 이름 → 표준 항목)과 구분되게 화면 목적을 이름에 적는다
   { path: '/analysis', label: '데이터 통계 분석', roles: ALL, inMenu: true },
   { path: '/dictionary', label: '사전 관리', roles: OWNER, inMenu: true },

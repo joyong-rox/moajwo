@@ -447,6 +447,30 @@ def test_limits_warn_and_never_truncate(bd, monkeypatch) -> None:
     assert res.status_code == 409
 
 
+def test_file_info_extension_for_keyjoin_keeps_the_bundle_plan_and_basis_unchanged(bd) -> None:
+    """공통 key 연결용으로 SheetInfo에 열 이름·열 문자·시트 순번·열별 글자 수를 더했다 — 묶기의 계획 응답 모양·basis는
+    그대로다 (새 필드는 응답에 나가지 않고, 같은 구성은 같은 basis)."""
+    from app import bundle
+    from app.db import SessionLocal
+    from app.models import SourceFile
+
+    u = bd["bd-user1"]
+    fids = _four(u, "snap", confirm=False)
+    plan1, plan2 = _plan(u, {"file_ids": fids}), _plan(u, {"file_ids": fids})
+    assert plan1 == plan2 and len(plan1["basis"]) == 64
+    assert set(plan1["sheets"][0]) == {"file_id", "file_name", "sheet_id", "sheet", "name", "renamed", "rows", "kinds",
+                                       "empty_rows", "title_rows", "two_level_header", "columns", "formula_missing",
+                                       "formula_cached", "formula_checked", "long_numbers"}  # fmt: skip
+    assert set(plan1["files"][0]["sheets"][0]) == {"sheet_id", "sheet", "rows", "columns"}
+    assert plan1["sheets"][0]["columns"] == 3  # 열 수는 예전처럼 개수 (이름 목록이 아님)
+    with SessionLocal() as db:
+        info = bundle.file_info(db, db.get(SourceFile, fids[0]))
+    (s,) = info.sheets
+    assert (s.column_names, s.source_columns, s.tab) == (HEAD, [0, 1, 2], 0)
+    assert s.column_chars == [len("서울특별시") * 2, len("종로구") + len("용산구"), 0]  # 데이터 행의 글자 칸만
+    assert s.text_chars == sum(len(h) for h in HEAD) + s.column_chars[0] + s.column_chars[1]
+
+
 def test_runs_list_shows_bundle_mode_and_existing_requests_keep_old_behaviour(bd) -> None:
     u = bd["bd-user1"]
     fids = _four(u, "list", confirm=False)
