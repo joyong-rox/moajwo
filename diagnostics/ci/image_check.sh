@@ -171,19 +171,21 @@ tls_case() {  # tls_case <이름> <서버 인증서 파일> <키> <설명> → �
     -v "$RT/trust.pem:/etc/ssl/certs/ca-certificates.crt:ro" moajwo-frontend-render:check > /dev/null
   for _ in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18082/ && break; sleep 1; done
   local code err hit
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18082/api/health?case=$name"); sleep 1
-  code="$code/$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18082/api/health?case=$name")"   # 다시 시도도 같은 결과여야
-  err=$(docker logs render-chain 2>&1 | grep -iE 'upstream SSL|certificate|verify|handshake' | sed -E 's/^[^ ]+ [^ ]+ //' | cut -c1-160 | tail -1)
-  hit=$(docker logs backend 2>&1 | grep -c "case=$name")   # backend 접근 기록에 그 경로가 있으면 요청이 전달된 것
+  # 경로를 경우마다 다르게 둔다 — backend 접근 기록은 경로만 남기므로(쿼리는 남기지 않음) 그 경로가 기록에 있으면 요청이 전달된 것.
+  # 전달되면 backend가 404로 답하고(없는 경로), 검증에 실패하면 앞단이 502로 끝내 backend에 닿지 않는다.
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18082/api/tlscase-$name"); sleep 1
+  code="$code/$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18082/api/tlscase-$name")"   # 다시 시도도 같은 결과여야
+  err=$(docker logs render-chain 2>&1 | grep '\[error\]' | grep -iE 'upstream SSL|certificate|verify|handshake' | sed -E 's/^[^ ]+ [^ ]+ //' | cut -c1-160 | tail -1)
+  hit=$(docker logs backend 2>&1 | grep -c "tlscase-$name")
   res "tls_$name" "$code · backend 도달 $hit · ${err:-오류 기록 없음}" "$why"
   docker rm -f render-chain api-tls > /dev/null
 }
-tls_case trusted      good-chain.crt good.key       "신뢰 CA + 올바른 서버 이름 → 200/200, backend 도달 2"
+tls_case trusted      good-chain.crt good.key       "신뢰 CA + 올바른 서버 이름 → 404/404(backend가 답함), backend 도달 2"
 tls_case untrusted    untrusted.crt  untrusted.key  "신뢰하지 않는 CA(자체 서명) → 502/502, 도달 0, verify 실패"
 tls_case expired      expired-chain.crt expired.key "만료 인증서 → 502/502, 도달 0"
 tls_case wrongname    wrongname-chain.crt wrongname.key "서버 이름 불일치 → 502/502, 도달 0"
 tls_case nointer      good.crt       good.key       "필수 중간 인증서 누락(서버 인증서만 보냄) → 502/502, 도달 0"
-tls_case recovered    good-chain.crt good.key       "정상 체인으로 복구 → 200/200 (검증을 끄지 않고 복구)"
+tls_case recovered    good-chain.crt good.key       "정상 체인으로 복구 → 404/404, 도달 2 (검증을 끄지 않고 복구)"
 
 # 복구된 체인으로 기존 흐름(로그인·쿠키·보안 헤더·업로드·내려받기)이 그대로인지 — 앞단은 시험 뿌리 CA 묶음으로
 printf 'server { listen 443 ssl; ssl_certificate /t/good-chain.crt; ssl_certificate_key /t/good.key;\n  location / { proxy_pass http://backend:8000; } }\n' > "$RT/tls.conf"
@@ -222,11 +224,12 @@ pubcase() {  # pubcase <이름> <호스트> <설명>
   sleep 2
   local code err kind
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 40 http://127.0.0.1:18083/)
-  err=$(docker logs pub 2>&1 | grep -iE 'upstream SSL|certificate|verify|resolve|timed out|connect\(\)' | sed -E 's/^[^ ]+ [^ ]+ //' | cut -c1-200 | tail -1)
+  err=$(docker logs pub 2>&1 | grep '\[error\]' | grep -iE 'upstream SSL|certificate|verify|resolve|timed out|connect\(\)' | sed -E 's/^[^ ]+ [^ ]+ //' | cut -c1-200 | tail -1)
   case "$err" in
     *verify*|*certificate*) kind="verify 실패";;
     *resolve*|*"timed out"*|*"connect()"*) kind="연결·DNS 문제 (인증서 거절로 세지 않음 — 미검증)";;
-    *) kind="오류 기록 없음";;
+    "") [ "$code" = 200 ] && kind="연결됨(오류 없음)" || kind="오류 기록 없음";;
+    *) kind="그 밖의 오류";;
   esac
   res "pub_$name" "$code · $kind · ${err:-}" "$why"
   docker rm -f pub > /dev/null
@@ -236,15 +239,36 @@ pubcase emudhra-g3b dv-g3b-emudhra.we-have-a-problem.com "손상된 eMudhra 체�
 pubcase emudhra-g3b-aaa dv-g3b-aaa-emudhra.we-have-a-problem.com "손상된 eMudhra 체인 (다른 중간) → verify 실패·502이어야"
 pubcase control example.com "대조군 — 정상 공개 체인 → 200 (연결이 되는 러너인지)"
 
+# backend 이미지의 실제 HTTP 클라이언트(urllib + OS CA 묶음 — 앱이 Ollama에 쓰는 것과 같은 경로)로 같은 호스트에: 검증 실패여야 한다
+pubpy() {  # pubpy <이름> <호스트> <설명>
+  local out kind
+  out=$(docker run --rm moajwo-backend:check python -c "import urllib.request
+try:
+    r = urllib.request.urlopen('https://$2/', timeout=25); print('status', r.status)
+except Exception as e:
+    print(type(e).__name__, str(e)[:160])" 2>&1 | tail -1)
+  case "$out" in
+    *CERTIFICATE_VERIFY_FAILED*) kind="verify 실패";;
+    status*) kind="연결됨";;
+    *) kind="그 밖(연결·DNS — 인증서 거절로 세지 않음)";;
+  esac
+  res "pubpy_$1" "$kind · $out" "$3"
+}
+pubpy emudhra-g3b dv-g3b-emudhra.we-have-a-problem.com "backend python urllib(OS CA): 손상된 eMudhra 체인 → CERTIFICATE_VERIFY_FAILED 이어야"
+pubpy emudhra-g3b-aaa dv-g3b-aaa-emudhra.we-have-a-problem.com "backend python urllib(OS CA): 다른 중간 → CERTIFICATE_VERIFY_FAILED 이어야"
+pubpy control example.com "backend python urllib(OS CA): 대조군 → status 200"
+
 # 신뢰 저장소 조사: 최종 이미지의 OS CA 묶음에 emSign·eMudhra 이름의 인증서가 남았는지(0이어야), 묶음 크기, 패키지 판
 for n in frontend-render backend; do
   docker run --rm --entrypoint cat "moajwo-$n:check" /etc/ssl/certs/ca-certificates.crt > "$OUT/ca-bundle-$n.pem" 2>/dev/null
   SUBJ=$(openssl crl2pkcs7 -nocrl -certfile "$OUT/ca-bundle-$n.pem" 2>/dev/null | openssl pkcs7 -print_certs -noout 2>/dev/null | grep '^subject')
-  res "ca_bundle_$n" "인증서 $(echo "$SUBJ" | grep -c .)개 · emSign/eMudhra $(echo "$SUBJ" | grep -ciE 'emsign|emudhra')개 · sha256 $(sha256sum "$OUT/ca-bundle-$n.pem" | cut -c1-16)" "OS CA 묶음 /etc/ssl/certs/ca-certificates.crt"
+  res "ca_bundle_$n" "인증서 $(echo "$SUBJ" | grep -c .)개 · emSign/eMudhra $(echo "$SUBJ" | grep -ciE 'emsign|emudhra')개 [$(echo "$SUBJ" | grep -iE 'emsign|emudhra' | sed -E 's/.*CN *= *//' | tr '\n' ';')] · sha256 $(sha256sum "$OUT/ca-bundle-$n.pem" | cut -c1-16)" \
+    "OS CA 묶음 /etc/ssl/certs/ca-certificates.crt — 손상된 중간 인증서를 서명한 'emSign ECC Root CA - G3'가 없어야 함 (Mozilla NSS 3.131.1 제거 대상; G1은 그대로 신뢰)"
 done
 res ca_pkg_frontend-render "$(grep -E '^ca-certificates' "$OUT/apk-frontend-render.txt" | tr '\n' ' ')" "Alpine ca-certificates 패키지 판 (기반: $(grep -E '^ca-certificates' "$OUT/apk-base-nginx.txt" | tr '\n' ' '))"
 res ca_pkg_backend "$(docker run --rm --entrypoint dpkg-query moajwo-backend:check -W -f '${Package} ${Version}' ca-certificates 2>/dev/null)" "Debian ca-certificates 패키지 판"
-res build_versions "$(grep -hoE 'node root certificates [0-9]+ emSign/eMudhra [0-9]+|^#[0-9]+ [0-9.]+ (v[0-9.]+|[0-9]+\.[0-9]+\.[0-9]+)$|pip [0-9.]+ from|pip-vendored certifi [0-9.]+|Python 3\.[0-9.]+|ca-certificates [0-9+a-z~.]+' "$OUT"/build-frontend-render.log "$OUT"/build-backend.log | sed -E 's/^#[0-9]+ [0-9.]+ //' | sort -u | tr '\n' ' ')" "빌드 기록의 node·npm·뿌리 인증서 수·python·pip·pip 내장 certifi·Debian ca-certificates"
+res build_versions "$(grep -hoE 'node root certificates [0-9]+ emSign/eMudhra [0-9]+|^#[0-9]+ [0-9.]+ (v[0-9.]+|[0-9]+\.[0-9]+\.[0-9]+)\s*$|pip [0-9.]+ from|pip-vendored certifi [0-9.]+|Python 3\.[0-9.]+|^#[0-9]+ [0-9.]+ ca-certificates [0-9+a-z~.]+' "$OUT"/build-frontend.log "$OUT"/build-frontend-render.log "$OUT"/build-backend.log | sed -E 's/^#[0-9]+ [0-9.]+ //' | sort -u | tr '\n' ' ')" "빌드 기록의 node·npm·뿌리 인증서 수(emSign/eMudhra 0이어야)·python·pip·pip 내장 certifi·Debian ca-certificates"
+res build_cache "$(for n in backend frontend frontend-render; do printf '%s CACHED=%s ' "$n" "$(grep -c '^#[0-9]* CACHED' "$OUT/build-$n.log")"; done)" "빌드 단계의 이전 레이어 재사용 수 (새 러너라 frontend-render의 빌드 단계만 같은 run의 frontend 빌드와 공유)"
 rm -rf "$RT"
 
 # ---------------------------------------------------------------- 메모리 제한 컨테이너의 읽기 한도 (Render 무료와 같은 512MiB)
