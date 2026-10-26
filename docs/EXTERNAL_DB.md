@@ -227,7 +227,7 @@ python -m app.dbcopy --source sqlite:///<원천 파일> --target-env <주소가 
 
 - **대상 주소 입력 — 비밀번호를 명령 인자에 두지 않음:** 서비스 주소(3-1의 서비스 파일·비밀번호 파일) 또는 `--target-env`(환경 변수에서 읽음), 둘 중 하나만. 비밀번호가 든 `--target` 주소도 호환으로 동작하지만 DB에 닿기 전에 stderr로 경고하고, 보고에는 주소 없이 `target_input`과 `target_secret_in_args`(참·거짓)만 남깁니다.
 - 기본은 확인만 합니다 (dry-run — 쓰지 않음): 두 DB가 최신 리비전인지, 원천 스냅숏 무결성, 표별 건수, 대상이 비었는지, 시간대 출처 확인이 필요한 실행 기록 후보, 대상 열 길이를 넘는 원천 값, NUL(0x00)이 든 원천 글자.
-- **원천 값 검사 (확인만·적용 모두 같은 '확인' 단계 — 쓰기 전):** 대상 열 길이(varchar n)를 넘는 값(보고 `too_long_values` — 표·열·한도·건수·가장 긴 글자 수·정수 행 번호)이나 NUL(0x00)이 든 글자(보고 `nul_values` — 표·열·건수·가장 긴 바이트 수·정수 행 번호, 길이 제한이 없는 Text 열 포함)가 하나라도 있으면 멈춥니다 (종료 1, 대상 표·시퀀스 그대로). SQLite는 길이를 강제하지 않고 NUL도 저장하지만 PostgreSQL은 둘 다 저장하지 못합니다. SQLite의 `length()`는 NUL 앞까지만 세므로(NUL 뒤가 긴 값도 짧게 보임) NUL은 바이트로 따로 찾습니다. 값을 자르거나 NUL을 지워서 옮기지 않습니다 — 원천 사본을 고칠지·스키마를 넓힐지는 소유자가 정합니다. 문자열 기본 키 표(`app_settings`)는 키가 원문이라 건수만 남깁니다. 시간대 출처 후보와 함께 있으면 모두 보고에 채운 뒤 한 번에 멈춥니다.
+- **원천 값 검사 (확인만·적용 모두 같은 '확인' 단계 — 쓰기 전):** 대상 열 길이(varchar n)를 넘는 값(보고 `too_long_values` — 표·열·한도·건수·가장 긴 글자 수·정수 행 번호)이나 NUL(0x00)이 든 글자(보고 `nul_values` — 표·열·건수·정수 행 번호, 길이 제한이 없는 Text 열 포함)가 하나라도 있으면 멈춥니다 (종료 1, 대상 표·시퀀스 그대로). NUL이 든 값은 글자 수를 셀 수 없어, 길이 제한이 있는 열은 한도(`limit`)와 바이트 수가 한도를 넘는 행 수(`length_unverified` — NUL을 지운 뒤에도 길이를 넘을 수 있는 행)를 함께 남깁니다 (UTF-8에서 글자 수 ≤ 바이트 수라 나머지 행은 한도 안). SQLite는 길이를 강제하지 않고 NUL도 저장하지만 PostgreSQL은 둘 다 저장하지 못합니다. SQLite의 `length()`는 NUL 앞까지만 세므로(NUL 뒤가 긴 값도 짧게 보임) NUL은 바이트로 따로 찾습니다. 값을 자르거나 NUL을 지워서 옮기지 않습니다 — 원천 사본을 고칠지·스키마를 넓힐지는 소유자가 정합니다. 문자열 기본 키 표(`app_settings`)는 키가 원문이라 건수만 남깁니다. 시간대 출처 후보와 함께 있으면 모두 보고에 채운 뒤 한 번에 멈춥니다. 원천 SQLite의 글자 인코딩이 UTF-8이 아니면(`PRAGMA encoding`, 보고 `source_encoding`) 이 검사들 전에 그 이유로 멈춥니다 — 바이트로 찾는 NUL 검사가 UTF-16에서는 NUL이 없는 값도 잡기 때문입니다 (앱·alembic이 만든 DB는 UTF-8).
 - **원천 보호:** 원천 파일은 읽기 전용으로만 엽니다. SQLite 백업 API로 임시 스냅숏(한 시점)을 만들고 무결성을 검사한 뒤 스냅숏에서 읽습니다. 스냅숏 해시와 원천 파일 해시(앞뒤 — 바뀌지 않았음)를 보고에 남깁니다. 읽기 전용 연결만으로 일관성이 보장된다고 보지 않습니다.
 - **보고 파일:** 원천 DB·저널·WAL·SHM과 같은 파일(상대 경로·대소문자·하드링크·심볼릭 링크 포함)이면 DB를 열기 전에 거절합니다. 이미 있는 파일은 이 도구의 보고서일 때만 바꾸고(백업 자료 등은 거절), 같은 폴더의 임시 파일에 다 쓴 뒤 교체합니다. 보고 위치에 쓸 수 없으면 DB에 닿기 전에 멈춥니다.
 - `--apply`는 트랜잭션 하나: 이관 잠금(이 도구·마이그레이션끼리) → 모든 표 ACCESS EXCLUSIVE 잠금(앱 요청은 잠금 대기 제한 뒤 503 '바쁨') → **잠금 안에서** 리비전·대상이 비었는지 다시 확인 → 복사 → 시퀀스 `ALTER SEQUENCE … RESTART`(트랜잭션과 함께 되돌려짐 — `setval`은 rollback으로 되돌아가지 않아 쓰지 않음) → 표별 건수·내용 해시·시퀀스 비교 → 이관 표시(`app_settings.dbcopy_applied`) → 커밋 → 새 연결로 다시 읽어 확인.
@@ -259,7 +259,7 @@ python -m app.dbcopy --source sqlite:///<원천 파일> --target-env <주소가 
 3. 사용자 PC에 서비스 파일·비밀번호 파일(3-1): `moajwo-migrate`(직접 연결·소유 계정), `moajwo-app`(연결 풀러·앱 계정).
 4. 직접 연결·소유 계정으로 마이그레이션: `DATABASE_URL=postgresql:///?service=moajwo-migrate`, `MOAJWO_DB_MODE=external`로 `python -m alembic upgrade head` (3-1).
 5. **같은 DB 확인:** `python -m app.dbcheck --app-service moajwo-app --migration-service moajwo-migrate` → 종료 0, `"result": "same"`. 종료 1(다름)이면 전환하지 않고 두 주소(프로젝트·분기·DB 이름)를 다시 확인합니다. Render에 넣을 `DATABASE_URL`·`MOAJWO_MIGRATION_DATABASE_URL`과 같은 값(호스트·계정·DB)인지도 확인합니다.
-6. (A) 원천 확보(8-1) → `app.dbcopy` dry-run(`tz_unverified_runs: 0` 확인) → `--apply --report backups/external-db/<시각>/dbcopy-report.json` → 7장 백업을 받아 다른 빈 DB로 **복원 확인**.
+6. (A) 원천 확보(8-1) → `app.dbcopy` dry-run(`too_long_values`·`nul_values`가 빈 목록, `tz_unverified_runs: 0`, `source_encoding: UTF-8` 확인) → `--apply --report backups/external-db/<시각>/dbcopy-report.json` → 7장 백업을 받아 다른 빈 DB로 **복원 확인**.
    (B) 이관하지 않습니다 — 빈 DB 그대로 (`setup_required: true`가 정상).
 7. **Render 설정 읽기 확인 (바꾸지 않음):** 웹·API 서비스마다 Settings의 Auto-Deploy 방식, 연결 브랜치, Dockerfile 경로·빌드 문맥을 대시보드에서 읽어 기록합니다. 이 값으로 '승인된 배포 방법'(병합 / 수동 배포)을 정합니다:
    - **On Commit**(새 서비스 기본): 연결 브랜치에 병합·푸시하는 순간 재배포됩니다 (그 재배포도 SQLite를 지움).
@@ -306,7 +306,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 1. 경로 결정 — (A) 기존 계정 이관 / (B) 새 계정 등록, 그 이유
 2. Neon 프로젝트(`moajwo-test`)·지역·PostgreSQL 판(17), 무료 조건을 확인한 날짜(2장)
 3. (A) 원천 스냅숏 식별자·sha256·보호 시점(원천 쓰기를 멈춘 시각)·보관 위치
-4. (A) `app.dbcopy` 보고 — dry-run과 적용(`dbcopy-report.json`: 표별 건수·내용 해시·`tz_unverified_runs`·`target_secret_in_args`)
+4. (A) `app.dbcopy` 보고 — dry-run과 적용(`dbcopy-report.json`: 표별 건수·내용 해시·`too_long_values`·`nul_values`·`tz_unverified_runs`·`source_encoding`·`target_secret_in_args`)
 5. (A) 7장 복원 확인 결과 — 다른 빈 DB, 로그인·건수·내용 해시, 원본 DB 그대로
 6. 같은 DB 확인(`app.dbcheck`) 출력 — `result: same`, 앱 쪽·마이그레이션 쪽 계정 이름
 7. 최종 앱 SHA·이미지, Render 환경 변수 저장 방식("Save only")과 승인된 배포 방법 — 준비 7단계의 Render 설정 읽기 확인 결과(웹·API의 Auto-Deploy 방식·연결 브랜치·Dockerfile 경로)
