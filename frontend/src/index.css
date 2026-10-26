@@ -4077,7 +4077,8 @@ button.wk-card:hover {
 }
 
 /* 분석 표: 넘칠 때만 초점을 받는 스크롤 영역 (Analysis.tsx TableRegion) */
-.an .upload-table-wrap[tabindex]:focus-visible {
+.an .upload-table-wrap[tabindex]:focus-visible,
+.keyjoin .upload-table-wrap[tabindex]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -5588,6 +5589,22 @@ ul.bd-item-problems,
   white-space: normal;
   vertical-align: top;
   overflow-wrap: anywhere;
+}
+
+/* 좁은 폭(320·390px): 단계 fieldset은 그리드라 결과 묶음(div)·표 래퍼가 표의 최소 폭(열당 5em)만큼 넓어져 페이지 밖으로
+   삐져나왔다. 그리드 칸과 항목의 최소 폭을 0으로 두고 표 래퍼는 자기 폭 안에서만 가로 스크롤하게 한다 (화면 확인 9·10번) */
+.keyjoin .an-step {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.keyjoin .an-step > *,
+.keyjoin .kj-input > * {
+  min-width: 0;
+}
+
+.keyjoin .upload-table-wrap {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .kj-preview th,

@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import math
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
@@ -59,7 +60,7 @@ from app.files import get_file_for, load_parsed
 from app.integration import KST, OUTPUT_DIR
 from app.models import IntegrationRun, SourceFile
 from app.name_limits import cell_place, sheet_place
-from app.parsing import MISSING_MARKERS, SheetResult
+from app.parsing import MISSING_MARKERS, SheetResult, is_subtotal_label
 from app.pii import mask_cell, mask_rrn_number, mask_text
 from app.validation_api import pii_out
 from app.xmltext import has_illegal, printable
@@ -156,7 +157,7 @@ class ColumnIn(BaseModel):
 class InputIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    file_id: int
+    file_id: int = Field(ge=1, le=2**63 - 1)  # 정수 범위 밖은 422 (DB에 닿아 500이 되지 않게)
     sheet_id: str = Field(pattern=r"^s\d{1,3}$")
     key_columns: list[Annotated[str, Field(pattern=r"^c\d{1,4}$")]] = Field(min_length=1, max_length=MAX_KEY_COLUMNS)
     columns: list[ColumnIn] = Field(default_factory=list, max_length=MAX_PICK_COLUMNS)
@@ -165,7 +166,7 @@ class InputIn(BaseModel):
 class BaseRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    file_id: int
+    file_id: int = Field(ge=1, le=2**63 - 1)  # 정수 범위 밖은 422 (DB에 닿아 500이 되지 않게)
     sheet_id: str = Field(pattern=r"^s\d{1,3}$")
 
 
@@ -194,8 +195,8 @@ def _name_code(name: str) -> str | None:
     """사용자가 적은 결과 이름의 형식 오류 코드 (없으면 None). 원문은 문구에 넣지 않는다."""
     if has_illegal(name):  # NUL 포함 — SQLite·PostgreSQL에서 같게, 저장 전에
         return "KEYJOIN_NAME_ILLEGAL"
-    if not name.strip():
-        return "KEYJOIN_NAME_BLANK"
+    if not name.strip() or all(unicodedata.category(ch) in ("Zs", "Cf", "Cc") for ch in name):
+        return "KEYJOIN_NAME_BLANK"  # 공백·폭 0 서식 문자(U+200B·U+FEFF 등)만으로 된 이름도 빈 이름
     if len(name) > OUT_NAME_MAX:
         return "KEYJOIN_NAME_TOO_LONG"
     return None
@@ -382,6 +383,7 @@ class KeyIndex:
     rejects: dict[str, _Rows] = field(default_factory=dict)  # 차단 코드 → 행
     value_illegal: _Rows = field(default_factory=_Rows)
     value_illegal_cells: list[tuple[int, int]] = field(default_factory=list)  # (행, 열) 처음 몇 개
+    value_filled: _Rows = field(default_factory=_Rows)  # 가져올 열의 병합 채움 칸 (파서가 위·왼쪽 값으로 채운 칸)
     kinds: list[dict[str, int]] = field(default_factory=list)  # key 열별 칸 종류 수
     int_keys: set[Key] = field(default_factory=set)  # 정수 칸에서 온 key (글자 key와의 연결 수 셈용)
     skipped: dict[str, _Rows] = field(default_factory=dict)  # subtotal · note
@@ -421,8 +423,9 @@ def analyze_input(
         if kind != "data":
             if kind == "empty":
                 ix.empty_rows += 1
-            else:
-                ix.skipped.setdefault(kind, _Rows()).add(entry["row"])
+            else:  # 소계로 본 칸의 열을 함께 둔다 — 선택하지 않은 열의 값으로 판정될 수도 있어 경고에 알린다
+                j = next((i for i, c in enumerate(entry["cells"]) if is_subtotal_label(c)), None)
+                ix.skipped.setdefault(kind, _Rows()).add(entry["row"], j if kind == "subtotal" else None)
             continue
         ix.data_rows += 1
         original, cells, row = entry["original"], entry["cells"], entry["row"]
@@ -470,6 +473,8 @@ def _row_values(
         original = originals[j] if j < len(originals) else None
         if isinstance(original, datetime | date):
             value = original  # 날짜는 원본 형식 그대로 (파서가 글자로 바꾼 값 대신)
+        elif original is None and value is not None:  # 병합으로 채워진 칸 — 앱이 읽은 대로 두되 세어 알린다
+            ix.value_filled.add(row, j)
         if formulas and _gap(entry, j, source, formulas) == "missing":
             ix.formula_missing += 1
             out.append(GAP)
@@ -682,7 +687,15 @@ def _cheap_checks(db: Session, user: CurrentUser, req: KeyJoinIn) -> tuple[list[
         record, info = records[fid], infos[fid]
         own = record.uploaded_by == user.id or (record.uploaded_by is None and user.is_manager)
         found = pii_out(record)
-        ip = InputPlan(n, item, record, info, None, own, _pii_state(record), found.model_dump() if found else None)
+        summary = found.model_dump() if found else None
+        if summary:  # 탐지 항목의 시트 이름도 다른 이름처럼 가린다 (형식은 파일 목록과 같음)
+            summary["items"] = [
+                {**it, "sheet": mask_text(it["sheet"])}
+                if isinstance(it, dict) and isinstance(it.get("sheet"), str)
+                else it
+                for it in summary.get("items") or []
+            ]
+        ip = InputPlan(n, item, record, info, None, own, _pii_state(record), summary)
         inputs.append(ip)
         if not own:
             text = f"{ip.where()}: 다른 사용자의 파일이라 연결할 수 없습니다 (본인 파일만 — 남의 파일은 조회만)."
@@ -838,7 +851,8 @@ def _file_warnings(inputs: list[InputPlan]) -> list[Problem]:
 def build_plan(db: Session, user: CurrentUser, req: KeyJoinIn, keep_values: bool = False) -> Plan:
     """요청한 구성으로 입력·결과 열·한도·key 문제·미리보기를 판정한다 (파일·DB를 쓰지 않음). 실행도 같은 함수로 다시
     판정한다 (keep_values=True — 결과를 만들 값까지 둔다). 싼 검사(권한·개인정보·시트·열·예산·이름)에서 하나라도
-    차단되면 파일을 읽지 않는다 (keys: null)."""
+    차단되면 key 분석을 하지 않는다 (keys: null) — 다만 file_info가 기억한 개수가 없는(처음 보는·캐시에서 밀린) 파일은
+    개수를 세려고 한 번 읽는다."""
     check_request(req)
     inputs, problems = _cheap_checks(db, user, req)
     base = next(ip for ip in inputs if (ip.file_id, ip.req.sheet_id) == (req.base.file_id, req.base.sheet_id))
@@ -927,7 +941,10 @@ def _analyze(db: Session, plan: Plan, keep_values: bool) -> None:
     out_cells = len(out_keys) * (k + picked + 1 + n) + SUMMARY_LINES + SUMMARY_PER_INPUT * n
     weighted = out_cells + math.ceil(INDEX_WEIGHT * index_cells)
     plan.budget.update(output_cells=out_cells, index_cells=index_cells, cells_weighted=weighted)
-    plan.preview = _preview(plan, _masked_numbers(plan, extra))
+    # 가림 충돌 경고는 확인·만들기 모두(요약 시트의 '주의'가 화면과 같게), 미리보기·가림 구분 번호는 확인(plan)에만
+    numbers = _masked_numbers(plan, extra, number=not keep_values)
+    if not keep_values:
+        plan.preview = _preview(plan, numbers)
 
 
 def _input_problems(plan: Plan, ws_map: dict[Key, set[Key]]) -> None:
@@ -963,19 +980,34 @@ def _input_problems(plan: Plan, ws_map: dict[Key, set[Key]]) -> None:
             problem = _block(VALUE_ILLEGAL, text, column=ip.letter(j), rows=list(ix.value_illegal.first),
                              count=ix.value_illegal.count)  # fmt: skip
             plan.problems.append(ip.add(problem))
+        if ix.value_filled.count:
+            r = ix.value_filled
+            j = r.column if r.column is not None else ip.pick_ids[0]
+            text = (
+                f"{ip.where(j)}: 가져올 열의 병합 칸 {r.count}칸({_rows_text(r.first)})은 앱이 읽은 대로 위(왼쪽) 칸의 "
+                "값을 채워 넣습니다 — 원본 빈 칸으로 두려면 원본에서 병합을 풀고 다시 올리세요."
+            )
+            problem = _warn("KEYJOIN_VALUE_FILLED", text, column=ip.letter(j), rows=list(r.first), count=r.count)
+            plan.problems.append(ip.add(problem))
         if ix.skipped:
             parts = []
+            column = None
             for kind, label in (("subtotal", "소계·합계"), ("note", "주석")):
                 r = ix.skipped.get(kind)
                 if r is not None:
-                    parts.append(f"{label} 행 {r.count}행({_rows_text(r.first)})")
+                    part = f"{label} 행 {r.count}행({_rows_text(r.first)})"
+                    if r.column is not None:  # 처음 행에서 소계로 본 칸의 열 — 선택하지 않은 열일 수 있다
+                        column = ip.letter(r.column)
+                        part += f", 판정 칸 {column}열"
+                    parts.append(part)
             rows = sorted(x for r in ix.skipped.values() for x in r.first)[:PROBLEM_ROWS]
             text = (
-                f"{ip.where()}: {' · '.join(parts)}은 데이터 행이 아니라 연결하지 않습니다 — '계'·'합계'처럼 보이는 "
-                "값의 행도 여기에 들어가니 행 번호를 확인하세요."
+                f"{ip.where()}: {' · '.join(parts)}은 데이터 행이 아니라 연결하지 않습니다 — 선택하지 않은 열을 포함해 "
+                "어느 칸이든 '계'·'합계'처럼 보이는 값이 있는 행도 여기에 들어가니 행 번호를 확인하세요."
             )
             count = sum(r.count for r in ix.skipped.values())
-            plan.problems.append(ip.add(_warn("KEYJOIN_NONDATA_ROWS_SKIPPED", text, rows=rows, count=count)))
+            problem = _warn("KEYJOIN_NONDATA_ROWS_SKIPPED", text, column=column, rows=rows, count=count)
+            plan.problems.append(ip.add(problem))
         for pos, kinds in enumerate(ix.kinds):
             if kinds["int"] and kinds["text"]:
                 j = ip.key_ids[pos]
@@ -1037,7 +1069,7 @@ def _masked_key(key: Key) -> Key:
     return tuple(mask_text(p) for p in key)
 
 
-def _masked_numbers(plan: Plan, extra: set[Key]) -> dict[Key, int]:
+def _masked_numbers(plan: Plan, extra: set[Key], number: bool = True) -> dict[Key, int]:
     """가린 표시가 같은 서로 다른 key → 처음 나온 순서의 번호 (미리보기에만 붙인다). 원문·해시는 두지 않는다."""
     bix = plan.base.ix
     assert bix is not None and plan.out_keys is not None
@@ -1055,6 +1087,8 @@ def _masked_numbers(plan: Plan, extra: set[Key]) -> dict[Key, int]:
         f"'({MASKED_NO} n)'을 붙입니다 (결과 파일에는 원래 key)."
     )
     plan.problems.append(_warn("KEYJOIN_MASKED_COLLISION", text, count=len(colliding)))
+    if not number:  # 번호는 미리보기에만 쓴다 — run은 결과 행 전체를 다시 가리지 않는다
+        return numbers
     seen: dict[Key, int] = {}
     for k in plan.out_keys:
         m = _masked_key(k)
@@ -1152,7 +1186,9 @@ def _write_result(ws: Any, plan: Plan) -> None:
                     c.fill = GAP_FILL
                     c.comment = Comment("원본의 수식 결과값이 저장돼 있지 않아 비워 둠 (0으로 채우지 않음)", "Moajwo")
                 else:
-                    _put(ws, r, col, v)
+                    c = _put(ws, r, col, v)
+                    if isinstance(v, str):
+                        c.data_type = "s"  # '#N/A'·'#REF!' 같은 글자도 오류 칸이 아니라 글자 그대로
                 col += 1
     for j, name in enumerate(plan.header, start=1):
         ws.column_dimensions[get_column_letter(j)].width = min(40, max(8, len(str(name)) * 2 + 2))
@@ -1225,7 +1261,9 @@ def _write_summary(ws: Any, plan: Plan, run_id: int, processed_at: str) -> None:
     row += 1
     for note in (
         "key 열은 글자 형식입니다 (Excel이 '숫자가 텍스트로 저장됨'을 표시할 수 있음 — 선행 0·자릿수 보존).",
-        "미연결·원본 빈 칸은 빈 칸입니다 (0 아님). 실제 0은 0입니다.",
+        "미연결·원본 빈 칸은 빈 칸입니다 (0 아님). 실제 0은 0입니다. 가져온 열의 병합 칸은 앱이 읽은 대로 "
+        "위(왼쪽) 칸의 값을 채웠습니다 (칸 수는 '주의' 줄).",
+        "'='로 시작하는 글자와 '#N/A' 같은 오류 코드 모양의 글자는 수식·오류 칸이 아니라 글자 그대로입니다.",
         f"{EXCEL_DIGITS + 1}자리 이상 정수 값은 자릿수를 지키려고 글자로 씁니다.",
         "선택하지 않은 열은 어느 시트에도 넣지 않습니다.",
         "key 원문·셀 값은 이 시트에 없습니다 (연결 결과 시트에만).",

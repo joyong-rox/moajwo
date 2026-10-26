@@ -1,7 +1,7 @@
 """접근성 수동 확인 보조 — 실제 브라우저(Edge)에서 키보드만으로 조작하고 초점·재배치·확대·간격·대상 크기·상태 메시지를 기록한다.
 
 판정은 기록과 캡처를 사람이(이번에는 검토자가 캡처·기록을 보고) 내린다. 스크린리더 낭독 확인은 이 스크립트로 대신하지 않는다.
-사용법: python a11y_manual.py <출력 폴더> [검사 이름,...]   (검사: keyboard, dialog, analysis, bundle, upload, reflow, zoom, authforms, spacing, target, status, login)
+사용법: python a11y_manual.py <출력 폴더> [검사 이름,...]   (검사: keyboard, dialog, analysis, bundle, upload, keyjoin, reflow, zoom, authforms, spacing, target, status, login)
 """
 
 import io
@@ -13,7 +13,7 @@ from pathlib import Path
 import openpyxl
 from playwright.sync_api import Page, sync_playwright
 
-from diag_common import EV, URL, USERS, creds
+from diag_common import EV, URL, USERS, XLSX, Api, creds, xlsx
 from diag_scope import browser_proxy, route_guard
 
 OUT = Path(sys.argv[1])
@@ -318,6 +318,81 @@ def check_upload(pg: Page) -> None:
     pg.screenshot(path=str(OUT / "kb-upload-after.png"), full_page=True)
 
 
+KJ_STATUS = "section.keyjoin p.kj-status[role=status]"
+KJ_ACTIVE_LABEL = "() => { const a = document.activeElement; return a ? (a.getAttribute('aria-label') || a.innerText || '').trim() : '' }"
+
+
+def tab_until_label(pg: Page, pred, n: int = 120, key: str = "Tab") -> str | None:
+    """초점 요소의 전체 aria-label(또는 글자)로 찾는다 — focus()의 이름은 50자에서 잘려 긴 라벨을 구분하지 못한다."""
+    for _ in range(n):
+        pg.keyboard.press(key)
+        label = pg.evaluate(KJ_ACTIVE_LABEL)
+        if label and pred(label):
+            return label
+    return None
+
+
+def check_keyjoin(pg: Page) -> None:
+    """공통 key 연결(/keyjoin): 키보드만으로 key 열(화살표)·가져올 열(Space)·범위(화살표)·연결 확인·만들기(Enter)를 지나고,
+    확인 중·만들기 중 초점이 그대로인지, role=status 한 곳의 글자가 단계마다 어떻게 바뀌는지, 파일을 뺀 뒤 초점이 어디로 가는지
+    기록한다 (합성 파일 2개를 이 계정으로 올린다 — 판정은 기록을 보고)."""
+    kb_login(pg, "user1")
+    api = Api().login("user1")
+    a = api.upload("key연결_a.xlsx", xlsx({"현황": [["사번", "부서", "비고"], ["001", "총무", "a1"], ["002", "기획", "a2"]]}), XLSX)[1][0]["id"]
+    b = api.upload("key연결_b.xlsx", xlsx({"현황": [["사용자번호", "교육 건수", "비고"], ["001", 10, "b1"], ["003", 30, "b3"]]}), XLSX)[1][0]["id"]
+    pg.goto(URL + f"/keyjoin?files={a},{b}")
+    settle(pg)
+    pg.locator("section.keyjoin select[aria-label$=' key 열']").nth(1).wait_for(timeout=60000)
+    pg.evaluate(f"""() => {{ const el = document.querySelector('{KJ_STATUS}'); window.__kj = []
+      new MutationObserver(() => window.__kj.push(el.textContent)).observe(el, {{ childList: true, characterData: true, subtree: true }}) }}""")
+    rec("keyjoin", {"step": "열기", "files": 2, "live": pg.evaluate(LIVE_JS), "status_count": pg.locator("section.keyjoin [role=status]").count()})
+    for n in (1, 2):
+        s = tab_until_label(pg, lambda x, n=n: x.startswith(f"입력 {n} ") and x.endswith(" key 열"))
+        pg.keyboard.press("ArrowDown")
+        value = pg.evaluate("() => document.activeElement.value")
+        c = tab_until_label(pg, lambda x, n=n: x.startswith(f"입력 {n} ") and " B열 " in x and x.endswith(" 결과에 넣기"))
+        pg.keyboard.press("Space")
+        rec("keyjoin", {"step": f"입력 {n}: key 열 ArrowDown → 가져올 열 Space", "key_select": s, "key_value": value, "checkbox": c,
+                        "checked": pg.evaluate("() => document.activeElement.checked"), "focus": focus(pg)})  # fmt: skip
+    r = press_until(pg, lambda f: f["type"] == "radio" and "기준 파일의 사용자만" in (f["name"] or ""), 80)
+    pg.keyboard.press("ArrowDown")
+    pg.keyboard.press("ArrowUp")
+    rec("keyjoin", {"step": "범위 라디오 ArrowDown·ArrowUp", "reached": r and r["name"], "checked_label": pg.evaluate(KJ_ACTIVE_LABEL) or (focus(pg) or {}).get("name")})
+    chk = tab_until_label(pg, lambda x: x.startswith("연결 확인"))
+    before = focus(pg)
+    with pg.expect_response(lambda res: res.url.endswith("/api/keyjoin/plan"), timeout=120000):
+        pg.keyboard.press("Enter")
+    during = {"focus": focus(pg), "aria_disabled": pg.evaluate("() => document.activeElement.getAttribute('aria-disabled')"),
+              "busy": pg.locator("section.keyjoin fieldset[aria-busy=true]").count()}  # fmt: skip
+    pg.wait_for_function(f"() => !document.querySelector('{KJ_STATUS}').textContent.includes('확인하는 중')", timeout=60000)
+    rec("keyjoin", {"step": "연결 확인 Enter", "button": chk, "focus_before": before, "during": during, "focus_after": focus(pg),
+                    "same_element": pg.evaluate("() => document.activeElement && document.activeElement.textContent.includes('연결 확인')"),
+                    "status_sequence": pg.evaluate("() => window.__kj"), "alerts": pg.evaluate(LIVE_JS)})  # fmt: skip
+    pg.screenshot(path=str(OUT / "kb-keyjoin-plan.png"), full_page=True)
+    mk = tab_until_label(pg, lambda x: x.startswith("엑셀 만들기"))
+    before = focus(pg)
+    with pg.expect_response(lambda res: res.url.endswith("/api/keyjoin/run"), timeout=120000) as ri:
+        pg.keyboard.press("Enter")
+    pg.wait_for_selector("section.keyjoin .bd-made", timeout=60000)
+    rec("keyjoin", {"step": "엑셀 만들기 Enter", "button": mk, "status_code": ri.value.status, "focus_before": before, "focus_after": focus(pg),
+                    "status_now": pg.locator(KJ_STATUS).inner_text().strip()[:120], "made": pg.locator("section.keyjoin .bd-made").inner_text().strip()[:160]})  # fmt: skip
+    dl = tab_until_label(pg, lambda x: x == "내려받기")
+    if dl:
+        with pg.expect_download(timeout=60000) as d:
+            pg.keyboard.press("Enter")
+        rec("keyjoin", {"step": "내려받기 Enter", "file": d.value.suggested_filename, "focus_after": focus(pg)})
+    # 파일 빼기: Shift+Tab으로 둘째 파일의 '이 파일 빼기'까지 거슬러 올라가 Enter — 제품은 초점을 옮기지 않는다 (사라진 단추 → body)
+    rm = tab_until_label(pg, lambda x: x == "이 파일 빼기", 160, "Shift+Tab")
+    y0 = pg.evaluate("() => window.scrollY")
+    pg.keyboard.press("Enter")
+    pg.wait_for_timeout(800)
+    pg.keyboard.press("Tab")
+    rec("keyjoin", {"step": "파일 빼기 Enter", "reached": rm, "url_after": pg.evaluate("() => location.search"), "scroll_same": pg.evaluate("() => window.scrollY") == y0,
+                    "inputs_left": pg.locator("section.keyjoin select[aria-label$=' key 열']").count(), "next_tab_focus": focus(pg),
+                    "status_now": pg.locator(KJ_STATUS).inner_text().strip()[:120]})  # fmt: skip
+    pg.screenshot(path=str(OUT / "kb-keyjoin-end.png"), full_page=True)
+
+
 REFLOW_PAGES = [("login", None, "/"), ("home", "user1", "/"), ("mapping", "user1", f"/mapping?file={IDS['user1']['long']}"),
                 ("reviews", "user1", "/reviews"), ("review-detail", "user1", f"/reviews?review={IDS['user1_review']}"),
                 ("runs", "user1", "/runs"), ("bundle", "user1", f"/bundle?files={IDS['user1']['basic']},{IDS['user1']['many']}"),
@@ -537,7 +612,7 @@ def main() -> None:
             return cx, cx.new_page()
 
         for name, fn in (("keyboard", check_keyboard_nav), ("dialog", check_dialog), ("analysis", check_analysis),
-                         ("bundle", check_bundle), ("upload", check_upload)):  # fmt: skip
+                         ("bundle", check_bundle), ("upload", check_upload), ("keyjoin", check_keyjoin)):  # fmt: skip
             if ONLY and name not in ONLY:
                 continue
             cx, pg = fresh()

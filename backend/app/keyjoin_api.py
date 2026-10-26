@@ -2,6 +2,7 @@
 실행 기록·내려받기는 기존 /runs*, 시트·열 목록은 기존 GET /files/{id}/preview를 쓴다."""
 
 import json
+import threading
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -11,11 +12,30 @@ from sqlalchemy.orm import Session
 from app.auth import CurrentUser, CurrentUserDep
 from app.db import get_session
 from app.integration_api import RunOut, runs_out
-from app.keyjoin import MODE, REQUEST_LOOKBACK, KeyJoinError, KeyJoinIn, KeyJoinRunIn, build_plan, make
+from app.keyjoin import (
+    MODE,
+    REQUEST_LOOKBACK,
+    KeyJoinError,
+    KeyJoinIn,
+    KeyJoinRunIn,
+    build_plan,
+    check_request,
+    make,
+)
 from app.models import IntegrationRun
-from app.output_slot import output_slot
+from app.output_slot import OutputBusy, output_slot
 
 router = APIRouter(prefix="/keyjoin", tags=["keyjoin"])
+
+# 이 프로세스에서 만드는 중인 (사용자, 요청 번호). 같은 번호의 동시 둘째는 차례 수와 상관없이 시작하지 않는다 —
+# 차례가 2개 이상이면 둘 다 '같은 번호 없음'을 읽고 실행·파일을 둘 만들 수 있기 때문. 다른 프로세스와는 나누지 않는다
+# (worker 여럿이면 runs의 요청 번호 고유 색인이 필요 — docs/KEYJOIN.md).
+_IN_FLIGHT: set[tuple[int, str]] = set()
+_IN_FLIGHT_LOCK = threading.Lock()
+IN_FLIGHT_BUSY = (
+    "같은 요청 번호의 결과를 이 서버가 이미 만드는 중입니다 — 먼저 보낸 요청의 응답을 기다리세요 "
+    "(이 요청은 시작하지 않았고 실행 기록·파일을 만들지 않았습니다)."
+)
 
 
 def _conflict(code: str, message: str, problems: list[str] | None = None, run_id: int | None = None) -> HTTPException:
@@ -40,9 +60,19 @@ def keyjoin_run(
     body: KeyJoinRunIn, response: Response, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep
 ) -> RunOut:
     """확인한 구성 그대로일 때만 결과 엑셀을 만든다 (201). 같은 요청 번호(request_id)의 재전송은 새로 만들지 않고
-    그 실행을 200으로 돌려준다. 결과 만들기 차례를 계획 확인부터 쥔다 — 없으면 실행 기록을 만들기 전에 OutputBusy."""
-    with output_slot():
-        return _keyjoin_run(body, response, db, user)
+    그 실행을 200으로 돌려준다. 결과 만들기 차례를 계획 확인부터 쥔다 — 없으면 실행 기록을 만들기 전에 OutputBusy.
+    같은 번호가 이 프로세스에서 만들어지는 중이면 둘째는 503(output_busy)으로 시작하지 않는다 — 실행·결과는 하나."""
+    mark = (user.id, body.request_id)
+    with _IN_FLIGHT_LOCK:
+        if mark in _IN_FLIGHT:
+            raise OutputBusy(IN_FLIGHT_BUSY)
+        _IN_FLIGHT.add(mark)
+    try:
+        with output_slot():
+            return _keyjoin_run(body, response, db, user)
+    finally:
+        with _IN_FLIGHT_LOCK:
+            _IN_FLIGHT.discard(mark)
 
 
 def _find_request(db: Session, user: CurrentUser, request_id: str) -> tuple[IntegrationRun, dict[str, Any]] | None:
@@ -59,6 +89,7 @@ def _find_request(db: Session, user: CurrentUser, request_id: str) -> tuple[Inte
 
 
 def _keyjoin_run(body: KeyJoinRunIn, response: Response, db: Session, user: CurrentUser) -> RunOut:
+    check_request(body)  # 형식 검사(파일·DB 없음)를 재전송 조회보다 먼저 — 재전송도 형식이 맞아야 200
     found = _find_request(db, user, body.request_id)  # 싼 검사 — 파싱 전
     if found is not None:
         run, summary = found
