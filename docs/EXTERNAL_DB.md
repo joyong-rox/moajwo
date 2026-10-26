@@ -35,7 +35,7 @@
 | 프로젝트 | 소유자가 관리하는 `moajwo-test` 전용 프로젝트. 같은 목적의 기존 프로젝트가 있으면 먼저 확인 |
 | DB 판 | PostgreSQL 17 |
 | 무료 조건 확인일 | 2026-10-25 (위 표). 프로젝트를 만들기 직전에 다시 확인하고 그 날짜를 승인 묶음(8-5)에 적음 |
-| 계정 | 앱 계정(`moajwo_app`, 데이터만)과 이관·마이그레이션 계정(소유 계정) 분리, TLS 검증 |
+| 계정 | 앱 계정(`moajwo_app`, 데이터만)과 이관·마이그레이션 계정(소유 계정) 분리. 연결은 TLS 암호화(`sslmode=require` — 서버 인증서·이름 **검증은 하지 않음**). 인증서 검증(`sslmode=verify-full`+`sslrootcert`, 코드 변경 없이 주소로 가능)은 전환 승인 묶음(8-5)에서 함께 결정 — `docs/SECURITY-CA-20261026.md` 5장 |
 | 비밀정보 | Render에는 소유자의 비밀정보 설정 경로(환경 변수의 비밀 값)로만, 사용자 PC에서는 서비스 파일·비밀번호 파일(3-1)로만 — 채팅·PR·로그·명령 인자·캡처에 남기지 않음 |
 | 전환 경로 | 기존 계정 이관(A) 또는 새 계정 등록(B) — 소유자가 전환 전에 정함 (8-0) |
 | 이관 원천 (A) | Render 시험 서비스에서 확보한 일관된 DB 백업 우선. 없으면 소유자가 지정한 검증된 백업 (8-1) |
@@ -324,8 +324,8 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 | `moajwo-test-web` | 모두 | `main` · `frontend/Dockerfile.render` | **바꾸지 않음** — 중복으로 보인다는 이유만으로 삭제·중지하지 않음 | 사용 여부·정리는 별도 과제 |
 
 - **health 경로를 넣은 뒤 확인:** 요청 없이 15~30분 둔 뒤 프런트·API가 멈추는지(대시보드 이벤트)와 무료 시간 사용량을 봅니다. 멈추지 않으면(확인이 요청으로 세어지는 경우 — 세 서비스가 늘 떠 있으면 750시간을 넘음) health 경로를 비워 되돌립니다. 상시 기동을 위한 요청은 넣지 않습니다.
-- 제안 프런트 이미지(`frontend/Dockerfile.render`)는 격리 러너에서 실제 Render 대신 같은 이름(`moajwo-test-api.onrender.com`)의 HTTPS 대역 API(자체 서명)를 두고 확인합니다: nginx 설정 검사, 비루트·8080, `/api/`가 그 이름으로 TLS 연결해 backend까지 가는지, 프록시를 거친 로그인·쿠키 속성, `/`·`/api/health`의 보안 헤더, 상류 인증서 검증 설정 (`diagnostics/ci/image_check.sh`). 대역 API는 SNI·Host를 따지지 않으므로 그 둘과 실제 Render 주소·인증서로는 확인하지 않았습니다.
-- **API 쪽 인증서 검증:** 지금 프런트(`Dockerfile.render-test`)와 제안 프런트(`nginx.render.conf`) 모두 `proxy_ssl_verify`를 쓰지 않아 nginx 기본값(끔)으로 API 인증서를 검증하지 않습니다 — TLS로 암호화하지만 상대가 진짜 API인지는 확인하지 않습니다. 켜려면 `proxy_ssl_verify on`과 CA 묶음(`proxy_ssl_trusted_certificate`)이 필요하고, 실제 Render 인증서 체인으로 시험해야 합니다 — 소유자 결정 사항으로 남깁니다 (이번 후보에서 바꾸지 않음).
+- 제안 프런트 이미지(`frontend/Dockerfile.render`)는 격리 러너에서 실제 Render 대신 같은 이름(`moajwo-test-api.onrender.com`)의 HTTPS 대역 API를 두고 확인합니다: nginx 설정 검사, 비루트·8080, `/api/`가 그 이름으로 TLS 연결해 backend까지 가는지, 프록시를 거친 로그인·쿠키 속성·업로드·내려받기, `/`·`/api/health`의 보안 헤더, 상류 인증서 검증 (`diagnostics/ci/image_check.sh`). 대역 API의 인증서는 시험 CA(뿌리 → 중간 → 서버)가 서명하고 앞단에는 그 뿌리만 신뢰 묶음으로 주어, 신뢰하지 않는 CA·만료·이름 불일치·중간 누락이 502로 끝나고 정상 체인으로 복구되는지까지 봅니다. 실제 Render 주소·인증서 체인으로는 확인하지 않았습니다.
+- **API 쪽 인증서 검증:** 제안 프런트(`nginx.render.conf`)는 2026-10-26부터 `proxy_ssl_verify on`(OS CA 묶음, 검증 이름 = API 호스트, 깊이 3, TLS 1.2/1.3)으로 API 인증서를 검증합니다 — 검증에 실패하면 요청을 전달하지 않고 502로 끝내며 검증을 끄는 우회는 없습니다 (`docs/SECURITY-CA-20261026.md`). 지금 사용자용 서비스(`moajwo-test`, 다른 분기의 `Dockerfile.render-test`)는 여전히 검증하지 않으므로, 전환 승인 뒤 이 이미지를 배포해야 효력이 생깁니다. 그때 API 체인이 깊이 3을 넘으면 `/api/health`가 502가 되므로 첫 배포에서 확인합니다.
 
 ### 8-4. 되돌리기 경계
 
