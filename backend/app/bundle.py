@@ -148,6 +148,11 @@ class SheetInfo:
     text_chars: int = (
         0  # 결과에 넣는 열 이름과 행(데이터·소계·주석) 칸의 글자 수 합 — 결과 글자 예산 (MAX_OUTPUT_TEXT_CHARS)
     )
+    # 공통 key 연결(app/keyjoin.py)이 파싱 없이 열을 고르고 예산을 셈하는 데 쓴다 — 묶기의 응답·basis에는 넣지 않는다
+    column_chars: list[int] = field(default_factory=list)  # 열별, 데이터 행의 글자 칸 글자 수 합
+    column_names: list[str] = field(default_factory=list)  # 원래 열 이름 (서버 안에서만)
+    source_columns: list[int] = field(default_factory=list)  # 열별 원본 시트의 열 번호 (0부터 — 열 문자 표시용)
+    tab: int = 0  # 원본 통합 문서의 시트 순번 (0부터, 건너뛴 설명 시트 포함 — 'N번째 시트')
 
 
 @dataclass
@@ -214,6 +219,7 @@ def file_info(db: Session, record: SourceFile) -> FileInfo:
         kinds = {"data": s.data_rows, "subtotal": s.subtotal_rows, "note": s.note_rows, "empty": s.empty_rows}
         missing = cached = long_numbers = 0
         text_chars = sum(len(n) for n in s.columns if isinstance(n, str))  # 결과 1행(열 이름)도 결과 글자
+        column_chars = [0] * len(s.columns)
         for entry in s.body:
             if entry["kind"] == "empty":
                 continue
@@ -224,6 +230,8 @@ def file_info(db: Session, record: SourceFile) -> FileInfo:
                 long_numbers += _long(value)
                 if isinstance(value, str):
                     text_chars += len(value)
+                    if entry["kind"] == "data" and j < len(column_chars):
+                        column_chars[j] += len(value)
         sheets.append(
             SheetInfo(
                 i,
@@ -236,6 +244,10 @@ def file_info(db: Session, record: SourceFile) -> FileInfo:
                 cached,
                 long_numbers,
                 text_chars,
+                column_chars=column_chars,
+                column_names=list(s.columns),
+                source_columns=list(s.source_columns or range(len(s.columns))),
+                tab=s.tab,
             )  # fmt: skip
         )
     info = FileInfo(record.id, record.sha256, record.original_name, Path(record.original_name).suffix.lower(), sheets,
