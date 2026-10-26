@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -723,13 +723,15 @@ def test_values_longer_than_the_target_columns_stop_the_copy(pg_env, target, tmp
 
 
 def _with_nul_values(path: Path) -> dict[str, int]:
-    """SQLite(NUL도 그대로 저장)에 NUL이 든 값을 넣는다 — varchar 열(짧은 값, NUL 뒤가 긴 값), Text 열, 문자열 기본 키
-    표. 함께 넣는 정상 값(한글 255자·끝 공백·탭·줄바꿈)은 어느 검사에도 걸리지 않아야 한다."""
+    """SQLite(NUL도 그대로 저장)에 NUL이 든 값을 넣는다 — varchar 열(짧은 값, NUL 뒤가 긴 값 — ASCII·한글, BLOB으로
+    저장된 값), Text 열, 문자열 기본 키 표. 함께 넣는 정상 값(한글 255자·끝 공백·탭·줄바꿈·NUL 없는 BLOB)은 어느
+    검사에도 걸리지 않아야 한다."""
     eng = create_engine(f"sqlite:///{path.as_posix()}")
     with Session(eng) as db:
         fid = db.query(SourceFile.id).order_by(SourceFile.id).first()[0]
-        rows = {"short": "인구\x00수", "hidden": "x\x00" + "a" * 300, "edge": "경" + "가" * 254,
-                "spaces": "끝 공백 ", "tabs": "탭\t줄\n바꿈"}  # fmt: skip
+        rows = {"short": "인구\x00수", "hidden": "x\x00" + "a" * 300, "after": "가" * 100 + "\x00" + "나" * 200,
+                "blob": b"BLOBNUL\x00x", "edge": "경" + "가" * 254, "spaces": "끝 공백 ", "tabs": "탭\t줄\n바꿈",
+                "blob_clean": b"BLOBCLEAN"}  # fmt: skip
         ids = {}
         for name, column in rows.items():
             db.execute(
@@ -748,8 +750,9 @@ def _with_nul_values(path: Path) -> dict[str, int]:
 
 def test_nul_values_are_found_apart_from_the_length_check_without_reading_them(tmp_path) -> None:
     """DB 없이: NUL이 든 원천 글자를 길이 검사와 따로 찾는다 — SQLite length()는 NUL 앞까지만 세서 'x + NUL + a 300개'
-    (302바이트)를 1자로 보므로 길이 검사로는 보이지 않는다. Text 열도 본다. 보고에는 표·열·건수·바이트 수·정수 행
-    번호만 (값·문자열 기본 키 원문 없음)."""
+    (302바이트)를 1자로 보므로 길이 검사로는 보이지 않는다. BLOB으로 저장된 값과 Text 열도 본다. NUL이 든 값은 글자 수를
+    셀 수 없어, 바이트 수가 열 한도를 넘는 행을 length_unverified로 센다 (NUL을 지운 뒤 길이 검사에 걸릴 수 있음).
+    보고에는 표·열·한도·건수·정수 행 번호만 (값·바이트 수·문자열 기본 키 원문 없음)."""
     source = tmp_path / "nul.db"
     _migrate(f"sqlite:///{source.as_posix()}")
     _fill_source(source)
@@ -759,16 +762,81 @@ def test_nul_values_are_found_apart_from_the_length_check_without_reading_them(t
         found = dbcopy._nul_values(c)
         too_long = dbcopy._too_long_values(c)
     eng.dispose()
-    assert too_long == []  # NUL 뒤가 긴 값(302바이트)도 length()로는 1자 — 길이 검사만으로는 통과했을 값
+    assert too_long == []  # NUL 뒤가 긴 값(302·901바이트)도 length()로는 1·100자 — 길이 검사만으로는 통과했을 값
     by = {(v["table"], v["column"]): v for v in found}
     assert set(by) == {("mapping_decisions", "column_name"), ("runs", "error"), ("app_settings", "value")}, found
     decisions = by[("mapping_decisions", "column_name")]
-    assert decisions["count"] == 2 and decisions["ids"] == sorted([ids["short"], ids["hidden"]]), decisions
-    assert decisions["longest_bytes"] == 302
-    assert by[("runs", "error")]["ids"] == [ids["run"]]  # 길이 제한이 없는 Text 열
-    assert "ids" not in by[("app_settings", "value")] and by[("app_settings", "value")]["count"] == 1
+    assert decisions == {"table": "mapping_decisions", "column": "column_name", "count": 4, "limit": 255,
+                         "length_unverified": 2,  # x + NUL + a 300개(302바이트)·한글 300자 + NUL(901바이트)
+                         "ids": sorted(ids[k] for k in ("short", "hidden", "after", "blob"))}  # fmt: skip
+    assert by[("runs", "error")] == {"table": "runs", "column": "error", "count": 1, "ids": [ids["run"]]}  # Text 열
+    assert by[("app_settings", "value")] == {"table": "app_settings", "column": "value", "count": 1}  # 문자열 키 표
     shown = json.dumps(found, ensure_ascii=False)
-    assert "a" * 20 not in shown and "nul_setting" not in shown and "인구" not in shown and "사유" not in shown
+    for raw in ("a" * 20, "가" * 20, "나" * 20, "nul_setting", "인구", "사유", "BLOB"):
+        assert raw not in shown, raw
+
+
+def _sqlite_target(monkeypatch: pytest.MonkeyPatch, sent: list[str]) -> None:
+    """PostgreSQL 없이 명령줄 경로(main → copy → _copy)를 돌린다: 대상만 마이그레이션한 빈 SQLite로 바꾸고(접속 인자만
+    뺌) 대상에 보낸 SQL을 모은다. '확인' 단계의 거절은 대상 리비전 조회 하나 뒤라 PostgreSQL 전용 동작에 닿지 않는다."""
+    real = dbcopy.create_engine
+
+    def engine(url: str, **kw: Any):  # noqa: ANN202
+        if not str(url).startswith("sqlite:///"):  # 원천 스냅숏은 creator로 여는 'sqlite://'
+            return real(url, **kw)
+        kw.pop("connect_args", None)
+        kw.pop("poolclass", None)
+        eng = real(url, **kw)
+        event.listen(eng, "before_cursor_execute", lambda _c, _cur, statement, *_: sent.append(statement))
+        return eng
+
+    monkeypatch.setattr(dbcopy, "_database", lambda raw, mode: ("external", raw))
+    monkeypatch.setattr(dbcopy, "create_engine", engine)
+
+
+def test_nul_values_stop_the_command_at_the_check_stage_without_postgresql(tmp_path, monkeypatch, capsys) -> None:
+    """PostgreSQL 없이(대상만 빈 SQLite): NUL이 든 원천은 확인만·적용 모두 '확인' 단계에서 멈춘다 (종료 1, 적용 안 함).
+    원천·대상 파일이 그대로이고, 대상에는 리비전 조회 하나만 갔으며, 출력에 값·키 원문이 없다."""
+    source, target = tmp_path / "nul.db", tmp_path / "target.db"
+    for p in (source, target):
+        _migrate(f"sqlite:///{p.as_posix()}")
+    _fill_source(source)
+    _with_nul_values(source)
+    before = {"source": _digest_file(source), "target": _digest_file(target)}
+    for args in ((), ("--apply",)):
+        sent: list[str] = []
+        _sqlite_target(monkeypatch, sent)
+        code, out = _run(capsys, "--source", f"sqlite:///{source.as_posix()}", "--target",
+                         f"sqlite:///{target.as_posix()}", *args)  # fmt: skip
+        assert code == dbcopy.EXIT_NOT_APPLIED and out["stage"] == "확인" and out["db_applied"] == "no", out
+        assert out["source"]["unchanged"] and out["source_encoding"] == "UTF-8", out
+        error = out["error"]
+        assert "mapping_decisions.column_name 4건" in error and "(최대 255자) 2건은" in error, error
+        assert sent == ["SELECT version_num FROM alembic_version"], sent
+        shown = json.dumps(out, ensure_ascii=False)
+        for raw in ("a" * 20, "가" * 20, "nul_setting", "인구", "사유"):
+            assert raw not in shown, raw
+    assert {"source": _digest_file(source), "target": _digest_file(target)} == before
+
+
+def test_a_source_that_is_not_utf8_stops_for_that_reason_not_as_nul(tmp_path, monkeypatch, capsys) -> None:
+    """UTF-16 원천에서는 바이트로 찾는 NUL 검사에 NUL이 없는 값('abc'·'가'·숫자)도 걸린다 — 인코딩을 이유로 '확인'
+    단계에서 먼저 멈추고 NUL로 보고하지 않는다 (앱·alembic이 만든 DB는 UTF-8)."""
+    source, target = tmp_path / "utf16.db", tmp_path / "target.db"
+    con = sqlite3.connect(source)
+    con.execute("PRAGMA encoding = 'UTF-16le'")  # 첫 표를 만들 때 정해지고 바뀌지 않는다
+    con.execute("CREATE TABLE enc (a)")
+    con.execute("DROP TABLE enc")
+    con.close()
+    for p in (source, target):
+        _migrate(f"sqlite:///{p.as_posix()}")
+    _fill_source(source)
+    sent: list[str] = []
+    _sqlite_target(monkeypatch, sent)
+    code, out = _run(capsys, "--source", f"sqlite:///{source.as_posix()}", "--target", f"sqlite:///{target.as_posix()}")
+    assert code == dbcopy.EXIT_NOT_APPLIED and out["stage"] == "확인" and out["source_encoding"] == "UTF-16le", out
+    assert "글자 인코딩이 UTF-16le" in out["error"] and "NUL" not in out["error"].split("—")[0], out["error"]
+    assert "nul_values" not in out and "too_long_values" not in out and out["source"]["unchanged"]
 
 
 @pg
@@ -778,16 +846,19 @@ def test_nul_values_stop_the_copy_before_writing(pg_env, target, tmp_path, capsy
     source = tmp_path / "nul.db"
     shutil.copy(pg_env["source"], source)
     ids = _with_nul_values(source)
-    before = _state(target)
+    before, source_hash = _state(target), _digest_file(source)
     for args in ((), ("--apply",)):
         code, out = _run(capsys, "--source", f"sqlite:///{source.as_posix()}", "--target", target, *args)
         assert code == dbcopy.EXIT_NOT_APPLIED and out["stage"] == "확인" and out["db_applied"] == "no", out
-        assert "NUL(0x00) 문자가 든 값" in out["error"] and "mapping_decisions.column_name 2건" in out["error"]
+        assert "NUL(0x00) 문자가 든 값" in out["error"] and "mapping_decisions.column_name 4건" in out["error"]
         assert "runs.error 1건" in out["error"] and "app_settings.value 1건" in out["error"]
+        assert "mapping_decisions.column_name(최대 255자) 2건은" in out["error"], out["error"]
         decisions = next(v for v in out["nul_values"] if v["column"] == "column_name")
-        assert decisions["ids"] == sorted([ids["short"], ids["hidden"]]) and out["too_long_values"] == []
+        assert decisions["ids"] == sorted(ids[k] for k in ("short", "hidden", "after", "blob"))
+        assert decisions["length_unverified"] == 2 and out["too_long_values"] == []
         assert "a" * 20 not in json.dumps(out, ensure_ascii=False) and "nul_setting" not in json.dumps(out)
-    assert _state(target) == before
+        assert out["source"]["unchanged"], out["source"]
+    assert _state(target) == before and _digest_file(source) == source_hash
 
 
 @pg
@@ -802,12 +873,13 @@ def test_length_nul_and_time_zone_problems_are_reported_together(pg_env, target,
     with con:
         con.execute("UPDATE runs SET started_at = created_at, finished_at = created_at")
     con.close()
-    before = _state(target)
+    before, source_hash = _state(target), _digest_file(source)
     for args in ((), ("--apply",)):
         code, out = _run(capsys, "--source", f"sqlite:///{source.as_posix()}", "--target", target, *args)
         assert code == dbcopy.EXIT_NOT_APPLIED and out["stage"] == "확인", out
         assert out["too_long_values"] and out["nul_values"] and out["tz_unverified_runs"] == 1, out
         assert out["error"].count(" / ") == 2  # 세 가지 문제를 한 번에
-        for part in ("대상 열 길이를 넘는 값", "NUL(0x00)", "시간대 출처"):
+        for part in ("대상 열 길이를 넘는 값", "NUL(0x00)", "NUL을 지운 뒤에도 길이를 넘을 수", "시간대 출처"):
             assert part in out["error"], out["error"]
-    assert _state(target) == before
+        assert out["source"]["unchanged"], out["source"]
+    assert _state(target) == before and _digest_file(source) == source_hash
