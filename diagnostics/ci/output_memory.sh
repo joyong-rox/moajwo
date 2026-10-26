@@ -5,6 +5,8 @@
 #  B: Render 권장 예산(MOAJWO_MAX_OUTPUT_CELLS=300000) — 한도 아래·경계·위, 통계 요약, 동시 요청, 통합
 #  C: 통계 요약 묶기·한도 가까운 통합  ·  D1~D7: 동시 생성·긴 글자·넓은 표·큰 통계 요약·분석 Excel·큰 병합 (사례마다 새 컨테이너)
 #  D3L: 로컬 기본 한도(1GiB 컨테이너)에서 공유 긴 글자  ·  D8: 결과 만들기 차례 2개(MOAJWO_OUTPUT_SLOTS=2) + 동시 큰 xlsx 올리기
+#  E1·E2·E3A~C: 최종 Render 권장값(docs/MEMORY.md 그대로 — 결과 글자 3,200만)에서 남은 경계 — E1 칸마다 다른 긴 한글 여러
+#  파일의 허용·초과·다음 정상 요청 · E2 결과 한 건(통합, 예산 바로 아래) + 큰 xlsx 올리기 · E3 읽기 차례를 기다리는 요청
 # 사용법: [IMAGE=moajwo-backend:before] [PARTS="D1 D2"] bash output_memory.sh <출력 폴더> — 이미지 기본은 moajwo-backend:check
 set -uo pipefail
 OUT=$(mkdir -p "$1" && cd "$1" && pwd)
@@ -100,10 +102,37 @@ ws.append(["시도", "시군구", "인구수"])
 for i in range(30000):
     ws.append(["서울특별시", f"시군구{i % 5000:04d}", (1000 + i) if i % 6 else "자료없음"])
 wb.save("/files/an_30k.xlsx")
+# 부분 E1·E3 — 칸마다 다른 긴 한글 (공유 문자열 없음: 실제 업무 문장처럼 낱말을 섞어 칸마다 다르게). 파일 하나 약 461만 자
+# (풀었을 때 약 10.2MiB — xlsx 16MiB·파일 글자 1,600만 한도 안), 묶기·통합 6개 ≈ 2,770만 자(예산 안) · 7개 ≈ 3,230만 자(넘음)
+import random
+ORG = ["행정안전부", "보건복지부", "국토교통부", "서울특별시", "부산광역시", "경기도", "강원특별자치도", "제주특별자치도",
+       "종로구청", "해운대구청", "수원시청", "춘천시청", "한국지역정보개발원", "국민건강보험공단", "한국토지주택공사"]
+TASK = ["주민등록 인구 통계", "지방재정 집행 현황", "공공시설 안전 점검", "복지 급여 지급 실적", "도로 정비 사업",
+        "재난 대비 훈련", "청년 일자리 지원", "노인 돌봄 서비스", "전자정부 시스템 운영", "민원 처리 실적"]
+NOTE = ["전년 대비 증가하였으며", "분기별로 집계한 결과", "현장 확인을 거쳐", "관계 기관과 협의하여", "예산 범위 안에서",
+        "자료 제출 기한을 지켜", "담당 부서의 검토를 마친 뒤", "시스템 장애 없이", "주민 의견을 반영해", "추가 확인이 필요하여"]
+END = ["정상 처리함.", "보완 요청함.", "다음 달에 다시 확인함.", "결과를 공유함.", "개선 계획을 세움.", "목표를 달성함."]
+def remark(rng, n):
+    out = []
+    while sum(len(s) for s in out) < n:
+        out.append(f"{rng.choice(ORG)} {rng.choice(TASK)} {rng.randint(1, 99999):05d}건은 {rng.choice(NOTE)} {rng.choice(END)} ")
+    return "".join(out)[:n].strip()
+for k in range(8):
+    rng = random.Random(1000 + k)
+    wb = openpyxl.Workbook(write_only=True)
+    ws = wb.create_sheet(f"d{k}")
+    ws.append(["시도", "시군구", "비고"])
+    for i in range(1125):
+        ws.append(["서울특별시", GU[i % len(GU)], f"[{k}-{i:04d}] " + remark(rng, 4090)])
+    wb.save(f"/files/dk_{k}.xlsx")
+    with zipfile.ZipFile(f"/files/dk_{k}.xlsx") as z:
+        print(f"dk_{k} unpacked MiB", round(sum(x.file_size for x in z.infolist()) / 2**20, 2))
 PY
 ls -l "$FILES" >> "$OUT/files.txt"
 # Render 권장 읽기 한도 (docs/MEMORY.md). 글자 수 한도는 수정 전 이미지에 없는 변수라 무시된다 — 같은 명령으로 둘을 잰다
 LIMITS="-e MOAJWO_MAX_UPLOAD_MIB=10 -e MOAJWO_MAX_XLSX_UNCOMPRESSED_MIB=16 -e MOAJWO_MAX_FILE_CELLS=400000 -e MOAJWO_VIEW_CACHE_MIB=32 -e MOAJWO_PARSE_SLOTS=1 -e MOAJWO_MAX_FILE_TEXT_CHARS=16000000 -e MOAJWO_MAX_OUTPUT_TEXT_CHARS=48000000"
+# 최종 Render 권장값 그대로 (docs/MEMORY.md — 9개, 결과 글자 3,200만·결과 차례 1개). E 부분은 이 값으로만 잰다
+FINAL="-e MOAJWO_MAX_UPLOAD_MIB=10 -e MOAJWO_MAX_XLSX_UNCOMPRESSED_MIB=16 -e MOAJWO_MAX_FILE_CELLS=400000 -e MOAJWO_VIEW_CACHE_MIB=32 -e MOAJWO_PARSE_SLOTS=1 -e MOAJWO_MAX_FILE_TEXT_CHARS=16000000 -e MOAJWO_MAX_OUTPUT_TEXT_CHARS=32000000 -e MOAJWO_OUTPUT_SLOTS=1"
 run_part() {  # run_part <부분> <결과 칸 예산> [메모리] [LIMITS 대신 쓸 환경 변수]
   local name="out$1" memory="${3:-512m}" limits="${4-$LIMITS}"
   docker run -d --name "$name" --memory="$memory" --memory-swap="$memory" -e OLLAMA_BASE_URL=http://127.0.0.1:9 $limits \
@@ -123,6 +152,7 @@ for part in ${PARTS:-A B}; do
     A|A3) run_part "$part" 5000000 ;;
     D3L|D10L_*|D11L_*) run_part "$part" 1000000 1g "" ;;  # 로컬·폐쇄망 기본 한도(환경 변수 없음) — 로컬은 컨테이너 제한이 없어 1GiB로 잰다
     D8) run_part D8 300000 512m "$LIMITS -e MOAJWO_OUTPUT_SLOTS=2" ;;
+    E*) run_part "$part" 300000 512m "$FINAL" ;;  # 최종 Render 권장값 (결과 칸 예산 30만도 같은 값)
     *) run_part "$part" 300000 ;;
   esac
 done

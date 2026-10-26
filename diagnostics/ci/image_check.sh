@@ -27,14 +27,33 @@ build() {  # build <이름> <컨텍스트> [Dockerfile]
     res "build_$name" FAIL "build-$name.log"; tail -30 "$OUT/build-$name.log"
   fi
 }
+# 기반 이미지를 먼저 받아 둔다 — 빌드가 같은 판을 쓰고, 아래에서 그 판의 digest·패키지를 읽는다
+for base in nginx:1.30-alpine node:24-alpine python:3.11-slim; do docker pull -q "$base" >> "$LOG" 2>&1; done
 build backend backend
 build frontend frontend
 build frontend-render frontend frontend/Dockerfile.render
+grep -ho 'docker.io/library/[a-z0-9.:-]*@sha256:[0-9a-f]*' "$OUT"/build-*.log 2>/dev/null | sort -u > "$OUT/base-digests-used.txt"
 for n in backend frontend frontend-render; do
   docker image inspect "moajwo-$n:check" > "$OUT/inspect-$n.json" 2>/dev/null || continue
   docker image inspect "moajwo-$n:check" --format \
     '{{.Id}} user={{.Config.User}} ports={{json .Config.ExposedPorts}} cmd={{json .Config.Cmd}} layers={{len .RootFS.Layers}} size={{.Size}}' \
     | sed "s/^/$n /" | tee -a "$OUT/images.txt"
+done
+
+# ---------------------------------------------------------------- 기반 이미지·설치 패키지 (두 nginx 최종 이미지 — 로컬 frontend·Render)
+# 기반 태그는 떠도는 태그라 빌드 때 받은 판의 digest를 남긴다. 패키지는 기반 nginx 이미지 대비 바뀐 것만 따로 (apk info -v)
+for base in nginx:1.30-alpine node:24-alpine python:3.11-slim; do
+  docker image inspect "$base" --format "$base {{.Id}} {{json .RepoDigests}}" >> "$OUT/bases.txt" 2>&1
+done
+res base_nginx "$(grep '^nginx:' "$OUT/bases.txt" | cut -d' ' -f3- | cut -c1-120)" "기반 nginx:1.30-alpine digest (bases.txt)"
+docker run --rm --entrypoint apk nginx:1.30-alpine info -v 2>/dev/null | sort > "$OUT/apk-base-nginx.txt"
+for n in frontend frontend-render; do
+  docker run --rm --entrypoint apk "moajwo-$n:check" info -v 2>/dev/null | sort > "$OUT/apk-$n.txt"
+  res "image_$n" "$(docker image inspect "moajwo-$n:check" --format '{{.Id}}' | cut -c1-19)" "최종 이미지 ID"
+  res "apk_brotli_$n" "$(grep -E '^brotli-libs-' "$OUT/apk-$n.txt" | tr '\n' ' ')" \
+    "설치된 brotli-libs (기반: $(grep -E '^brotli-libs-' "$OUT/apk-base-nginx.txt" | tr '\n' ' '))"
+  res "apk_changes_$n" "$(diff "$OUT/apk-base-nginx.txt" "$OUT/apk-$n.txt" | grep '^[<>]' | tr '\n' ' ')" \
+    "기반 nginx 대비 패키지 변경 (< 기반 · > 최종, 비면 변경 없음 — apk-$n.txt)"
 done
 
 # ---------------------------------------------------------------- backend
@@ -93,6 +112,32 @@ for _ in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18081/ && break;
 res render_uid "$(docker exec render id -u)" "id -u"
 res render_index "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18081/)" "GET / (8080)"
 docker rm -f render > /dev/null
+
+# Render 앞단 → https API → backend 흐름을 격리로: 같은 이름(moajwo-test-api.onrender.com)의 대역 TLS 앞단(자체 서명)을 이 망
+# 안에 두고 그 뒤에 위 backend를 둔다 — 실제 Render로 요청하지 않는다. 로그인(이미 만든 ci-owner)·쿠키·보안 헤더·상류 검증 설정
+RT=$(mktemp -d)
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=moajwo-test-api.onrender.com" \
+  -keyout "$RT/k.pem" -out "$RT/c.pem" > /dev/null 2>&1 && chmod 644 "$RT"/*.pem
+printf 'server { listen 443 ssl; ssl_certificate /t/c.pem; ssl_certificate_key /t/k.pem;\n  location / { proxy_pass http://backend:8000; } }\n' > "$RT/tls.conf"
+docker run -d --name api-tls --network mnet --network-alias moajwo-test-api.onrender.com -v "$RT:/t:ro" \
+  -v "$RT/tls.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.30-alpine > /dev/null
+sleep 2
+docker run -d --name render-chain --network mnet -p 127.0.0.1:18082:8080 moajwo-frontend-render:check > /dev/null
+for _ in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18082/ && break; sleep 1; done
+R=http://127.0.0.1:18082
+res render_chain_health "$(curl -s $R/api/health)" "앞단 /api/health → https 대역 API → backend"
+RJ="$RT/cookies"
+res render_chain_login "$(curl -s -c "$RJ" -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d "{\"username\":\"ci-owner\",\"password\":\"$PW\"}" $R/api/auth/login) · me $(curl -s -b "$RJ" -o /dev/null -w '%{http_code}' $R/api/auth/me)" \
+  "로그인(앞단을 거쳐) → 쿠키로 /api/auth/me"
+res render_chain_cookie "$(grep -c moajwo "$RJ" 2>/dev/null)개 · $(curl -s -D - -o /dev/null -H 'Content-Type: application/json' -d "{\"username\":\"ci-owner\",\"password\":\"$PW\"}" $R/api/auth/login | grep -i '^set-cookie' | sed 's/=[^;]*;/=<값>;/' | tr -d '\r' | head -1)" \
+  "로그인 쿠키 속성 (값은 지움 — Secure는 MOAJWO_COOKIE_SECURE를 켠 Render에서만)"
+res render_chain_headers "$(curl -sI $R/ | grep -ciE '^(content-security-policy|x-frame-options|x-content-type-options|referrer-policy):')/4" "GET / 보안 헤더 4종"
+res render_chain_api_headers "$(curl -sI $R/api/health | grep -ciE '^(content-security-policy|x-frame-options|x-content-type-options|referrer-policy):')/4" "GET /api/health 보안 헤더 (앞단이 API 응답에 붙이는지)"
+res render_upstream_verify "$(docker exec render-chain nginx -T 2>/dev/null | grep -cE '^\s*proxy_ssl_verify\s+on')" \
+  "상류 인증서 검증 설정 수 (0 = nginx 기본값 off — 자체 서명 대역 API로도 통과함)"
+docker rm -f render-chain api-tls > /dev/null
+rm -rf "$RT"
 
 # ---------------------------------------------------------------- 메모리 제한 컨테이너의 읽기 한도 (Render 무료와 같은 512MiB)
 # 한도는 docs/MEMORY.md의 Render 권장값. 자료는 측정 대상이 아닌 일회용 컨테이너(같은 backend 이미지의 openpyxl)에서 만든다
@@ -225,8 +270,31 @@ curl -sSL -o "$TGZ" "https://github.com/aquasecurity/trivy/releases/download/v$T
 curl -sSL -o trivy.sum "https://github.com/aquasecurity/trivy/releases/download/v$TV/trivy_${TV}_checksums.txt"
 if grep "  $TGZ\$" trivy.sum | sha256sum -c - >> "$LOG" 2>&1; then
   tar xzf "$TGZ" trivy
+  ./trivy --version | head -1 >> "$LOG"
+  # 검사 보고(JSON)에는 취약점 DB 시각이 없다 — DB를 먼저 받고 그 판·시각을 따로 남긴다
+  ./trivy image --download-db-only --quiet 2>> "$LOG"
+  ./trivy version --format json > "$OUT/trivy-version.json" 2>> "$LOG"
+  for n in frontend frontend-render; do  # 대상 CVE는 심각도와 상관없이 찾는다 (HIGH·CRITICAL만 보면 등급이 다를 때 놓침)
+    ./trivy image --quiet --skip-db-update --format json --scanners vuln -o "$OUT/trivy-all-$n.json" "moajwo-$n:check" 2>> "$LOG"
+    res "trivy_target_$n" "$(python3 - "$OUT/trivy-all-$n.json" "$OUT/trivy-version.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+v = [x for r in d.get("Results", []) for x in r.get("Vulnerabilities") or []]
+hit = [f"{x['PkgName']} {x['InstalledVersion']} (수정 {x.get('FixedVersion') or '-'})" for x in v
+       if x["VulnerabilityID"] == "CVE-2026-111497"]
+os_ = (d.get("Metadata") or {}).get("OS") or {}
+try:
+    db = json.load(open(sys.argv[2])).get("VulnerabilityDB") or {}
+except (OSError, ValueError):
+    db = {}
+print(("남음: " + "; ".join(hit)) if hit else "검출 없음", "· 모든 심각도", len({x["VulnerabilityID"] for x in v}), "개",
+      "· OS", os_.get("Family", "-"), os_.get("Name", "-"),
+      "· 검사 대상", [r.get("Type") for r in d.get("Results", [])], "· DB", (db.get("UpdatedAt") or "-")[:19])
+PY
+)" "CVE-2026-111497 (brotli-libs) — trivy-all-$n.json · DB 시각 trivy-version.json (OS 패키지 대상이 없으면 검사가 안 된 것)"
+  done
   for n in backend frontend frontend-render; do
-    ./trivy image --quiet --format json --scanners vuln --severity HIGH,CRITICAL -o "$OUT/trivy-$n.json" "moajwo-$n:check" 2>> "$LOG"
+    ./trivy image --quiet --skip-db-update --format json --scanners vuln --severity HIGH,CRITICAL -o "$OUT/trivy-$n.json" "moajwo-$n:check" 2>> "$LOG"
     res "trivy_$n" "$(python3 - "$OUT/trivy-$n.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
