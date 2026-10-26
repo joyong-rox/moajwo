@@ -211,8 +211,9 @@ psql --no-password "service=moajwo-restore-test" -c "SELECT count(*) FROM users"
 
 ### 8-1. (A만) 원천을 먼저 확보한다
 
-- 지금 Render 검토 서비스의 SQLite는 **재시작·재배포·휴면(15분 무트래픽)으로 사라질 수 있습니다.** 백업을 확보하기 전에 서비스를 멈추거나 재배포하지 않습니다 (Render 환경 변수 저장의 'deploy' 선택지와 Auto-Deploy 병합도 재배포 — 8-3).
-- **무료 환경에서 쓸 수 있는 추출 수단:** Render Free는 SSH·Dashboard Shell·one-off job을 지원하지 않습니다. 지금 배포된 앱(main)에는 DB 내보내기 기능이 없습니다 (내려받기는 용어사전 CSV·통합·분석 결과 파일뿐이고, 관리자 화면은 계정 목록·이력만 보이며 비밀번호 해시를 내보내지 않음 — 코드 확인). 그래서 **현재 Render SQLite에서 계정을 그대로(해시 포함) 꺼낼 수 있는 안전한 무료 수단은 없습니다.** 내보내기 기능을 넣으려고 먼저 재배포하면 그 재배포가 SQLite를 지우므로 하지 않습니다.
+- **원천은 API 서비스(`moajwo-test-api`)가 쓰던 Render DB입니다** — 프런트(`moajwo-test`·`moajwo-test-web`)는 nginx라 DB가 없습니다. 계정 DB가 실제로 이 서비스의 것인지 전환 전에 확인합니다. 로컬 운영 SQLite 백업을 Render 계정의 백업으로 보지 않고, 두 DB를 합치지 않습니다.
+- 지금 Render API 서비스의 SQLite는 **재시작·재배포·휴면(15분 무트래픽)으로 사라질 수 있습니다.** 백업을 확보하기 전에 서비스를 멈추거나 재배포하지 않습니다 (Render 환경 변수 저장의 'deploy' 선택지도 재배포 — 8-3. Auto-Deploy는 2026-10-25 조회 때 세 서비스 모두 Off였지만 당시 관측입니다 — 8-3 'Render 서비스').
+- **무료 환경에서 쓸 수 있는 추출 수단:** Render Free는 SSH·Dashboard Shell·one-off job을 지원하지 않습니다. API 서비스의 연결 브랜치는 main이고(2026-10-25 조회 — 배포된 커밋은 대시보드의 마지막 배포로 확인), main의 앱에는 DB 내보내기 기능이 없습니다 (내려받기는 용어사전 CSV·통합·분석 결과 파일뿐이고, 관리자 화면은 계정 목록·이력만 보이며 비밀번호 해시를 내보내지 않음 — 코드 확인). 그래서 **현재 Render SQLite에서 계정을 그대로(해시 포함) 꺼낼 수 있는 안전한 무료 수단은 없습니다.** 내보내기 기능을 넣으려고 먼저 재배포하면 그 재배포가 SQLite를 지우므로 하지 않습니다.
 - 이미 확보된 Render DB 백업은 이 저장소 기록에 없습니다. 소유자가 따로 가진 검증된 백업이 있으면 그것이 원천입니다 (경로 A). 없으면 **Render 계정은 이관할 수 없으므로 경로 B(새 계정 등록)** 입니다 — 결과 보고에서 '새로 만든 계정'과 '이관한 계정'을 나눠 적습니다. 이미 사라진 계정은 백업 없이 복구했다고 하지 않습니다.
 - 원천이 정해지면: 원천 쓰기가 멈춘 시점(보호 시점)을 기록하고, 원천 파일의 sha256·크기·리비전·표별 건수·보관 위치를 남깁니다.
 
@@ -260,7 +261,7 @@ python -m app.dbcopy --source sqlite:///<원천 파일> --target-env <주소가 
 5. **같은 DB 확인:** `python -m app.dbcheck --app-service moajwo-app --migration-service moajwo-migrate` → 종료 0, `"result": "same"`. 종료 1(다름)이면 전환하지 않고 두 주소(프로젝트·분기·DB 이름)를 다시 확인합니다. Render에 넣을 `DATABASE_URL`·`MOAJWO_MIGRATION_DATABASE_URL`과 같은 값(호스트·계정·DB)인지도 확인합니다.
 6. (A) 원천 확보(8-1) → `app.dbcopy` dry-run(`tz_unverified_runs: 0` 확인) → `--apply --report backups/external-db/<시각>/dbcopy-report.json` → 7장 백업을 받아 다른 빈 DB로 **복원 확인**.
    (B) 이관하지 않습니다 — 빈 DB 그대로 (`setup_required: true`가 정상).
-7. **Render 설정 읽기 확인 (바꾸지 않음):** 웹·API 서비스마다 Settings의 Auto-Deploy 방식, 연결 브랜치, Dockerfile 경로·빌드 문맥을 대시보드에서 읽어 기록합니다. 이 값으로 '승인된 배포 방법'(병합 / 수동 배포)을 정합니다:
+7. **Render 설정 읽기 확인 (바꾸지 않음):** 아래 'Render 서비스' 표의 현재값(2026-10-25 조회)이 그대로인지, 프런트(`moajwo-test`)·API(`moajwo-test-api`) 서비스마다 Settings의 Auto-Deploy 방식, 연결 브랜치, Dockerfile 경로·빌드 문맥, health 경로를 대시보드에서 다시 읽어 기록합니다. 이 값으로 '승인된 배포 방법'(병합 / 수동 배포)을 정합니다. Auto-Deploy가 Off라는 사실은 수동 배포나 환경 변수 적용의 승인을 대신하지 않습니다:
    - **On Commit**(새 서비스 기본): 연결 브랜치에 병합·푸시하는 순간 재배포됩니다 (그 재배포도 SQLite를 지움).
    - **After CI Checks Pass**: 연결 브랜치의 새 커밋에서 CI 체크가 모두 통과하면 재배포됩니다. 체크가 0개면 자동 배포하지 않습니다 — 지금 이 저장소의 main·후보에는 GitHub Actions가 없어(2026-10-25 확인) 다른 체크가 붙지 않는 한 수동 배포가 됩니다.
    - **Off**: 수동 배포만.
@@ -271,7 +272,8 @@ python -m app.dbcopy --source sqlite:///<원천 파일> --target-env <주소가 
 9. 7단계에서 기록한 Render 설정이 그대로인지 다시 봅니다 (바뀌었으면 멈추고 묶음을 고쳐 다시 승인).
 10. Render 환경 변수는 **"Save only"** 로 저장합니다: 3장 변수(`MOAJWO_DB_MODE=external`, `DATABASE_URL` = 풀러·앱 계정, `MOAJWO_MIGRATION_DATABASE_URL` = 직접 연결·소유 계정).
 11. 승인된 배포 한 번: PostgreSQL을 지원하는 앱 커밋(이 PR 이후 코드)을 배포합니다. 저장한 변수는 이 배포부터 쓰입니다. 기동 때 마이그레이션은 직접 연결로 돕니다 (통합 후보는 `0020_run_worker_lease`까지).
-    - **웹(`moajwo-test-web`)을 먼저, API(`moajwo-test-api`)를 다음에:** 이전 화면은 완료가 아닌 실행을 모두 '실패: …'로 그려, 새 API가 정할 근거가 없어 오래 두는 '실행 중'과 새 상태 '결과 확인 필요'가 실패로 보입니다. 새 화면은 이전 API의 상태값(완료·실패·실행 중·검토 대기)을 그대로 처리하고, 이전 API에 없는 업로드 한도 조회가 실패하면 크기 안내만 빼고 보입니다 (코드 확인, 실행 안 함). 두 서비스가 같은 브랜치에 On Commit으로 연결돼 있으면 병합 한 번에 함께 재배포되어 순서를 정할 수 없습니다 — 화면 표시만 잠깐 섞이고 자료는 바뀌지 않습니다.
+    - **프런트(`moajwo-test`)를 먼저, API(`moajwo-test-api`)를 다음에:** 이전 화면은 완료가 아닌 실행을 모두 '실패: …'로 그려, 새 API가 정할 근거가 없어 오래 두는 '실행 중'과 새 상태 '결과 확인 필요'가 실패로 보입니다. 새 화면은 이전 API의 상태값(완료·실패·실행 중·검토 대기)을 그대로 처리하고, 이전 API에 없는 업로드 한도 조회가 실패하면 크기 안내만 빼고 보입니다 (코드 확인, 실행 안 함). 2026-10-25 조회에서는 세 서비스 모두 Auto-Deploy Off라 병합만으로는 재배포되지 않았습니다. 직전 확인(9단계)에서 두 서비스가 같은 브랜치에 On Commit으로 바뀌어 있으면 병합 한 번에 함께 재배포되어 순서를 정할 수 없습니다 — 화면 표시만 잠깐 섞이고 자료는 바뀌지 않습니다.
+    - 프런트를 이 저장소의 `frontend/Dockerfile.render`로 바꾸는 것은 연결 브랜치·Dockerfile 경로·health 경로를 함께 바꾸는 설정 변경입니다 (아래 'Render 서비스'의 제안값) — 승인 묶음에 넣어 한 번에 적용합니다.
 12. 점검 (쓰기 없는 것만): `/health`, `/auth/status` — (A) `setup_required: false`, 이관한 계정 로그인 → **로그인부터 쓰기입니다** (세션·최근 로그인 시각·실패 횟수) / (B) `setup_required: true`가 정상 → 최초 소유자 설정 → 계정을 새로 등록. 점검에 쓴 계정·시각·생긴 세션 수를 기록합니다.
 13. 쓰기 재개 시점을 기록하고, 전환 뒤 첫 백업(7장)을 받습니다.
 
@@ -285,11 +287,44 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 
 - **(A)에서는 원천 확보(8-1) 전에 앞의 두 선택지를 고르지 않습니다** — 저장과 함께 재배포되어 지금 Render SQLite와 파일이 지워집니다.
 - **Restart는 저장만 한 변수를 반영하지 않습니다** — 지금 배포된 커밋을 그때의 변수 값으로 다시 띄웁니다. 전환은 배포로만 합니다.
-- Docker 서비스는 환경 변수를 빌드 인자로도 넘깁니다 — 빌드가 그 값을 쓰면 다시 빌드("Save, rebuild, and deploy" 또는 새 커밋 배포)해야 반영됩니다. 이 저장소의 `backend/Dockerfile`에는 `ARG`가 없어 빌드가 DB 변수를 쓰지 않지만, Render API 서비스가 어느 Dockerfile·브랜치로 빌드하는지는 저장소에 기록이 없어 준비 7단계에서 대시보드로 확인합니다.
+- Docker 서비스는 환경 변수를 빌드 인자로도 넘깁니다 — 빌드가 그 값을 쓰면 다시 빌드("Save, rebuild, and deploy" 또는 새 커밋 배포)해야 반영됩니다. 이 저장소의 `backend/Dockerfile`에는 `ARG`가 없어 빌드가 DB 변수를 쓰지 않지만, Render API 서비스가 어느 Dockerfile·브랜치로 빌드하는지는 2026-10-25 조회 기록(main · `backend/Dockerfile` · 문맥 `backend`)뿐이라 준비 7단계에서 대시보드로 다시 확인합니다.
 - 환경 그룹을 고치면 자동 배포가 켜진 연결 서비스가 모두 재배포됩니다 — 이 변수들은 서비스 자체의 환경 변수로 둡니다.
 - **같은 DB 확인(`app.dbcheck`)이 보는 것:** 두 주소 각각으로 읽기 전용 트랜잭션에서 `current_database()`·DB OID·`pg_postmaster_start_time()`·`server_version_num`·`alembic_version`·Neon 식별자(`neon.tenant_id`·`neon.timeline_id` — 설정이 있을 때)를 읽어 비교합니다. 한쪽이 읽지 못한 항목은 비교에서 빼고 `not_compared`에 적습니다. 출력(JSON)에 주소·호스트·비밀번호가 없습니다 (계정 이름은 있음). 종료 0 같음 · 1 다름 · 2 확인 못 함(주소 없음·연결 실패). 서버 시작 시각만 다르면 그 사이 서버가 다시 시작됐을 수 있으니 다시 실행합니다.
   - 로컬 PostgreSQL 17.11에서 시험: 같은 DB를 서로 다른 두 계정으로(하나는 서비스 주소) → 같음, 같은 서버의 다른 DB → 다름, 닿지 않는 주소 → 2.
   - **연결 풀러(PgBouncer·Neon 풀러)를 거친 동작과 실제 Neon 식별자 값은 확인하지 못했습니다** — 로컬에는 풀러와 Neon이 없습니다.
+
+### Render 서비스 — 현재값(2026-10-25 조회)과 제안값
+
+**현재값:** 2026-10-25 Render 관리 API의 읽기 조회(moajwo 워크스페이스 — 재배포·설정 변경·앱 로그인·DB 연결 없음)입니다. 이 저장소 작업에서는 Render에 접근하지 않았습니다. 조회 시점의 사실이며, 병합·전환 직전에 다시 확인합니다 (준비 7단계·전환 9단계).
+
+| 서비스 | 역할 | 연결 브랜치 | Auto-Deploy | Dockerfile / 빌드 문맥 | HTTP health 경로 | plan |
+|---|---|---|---|---|---|---|
+| `moajwo-test` | 프런트 — 사용자가 써 온 주소 https://moajwo-test.onrender.com/ | `test/render-20261021` | Off | `frontend/Dockerfile.render-test` / `frontend` | 비어 있음 | free |
+| `moajwo-test-web` | 프런트 (같은 API로 프록시) | `main` | Off | `frontend/Dockerfile.render` / `frontend` | 비어 있음 | free |
+| `moajwo-test-api` | API — 계정 DB(SQLite)의 원천 후보 | `main` | Off | `backend/Dockerfile` / `backend` | 비어 있음 | free |
+
+- **Auto-Deploy Off:** Render 문서는 Off를 자동 배포를 하지 않는 설정으로 설명합니다 (https://render.com/docs/deploys). 그래서 이 조회 기준으로는 main 병합만으로 재배포되지 않습니다. 다만 수동 배포·배포 훅 등 다른 트리거가 없다고 단정하지 않고, 병합 직전에 다시 확인합니다. Off는 수동 배포나 환경 변수 적용의 승인이 아닙니다.
+- **지금 `moajwo-test`의 이미지:** `test/render-20261021`(60bcae8 — 앱 코드는 main 703fdcb)의 `frontend/Dockerfile.render-test`입니다. nginx 1.29(root, 포트 80)에 로컬용 `nginx.conf`를 빌드 때 고쳐 `/api/`를 `https://moajwo-test-api.onrender.com/`으로 보냅니다 (Host 헤더·SNI). 보안 응답 헤더는 없습니다. 이 파일은 통합 후보(#42) 트리에 **없습니다** — 후보 코드를 이 서비스에 배포하려면 연결 브랜치·Dockerfile 경로·빌드 문맥을 함께 바꿉니다. 파일 경로를 그대로 둔 채 후보 SHA로 배포하지 않습니다.
+- **health 경로가 비어 있으면** Render는 포트에 TCP로 붙어 보기만 합니다. 포트 연결은 업무 준비(DB 연결)와 같지 않습니다. 이 저장소의 `/health`는 DB에 `SELECT 1`을 보내 실패하면 503을 돌려줍니다.
+- **Render health 확인의 동작** (https://render.com/docs/health-checks, 2026-10-26 확인): 실행 중인 인스턴스에 몇 초마다 보내고, 검사마다 5초 안에 2xx·3xx가 와야 성공입니다. 15초 연속 실패하면 그 인스턴스로 트래픽을 보내지 않고, 60초 연속이면 다시 시작합니다. 새 배포는 확인을 통과해야 트래픽을 받고, 15분 안에 통과하지 못하면 취소되어 이전 인스턴스가 계속 받습니다.
+- **무료 웹 서비스** (https://render.com/docs/free, 2026-10-26 확인): 15분 동안 들어오는 요청(HTTP·WebSocket)이 없으면 멈추고 다시 깨는 데 약 1분 걸립니다. 작업 공간마다 한 달 750시간이며, 다 쓰면 그달 남은 기간 무료 웹 서비스가 정지됩니다. Render의 health 확인 자체가 '들어오는 요청'으로 세어지는지는 문서에 없습니다 (**미확인**).
+- 계정 보존은 API 서비스의 `DATABASE_URL` 등(3장)으로만 이뤄집니다. 프런트 서비스에 DB 환경 변수를 넣어도 계정이 보존되지 않습니다.
+
+**제안값 (승인 묶음 8-5에 넣어 한 번에 적용 — 이번 작업에서는 저장하지 않음):**
+
+| 서비스 | 항목 | 현재 | 제안 | 영향 |
+|---|---|---|---|---|
+| `moajwo-test` | 연결 브랜치 | `test/render-20261021` | 승인된 릴리스(main 병합 뒤 main) | 이 서비스가 승인된 코드를 따름. Auto-Deploy Off 그대로면 수동 배포만 |
+| `moajwo-test` | Dockerfile / 문맥 | `frontend/Dockerfile.render-test` / `frontend` | `frontend/Dockerfile.render` / `frontend` (Docker Command는 비움 — 이미지 CMD) | nginx 1.30(brotli-libs 수정판)·비루트(uid 101)·컨테이너 포트 80 → 8080(Render가 열린 포트를 찾음 — 못 찾으면 `PORT=8080`)·보안 헤더 4종·접근 기록에 쿼리 값 없음. 공개 주소는 그대로 |
+| `moajwo-test` | HTTP health 경로 | 비어 있음 | `/api/health` (nginx → API `/health`) — 또는 `/`(소유자 결정) | `/api/health`: 새 프런트가 API·DB 응답을 받아야 트래픽을 받음(API가 깨는 약 1분은 배포 대기). 대신 프런트 가용성이 API에 묶임 — API가 15초 넘게 답하지 못하면 프런트(정적 화면 포함)로도 트래픽이 끊기고 60초면 프런트가 다시 시작됨. 프런트가 떠 있는 동안 확인마다 API 공개 주소로 실제 요청이 가 API도 멈추지 않음. `/`: 프런트만 확인(정적 화면은 API와 무관) |
+| `moajwo-test-api` | 연결 브랜치 · Dockerfile / 문맥 | `main` · `backend/Dockerfile` / `backend` | 그대로 (승인된 릴리스) | — |
+| `moajwo-test-api` | HTTP health 경로 | 비어 있음 | `/health` (DB `SELECT 1`, 실패하면 503) | DB에 닿지 못하면 새 배포가 트래픽을 받지 않음(이전 인스턴스 유지). 실행 중에 DB가 15초 넘게 답하지 못하면 API로 트래픽이 끊김. Neon 휴면 복귀 시간과 검사마다 5초 제한의 관계는 실제 연결 시험에서 확인 (**미검증**) |
+| `moajwo-test-api` | 환경 변수 | SQLite (외부 DB 변수 없음) | 3장 변수를 "Save only"로 (전환 10단계) | 다음 배포부터 외부 DB |
+| `moajwo-test-web` | 모두 | `main` · `frontend/Dockerfile.render` | **바꾸지 않음** — 중복으로 보인다는 이유만으로 삭제·중지하지 않음 | 사용 여부·정리는 별도 과제 |
+
+- **health 경로를 넣은 뒤 확인:** 요청 없이 15~30분 둔 뒤 프런트·API가 멈추는지(대시보드 이벤트)와 무료 시간 사용량을 봅니다. 멈추지 않으면(확인이 요청으로 세어지는 경우 — 세 서비스가 늘 떠 있으면 750시간을 넘음) health 경로를 비워 되돌립니다. 상시 기동을 위한 요청은 넣지 않습니다.
+- 제안 프런트 이미지(`frontend/Dockerfile.render`)는 격리 러너에서 실제 Render 대신 같은 이름(`moajwo-test-api.onrender.com`)의 HTTPS 대역 API(자체 서명)를 두고 확인합니다: nginx 설정 검사, 비루트·8080, `/api/`가 그 이름으로 TLS 연결해 backend까지 가는지, 프록시를 거친 로그인·쿠키 속성, `/`·`/api/health`의 보안 헤더, 상류 인증서 검증 설정 (`diagnostics/ci/image_check.sh`). 대역 API는 SNI·Host를 따지지 않으므로 그 둘과 실제 Render 주소·인증서로는 확인하지 않았습니다.
+- **API 쪽 인증서 검증:** 지금 프런트(`Dockerfile.render-test`)와 제안 프런트(`nginx.render.conf`) 모두 `proxy_ssl_verify`를 쓰지 않아 nginx 기본값(끔)으로 API 인증서를 검증하지 않습니다 — TLS로 암호화하지만 상대가 진짜 API인지는 확인하지 않습니다. 켜려면 `proxy_ssl_verify on`과 CA 묶음(`proxy_ssl_trusted_certificate`)이 필요하고, 실제 Render 인증서 체인으로 시험해야 합니다 — 소유자 결정 사항으로 남깁니다 (이번 후보에서 바꾸지 않음).
 
 ### 8-4. 되돌리기 경계
 
@@ -310,7 +345,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 4. (A) `app.dbcopy` 보고 — dry-run과 적용(`dbcopy-report.json`: 표별 건수·내용 해시·`tz_unverified_runs`·`target_secret_in_args`)
 5. (A) 7장 복원 확인 결과 — 다른 빈 DB, 로그인·건수·내용 해시, 원본 DB 그대로
 6. 같은 DB 확인(`app.dbcheck`) 출력 — `result: same`, 앱 쪽·마이그레이션 쪽 계정 이름
-7. 최종 앱 SHA·이미지, Render 환경 변수 저장 방식("Save only")과 승인된 배포 방법 — 준비 7단계의 Render 설정 읽기 확인 결과(웹·API의 Auto-Deploy 방식·연결 브랜치·Dockerfile 경로)
+7. 최종 앱 SHA·이미지, Render 환경 변수 저장 방식("Save only")과 승인된 배포 방법 — 준비 7단계의 Render 설정 읽기 확인 결과(프런트 `moajwo-test`·API `moajwo-test-api`의 Auto-Deploy 방식·연결 브랜치·Dockerfile 경로·health 경로)와 적용할 제안값('Render 서비스' 표). `moajwo-test-web`은 바꾸지 않음
 8. 중단 계획 — (A)는 8-1의 보호 시점(원천 쓰기를 멈춘 시각)부터 전환까지 지금 Render 서비스가 받는 쓰기는 **옮겨지지 않고** 전환 배포 때 지워집니다: 그 사이 쓰기를 멈추거나(사용자 안내) 잃는 범위를 소유자가 받아들임을 적습니다. 그다음 전환 배포 → 점검 → 쓰기 재개 (예정 시각)
 9. 되돌리기 경계 (8-4)
 10. 전환 뒤 백업 계획 — 7장 백업 주기·보관 위치
