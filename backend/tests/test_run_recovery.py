@@ -832,50 +832,77 @@ def test_cli_on_a_database_before_0020_only_reads_counts_and_changes_nothing(tmp
 
 
 def _odd_database(data: Path, case: str) -> None:
-    """지원하는 판(0019·0020)이 아니거나 리비전과 실제 열이 맞지 않는 DB를 만든다 (실행 기록 한 행 포함)."""
+    """지원하는 판(0019·0020)이 아니거나 리비전과 실제 열이 맞지 않는 DB를 만든다 (실행 중 1행과 결과 확인 필요 1행 —
+    판을 잘못 짐작하면 resolve가 바꿀 수 있는 행)."""
     target = "0018_mapping_analyses" if case == "unsupported" else (
         "0019_analysis_runs" if case == "0020_without_columns" else "head"
     )  # fmt: skip
     assert _cli(data, "-m", "alembic", "upgrade", target).returncode == 0
     con = sqlite3.connect(data / "moajwo.db")
-    con.execute(
-        "INSERT INTO runs (status, trigger, input_file_count, file_ids, row_count, change_count, warning_count,"
-        " summary) VALUES ('running', 'manual', 0, '[]', 0, 0, 0, '{}')"
-    )
+    for status in ("running", "check"):
+        con.execute(
+            "INSERT INTO runs (status, trigger, input_file_count, file_ids, row_count, change_count, warning_count,"
+            " summary) VALUES (?, 'manual', 0, '[]', 0, 0, 0, '{}')",
+            (status,),
+        )
     if case == "missing":
         con.execute("DELETE FROM alembic_version")
+    elif case == "no_version_table":  # 리비전 표 자체가 없음 (0020 표 구조)
+        con.execute("DROP TABLE alembic_version")
+    elif case == "null_revision":  # 손으로 다시 만든 리비전 표 (NOT NULL 없음)에 빈 값
+        con.execute("DROP TABLE alembic_version")
+        con.execute("CREATE TABLE alembic_version (version_num VARCHAR(32))")
+        con.execute("INSERT INTO alembic_version (version_num) VALUES (NULL), ('0020_run_worker_lease')")
     elif case == "two":
         con.execute("INSERT INTO alembic_version (version_num) VALUES ('0019_analysis_runs')")
     elif case == "0020_without_columns":  # 0019 표 구조에 리비전만 0020 (열 없음)
         con.execute("UPDATE alembic_version SET version_num = '0020_run_worker_lease'")
+    elif case == "0020_partial":  # 0020에서 생존 신호 열만 빠짐
+        con.execute("ALTER TABLE runs DROP COLUMN heartbeat_at")
     elif case == "0019_with_columns":  # 0020 표 구조에 리비전만 0019 (열 남음)
+        con.execute("UPDATE alembic_version SET version_num = '0019_analysis_runs'")
+    elif case == "0019_with_worker":  # 0019 리비전에 담당 열만 남음
+        con.execute("ALTER TABLE runs DROP COLUMN heartbeat_at")
         con.execute("UPDATE alembic_version SET version_num = '0019_analysis_runs'")
     con.commit()
     con.close()
+
+
+def _no_raw(res: subprocess.CompletedProcess, data: Path) -> None:
+    """출력(stdout·stderr)에 경로(그대로·JSON 이스케이프·슬래시 형태)·SQL·오류 추적이 없다."""
+    shown = res.stdout + res.stderr
+    for path in (str(data), data.as_posix(), json.dumps(str(data))[1:-1]):
+        assert path not in shown, path
+    for raw in ("Traceback", "[SQL", "[parameters", "SELECT", "UPDATE", "PRAGMA", "sqlite3."):
+        assert raw not in shown, raw
 
 
 @pytest.mark.parametrize(
     ("case", "expected"),
     [
         ("missing", "리비전 기록(alembic_version)이 없습니다"),
+        ("no_version_table", "리비전 기록(alembic_version)이 없습니다"),
+        ("null_revision", "리비전 기록(alembic_version)에 빈 값이 있습니다 (2행)"),
         ("two", "리비전이 2개입니다"),
         ("unsupported", "이 판의 복구 명령이 다루지 않는 리비전(0018_mapping_analyses)입니다"),
         (
             "0020_without_columns",
             "리비전은 0020_run_worker_lease인데 담당·생존 신호 열(runs.worker·heartbeat_at)이 없습니다",
         ),
+        ("0020_partial", "리비전은 0020_run_worker_lease인데 담당·생존 신호 열(runs.worker·heartbeat_at)이 일부만"),
         (
             "0019_with_columns",
             "리비전은 0019_analysis_runs인데 0020의 담당·생존 신호 열(heartbeat_at, worker)이 있습니다",
         ),
+        ("0019_with_worker", "리비전은 0019_analysis_runs인데 0020의 담당·생존 신호 열(worker)이 있습니다"),
     ],
 )
 def test_cli_refuses_a_database_whose_revision_it_does_not_support_or_that_does_not_match(
     tmp_path: Path, case: str, expected: str
 ) -> None:
-    """지원하는 리비전과 필요한 열이 맞을 때만 쓴다: 리비전 없음·여러 개·다루지 않는 리비전·리비전과 열 불일치면
-    status를 포함해 진단만 알리고 종료 1 — 어느 판이라고 짐작하지 않고('0020 이전 판' 아님) 행·리비전·파일을 바꾸지
-    않는다."""
+    """지원하는 리비전과 필요한 열이 맞을 때만 쓴다: 리비전 없음(행·표)·빈 값·여러 개·다루지 않는 리비전·리비전과 열
+    불일치(전부·일부)면 status를 포함해 진단만 알리고 종료 1 — 어느 판이라고 짐작하지 않고('0020 이전 판' 아님)
+    결과 확인 필요 행도 바꾸지 않으며 행·리비전·파일 그대로. 출력에 경로·SQL이 없다."""
     data = tmp_path / "data"
     _odd_database(data, case)
     db = data / "moajwo.db"
@@ -884,21 +911,68 @@ def test_cli_refuses_a_database_whose_revision_it_does_not_support_or_that_does_
     def state() -> tuple:
         con = sqlite3.connect(db)
         try:
-            return con.execute(query).fetchall(), con.execute("SELECT version_num FROM alembic_version").fetchall()
+            versions = (
+                con.execute("SELECT version_num FROM alembic_version").fetchall()
+                if con.execute("SELECT count(*) FROM sqlite_master WHERE name = 'alembic_version'").fetchone()[0]
+                else None
+            )
+            return con.execute(query).fetchall(), versions
         finally:
             con.close()
 
     before = state()
     files_before = sorted(p.relative_to(data).as_posix() for p in data.rglob("*"))
-    for args in (("status",), ("recover",), ("resolve", "1", "--failed")):
+    for args in (("status",), ("recover",), ("resolve", "2", "--failed")):
         res = _cli(data, "-m", "app.recovery", *args)
         assert res.returncode == 1, (case, args, res.stdout, res.stderr[-400:])
         out = json.loads(res.stdout)
         assert expected in out["error"] and "아무것도 바꾸지 않음" in out["error"], (case, out)
-        assert "0020 이전 판" not in res.stdout and "Traceback" not in res.stderr
-        assert str(data) not in res.stdout and "SELECT" not in res.stdout  # 경로·SQL 없음
-    assert state() == before  # 실행 기록·리비전을 바꾸지 않음
+        assert "0020 이전 판" not in res.stdout
+        _no_raw(res, data)
+    assert state() == before  # 실행 기록(결과 확인 필요 행 포함)·리비전을 바꾸지 않음
     assert sorted(p.relative_to(data).as_posix() for p in data.rglob("*")) == files_before
+
+
+def test_cli_without_a_runs_table_refuses_and_changes_nothing(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    assert _cli(data, "-m", "alembic", "upgrade", "head").returncode == 0
+    con = sqlite3.connect(data / "moajwo.db")
+    con.execute("DROP TABLE run_changes")
+    con.execute("DROP TABLE runs")
+    con.commit()
+    con.close()
+    before = _sha(data / "moajwo.db")
+    for args in (("status",), ("recover",), ("resolve", "1", "--failed")):
+        res = _cli(data, "-m", "app.recovery", *args)
+        assert res.returncode == 1, (args, res.stdout, res.stderr[-400:])
+        assert "리비전은 0020_run_worker_lease인데 실행 기록 표(runs)가 없습니다" in json.loads(res.stdout)["error"]
+        _no_raw(res, data)
+    assert _sha(data / "moajwo.db") == before
+
+
+def test_cli_without_the_database_file_does_not_create_it(tmp_path: Path) -> None:
+    """데이터 폴더·볼륨을 잘못 골라 DB 파일이 없으면: 열지 않고(SQLite는 열면 빈 파일을 만듦) 폴더·볼륨을 확인하라고
+    알린다 — 종료 1, 파일을 만들지 않는다 (예전: 빈 moajwo.db를 만들고 '리비전 기록이 없습니다'로 안내)."""
+    data = tmp_path / "data"
+    data.mkdir()
+    for args in (("status",), ("recover",), ("resolve", "1", "--failed")):
+        res = _cli(data, "-m", "app.recovery", *args)
+        assert res.returncode == 1, (args, res.stdout, res.stderr[-400:])
+        error = json.loads(res.stdout)["error"]
+        assert error.startswith("DB 파일이 없습니다 — 데이터 폴더(MOAJWO_DATA_DIR)나 연결한 볼륨"), error
+        assert "DB 파일을 만들지 않았습니다" in error and "리비전" not in error, error
+        _no_raw(res, data)
+    assert sorted(p.name for p in data.rglob("*")) == []
+
+
+def test_cli_status_on_a_0020_database_names_the_revision(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    assert _cli(data, "-m", "alembic", "upgrade", "head").returncode == 0
+    res = _cli(data, "-m", "app.recovery", "status")
+    assert res.returncode == 0, (res.stdout, res.stderr[-400:])
+    out = json.loads(res.stdout)
+    assert out["revision"] == "0020_run_worker_lease" and out["running"] == [] and out["check"] == [], out
+    _no_raw(res, data)
 
 
 def test_cli_reports_a_database_it_cannot_read_without_its_path(tmp_path: Path) -> None:
@@ -906,12 +980,37 @@ def test_cli_reports_a_database_it_cannot_read_without_its_path(tmp_path: Path) 
     data.mkdir()
     (data / "moajwo.db").write_bytes(b"not a database " * 64)
     before = (data / "moajwo.db").read_bytes()
-    for args in (("status",), ("recover",)):
+    for args in (("status",), ("recover",), ("resolve", "1", "--failed")):
         res = _cli(data, "-m", "app.recovery", *args)
         assert res.returncode == 1, (args, res.stdout, res.stderr[-400:])
-        assert json.loads(res.stdout)["error"].startswith("DB를 확인하지 못했습니다 (DatabaseError)"), res.stdout
-        assert str(data) not in res.stdout and "Traceback" not in res.stderr
+        error = json.loads(res.stdout)["error"]
+        assert error == "DB를 확인하지 못했습니다 (DatabaseError SQLITE_NOTADB) — 아무것도 바꾸지 않았습니다.", error
+        _no_raw(res, data)
     assert (data / "moajwo.db").read_bytes() == before
+
+
+def test_cli_failure_after_the_check_reports_only_the_kind(tmp_path: Path) -> None:
+    """확인은 통과했는데 그다음 쓰기가 막히면(다른 연결이 쓰기 잠금을 쥠 — 서버가 떠 있는 동안 resolve) 오류 추적
+    (SQL·매개변수) 대신 종류만 알리고 종료 1. 그 실행은 그대로다."""
+    data = tmp_path / "data"
+    assert _cli(data, "-m", "alembic", "upgrade", "head").returncode == 0
+    con = sqlite3.connect(data / "moajwo.db", isolation_level=None)
+    rid = con.execute(
+        "INSERT INTO runs (status, trigger, input_file_count, file_ids, row_count, change_count, warning_count,"
+        " summary, error) VALUES ('check', 'manual', 0, '[]', 0, 0, 0, '{}', '확인 필요')"
+    ).lastrowid
+    con.execute("BEGIN IMMEDIATE")  # 쓰기 잠금 (읽기는 됨 — 확인 단계는 통과)
+    try:
+        res = _cli(data, "-m", "app.recovery", "resolve", str(rid), "--failed")
+    finally:
+        con.execute("ROLLBACK")
+    assert res.returncode == 1, (res.stdout, res.stderr[-400:])
+    out = json.loads(res.stdout)
+    expected = "resolve를 끝내지 못했습니다 (OperationalError SQLITE_BUSY) — status로 실행 상태를 확인하세요."
+    assert out["error"] == expected, out
+    _no_raw(res, data)
+    assert con.execute("SELECT status FROM runs WHERE id = ?", (rid,)).fetchone()[0] == "check"
+    con.close()
 
 
 def test_heartbeat_runs_only_while_a_run_is_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
