@@ -19,7 +19,7 @@ import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import POSTGRES, db_connect, db_rows
+from tests.conftest import db_connect, db_rows
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 PHONE = "010-1234-5678"
@@ -216,6 +216,13 @@ def _glossary_seoul(c: TestClient) -> None:
 def _drop_glossary_seoul() -> None:
     db_rows("delete from glossary_aliases where target_code in ('6110000', '3150000', '3010000')")
     db_rows("delete from glossary_entries where code in ('6110000', '3150000', '3010000')")
+
+
+def _rename_automation(automation_id: int, name: str) -> None:
+    """이름 규칙 전에 SQLite에 쌓인 NUL 자동화 이름을 흉내 낸다 — POST /runs/{id}/automation은 이제 두 DB 모두
+    거절하므로(tests/test_nul_inputs.py) 행을 직접 고친다 (PostgreSQL에는 드라이버가 거절해 이런 행이 생길 수 없다)."""
+    with db_connect() as con:
+        con.execute("update automations set name = ? where id = ?", (name, automation_id))
 
 
 def _no_echo(text: str, *raws: str) -> None:
@@ -600,9 +607,11 @@ def test_nul_in_an_entity_name_across_files_is_refused_at_its_cell_and_a_conditi
     assert f"파일 #{b} · 1번째 시트 · 2행 · A열" in res.text and "원본 파일에서 그 칸의 NUL" in res.text, res.text
     assert "검토 항목." not in res.text and "[VALUE_HAS_NUL]" in res.text
     _no_echo(res.text, "가나다")
+    # 필수 기관(사용자가 넣은 검토 조건)의 NUL은 이제 요청 검증이 먼저 막는다 — 항목 위치(loc)로, 두 DB 같게
+    # (tests/test_nul_inputs.py). 저장된 자동화 조건의 NUL은 아래 '…tells_to_save_the_automation_again'이 맡는다
     res = client.post("/reviews", json={"file_ids": [a], "required_entities": ["없는\x00기관"]})
-    assert res.status_code == 422 and "검토 조건 '필수 기관'" in res.text, res.text
-    assert "필수 기관 조건에서 NUL 문자를 지운 뒤" in res.text and "원본 파일에서" not in res.text, res.text
+    assert res.status_code == 422 and "[VALUE_HAS_NUL]" in res.text, res.text
+    assert res.json()["detail"][0]["loc"] == ["body", "required_entities", 0] and "원본 파일에서" not in res.text
     _no_echo(res.text, "없는")
     assert _counts() == before
 
@@ -628,7 +637,7 @@ def test_nul_entity_names_are_looked_up_in_one_pass_over_the_cells(client, monke
     assert f"파일 #{fid} · 1번째 시트 · 2행 · A열" in res.text and " 외 37곳" in res.text, res.text
 
 
-@pytest.mark.sqlite_only("PostgreSQL은 NUL이 든 자동화 이름을 저장하지 않음 (422 — 직접 입력 글자의 안전망)")
+@pytest.mark.sqlite_only("이름 규칙 전에 SQLite에 쌓인 NUL 자동화 이름 (PostgreSQL에는 드라이버가 거절해 생길 수 없음)")
 def test_nul_from_an_automation_name_is_not_blamed_on_a_cell(client) -> None:
     # 자동화 이름의 NUL은 규칙 항목의 사유에 들어간다 — 같은 값의 칸(NUL 없음)을 지목하지 않고 설정을 고치라고 알린다
     header = "기관명,인구수\n"
@@ -640,10 +649,10 @@ def test_nul_from_an_automation_name_is_not_blamed_on_a_cell(client) -> None:
         assert client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json=body).status_code == 200
     assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
     run = client.post(f"/reviews/{review['id']}/integrate", json={}).json()
-    auto = client.post(f"/runs/{run['id']}/automation", json={"name": "규칙\x00이름"})
-    assert auto.status_code == 201, auto.text  # SQLite는 직접 입력 글자의 NUL을 저장한다 (남은 두 DB 차이)
+    auto = client.post(f"/runs/{run['id']}/automation", json={"name": "규칙 이름"}).json()
+    _rename_automation(auto["id"], "규칙\x00이름")  # API는 이제 NUL 이름을 거절한다 — 옛 저장값을 흉내 낸다
     oct_ = _csv(client, "규칙이름10월.csv", header + "가나다라연구소,7\n")
-    res = client.post(f"/automations/{auto.json()['id']}/run", json={"file_ids": [oct_]})
+    res = client.post(f"/automations/{auto['id']}/run", json={"file_ids": [oct_]})
     assert res.status_code == 422, res.text
     detail = res.json()["detail"]
     assert "자동화 이름 (원본 칸이 아니라 규칙 항목의 사유에 들어가는 설정)" in detail, detail
@@ -701,7 +710,7 @@ def test_nul_in_the_review_period_is_named_as_a_condition_not_as_the_file_cell()
     assert "자동화의 조건·이름은 바꿀 수 없으니" in str(exc.value), str(exc.value)
 
 
-@pytest.mark.sqlite_only("PostgreSQL은 NUL이 든 자동화 이름을 저장하지 않음 (422 — 직접 입력 글자의 안전망)")
+@pytest.mark.sqlite_only("이름 규칙 전에 SQLite에 쌓인 NUL 자동화 이름 (PostgreSQL에는 드라이버가 거절해 생길 수 없음)")
 def test_automation_name_that_is_part_of_a_cell_does_not_hide_that_cell(client) -> None:
     # 자동화 이름이 칸 글자의 일부여도(여기서는 NUL 한 글자) 규칙 항목의 "자동화 '<이름>'" 꼴만 설정으로 보고, 경고
     # 사유에 옮겨 적힌 칸의 NUL은 그 칸으로 알린다 (검증 지적 R48-IV-6 — 예전: 이름 글자를 모든 사유에서 지워 칸을 놓침)
@@ -714,10 +723,10 @@ def test_automation_name_that_is_part_of_a_cell_does_not_hide_that_cell(client) 
         assert client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json=body).status_code == 200
     assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
     run = client.post(f"/reviews/{review['id']}/integrate", json={}).json()
-    auto = client.post(f"/runs/{run['id']}/automation", json={"name": "\x00"})
-    assert auto.status_code == 201, auto.text
+    auto = client.post(f"/runs/{run['id']}/automation", json={"name": "이름 일부"}).json()
+    _rename_automation(auto["id"], "\x00")  # API는 이제 NUL 이름을 거절한다 — 옛 저장값을 흉내 낸다
     oct_ = _csv(client, "이름일부10월.csv", header + "가나다라연구소,abc\n마바사연구소,x\x00y\n")
-    res = client.post(f"/automations/{auto.json()['id']}/run", json={"file_ids": [oct_]})
+    res = client.post(f"/automations/{auto['id']}/run", json={"file_ids": [oct_]})
     assert res.status_code == 422, res.text
     detail = res.json()["detail"]
     assert "자동화 이름 (원본 칸이 아니라 규칙 항목의 사유에 들어가는 설정)" in detail, detail
@@ -1617,18 +1626,17 @@ def test_upload_refuses_a_file_name_over_the_limit_instead_of_cutting_it(client)
     assert len(stored) == 255 and stored.endswith(".xlsx"), len(stored)  # 자르지 않고 확장자 그대로
 
 
-def test_typed_text_with_nul_is_not_a_server_error_on_postgresql(client) -> None:
-    """앱이 쓰기 전에 거절하지 않는 직접 입력(자동화 이름 등)의 NUL — PostgreSQL은 안전망이 입력 오류(422)로 알리고,
-    SQLite는 그대로 저장한다 (남은 두 DB 차이 — app/main.py)."""
+def test_typed_text_with_nul_is_refused_the_same_way_on_both_databases(client) -> None:
+    """직접 입력(자동화 이름 등)의 NUL — 예전에는 PostgreSQL만 안전망(문자열 detail 422)이 막고 SQLite는 저장했다.
+    이제 두 DB 모두 요청 검증이 필드 위치(loc)와 함께 422로 거절한다 (tests/test_nul_inputs.py가 필드별로 본다)."""
     fid = _upload(client, "안전망.xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 1]]))
     assert _apply(client, fid, ("c0", "org_name"), ("c1", "population")).status_code == 200
     run = client.post(f"/reviews/{_ready(client, [fid])['id']}/integrate", json={})
     assert run.status_code == 201, run.text
     res = client.post(f"/runs/{run.json()['id']}/automation", json={"name": f"널\x00자동화 {fid}"})
-    if POSTGRES:
-        assert res.status_code == 422 and "[VALUE_HAS_NUL]" in res.text, res.text
-    else:
-        assert res.status_code == 201, res.text
+    assert res.status_code == 422 and "[VALUE_HAS_NUL]" in res.text, res.text
+    assert res.json()["detail"][0]["loc"] == ["body", "name"] and "반영됐는지" not in res.text, res.text
+    _no_echo(res.text, "널\x00자동화")
 
 
 # ---------------------------------------------------------------- 이름 규칙 전에 SQLite에 쌓인 자료 (그대로 둠)

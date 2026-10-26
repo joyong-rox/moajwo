@@ -16,6 +16,7 @@ from app.files import get_file_for, load_parsed
 from app.glossary_api import get_glossary
 from app.mapping import get_engine
 from app.models import SourceFile, ValidationRun
+from app.name_limits import StoredText
 from app.pii import has_pii, mask_nested, mask_rrn_number, mask_text
 from app.promotion import load_standard
 from app.quantity import confirmed_quantity_indexes, quantity_sheet
@@ -108,7 +109,9 @@ class ValidationIn(BaseModel):
     file_ids: list[int] = Field(min_length=1, max_length=MAX_FILES)
     baseline_file_ids: list[int] = Field(default_factory=list, max_length=MAX_FILES)
     expected_period: str | None = Field(default=None, pattern=r"^(19|20)\d{2}(-(0[1-9]|1[0-2]))?$")
-    required_entities: list[str] = Field(default_factory=list, max_length=500)
+    # 항목은 검토 조건(params JSON)·검토 항목 사유에 저장된다 — NUL은 항목 위치(loc)로 /validation·/reviews가 같게
+    # 422 (항목별 길이 한도는 두지 않음)
+    required_entities: list[StoredText] = Field(default_factory=list, max_length=500)
     entity_field: str | None = None
     change_threshold: float = Field(default=0.5, gt=0, le=10)
 

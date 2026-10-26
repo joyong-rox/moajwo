@@ -20,6 +20,7 @@ from app.config import OLLAMA_EMBED_MODEL
 from app.db import get_session
 from app.mapping import get_engine
 from app.models import AppSetting, Automation, MappingApproval, PromotionCandidate, StandardTerm, User
+from app.name_limits import OptionalStoredText
 from app.pii import mask_text
 from app.promotion import PROMOTION_THRESHOLD, PromotionError, approve, reject
 from app.timefmt import utc_to_kst
@@ -99,7 +100,7 @@ def list_promotions(
 
 
 class ReviewNoteIn(BaseModel):
-    note: str | None = Field(default=None, max_length=500)
+    note: OptionalStoredText = Field(default=None, max_length=500)  # promotion_candidates.review_note
 
 
 def _candidate(db: Session, candidate_id: int) -> PromotionCandidate:
@@ -315,10 +316,11 @@ def read_llm_settings(_: OwnerDep, db: Annotated[Session, Depends(get_session)])
 
 class LlmSettingsIn(BaseModel):
     mode: Literal["ollama", "openai", "anthropic", "custom"]
-    model: str | None = Field(default=None, max_length=200)
-    base_url: str | None = Field(default=None, max_length=500)
+    # JSON으로 저장돼 두 DB 차이는 없지만, 읽을 때 되살아나 모델 이름·주소·헤더로 가는 값이라 NUL은 받지 않는다
+    model: OptionalStoredText = Field(default=None, max_length=200)
+    base_url: OptionalStoredText = Field(default=None, max_length=500)
     # None = 저장된 키 유지, "" = 키 삭제, 값 = 새 키
-    api_key: str | None = Field(default=None, max_length=500)
+    api_key: OptionalStoredText = Field(default=None, max_length=500)
 
 
 @router.put("/settings/llm", response_model=LlmSettingsOut)
