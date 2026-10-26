@@ -29,6 +29,7 @@ from app.name_limits import (
     HAS_NUL,
     NUL,
     TOO_LONG,
+    VALUE_HAS_NUL,
 )
 from app.parsing import Cell, ParseError, is_missing, parse_file
 
@@ -92,13 +93,13 @@ def _text(cell: Cell) -> str | None:
     return text or None
 
 
-def _date(cell: Cell) -> date | None:
+def _date(cell: Cell, label: str) -> date | None:
     text = _text(cell)
     if text is None:
         return None
     m = _DATE.match(text.split(" ")[0])
-    if not m:
-        raise ValueError(f"날짜 형식이 아닙니다: {text} (예: 2026-01-01)")
+    if not m:  # 칸 값은 문구에 넣지 않는다 (행 번호·열 이름으로 위치를 알림)
+        raise ValueError(f"{label}이 날짜 형식이 아닙니다 (예: 2026-01-01).")
     return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 
@@ -108,7 +109,7 @@ def _digits(cell: Cell, width: int, label: str) -> str | None:
     if text is None:
         return None
     if not text.isdigit() or len(text) > width:
-        raise ValueError(f"{label}는 {width}자리 숫자여야 합니다: {text}")
+        raise ValueError(f"{label}는 {width}자리 숫자여야 합니다.")
     return text.zfill(width)
 
 
@@ -160,18 +161,18 @@ def _to_row(row_no: int, cells: list[Cell], get) -> ImportRow:  # noqa: ANN001
     if not code or not name:
         raise ValueError("코드와 정식명칭은 비울 수 없습니다.")
     if not CODE_PATTERN.match(code):
-        raise ValueError(f"코드는 7자리(숫자·영문 대문자)여야 합니다: {code}")
+        raise ValueError("코드는 7자리(숫자·영문 대문자)여야 합니다.")
     sido = _digits(get(cells, "시도코드"), 2, "시도코드")
     sigungu = _digits(get(cells, "시군구코드"), 3, "시군구코드")
     if sigungu and not sido:
         raise ValueError("시군구코드가 있으면 시도코드도 있어야 합니다.")
-    valid_from, valid_to = _date(get(cells, "시작일")), _date(get(cells, "종료일"))
+    valid_from, valid_to = _date(get(cells, "시작일"), "시작일"), _date(get(cells, "종료일"), "종료일")
     if valid_from and valid_to and valid_from > valid_to:
         raise ValueError("시작일이 종료일보다 늦습니다.")
     previous = [p.strip().upper() for p in re.split(r"[,;\s]+", _text(get(cells, "이전코드")) or "") if p.strip()]
     bad_prev = [p for p in previous if not CODE_PATTERN.match(p)]
     if bad_prev:
-        raise ValueError(f"이전코드는 7자리여야 합니다: {', '.join(bad_prev)}")
+        raise ValueError(f"이전코드 중 {len(bad_prev)}개가 7자리(숫자·영문 대문자)가 아닙니다.")
     aliases = [a.strip() for a in _ALIAS_SPLIT.split(_text(get(cells, "별칭")) or "") if a.strip()]
     type_label, note = _text(get(cells, "유형")), _text(get(cells, "메모"))
     # 저장 규칙 (두 DB에서 같게 — app/name_limits.py): 저장 한도와 NUL. 이름은 정규화한 키도 저장되므로 함께 본다
@@ -205,7 +206,7 @@ def _to_row(row_no: int, cells: list[Cell], get) -> ImportRow:  # noqa: ANN001
 def _stored_problem(label: str, value: str, limit: int, keyed: bool) -> str | None:
     """사전에 저장할 칸 하나의 문제 (없으면 None). keyed: 정규화한 키도 저장되는 이름."""
     if NUL in value:
-        return f"{label}에 NUL(0x00) 문자가 있습니다 — 지운 뒤 다시 올리세요. [{HAS_NUL}]"
+        return f"{label}에 NUL(0x00) 문자가 있습니다 — 지운 뒤 다시 올리세요. [{HAS_NUL if keyed else VALUE_HAS_NUL}]"
     if len(value) > limit:
         return f"{label} {len(value):,}자 — 저장 한도 {limit}자를 넘습니다. 줄여서 다시 올리세요. [{TOO_LONG}]"
     key = normalize_name(value) if keyed else value

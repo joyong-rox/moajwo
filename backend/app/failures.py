@@ -17,9 +17,11 @@ from sqlalchemy.exc import SQLAlchemyError
 
 
 def failure_reason(exc: BaseException, own: tuple[type[BaseException], ...] = ()) -> str:
-    """응답·실행 기록에 쓸 실패 이유. own: 문구를 앱이 직접 만드는 예외 (그대로 쓴다)."""
+    """응답·실행 기록에 쓸 실패 이유. own: 문구를 앱이 직접 만드는 예외 (그대로 쓴다 — HTTPException은 상태 코드 없이
+    문구만)."""
     if isinstance(exc, own):
-        return str(exc)
+        detail = getattr(exc, "detail", None)
+        return detail if isinstance(detail, str) else str(exc)
     if isinstance(exc, SQLAlchemyError):  # SQL 문장·매개변수 없이 종류·SQLSTATE만 (app/main.py와 같은 원칙)
         orig = getattr(exc, "orig", None)
         state = getattr(orig, "sqlstate", None)

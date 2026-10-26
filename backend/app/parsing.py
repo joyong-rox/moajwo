@@ -244,7 +244,9 @@ def _check_xlsx_size(path: Path) -> None:
         raise ParseError(_too_many_cells(f"병합 범위만 {merged:,}칸"))
 
 
-def _read_xlsx(path: Path) -> tuple[dict[str, list[list[Any]]], Filled]:
+def _read_xlsx(path: Path) -> tuple[dict[str, list[list[Any]]], Filled, dict[str, int]]:
+    """(시트별 칸, 병합으로 채운 칸, 탭 순번). 탭 순번은 통합 문서의 모든 탭(차트 시트 포함)에서 센다 — 읽는 것은
+    워크시트뿐이라 그 순서로 세면 앞에 차트 시트가 있을 때 'N번째 시트'가 어긋난다."""
     _check_xlsx_size(path)
     # read_only 모드에서는 병합 셀 정보를 얻을 수 없어 일반 모드로 연다 (파일은 읽기만 함).
     wb = openpyxl.load_workbook(path, data_only=True)
@@ -258,7 +260,7 @@ def _read_xlsx(path: Path) -> tuple[dict[str, list[list[Any]]], Filled]:
                 top_left = grid[rng.min_row - 1][rng.min_col - 1] if rng.min_row - 1 < len(grid) else None
                 _fill_range(grid, rng.min_row - 1, rng.max_row, rng.min_col - 1, rng.max_col, top_left, cells)
             sheets[ws.title] = grid
-        return sheets, filled
+        return sheets, filled, {name: i for i, name in enumerate(wb.sheetnames)}
     finally:
         wb.close()
 
@@ -773,9 +775,10 @@ def _parse_file(path: Path, original_name: str | None) -> FileResult:
     ext = path.suffix.lower()
     encoding = None
     filled: Filled = {}
+    tabs: dict[str, int] = {}  # xlsx: 원본 탭 순번 (그 밖은 읽은 순서)
     try:
         if ext == ".xlsx":
-            sheets, filled = _read_xlsx(path)
+            sheets, filled, tabs = _read_xlsx(path)
         elif ext == ".xls":
             sheets, filled = _read_xls(path)
         elif ext == ".csv":
@@ -806,5 +809,5 @@ def _parse_file(path: Path, original_name: str | None) -> FileResult:
     for tab, (n, g) in enumerate(sheets.items()):
         if n not in skipped:
             sheet_results.append(analyze_sheet(n, g, filled.get(n)))
-            sheet_results[-1].tab = tab
+            sheet_results[-1].tab = tabs.get(n, tab)
     return FileResult(sheets=sheet_results, encoding=encoding, skipped_sheets=skipped)

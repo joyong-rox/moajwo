@@ -149,9 +149,12 @@ class _Built:
     text_chars: int = 0  # 결과 칸·변경 기록(앞뒤 값·이유)의 글자 수 합 — 결과 글자 예산 (쌓는 중에 센다)
     # (파일 번호, 시트 이름, 원본 열 이름) → 위치 '파일 #n · N번째 시트 · C열(머리글 1행)' — 이름 없이 알릴 때
     places: dict[tuple[int, str, str], str] = field(default_factory=dict)
-    # 결과 파일에 쓸 수 없는 제어 문자가 든 곳: 처음 3곳의 위치와 전체 수 (실행 기록을 만들기 전에 거절)
+    sheets: dict[tuple[int, str], str] = field(default_factory=dict)  # (파일 번호, 시트 이름) → '파일 #n · N번째 시트'
+    # 결과 파일에 쓸 수 없는 제어 문자가 든 곳: 처음 3곳의 위치와 전체 수 (실행 기록을 만들기 전에 거절). 그중 용어사전
+    # 표시 이름에서 온 곳의 수 — 원본 파일이 아니라 용어사전을 고쳐야 한다
     control: list[str] = field(default_factory=list)
     control_count: int = 0
+    control_glossary: int = 0
 
 
 # ---------------------------------------------------------------- 값 비교
@@ -259,8 +262,9 @@ def _bad_text(value: Any) -> bool:
     return isinstance(value, str) and ILLEGAL_CHARACTERS_RE.search(value) is not None
 
 
-def _control_at(built: _Built, where: str) -> None:
+def _control_at(built: _Built, where: str, glossary: bool = False) -> None:
     built.control_count += 1
+    built.control_glossary += glossary
     if len(built.control) < 3:
         built.control.append(where)
 
@@ -338,6 +342,7 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
         for sheet in parsed.sheets:
             # 시트·열 이름은 결과 파일(출처 열·변경 내역·처리 요약)에 그대로 쓴다 — 쓰지 않는 열 이름도 요약에 남는다
             where = f"파일 #{fid} · {sheet_place(sheet)}"
+            built.sheets[(fid, sheet.name)] = where
             if _bad_text(sheet.name):
                 _control_at(built, f"{where}: 시트 이름")
             for j, name in enumerate(sheet.columns):
@@ -419,8 +424,13 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                             if shown != value:
                                 value, kind, reason, confidence = shown, "entity", why, conf
                     row[label_index[c.label]] = value
-                    if _bad_text(value) or _bad_text(original):  # 결과 칸·변경 내역(이전 값)에 쓸 수 없는 글자
-                        _control_at(built, f"{where} · {cell_place(sheet, entry['row'], c.index)}")
+                    place = f"{where} · {cell_place(sheet, entry['row'], c.index)}"
+                    # 결과 칸·변경 내역(이전 값)에 쓸 수 없는 글자 — 원본 칸에서 왔는지, 칸 값을 바꾼 용어사전 표시
+                    # 이름에서 왔는지 나눠 알린다 (용어사전 글자는 원본을 고쳐도 남는다)
+                    if _bad_text(original) or (kind != "entity" and _bad_text(value)):
+                        _control_at(built, place)
+                    elif _bad_text(value):
+                        _control_at(built, f"용어사전 {ref.code} 항목의 이름 ({place}에 쓰려던 값)", glossary=True)
                     if same(original, value):
                         continue
                     if kind is None:
@@ -734,10 +744,14 @@ def _check_text(built: _Built) -> None:
     (값 원문은 응답·실행 기록·서버 기록 어디에도 넣지 않음). 값을 지우거나 바꿔 만들지 않는다."""
     if built.control_count:
         more = built.control_count - len(built.control)
+        fixes = []
+        if built.control_count > built.control_glossary:
+            fixes.append("원본 파일에서 그 문자를 지운 뒤 다시 올리고 검토에서 다시 검사하세요")
+        if built.control_glossary:
+            fixes.append("용어사전 항목의 이름은 용어사전에서 고친 뒤 다시 통합하세요")
         raise IntegrationError(
             "통합하지 않았습니다 — 결과 파일(엑셀)에 쓸 수 없는 제어 문자(NUL 등)가 있습니다: "
-            f"{' / '.join(built.control)}{f' 외 {more}곳' if more else ''}. "
-            f"원본 파일에서 그 문자를 지운 뒤 다시 올리고 검토에서 다시 검사하세요. [{CONTROL_CHAR}]"
+            f"{' / '.join(built.control)}{f' 외 {more}곳' if more else ''}. {' · '.join(fixes)}. [{CONTROL_CHAR}]"
         )
 
 
@@ -795,8 +809,9 @@ def _integrate(db: Session, session: ReviewSession, include_unmapped: bool | Non
     ]  # fmt: skip
     for w, i in zip(warnings, shown, strict=True):  # 처리 요약 시트에 쓴다 (경고 사유에 칸 값이 들어갈 수 있음)
         if any(_bad_text(v) for v in w.values()):
-            base = built.places.get((i.file_id or 0, i.sheet or "", i.column or "")) or f"파일 #{i.file_id}"
-            _control_at(built, f"{base}{f' · {i.row}행' if i.row else ''} (검증 경고)")
+            # 사유의 글자는 경고가 가리킨 열이 아니라 그 행의 다른 칸(합계 행의 이름 칸 등)에서 왔을 수 있어 행까지만
+            base = built.sheets.get((i.file_id or 0, i.sheet or "")) or f"파일 #{i.file_id}"
+            _control_at(built, f"{base}{f' · {i.row}행' if i.row else ''} (검증 경고 사유 — 그 행의 칸에서 온 글자)")
     _check_text(built)  # 결과 파일에 쓸 수 없는 제어 문자 — 실행 기록을 만들기 전에 거절
     file_ids = [f["id"] for f in built.files if not f["excluded"]]
     # 자동화가 만든 '검토 대기' 행은 DB에서도 그 상태일 때만 이어 쓴다 (겹친 두 요청이 같은 행을 쓰지 않게)
