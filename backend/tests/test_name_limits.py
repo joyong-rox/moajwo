@@ -578,6 +578,29 @@ def test_nul_from_an_automation_name_is_not_blamed_on_a_cell(client) -> None:
     assert f"파일 #{oct_}" not in detail, detail  # NUL이 없는 칸을 지목하지 않음
 
 
+@pytest.mark.sqlite_only("PostgreSQL은 NUL이 든 자동화 이름을 저장하지 않음 (422 — 직접 입력 글자의 안전망)")
+def test_automation_name_that_is_part_of_a_cell_does_not_hide_that_cell(client) -> None:
+    # 자동화 이름이 칸 글자의 일부여도(여기서는 NUL 한 글자) 규칙 항목의 "자동화 '<이름>'" 꼴만 설정으로 보고, 경고
+    # 사유에 옮겨 적힌 칸의 NUL은 그 칸으로 알린다 (검증 지적 R48-IV-6 — 예전: 이름 글자를 모든 사유에서 지워 칸을 놓침)
+    header = "기관명,인구수\n"
+    sept = _csv(client, "이름일부9월.csv", header + "가나다라연구소,5\n")
+    assert _apply(client, sept, ("c0", "org_name"), ("c1", "population")).status_code == 200
+    review = client.post("/reviews", json={"file_ids": [sept]}).json()
+    for item in [i for i in review["items"] if i["category"] == "pending" and i["decision"] is None]:
+        body = {"decision": "rejected"}
+        assert client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json=body).status_code == 200
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = client.post(f"/reviews/{review['id']}/integrate", json={}).json()
+    auto = client.post(f"/runs/{run['id']}/automation", json={"name": "\x00"})
+    assert auto.status_code == 201, auto.text
+    oct_ = _csv(client, "이름일부10월.csv", header + "가나다라연구소,abc\n마바사연구소,x\x00y\n")
+    res = client.post(f"/automations/{auto.json()['id']}/run", json={"file_ids": [oct_]})
+    assert res.status_code == 422, res.text
+    detail = res.json()["detail"]
+    assert "자동화 이름 (원본 칸이 아니라 규칙 항목의 사유에 들어가는 설정)" in detail, detail
+    assert f"파일 #{oct_} · 1번째 시트 · 3행 · B열" in detail, detail
+
+
 def test_nul_quoted_into_a_warning_reason_is_pointed_at_its_own_cell(client) -> None:
     # 숫자로 읽지 못한 값 경고는 첫 값의 행을 가리키고 사유에 값을 3개까지 옮겨 적는다 — NUL이 둘째 값에 있으면 경고의
     # 행(첫 값의 칸)이 아니라 그 값의 칸을 알리고, 설정이 아니라 원본 파일을 고치라고 안내한다
@@ -699,9 +722,18 @@ def test_entity_values_are_found_with_one_pass_over_the_values_entity_columns_fi
             Values.walks += 1
             return super().__iter__()
 
+    class Cell(str):
+        eqs = 0
+
+        def __eq__(self, other: object) -> bool:  # 칸 글자를 값과 견줄 때마다 센다 (사전 찾기는 칸마다 한두 번)
+            Cell.eqs += 1
+            return str.__eq__(self, other)
+
+        __hash__ = str.__hash__
+
     body = [
-        {"row": 2, "kind": "data", "cells": ["가\x00나", 1, "가\x00나"]},
-        {"row": 3, "kind": "data", "cells": ["강\x00서구", 2, None]},
+        {"row": 2, "kind": "data", "cells": [Cell("가\x00나"), 1, Cell("가\x00나")]},
+        {"row": 3, "kind": "data", "cells": [Cell("강\x00서구"), 2, None]},
     ]
     sheet = SimpleNamespace(name="s", tab=0, columns=["기관", "값", "메모"], source_columns=[], header_row=1,
                             header_row_end=None, body=body, title_texts=[])  # fmt: skip
@@ -710,11 +742,12 @@ def test_entity_values_are_found_with_one_pass_over_the_values_entity_columns_fi
     target = SimpleNamespace(
         record=SimpleNamespace(id=3), parsed=SimpleNamespace(sheets=[sheet]), mappings={"s": mapped}
     )
-    values = Values({"가\x00나", "서울특별시 강\x00서구", "없는\x00값"})
+    values = Values({"가\x00나", "서울특별시 강\x00서구", "없는\x00값", *(f"다른{k}\x00값" for k in range(30))})
     places, missing = review_module._cells_holding([target], values)
     assert places == ["파일 #3 · 1번째 시트 · 2행 · A열", "파일 #3 · 1번째 시트 · 3행 · A열"], places
     assert missing is True
     assert Values.walks == 1, Values.walks
+    assert Cell.eqs <= 2 * 3 * 2, Cell.eqs  # 칸 3개 × 두 차례 — 값(30여 개)마다 견주지 않음
 
 
 def test_nul_in_a_cell_that_is_only_read_is_refused_only_where_it_is_written(client) -> None:
