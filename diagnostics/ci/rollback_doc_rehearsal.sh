@@ -286,13 +286,13 @@ sha256sum backups/moajwo-data-before-rollback-bad.tgz | sed 's|  .*|  backups/mo
 printf 'x' >> backups/moajwo-data-before-rollback-bad.tgz   # 기록한 sha256과 달라짐
 ls_before=$(volume_ls); db_before=$(volume_db_sha)
 export BK=moajwo-data-before-rollback-bad.tgz; r=$(run_box a_bad A); unset BK
-check a.bad_backup_refused "$r · $(grep -h '\[중단\]' "$OUT/a_bad-stepA.log" | head -1) · $( [ "$(volume_ls)" = "$ls_before" ] && [ "$(volume_db_sha)" = "$db_before" ] && echo volume_unchanged || echo volume_changed)" \
+check a.bad_backup_refused "$r · $(grep -h '^\[중단\]' "$OUT/a_bad-stepA.log" | head -1) ·$( [ "$(volume_ls)" = "$ls_before" ] && [ "$(volume_db_sha)" = "$db_before" ] && echo volume_unchanged || echo volume_changed)" \
   "A:1" "sha256이 기록과 다름" "volume_unchanged"
 r=$(run_box a_ok A)
 check a.restored "$r · $(volume_ls)" "done" "_pre_rollback_$TS3" "moajwo.db"
 ls_after=$(volume_ls); db_after=$(volume_db_sha)
 r=$(run_box a_again A)
-check a.rerun_refused "$r · $(grep -h '\[중단\]' "$OUT/a_again-stepA.log" | head -1) · $( [ "$(volume_ls)" = "$ls_after" ] && [ "$(volume_db_sha)" = "$db_after" ] && echo volume_unchanged || echo volume_changed)" \
+check a.rerun_refused "$r · $(grep -h '^\[중단\]' "$OUT/a_again-stepA.log" | head -1) ·$( [ "$(volume_ls)" = "$ls_after" ] && [ "$(volume_db_sha)" = "$db_after" ] && echo volume_unchanged || echo volume_changed)" \
   "A:1" "보존 폴더가 이미 있음" "volume_unchanged"
 r=$(run_steps a 6 7)
 snapshot after_a

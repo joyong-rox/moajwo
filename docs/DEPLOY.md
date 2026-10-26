@@ -131,7 +131,7 @@ if [ -n "$UNIT" ]; then   # 전환을 마친 반영
   PREV=$(printf '%s\n' "$UNIT" | sed -n 's|.*리비전 \([0-9a-z_]*\) → .*|\1|p')
   NEWREV=$(printf '%s\n' "$UNIT" | sed -n 's|.*리비전 [0-9a-z_]* → \([0-9a-z_]*\).*|\1|p')
 elif [ -n "$HINT" ]; then  # 전환에서 멈춘 반영 — 마이그레이션이 진행됐을 수 있어 반영 후 리비전은 지금 DB에서 읽는다
-  echo "$HINT"
+  printf '%s\n' "$HINT" | sed 's/^\[[0-9:]*\] \[중단\] /반영 로그(전환에서 멈춤): /'
   TS=$(printf '%s\n' "$HINT" | sed -n 's|.*롤백 태그 rollback-\([0-9-]*\),.*|\1|p')
   PREV=$(printf '%s\n' "$HINT" | sed -n 's|.*반영 전 리비전 \([0-9a-z_]*\)).*|\1|p')
   NEWREV=$(dbrev) && echo "전환에서 멈춘 반영 — 지금 DB 리비전 $NEWREV"
