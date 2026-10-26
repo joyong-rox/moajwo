@@ -499,14 +499,23 @@ else:
     print(f"tar_seen=yes verify_before_write={before} written_uptime={written:.2f} verify_started_uptime={started} 쓰기가 먼저={order}")
 PY
 
-vm_case() {  # vm_case <이름> <during|after> <deploy 번호> — 새 반영 → 1단계 정지 → 감시기 → 2단계 → 판정
+vm_case() {  # vm_case <이름> <during|after> <deploy 번호|-> — (새 반영 →) 1단계 정지 → 감시기 → 2단계 → 판정
+  # '-'이면 새로 반영하지 않고 앞 경우가 '지금 판 재개'로 돌려놓은 같은 배포 단위를 1단계부터 다시 쓴다
+  # (deploy.sh는 반영 전 리비전이 0019일 때만 반영하므로, 재개 뒤 0020 상태에서 다시 반영하지 않는다)
   local name=$1 mode=$2 dn=$3 ts r mp before sha_before wpid ctl
-  bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-$dn.out" 2>&1
-  r=$?; check "$name.deploy" "exit=$r · scripts/deploy.sh $NEW 0019_analysis_runs (9b $name 앞 새 반영)" "exit=0"
+  if [ "$dn" != - ]; then
+    bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-$dn.out" 2>&1
+    r=$?; check "$name.deploy" "exit=$r · scripts/deploy.sh $NEW 0019_analysis_runs (9b $name 앞 새 반영)" "exit=0"
+  fi
   ts=$(ts_of_unit)
   mp=$(docker volume inspect moajwo_moajwo-data --format '{{.Mountpoint}}')
   r=$(run_steps "$name" 1 1)
   check "$name.stop" "$r" "done"
+  if [ "$r" != done ]; then  # 정지하지 못했으면 2단계를 돌리지 않는다 (떠 있는 서비스로 백업 단계를 돌리면 판정이 흐려짐)
+    res "$name.skipped" "fail" "1단계가 끝나지 않아 2단계·감시기를 돌리지 않음"
+    res "$name.resume" "$(resume && echo ok || echo fail)" "지금 판 재개"
+    return
+  fi
   [ "$mode" = during ] && sudo dd if=/dev/urandom of="$mp/rehearsal-filler.bin" bs=1M count=200 status=none   # tar가 몇 초 걸리게
   before=$(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l); sha_before=$(ls backups/*.sha256 2>/dev/null | wc -l)
   sudo python3 "$OUT/vm-watch.py" "$mp" "$mode" > "$OUT/$name-watch.log" 2>&1 &
@@ -535,7 +544,7 @@ vm_case() {  # vm_case <이름> <during|after> <deploy 번호> — 새 반영 �
 # 9b-1. 압축 중 원본이 바뀜 → tar 'file changed as we read it' → '[중단] 백업 만들기·압축 검사 실패' (검증 컨테이너는 뜨지 않음)
 vm_case vm_tar during 6
 # 9b-2. 압축이 끝난 뒤·검증 전에 볼륨 DB가 바뀜 → '[중단] 백업 검증 실패' (백업은 만들어졌지만 검증 표시 .sha256 없음)
-vm_case vm_verify after 7
+vm_case vm_verify after -
 
 cp -r backups "$OUT/backups-meta" 2>/dev/null; rm -f "$OUT"/backups-meta/*.tgz   # 압축 백업(합성 자료)은 올리지 않음
 docker compose logs --no-color > "$OUT/compose.log" 2>&1
