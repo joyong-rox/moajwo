@@ -1,4 +1,4 @@
-import type { IntegrationRun } from './api'
+import type { IntegrationRun, KeyJoinScope } from './api'
 
 const OFFSET = /(Z|[+-]\d{2}:?\d{2})$/i
 const KST_PARTS = new Intl.DateTimeFormat('en-CA', {
@@ -59,3 +59,22 @@ export function runOutcome(r: IntegrationRun): { text: string; tone: 'muted' | '
 }
 
 export const OUTCOME_CLASS = { muted: 'mw-muted', warn: 'run-check', error: 'upload-error' } as const
+
+// ---------------------------------------------------------------- 공통 key 연결 (summary.mode === 'keyjoin')
+/** 실행 기록의 방식 열 표기 — '직접 검토'·'시트 묶기'와 같은 길이로 표 열 너비를 바꾸지 않는다 */
+export const KEYJOIN_MODE_SHORT = 'key 취합'
+export const KEYJOIN_MODE_TITLE = '공통 key로 연결하기 (검토 없음)'
+/** 포함할 사용자 범위 문구 (연결 화면의 선택지·실행 기록 공용) */
+export const KEYJOIN_SCOPE_LABEL: Record<KeyJoinScope, string> = {
+  base: '기준 파일의 사용자만',
+  all: '모든 파일의 사용자',
+  common: '모든 파일의 공통 사용자',
+}
+export const KEYJOIN_SCOPE_SHORT: Record<KeyJoinScope, string> = { base: '기준', all: '모든', common: '공통' }
+
+/** 실행 기록 요약의 입력 수 — 시작 요약은 개수, 완료 요약은 입력 목록 (없으면 null) */
+export function keyJoinInputCount(summary: IntegrationRun['summary']): number | null {
+  const v = summary.inputs
+  if (Array.isArray(v)) return v.length
+  return typeof v === 'number' ? v : null
+}
