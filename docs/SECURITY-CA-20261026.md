@@ -11,7 +11,17 @@ PR `fix/tls-trust-emudhra`(#50)의 조사표·변경·검증 기록입니다. �
 | Python 공식 안내 discuss.python.org (2026-10-20~21) | pip는 항상 내장 certifi를 함께 쓰므로 **pip 26.2.2 이상** 필요. 안전한 올림: PyPI 파일 서버 고정 주소 + `#sha256=`으로 설치. CPython 3.11.18 등 보안 판. Debian은 `ca-certificates` 보안 갱신 배포 |
 | Node.js 24.22.1 (2026-10-21, 보안 판) | 뿌리 인증서를 NSS 3.131.1로 갱신 |
 | nginx 문서 `ngx_http_proxy_module` | `proxy_ssl_verify` 기본값 **off**. `proxy_ssl_server_name`은 SNI만 보냄. 검증에는 `proxy_ssl_trusted_certificate`가 필요 |
-| Oracle CVE-2026-91403 (Java) | 이 환경에서 Oracle 안내 페이지를 읽지 못함(403)·검색 결과 없음. 저장소는 Java를 **직접 쓰지 않으므로**(아래 2장) 적용 대상이 없음 — Java 범위는 '직접 사용 없음'으로만 기록 |
+| Oracle CVE-2026-91403 (Java) | 2026-10-26: 이 환경에서 Oracle 안내 페이지를 읽지 못함(403)·검색 결과 없음. 저장소는 Java를 **직접 쓰지 않으므로**(아래 2장) 적용 대상이 없음 — Java 범위는 '직접 사용 없음'으로만 기록 (10-26 기록 그대로 둠). **2026-10-27 보완은 아래 1-1** |
+
+### 1-1. 2026-10-27 다시 확인한 것
+
+| 출처 | 내용 | 확인 수준 |
+|---|---|---|
+| Oracle CVE-2026-91403 공식 안내 `oracle.com/security-alerts/alert-cve-2026-91403.html` | 검토자(10-27 지시문)는 읽을 수 있었다고 했으나 **이 작업 환경에서는 다시 403** — 공식 원문은 인용하지 않는다. 2차 출처(CVE Watchtower, 게시 2026-10-21·수정 10-24): **Java SE 8u511·11.0.33·17.0.21·21.0.13·25.0.5·27.0.1, GraalVM for JDK 17.0.21·21.0.13, GraalVM EE 21.3.20의 JSSE 구성 요소**, CVSS 3.1 9.1(AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N), 인증 없는 네트워크 공격자. 그 요약에 eMudhra·cacerts 언급은 없음 | 2차 출처 요약 — 공식 원문 미확인 |
+| 구분 | **Java/JSSE 제품 권고**(Java 런타임의 TLS 구현을 쓰는 프로그램이 대상)와 **공통 CA 사고**(eMudhra 중간 인증서 키 손상 — Node·Python certifi·OS CA·Java cacerts 등 *모든* TLS 클라이언트의 신뢰 저장소가 대상)는 다르다. 이 저장소의 이미지·앱에는 Java가 없어 앞의 것은 적용 대상이 없지만, **뒤의 것은 Java 유무와 상관없이 Node 빌드·pip/certifi·OS CA 묶음에 영향이 있어 이 PR(2·3장)로 보완했다** — 'Java가 없으니 영향 없음'으로 읽지 않는다 | 판단 |
+| Java가 있는 곳 | 이미지·compose·CI 워크플로에는 없음(2장 표). GitHub 호스트 러너 이미지에는 JDK가 깔려 있으나 이 저장소의 워크플로는 Java를 실행하지 않음. ZAP·Nu HTML 검사기(둘 다 Java)는 실행하지 않았거나 로컬 진단 전용 — 다시 쓸 때는 그 JRE를 위 수정판 이상으로. 이 개발 PC에는 PATH의 `java`가 없음(10-27 확인) | 저장소·PC 확인 |
+| Render 안내 `render.com/docs/advisory-emudhra` (10-27 다시 읽음) | 변경 이력은 10-22 게시 한 건뿐 — 권장 판(Node 24.22.1·certifi 2026.10.19 등)·Docker 할 일(배포판 `ca-certificates`·언어별 CA 갱신 뒤 다시 빌드)은 같음. "재배포 후 인증서 거부를 확인하는 것을 강하게 권장", "테스트는 **실행 중인 Render 서비스의 HTTP 클라이언트**에서"(셸의 curl은 다른 CA 저장소일 수 있음) — 그래서 이 문서의 격리 러너 확인(4장)·후보 이미지의 실제 상류 확인(6장)은 실제 Render 인스턴스 확인을 대신하지 않는다 | 공식 문서 |
+| 앱 런타임의 certifi | 앱 실행 의존성(`backend/requirements.txt`)에 certifi·requests·httpx가 없음 — 앱의 python TLS는 OS CA 묶음(Debian `ca-certificates`)을 씀. certifi는 빌드 때 pip 내장분(2026.10.19)만 | 저장소 확인 |
 
 ## 2. 조사표 — 런타임·빌드·CI·진단 도구별 TLS 클라이언트와 신뢰 저장소
 
@@ -20,7 +30,7 @@ PR `fix/tls-trust-emudhra`(#50)의 조사표·변경·검증 기록입니다. �
 | 앱 런타임 | Render 프런트 nginx `/api/` → API (`frontend/nginx.render.conf`) | `https://moajwo-test-api.onrender.com/` | OS CA(Alpine `ca-certificates-bundle`) — **쓰지 않음**(`proxy_ssl_verify` 기본 off, 자체 서명 대역 API도 통과) | 암호화만, 상대 확인 없음 | `proxy_ssl_verify on` + 신뢰 묶음·이름·깊이·프로토콜 (3장) |
 | 앱 런타임 | 로컬 프런트 nginx → backend | `http://backend:8000` (compose 내부망) | 해당 없음 | — | 없음 (묶음 갱신만 같이) |
 | 앱 런타임 | backend `urllib` → Ollama / (소유자가 고른 경우) 외부 LLM | 기본 `http://`(Ollama) · 외부 LLM은 https | OS CA(Debian `ca-certificates`) — certifi 패키지 없음 | Debian 20250419+deb13u1 | `apt --only-upgrade ca-certificates`(이미 최신이면 그대로) |
-| 앱 런타임 | backend psycopg → 외부 PostgreSQL(제안, 아직 연결 안 함) | `sslmode=require`(암호화만) | 없음(require는 CA·이름 검증 안 함) | — | **이번 PR 밖** — Render 전환 승인 묶음에서 `verify-full`+`sslrootcert` 검토(소유자 결정) |
+| 앱 런타임 | backend psycopg → 외부 PostgreSQL(제안, 아직 연결 안 함) | 문서 예시는 `sslmode=require`(암호화만) | 없음(require는 CA·이름 검증 안 함) | — | **이번 PR 밖** — 2026-10-27 지시로 기본 정책을 `sslmode=verify-full`(호스트 이름까지 검증)로 정하고 격리 시험·설정 예시는 별도 PR(`docs/pg-tls-verify-full`)에서 |
 | 빌드 | backend `pip install` | PyPI | pip 내장 certifi (기반 이미지 pip **24.0** — 옛 묶음) | 해시 검증 없음 | 의존성 전에 **pip 26.2.2**를 고정 주소+sha256으로 설치 → `--require-hashes`로 의존성 설치 (3장) |
 | 빌드 | frontend `npm ci` (`node:24-alpine`) | npm registry | Node 내장 뿌리 저장소 | 떠도는 태그(2026-10-22 실제 판 v24.22.1) | `node:24.22.1-alpine@sha256:06d7adf3…` 색인 digest 고정, 판·emSign/eMudhra 뿌리 수 기록 |
 | 빌드 | nginx 스테이지 `apk upgrade` | Alpine CDN | 이미지 `ca-certificates-bundle` + apk 서명 | brotli-libs·curl·libcurl만 | `ca-certificates ca-certificates-bundle` 추가 |
@@ -112,9 +122,38 @@ backend 잔여 HIGH·CRITICAL (고유 ID, 수정판 있는 것 0 — Debian 안�
 
 ## 5. 남은 것·미검증·후속
 
-- 실제 Render API 서비스의 인증서 발급 기관·체인 길이는 조회하지 않았습니다(외부 요청 금지 범위). 깊이 3은 여유값이며, 적용 뒤 첫 배포에서 `/api/health`가 200인지로 확인합니다. 체인이 더 길면 502가 나며 그때 깊이를 근거와 함께 올립니다.
+- (10-26 기록) 실제 Render API 서비스의 인증서 발급 기관·체인 길이는 조회하지 않았습니다(외부 요청 금지 범위) — **10-27에 후보 이미지로 실제 체인을 확인했습니다(6장)**. 깊이 3은 여유값이며, 적용 뒤 첫 배포에서 `/api/health`가 200인지로 확인합니다. 체인이 더 길면 502가 나며 그때 깊이를 근거와 함께 올립니다.
 - 커뮤니티 시험 호스트 거절은 '손상된 체인을 믿지 않음'의 확인이지, eMudhra 사고 전체의 차단 증명이 아닙니다. 공식 시험 끝점은 없습니다.
 - backend 기반 이미지의 잔여 취약점(Trivy HIGH·CRITICAL 8, 수정판 0)은 이번 CA 조치로 바뀌지 않습니다 — 5장 표.
-- Render 전환 승인 묶음에서 외부 PostgreSQL 주소의 `sslmode=verify-full`과 `sslrootcert`(Debian 묶음 경로) 적용을 함께 결정해야 합니다(코드 변경 없이 주소로 가능).
+- 외부 PostgreSQL 연결의 기본 정책은 `sslmode=verify-full`입니다(2026-10-27 지시) — 격리 시험·설정 예시·도구별 확인은 별도 PR `docs/pg-tls-verify-full`. `require`는 서버 신원 검증이 아닙니다.
 - 운영 PC Docker Desktop의 데몬이 Docker Hub에 어느 신뢰 저장소로 붙는지는 확인하지 않았습니다(호스트 OS 갱신 사안).
 - 보안 수정 전 이미지(롤백 태그)로 되돌리면 상류 검증이 없는 상태로 돌아갑니다 — `docs/DEPLOY.md` 8장 참고.
+
+## 6. 실제 Render 경로 (2026-10-27)
+
+### 6-1. 서비스 표 — 마지막 관측은 2026-10-25, 10-27 재확인 못 함
+
+관리 API로 서비스 ID·연결 분기·Dockerfile·Auto-Deploy·공개 주소·상류 API를 읽기 전용으로 다시 확인하라는 지시가 있었으나, **이 작업 환경에는 사용이 승인된 Render 접근 수단이 없어 다시 읽지 못했습니다**(키를 찾는 동작은 하지 않음). 아래는 2026-10-25 관측(승인 자료 `APPROVAL-render-switch-20261026.md` 1장)이며, 전환·배포 직전에 소유자가 대시보드나 승인된 API 키로 다시 확인해야 합니다.
+
+| 서비스 | 역할 | 10-25 관측 | 이 PR이 닿는 경로 |
+|---|---|---|---|
+| `moajwo-test` | 사용자가 써 온 공개 프런트 | 분기 `test/render-20261021` · `frontend/Dockerfile.render-test` · Auto-Deploy Off | **닿지 않음** — 다른 분기·다른 Dockerfile. 이 PR의 `frontend/Dockerfile.render`·`nginx.render.conf`는 승인된 전환(브랜치·Dockerfile·문맥을 함께 바꿈) 뒤에야 적용됨 |
+| `moajwo-test-api` | API(계정 DB 원천 — 지금 SQLite) | 분기 main · `backend/Dockerfile` · Off | 이 PR이 main에 들어간 뒤 **수동 배포할 때** backend 이미지(pip 26.2.2·OS CA 갱신)가 적용됨 — 배포는 원천 보존 결정 뒤 별도 승인 |
+| `moajwo-test-web` | 같은 API를 쓰는 다른 프런트 | 분기 main · `frontend/Dockerfile.render` · Off | main 반영 뒤 수동 배포할 때 적용 — 이번 전환 대상 아님(바꾸지 않음) |
+
+Render의 기존 SQLite 원천 보존 여부가 정해지기 전에는 API를 재시작·재배포하지 않습니다(A: 검증된 백업 이관 / B: 새 계정 시작 — 별도 승인).
+
+### 6-2. 후보 이미지가 실제 상류와 통신 (격리 러너 __REAL_RUN__)
+
+후보 frontend-render 이미지를 **그대로**(설정·신뢰 묶음을 덮지 않고) 써서 실제 공개 API와 통신했습니다. 업무 변경이 없는 health 경로 GET만 했고 쿠키·업로드·계정·설정 변경은 하지 않았습니다.
+
+| 확인 | 결과 |
+|---|---|
+| TLS 핸드셰이크만(HTTP 요청 없음) — 러너 openssl + 이미지의 OS CA 묶음, 이름 검증 | __REAL_CHAIN__ |
+| 앞단 nginx(이미지 그대로, `proxy_ssl_verify on`) → 실제 API `GET /api/health` | __REAL_HEALTH__ |
+
+이것은 "후보 이미지가 실제 상류의 정상 체인·호스트 이름을 검증하고 통신한다"는 확인입니다. **실제 Render 인스턴스가 새 CA·설정을 쓴다는 확인이 아니며**, 실제 인스턴스에서 손상 체인을 거절하는지(Render 안내가 권하는 '실행 중인 서비스의 HTTP 클라이언트'로 시험 호스트 요청)는 승인된 배포 뒤 항목으로 남깁니다. DNS 실패·시간 초과·HTTP 오류는 인증서 거절로 세지 않습니다.
+
+### 6-3. 검증 실패 때 하지 않는 것
+
+앞단의 상류 인증서 검증이 실패하면 `/api/*`는 502로 끝납니다. `proxy_ssl_verify off`, `curl -k`, HTTP로 되돌리기 같은 우회로 복구하지 않습니다 — 원인(상류 인증서·이미지 CA 묶음·이름)을 고친 이미지로 다시 배포합니다.

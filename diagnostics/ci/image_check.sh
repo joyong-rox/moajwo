@@ -258,6 +258,53 @@ pubpy emudhra-g3b dv-g3b-emudhra.we-have-a-problem.com "backend python urllib(OS
 pubpy emudhra-g3b-aaa dv-g3b-aaa-emudhra.we-have-a-problem.com "backend python urllib(OS CA): 다른 중간 → CERTIFICATE_VERIFY_FAILED 이어야"
 pubpy control example.com "backend python urllib(OS CA): 대조군 → status 200"
 
+# 실제 공개 API(Render의 moajwo-test-api) — REAL_UPSTREAM=1일 때만(그 진단 워크플로가 정함). 후보 이미지를 그대로(설정·신뢰 묶음을
+# 덮지 않고) 써서 실제 상류 체인과 호스트 이름 검증이 되는지 본다. (1) TLS 핸드셰이크만(HTTP 요청 없음): 러너의 openssl에 이미지의
+# OS CA 묶음을 주고 이름까지 검증 (2) 앞단 nginx(이미지 그대로)로 업무 변경이 없는 /api/health GET 한 번 — 잠든 무료 인스턴스를 깨우느라
+# 시간 초과가 나면 한 번만 다시. 쿠키·업로드·계정·설정 변경은 하지 않는다. 이것은 '후보 이미지가 실제 상류와 통신'한 확인이며,
+# 실제 Render 인스턴스가 새 CA·설정을 쓴다는 확인이 아니다(배포 뒤 항목). DNS 실패·시간 초과·HTTP 오류는 인증서 거절로 세지 않는다.
+if [ "${REAL_UPSTREAM:-0}" = 1 ]; then
+  API_HOST=moajwo-test-api.onrender.com
+  docker run --rm --entrypoint cat moajwo-frontend-render:check /etc/ssl/certs/ca-certificates.crt > "$RT/real-ca.pem"
+  out=$(echo | timeout 40 openssl s_client -connect "$API_HOST:443" -servername "$API_HOST" -verify_hostname "$API_HOST" \
+    -verify_return_error -CAfile "$RT/real-ca.pem" -showcerts 2>&1)
+  rc=$?
+  printf '%s\n' "$out" | grep -E '^ *[0-9]+ s:|^ *i:|Verify return code|Verification|depth=' > "$OUT/real-chain-api.txt"
+  verify=$(printf '%s\n' "$out" | grep -m1 'Verify return code' | sed 's/^ *//')
+  nchain=$(printf '%s\n' "$out" | grep -cE '^ *[0-9]+ s:')
+  top=$(printf '%s\n' "$out" | grep -E '^ *i:' | tail -1 | sed 's/^ *//' | cut -c1-120)
+  case "$out" in
+    *"Verify return code: 0 (ok)"*) kind="검증 통과";;
+    *"verify error"*|*"Verify return code: "[1-9]*) kind="검증 실패";;
+    *) kind="연결·DNS 문제 (인증서 판정 아님 — 미검증)";;
+  esac
+  res real_chain_api "rc=$rc · $kind · $verify · 서버가 보낸 인증서 ${nchain}개 · 맨 위 발급자 $top" \
+    "후보 frontend-render 이미지의 OS CA 묶음으로 실제 공개 API의 체인·호스트 이름 검증 (TLS만, HTTP 요청 없음; 상세 real-chain-api.txt)"
+  docker run -d --name realfe -p 127.0.0.1:18085:8080 moajwo-frontend-render:check > /dev/null
+  for _ in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:18085/ && break; sleep 1; done
+  try=1
+  while :; do
+    code=$(curl -s -o "$OUT/real-health-api.json" -w '%{http_code}' --max-time 110 http://127.0.0.1:18085/api/health)
+    err=$(docker logs realfe 2>&1 | grep '\[error\]' | grep -iE 'upstream SSL|certificate|verify|resolve|timed out|connect\(\)' | sed -E 's/^[^ ]+ [^ ]+ //' | cut -c1-200 | tail -1)
+    case "$err" in
+      *verify*|*certificate*) kind="verify 실패 — 거절";;
+      *resolve*|*"timed out"*|*"connect()"*) kind="연결·DNS·시간 초과 (인증서 판정 아님 — 미검증)";;
+      "") [ "$code" = 200 ] && kind="통신됨(검증 통과·이름 일치)" || kind="오류 기록 없음 (HTTP $code — 인증서 판정 아님)";;
+      *) kind="그 밖의 오류";;
+    esac
+    [ "$try" -lt 2 ] && [ "$code" != 200 ] && case "$kind" in *"시간 초과"*|*"HTTP"*) try=2; sleep 20; continue;; esac
+    break
+  done
+  body=$(python3 -c "import json, sys
+try:
+    d = json.load(open(sys.argv[1])); print('keys=' + ','.join(sorted(d)) + ' status=' + str(d.get('status')) + ' database=' + str(d.get('database')))
+except Exception as e:
+    print('본문 JSON 아님')" "$OUT/real-health-api.json" 2>&1)
+  res real_health_api "$code · $kind · 시도 $try번 · $body · ${err:-}" \
+    "후보 frontend-render 이미지(설정 그대로, proxy_ssl_verify on)로 실제 공개 API GET /api/health — 업무 변경 없음"
+  docker rm -f realfe > /dev/null
+fi
+
 # 신뢰 저장소 조사: 최종 이미지의 OS CA 묶음에 emSign·eMudhra 이름의 인증서가 남았는지(0이어야), 묶음 크기, 패키지 판
 for n in frontend-render backend; do
   docker run --rm --entrypoint cat "moajwo-$n:check" /etc/ssl/certs/ca-certificates.crt > "$OUT/ca-bundle-$n.pem" 2>/dev/null
