@@ -219,10 +219,10 @@ echo "되돌릴 배포 단위: 시각 ${TS:-(없음)} · 리비전 ${PREV:-(없�
   docker compose stop -t 30 frontend backend || { echo "[중단] 정지 명령 실패 — 1단계부터 다시 (백업·정리를 하지 않음)"; exit 1; }
   left=$(docker compose ps --status running --services) \
     || { echo "[중단] 정지 뒤 실행 중 서비스를 조회하지 못함 — 1단계부터 다시 (백업·정리를 하지 않음)"; exit 1; }
-  [ -z "$left" ] || { echo "[중단] 정지 뒤에도 실행 중인 서비스: $left"; exit 1; }
+  [ -z "$left" ] || { echo "[중단] 정지 뒤에도 실행 중인 서비스: $(echo $left)"; exit 1; }
   w=$(docker ps --filter volume=moajwo_moajwo-data --format '{{.Names}}') \
     || { echo "[중단] 데이터 볼륨을 쓰는 컨테이너를 조회하지 못함 — 1단계부터 다시 (백업·정리를 하지 않음)"; exit 1; }
-  [ -z "$w" ] || { echo "[중단] 데이터 볼륨을 쓰는 컨테이너가 남음: $w — 백업·정리를 하지 않음"; exit 1; }
+  [ -z "$w" ] || { echo "[중단] 데이터 볼륨을 쓰는 컨테이너가 남음: $(echo $w) — 백업·정리를 하지 않음"; exit 1; }
   echo "[1 완료] 쓰는 프로세스 없음 · DB 리비전 $rev · 이전 이미지 $TAG · 이전 포트 $(echo $want)"
 )
 ```
@@ -402,10 +402,10 @@ echo "풀 백업: backups/$BK"
   [ -n "$TS" ] && [ -n "$PREV" ] || { echo "[중단] 배포 단위를 읽지 못함 — 0단계 출력 확인 (아무것도 바꾸지 않음)"; exit 1; }
   left=$(docker compose ps --status running --services) \
     || { echo "[중단] 실행 중 서비스를 조회하지 못함 (아무것도 바꾸지 않음)"; exit 1; }
-  [ -z "$left" ] || { echo "[중단] 실행 중인 서비스: $left — B 0·1단계로 먼저 멈춤 (아무것도 바꾸지 않음)"; exit 1; }
+  [ -z "$left" ] || { echo "[중단] 실행 중인 서비스: $(echo $left) — B 0·1단계로 먼저 멈춤 (아무것도 바꾸지 않음)"; exit 1; }
   w=$(docker ps --filter volume=moajwo_moajwo-data --format '{{.Names}}') \
     || { echo "[중단] 데이터 볼륨을 쓰는 컨테이너를 조회하지 못함 (아무것도 바꾸지 않음)"; exit 1; }
-  [ -z "$w" ] || { echo "[중단] 데이터 볼륨을 쓰는 컨테이너가 남음: $w (아무것도 바꾸지 않음)"; exit 1; }
+  [ -z "$w" ] || { echo "[중단] 데이터 볼륨을 쓰는 컨테이너가 남음: $(echo $w) (아무것도 바꾸지 않음)"; exit 1; }
   bts=${BK#moajwo-data-before-rollback-}; bts=${bts%.tgz}   # 이 반영의 백업만: 반영 직전 백업, 또는 반영 뒤에 만든 2단계 백업
   [ "$BK" = "moajwo-data-$TS.tgz" ] || { [[ "$bts" =~ ^[0-9]{8}-[0-9]{6}$ ]] && [[ "$bts" > "$TS" ]]; } \
     || { echo "[중단] $BK 는 이 반영($TS)의 백업이 아님 (moajwo-data-$TS.tgz 또는 그 뒤의 moajwo-data-before-rollback-<시각>.tgz) — 풀지 않음 (아무것도 바꾸지 않음)"; exit 1; }
