@@ -900,9 +900,8 @@ def test_upload_refuses_a_file_name_over_the_limit_instead_of_cutting_it(client)
     assert result["error"] == f"{expected} [NAME_TOO_LONG]", result
     assert _count("source_files") == before
     fid = _upload(client, "나" * 250 + ".xlsx", _xlsx([["기관명", "인구수"], ["행정안전부", 1]]))  # 255자
-    assert db_rows("select length(original_name), substr(original_name, -5) from source_files where id = ?", fid) == [
-        (255, ".xlsx")
-    ]
+    ((stored,),) = db_rows("select original_name from source_files where id = ?", fid)
+    assert len(stored) == 255 and stored.endswith(".xlsx"), len(stored)  # 자르지 않고 확장자 그대로
 
 
 def test_typed_text_with_nul_is_not_a_server_error_on_postgresql(client) -> None:
