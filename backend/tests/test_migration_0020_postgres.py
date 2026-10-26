@@ -132,6 +132,9 @@ def test_0020_up_and_down_give_up_behind_an_open_transaction_on_runs(tmp_path: P
             if step == "downgrade":
                 assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
             revision = _revision(url)
+            started = time.monotonic()  # 막히지 않은 alembic 명령의 기동·종료 비용 — 기다린 시간만 떼어 본다
+            assert _ok(_alembic(url, tmp_path, "current"))
+            base = time.monotonic() - started
             e = _engine(url)
             with e.connect() as holder:
                 holder.execute(text("SELECT count(*) FROM runs"))  # 열린 트랜잭션이 표를 읽는 중 (ACCESS SHARE)
@@ -141,7 +144,7 @@ def test_0020_up_and_down_give_up_behind_an_open_transaction_on_runs(tmp_path: P
                 holder.rollback()
             e.dispose()
             assert blocked.returncode != 0 and "LockNotAvailable" in blocked.stderr, (step, blocked.stderr[-500:])
-            assert 5 <= took < 60, (step, took)
+            assert 4 <= took - base < 15, (step, took, base)  # 5초를 기다리고 포기 (30초나 세션값 120초면 실패)
             assert _revision(url) == revision and _lease_columns(url) == then, step
         assert _ok(_alembic(url, tmp_path, "downgrade", PREVIOUS))  # 트랜잭션이 끝나면 같은 명령이 된다
     finally:
@@ -230,22 +233,41 @@ def _recovery(url: str, data: Path, *args: str) -> subprocess.CompletedProcess:
 @needs_admin
 def test_recover_and_status_on_postgresql_before_the_downgrade(tmp_path: Path) -> None:
     """서버를 멈춘 롤백 전 정리를 PostgreSQL에서: 다른 결과 폴더(다른 디스크)의 실행은 생존 신호가 오래됐을 때만 '결과
-    확인 필요'(실패로 바꾸지 않음) — recover 종료 0과 status로 확인한 뒤 내리면 그 행은 'check'로 남는다 (DEPLOY.md)."""
+    확인 필요'(실패로 바꾸지 않음). 신호가 새로우면 recover가 종료 2로 알리고 downgrade도 거절된다 — 신호가
+    기준(600초)을 넘은 뒤 recover 종료 0과 status로 확인하고 내리면 두 행 모두 'check'로 남는다 (DEPLOY.md)."""
     url = pg_database("mig_0020_recover")
+    statuses = "SELECT id, status FROM runs WHERE id IN (:a, :b) ORDER BY id"
     try:
         assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
         values = ", 'f0f0f0f0f0f0-gone1234', now() - interval '1 day'"  # 이 결과 폴더가 아닌 담당, 하루 전 신호
         rid = _sql(url, INSERT_RUN.format(extra=", worker, heartbeat_at", values=values), status="running")[0][0]
+        values = ", 'f0f0f0f0f0f0-live5678', now() - interval '1 minute'"  # 같은 다른 디스크, 1분 전 신호
+        live = _sql(url, INSERT_RUN.format(extra=", worker, heartbeat_at", values=values), status="running")[0][0]
         shown = _recovery(url, tmp_path, "status")
         assert shown.returncode == 0, shown.stderr[-500:]
-        assert rid in [r["id"] for r in json.loads(shown.stdout)["running"]]
+        assert {rid, live} <= {r["id"] for r in json.loads(shown.stdout)["running"]}
+        waiting = _recovery(url, tmp_path, "recover")  # 새 신호의 행은 살아 있을 수 있어 그대로 — 종료 2
+        assert waiting.returncode == 2, (waiting.stdout[-500:], waiting.stderr[-500:])
+        report = json.loads(waiting.stdout)
+        assert (report["check"], report["waiting"], report["blocking"]) == (1, 1, 1), report
+        assert _sql(url, statuses, a=rid, b=live) == [(rid, "check"), (live, "running")]
+        refused = _alembic(url, tmp_path, "downgrade", PREVIOUS)
+        assert refused.returncode != 0 and "0019로 내리지 않습니다" in refused.stderr, refused.stderr[-500:]
+        assert _revision(url) == HEAD and _lease_columns(url) == {"worker", "heartbeat_at"}
+        _sql(url, "UPDATE runs SET heartbeat_at = now() - interval '25 minutes' WHERE id = :i", i=live)
         settled = _recovery(url, tmp_path, "recover")
         assert settled.returncode == 0, (settled.stdout[-500:], settled.stderr[-500:])
-        assert _sql(url, "SELECT status FROM runs WHERE id = :i", i=rid) == [("check",)]
-        assert rid in [r["id"] for r in json.loads(_recovery(url, tmp_path, "status").stdout)["check"]]
+        assert _sql(url, statuses, a=rid, b=live) == [(rid, "check"), (live, "check")]
+        checked = _recovery(url, tmp_path, "status")
+        assert {rid, live} <= {r["id"] for r in json.loads(checked.stdout)["check"]}
         assert _ok(_alembic(url, tmp_path, "downgrade", PREVIOUS))  # 담당이 있는 실행 중 행이 없으므로
-        assert _revision(url) == PREVIOUS and _sql(url, "SELECT status FROM runs WHERE id = :i", i=rid) == [("check",)]
-        for out in (shown.stdout, settled.stdout):
-            assert "postgresql://" not in out and (make_url(PG_ADMIN).password or "\0") not in out
+        assert _revision(url) == PREVIOUS and _sql(url, statuses, a=rid, b=live) == [(rid, "check"), (live, "check")]
+        # 출력(stdout·stderr)에 주소·비밀번호가 없다 — 앱이 만드는 주소 형태(postgresql+psycopg://)도
+        admin = make_url(PG_ADMIN)
+        for done in (shown, waiting, settled, checked):
+            for out in (done.stdout, done.stderr):
+                assert "postgresql:" not in out and "postgresql+" not in out
+                assert not admin.password or admin.password not in out
+                assert not admin.host or admin.host not in out
     finally:
         pg_database("mig_0020_recover", drop=True)
