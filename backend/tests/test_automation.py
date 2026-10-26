@@ -213,6 +213,28 @@ def test_automation_rejects_bad_requests(client: TestClient) -> None:
     assert client.post(f"/automations/{automation['id']}/run", json={"file_ids": []}).status_code == 422
 
 
+def test_automation_run_refuses_a_malformed_period_before_writing(client: TestClient) -> None:
+    # 기준 기간은 검증 API와 같은 형식(2026 · 2026-09)만 받는다 — 화면의 자유 입력칸에 '2026-13' 같은 값을 넣으면
+    # 기간 계산에서 500이 났다. 거절은 아무것도 쓰기 전에 한다
+    _, run = _manual_run(client, _upload(client, "9월p.xlsx", SEPT))
+    automation = client.post(f"/runs/{run['id']}/automation", json={"name": "기간 검사"}).json()
+    fid = _upload(client, "10월p.xlsx", SEPT)
+
+    def counts() -> tuple[int, int]:  # 이 자동화의 실행 수·실행 기록 수 (DB 종류와 무관하게 API로 센다)
+        listed = {a["id"]: a for a in client.get("/automations").json()}
+        return listed[automation["id"]]["run_count"], len(client.get("/runs", params={"limit": 200}).json())
+
+    before = counts()
+    for period in ("2026-13", "2026-00", "2026년9월", "2026-9", "26-09", "2026-1\x000", " 2026-09"):
+        res = client.post(f"/automations/{automation['id']}/run", json={"file_ids": [fid], "expected_period": period})
+        assert res.status_code == 422, (repr(period), res.text)
+        assert res.json()["detail"][0]["loc"] == ["body", "expected_period"], res.text
+    assert counts() == before
+    for period in ("2026-10", "2026", None):
+        res = client.post(f"/automations/{automation['id']}/run", json={"file_ids": [fid], "expected_period": period})
+        assert res.status_code == 201, (period, res.text)
+
+
 def test_automation_keeps_include_unmapped_choice(client: TestClient) -> None:
     review = client.post("/reviews", json={"file_ids": [_upload(client, "9월e.xlsx", SEPT)]}).json()
     _approve_all(client, review)
