@@ -8,7 +8,8 @@
 #   6·7단계로 바로잡기 → 전환에서 멈춘 반영(앞의 성공 반영보다 나중 — 0단계가 그 로그만 읽는지) 되돌리기와 다시 붙여 넣기
 #   거절 → 전환 도중에 끊긴 반영(로그 끝을 잘라 만듦) 되돌리기 → 새 반영 직후 R(롤백 태그를 지운 뒤 이전 커밋으로 다시
 #   만들기)·A(서비스가 떠 있으면 거절·검증 기록이 맞지 않는 백업·다른 반영의 백업 거절·복원·다시 돌리기 거절, 반영 뒤 생긴
-#   행은 보존 폴더로) 뒤 6·7단계. 판정(yes/no)이 하나라도 no(또는 fail)이면 종료 1.
+#   행은 보존 폴더로) 뒤 6·7단계 → 경계 2가지(운영 설정의 재시작 반복 중 전환 실패와 볼륨을 쓰는 컨테이너·백업 DB와 볼륨
+#   DB의 불일치). 판정(yes/no)이 하나라도 no(또는 fail)이면 종료 1.
 # 러너 맞춤 두 가지(5·6차와 같음): deploy.sh의 'pwd -W'(Git Bash)를 리눅스 경로로, 백업 컨테이너(uid 1000)가 쓸 수 있게
 # backups/ 권한. 'pwd -W' 맞춤은 deploy.sh에만 쓰고 문서 단계 상자는 맞춤 없이('pwd -W 2>/dev/null || pwd') 돌린다.
 # 합성 자료만 쓰고, 비밀번호는 실행 때 만들고 출력하지 않는다.
@@ -356,6 +357,74 @@ check a.rerun_refused "$r · $(grep -h '^\[중단\]' "$OUT/a_again-stepA.log" | 
 r=$(run_steps a 6 7)
 snapshot after_a
 check a.serves "$r $API $FRONT" "done" '"login": 200' '"result_same": true' '"80/tcp"'
+
+# ---------------------------------------------------------------- 9. 경계 2가지 (2026-10-26 지시 6장) — 그 뒤 단계(백업·정리·downgrade·이전
+#   이미지 기동)가 실행되지 않는지. 9a: 운영 설정(restart: unless-stopped) 그대로 새 backend가 마이그레이션 뒤 끝나 재시작을
+#   반복하는 동안의 전환 실패 → 정지 확인이 정확한지, 볼륨을 쓰는 컨테이너가 남으면 멈추는지. 9b: 백업 DB와 볼륨 DB의 불일치
+#   (Docker 밖 호스트 프로세스가 2단계 동안 볼륨 DB에 계속 씀) → 검증에서 멈추고 .sha256 표시가 생기지 않는지
+cat > "$OUT/fail-switch-restart.yml" <<'YML'
+services:
+  backend:
+    command: ["sh", "-c", "alembic upgrade head && exit 3"]
+YML
+DEPLOY_COMPOSE_ARGS="-f docker-compose.yml -f $OUT/fail-switch-restart.yml" timeout -k 10 900 bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-5.out" 2>&1
+D5=$?
+[ "$D5" -ne 124 ] || pkill -f "compose up -d --wait" || true   # up --wait가 끝나지 않아 끊었으면 남은 compose도 끝낸다 (컨테이너는 그대로)
+LOG5=$(newest_log)
+TS5=$(sed -n 's|.*롤백 태그 .*:rollback-\([0-9-]*\)$|\1|p' "$LOG5" | tail -1)
+how5=$( [ "$D5" -eq 124 ] && echo "up --wait가 900초 안에 끝나지 않아 끊음 (끊긴 로그)" || echo "스스로 끝남" )
+res deploy5.exit "exit=$D5 · $how5 · hint=$(grep -c '\[중단\].*4장 (백업 ' "$LOG5") · ts5=$TS5" "재시작 반복(unless-stopped) 중 전환 실패"
+BSTATE=$(docker inspect moajwo-backend-1 --format '{{.State.Status}} restarts={{.RestartCount}} policy={{.HostConfig.RestartPolicy.Name}}' 2>&1)
+check restart.loop_before "$BSTATE · $(state "$TS5")" "policy=unless-stopped" "rev=0020_run_worker_lease"
+# 9a-1. 볼륨을 쓰는 다른 컨테이너가 재시작을 반복하는 동안 — 1단계가 정지 뒤 확인에서 멈추고 백업·정리를 하지 않아야 한다
+rm -f "backups/rollback-$TS5.recover.json" "backups/rollback-$TS5.status.json" "backups/rollback-$TS5.status-before.json"
+before=$(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l)
+docker run -d --name rb-loop --restart unless-stopped --entrypoint sh -v moajwo_moajwo-data:/data moajwo-backend:latest -c 'sleep 5; exit 1' > /dev/null
+r=$(run_steps rs 1 7); docker rm -f rb-loop > /dev/null
+expect restart.writer_left "1:1" "$r" "$(state "$TS5")" "rev=0020_run_worker_lease" "running=[]" "before_rollback_backups=$before" "recover_json=no"
+check restart.writer_message "$(grep -h '^\[중단\]' "$OUT/rs-step1.log" | head -1)" "데이터 볼륨을 쓰는 컨테이너가 남음" "rb-loop"
+# 9a-2. 되돌리기 — 1단계 뒤 backend 컨테이너는 '멈춤'(재시작 반복이 아님)이고 볼륨을 쓰는 컨테이너가 없어야 한다
+r=$(run_steps rs2 1 1)
+ST1="$(docker inspect moajwo-backend-1 --format '{{.State.Status}} restarts={{.RestartCount}}' 2>&1) · writers=[$(docker ps --filter volume=moajwo_moajwo-data --format '{{.Names}}' | paste -sd' ')]"
+check restart.stop_accurate "$r · $ST1" "done" "exited" "writers=[]"
+[ "$r" = done ] && r=$(run_steps rs2 2 7)
+expect restart.rollback "done" "$r" "$(state "$TS5")" "rev=0019_analysis_runs" "backend=$(img "moajwo-backend:rollback-$TS5")" \
+  "frontend=$(img "moajwo-frontend:rollback-$TS5")" "running=[backend frontend]" "recover_json=yes"
+snapshot rs2
+check restart.serves "$API $FRONT" '"login": 200' '"result_same": true' '"80/tcp"'
+
+# 9b. 백업 DB ≠ 볼륨 DB — 정상 반영 뒤 1단계로 멈춘 상태에서, 호스트 프로세스(Docker 밖 — 1단계가 보지 못하는 쓰기)가 볼륨 DB에 표를
+#   만들고 계속 넣는 동안 2단계: tar 시점과 검증 시점의 표·행 수가 달라 '백업 검증 실패'로 멈추고, 정리·downgrade·.sha256이 없어야 한다
+bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-6.out" 2>&1
+rc=$?; check deploy6.exit "exit=$rc · scripts/deploy.sh $NEW 0019_analysis_runs (9b 앞 새 반영)" "exit=0"
+TS6=$(ts_of_unit)
+MP=$(docker volume inspect moajwo_moajwo-data --format '{{.Mountpoint}}')
+r=$(run_steps vm 1 1)
+check vm.stop "$r" "done"
+sudo python3 - "$MP/moajwo.db" "$OUT/vm-writer.stop" > "$OUT/vm-writer.log" 2>&1 <<'PY' &
+import os, sqlite3, sys, time
+db, stop = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(db, isolation_level=None)
+con.execute("create table if not exists rehearsal_probe (n integer)")
+k = 0
+while not os.path.exists(stop) and k < 6000:  # 2단계가 도는 동안 0.05초마다 한 행 (최대 5분)
+    con.execute("insert into rehearsal_probe (n) values (?)", (k,))
+    k += 1
+    time.sleep(0.05)
+print("rows", k)
+PY
+WPID=$!
+sleep 2
+before=$(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l); sha_before=$(ls backups/*.sha256 2>/dev/null | wc -l)
+r=$(run_box vm 2)
+touch "$OUT/vm-writer.stop"; wait "$WPID" 2>/dev/null || true
+expect vm.verify_stops "2:1" "$r" "$(state "$TS6")" "rev=0020_run_worker_lease" "running=[]" "recover_json=no"
+check vm.message "$(grep -h '^\[중단\]' "$OUT/vm-step2.log" | head -1)" "백업 검증 실패" "정리·downgrade를 하지 않음"
+check vm.no_sha256 "new_backups=$(( $(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l) - before )) · new_sha256=$(( $(ls backups/*.sha256 2>/dev/null | wc -l) - sha_before )) · writer=$(tail -1 "$OUT/vm-writer.log")" "new_backups=1" "new_sha256=0"
+sudo python3 -c "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute('drop table if exists rehearsal_probe'); c.commit()" "$MP/moajwo.db"
+res vm.resume "$(resume && echo ok || echo fail)" "지금 판 재개 (리허설 표는 지움)"
+snapshot vm
+check vm.serves "$API" '"login": 200' '"result_same": true'
 
 cp -r backups "$OUT/backups-meta" 2>/dev/null; rm -f "$OUT"/backups-meta/*.tgz   # 압축 백업(합성 자료)은 올리지 않음
 docker compose logs --no-color > "$OUT/compose.log" 2>&1
