@@ -4,9 +4,11 @@
 # 적거나 고치지 않는다. 운영자처럼 단계마다 '[N 완료]'가 찍힌 뒤에만 다음 단계로 간다.
 #   이전(main) 기동·합성 자료 → 후보 반영(scripts/deploy.sh 그대로) → 실패 경로 6가지(그 뒤 파괴적 단계가 실행되지 않는지:
 #   리비전·latest 이미지·서비스·백업·정리 기록) → 정상 롤백(0~7단계 — 결과 확인 필요 행·이전 판 실행 중 행을 일괄로 바꾸지
-#   않는지) → 다시 후보 반영 → 이전 9장 명령(덧붙임 없이 up)의 수정 전 모습 → 4장 B 6·7단계로 바로잡기 → 전환에서 멈춘
-#   반영(앞의 성공 반영보다 나중 — 0단계가 그 로그만 읽는지) 되돌리기 → A(검증 기록이 맞지 않는 백업 거절·복원·다시 돌리기
-#   거절) 뒤 6·7단계. 판정(yes/no)이 하나라도 no이면 종료 1.
+#   않는지) → 이미 되돌린 상태의 0·1단계 거절 → 다시 후보 반영 → 이전 9장 명령(덧붙임 없이 up)의 수정 전 모습 → 4장 B
+#   6·7단계로 바로잡기 → 전환에서 멈춘 반영(앞의 성공 반영보다 나중 — 0단계가 그 로그만 읽는지) 되돌리기와 다시 붙여 넣기
+#   거절 → 전환 도중에 끊긴 반영(로그 끝을 잘라 만듦) 되돌리기 → 새 반영 직후 R(롤백 태그를 지운 뒤 이전 커밋으로 다시
+#   만들기)·A(서비스가 떠 있으면 거절·검증 기록이 맞지 않는 백업·다른 반영의 백업 거절·복원·다시 돌리기 거절, 반영 뒤 생긴
+#   행은 보존 폴더로) 뒤 6·7단계. 판정(yes/no)이 하나라도 no(또는 fail)이면 종료 1.
 # 러너 맞춤 두 가지(5·6차와 같음): deploy.sh의 'pwd -W'(Git Bash)를 리눅스 경로로, 백업 컨테이너(uid 1000)가 쓸 수 있게
 # backups/ 권한. 'pwd -W' 맞춤은 deploy.sh에만 쓰고 문서 단계 상자는 맞춤 없이('pwd -W 2>/dev/null || pwd') 돌린다.
 # 합성 자료만 쓰고, 비밀번호는 실행 때 만들고 출력하지 않는다.
@@ -160,14 +162,14 @@ check() {  # check <이름> <값> <있어야 하는 조각들...> — 모두 있
 # ---------------------------------------------------------------- 1. 이전 (main) → 2. 후보 반영
 git checkout -q --detach "$OLD"
 docker compose up -d --build --wait > "$OUT/old-up.log" 2>&1
-res old.up $? "docker compose up -d --build --wait ($(git rev-parse --short HEAD))"
+rc=$?; check old.up "exit=$rc · docker compose up -d --build --wait ($(git rev-parse --short HEAD))" "exit=0"
 res seed "$(python3 "$HERE/deploy_probe.py" seed http://127.0.0.1:8080 "$OUT/seed.json" 2>&1 | tail -1)" "최초 소유자·합성 CSV·매핑 확정·묶기 결과"
 snapshot old
 OLD_B=$(img moajwo-backend:latest); OLD_F=$(img moajwo-frontend:latest)
 mkdir -p backups && chmod 777 backups
 git checkout -q --detach "$NEW"
 bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-1.out" 2>&1
-res deploy1.exit $? "scripts/deploy.sh $NEW 0019_analysis_runs"
+rc=$?; check deploy1.exit "exit=$rc · scripts/deploy.sh $NEW 0019_analysis_runs" "exit=0"
 snapshot new
 res steps "$(extract_steps)" "docs/DEPLOY.md 4장 B·A 단계 상자 수 · 이름 · 내용 해시 (후보 트리 그대로)"
 TS=$(ts_of_unit); RBF="backups/rollback-$TS.compose.yml"
@@ -228,10 +230,14 @@ res rollback.recover "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1
 grep -h "^\[[0-9] 완료\]" "$OUT"/rollback-step*.log | sed 's/^/  /' >> "$RES"
 snapshot rollback
 check rollback.serves "$API $FRONT" '"login": 200' '"result_same": true' '"80/tcp"' "$OLD_F"
+# 이미 되돌린 상태에서 0·1단계를 다시 붙여 넣으면: 정지하지 않고 거절 (latest가 backend·frontend 모두 롤백 태그 이미지)
+r=$(run_steps rollback_again 1 1)
+expect rollback_again.refused "1:1" "$r" "$(state)" "rev=0019_analysis_runs" "running=[backend frontend]"
+check rollback_again.message "$(grep -h '^\[중단\]' "$OUT/rollback_again-step1.log" | head -1)" "이미 되돌렸거나"
 
 # ---------------------------------------------------------------- 5. 다시 후보 → 6. 이전 9장 명령(덧붙임 없이 up)의 수정 전 모습
 bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-2.out" 2>&1
-res deploy2.exit $? "scripts/deploy.sh $NEW 0019_analysis_runs (롤백 뒤 다시)"
+rc=$?; check deploy2.exit "exit=$rc · scripts/deploy.sh $NEW 0019_analysis_runs (롤백 뒤 다시)" "exit=0"
 snapshot new_again
 TS2=$(ts_of_unit)
 git show "$OLD_DOC:docs/DEPLOY.md" > "$OUT/DEPLOY-old.md"
@@ -277,19 +283,72 @@ expect f1.steps "done" "$r" "$(state "$TS3")" "rev=0019_analysis_runs" "backend=
   "frontend=$(img "moajwo-frontend:rollback-$TS3")" "running=[backend frontend]" "recover_json=yes"
 snapshot f1
 check f1.serves "$API $FRONT" '"login": 200' '"result_same": true' '"80/tcp"'
+r=$(run_steps f1_again 1 1)   # 되돌린 뒤 같은 로그로 다시 붙여 넣기 — 전환 실패 로그에는 '전환 완료' 이미지가 없어도 거절해야 함
+expect f1_again.refused "1:1" "$r" "$(state "$TS3")" "rev=0019_analysis_runs" "running=[backend frontend]"
+check f1_again.message "$(grep -h '^\[중단\]' "$OUT/f1_again-step1.log" | head -1)" "이미 되돌렸거나"
 
-# ---------------------------------------------------------------- 8. A — 검증 기록이 맞지 않는 백업 거절 → 복원 → 다시 돌리기 거절
-r=$(run_steps a 1 1)   # B 0·1단계 (정지)
-res a.stop "$r" "A 앞의 B 0·1단계"
-cp "backups/moajwo-data-$TS3.tgz" backups/moajwo-data-before-rollback-bad.tgz
-sha256sum backups/moajwo-data-before-rollback-bad.tgz | sed 's|  .*|  backups/moajwo-data-before-rollback-bad.tgz|' > backups/moajwo-data-before-rollback-bad.tgz.sha256
-printf 'x' >> backups/moajwo-data-before-rollback-bad.tgz   # 기록한 sha256과 달라짐
+# ---------------------------------------------------------------- 7b. 전환 도중에 끊긴 반영 (창 닫힘·재부팅) — 로그 끝을 잘라 만든다
+DEPLOY_COMPOSE_ARGS="-f docker-compose.yml -f $OUT/fail-switch.yml" bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-3b.out" 2>&1
+D3B=$?
+LOG3B=$(newest_log); cp "$LOG3B" "$OUT/deploy-3b-full.log"
+sed -i '/\[중단\]/,$d' "$LOG3B"   # 전환 실패 줄부터 끝을 지움 — '== 6.' 뒤 compose 출력까지만 남은, 도중에 끊긴 로그
+TS3B=$(sed -n 's|.*롤백 태그 .*:rollback-\([0-9-]*\)$|\1|p' "$LOG3B" | tail -1)
+check deploy3b.cut "exit=$D3B · hint=$(grep -c '\[중단\]' "$LOG3B") · six=$(grep -c '== 6\. ' "$LOG3B") · ts=$TS3B" "exit=1" "hint=0" "six=1"
+r=$(run_steps k1 1 7)
+check k1.unit_chosen "$(grep -h -E '^(\[주의\] 반영 로그가 전환|되돌릴 배포 단위|전환에서 멈춘 반영)' "$OUT/k1-step1.log" | paste -sd' ')" \
+  "[주의] 반영 로그가 전환" "되돌릴 배포 단위: 시각 $TS3B " "지금 DB 리비전 0020_run_worker_lease"
+expect k1.steps "done" "$r" "$(state "$TS3B")" "rev=0019_analysis_runs" "backend=$(img "moajwo-backend:rollback-$TS3B")" \
+  "frontend=$(img "moajwo-frontend:rollback-$TS3B")" "running=[backend frontend]" "recover_json=yes"
+snapshot k1
+check k1.serves "$API $FRONT" '"login": 200' '"result_same": true' '"80/tcp"'
+
+# ---------------------------------------------------------------- 8. 새 반영 직후 R·A — 롤백 태그가 없을 때 다시 만들기 → A(서비스가 떠
+#   있으면 거절·검증 기록이 맞지 않는 백업·다른 반영의 백업 거절·복원·다시 돌리기 거절) → 6·7단계. 반영 뒤 생긴 행은 보존 폴더로
+bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-4.out" 2>&1
+rc=$?; check deploy4.exit "exit=$rc · scripts/deploy.sh $NEW 0019_analysis_runs (R·A 앞 새 반영)" "exit=0"
+TS4=$(ts_of_unit); TAG4="rollback-$TS4"
+res a.after_deploy_rows "$(in_app "$CHECK_AND_LEGACY_RUNS")" "반영 뒤 생긴 행 (A 뒤에는 보존 폴더에만 있어야 함)"
+runs_in() {  # runs_in <볼륨 안 DB 경로> — 실행 기록 행 수 (읽기 전용)
+  docker run --rm --entrypoint python -v moajwo_moajwo-data:/data:ro moajwo-backend:latest -c \
+    "import sqlite3, sys; print(sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True).execute('select count(*) from runs').fetchone()[0])" "$1" 2>&1 | tail -1
+}
+RUNS_AFTER_DEPLOY=$(runs_in /data/moajwo.db)
+# R: 롤백 태그를 지우면 1단계가 정지 전에 멈추고, R이 이전 커밋으로 다시 만든다 (REBUILD_FROM 없음·이미 있음은 거절)
+docker image rm "moajwo-backend:$TAG4" "moajwo-frontend:$TAG4" > "$OUT/r-untag.log" 2>&1
+r=$(run_steps r_missing 1 1)
+expect r.tag_missing "1:1" "$r" "$(state "$TS4")" "rev=0020_run_worker_lease" "running=[backend frontend]"
+check r.tag_missing_message "$(grep -h '^\[중단\]' "$OUT/r_missing-step1.log" | head -1)" "롤백 태그 $TAG4 이미지 없음"
+r=$(run_box r_nosrc R)
+check r.needs_source "$r · $(grep -h '^\[중단\]' "$OUT/r_nosrc-stepR.log" | head -1)" "R:1" "REBUILD_FROM"
+export REBUILD_FROM="$OLD"; r=$(run_box r R); unset REBUILD_FROM
+check r.rebuilt "$r · $(grep -h '^\[R 완료\]' "$OUT/r-stepR.log") · tags=$(img "moajwo-backend:$TAG4")+$(img "moajwo-frontend:$TAG4") · worktrees=$(git worktree list | wc -l)" \
+  "done" "[R 완료] 이전 커밋 ${OLD:0:7}" "worktrees=1"
+export REBUILD_FROM="$OLD"; r=$(run_box r_again R); unset REBUILD_FROM
+check r.rerun_refused "$r · $(grep -h '^\[중단\]' "$OUT/r_again-stepR.log" | head -1)" "R:1" "이미 있음"
+# A: 서비스가 떠 있으면 아무것도 옮기지 않고 거절
 ls_before=$(volume_ls); db_before=$(volume_db_sha)
-export BK=moajwo-data-before-rollback-bad.tgz; r=$(run_box a_bad A); unset BK
+r=$(run_box a_running A)
+check a.running_refused "$r · $(grep -h '^\[중단\]' "$OUT/a_running-stepA.log" | head -1) ·$( [ "$(volume_ls)" = "$ls_before" ] && [ "$(volume_db_sha)" = "$db_before" ] && echo volume_unchanged || echo volume_changed)" \
+  "A:1" "실행 중인 서비스" "volume_unchanged"
+r=$(run_steps a 1 1)   # B 0·1단계 (정지 — R이 다시 만든 롤백 태그로 확인)
+check a.stop "$r" "done"
+BAD="moajwo-data-before-rollback-$(date +%Y%m%d-%H%M%S).tgz"   # 이 반영 뒤의 시각 — 이름 규칙은 통과하고 sha256이 다름
+cp "backups/moajwo-data-$TS4.tgz" "backups/$BAD"
+sha256sum "backups/$BAD" | sed "s|  .*|  backups/$BAD|" > "backups/$BAD.sha256"
+printf 'x' >> "backups/$BAD"   # 기록한 sha256과 달라짐
+ls_before=$(volume_ls); db_before=$(volume_db_sha)
+export RESTORE_BACKUP="$BAD"; r=$(run_box a_bad A); unset RESTORE_BACKUP
 check a.bad_backup_refused "$r · $(grep -h '^\[중단\]' "$OUT/a_bad-stepA.log" | head -1) ·$( [ "$(volume_ls)" = "$ls_before" ] && [ "$(volume_db_sha)" = "$db_before" ] && echo volume_unchanged || echo volume_changed)" \
   "A:1" "sha256이 기록과 다름" "volume_unchanged"
+OLDER=$(ls backups/moajwo-data-before-rollback-*.tgz.sha256 | sed 's|.*/||; s|\.sha256$||' | sort | head -1)   # 앞 롤백의 2단계 백업
+export RESTORE_BACKUP="$OLDER"; r=$(run_box a_other A); unset RESTORE_BACKUP
+check a.other_deploy_backup_refused "$r · $OLDER · $(grep -h '^\[중단\]' "$OUT/a_other-stepA.log" | head -1) ·$( [ "$(volume_ls)" = "$ls_before" ] && [ "$(volume_db_sha)" = "$db_before" ] && echo volume_unchanged || echo volume_changed)" \
+  "A:1" "이 반영($TS4)의 백업이 아님" "volume_unchanged"
 r=$(run_box a_ok A)
-check a.restored "$r · $(volume_ls)" "done" "_pre_rollback_$TS3" "moajwo.db"
+check a.restored "$r · $(grep -h '^\[A 완료\]' "$OUT/a_ok-stepA.log") · $(volume_ls)" "done" "다음: B 6·7단계" "_pre_rollback_$TS4" "moajwo.db"
+RESTORED=$(runs_in /data/moajwo.db); KEPT=$(runs_in "/data/_pre_rollback_$TS4/moajwo.db")
+check a.rows_moved "restored=$RESTORED · kept=$KEPT · after_deploy=$RUNS_AFTER_DEPLOY · $([ "$RESTORED" -lt "$KEPT" ] 2>/dev/null && echo fewer_after_restore || echo not_fewer)" \
+  "kept=$RUNS_AFTER_DEPLOY" "fewer_after_restore"
 ls_after=$(volume_ls); db_after=$(volume_db_sha)
 r=$(run_box a_again A)
 check a.rerun_refused "$r · $(grep -h '^\[중단\]' "$OUT/a_again-stepA.log" | head -1) ·$( [ "$(volume_ls)" = "$ls_after" ] && [ "$(volume_db_sha)" = "$db_after" ] && echo volume_unchanged || echo volume_changed)" \
