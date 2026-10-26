@@ -5450,3 +5450,166 @@ ul.bd-item-problems,
 .bd-checking {
   margin: 0;
 }
+
+/* ---------------------------------------------------------------- 공통 key로 연결하기 (/keyjoin)
+   묶기(bd-*)·분석(an-step)·표(upload-table-wrap) 부품을 재사용하고, 이 화면에만 필요한 것만 둔다 */
+.keyjoin {
+  display: grid;
+  gap: 16px;
+}
+
+/* 입력(파일·시트) 하나의 설정 묶음 */
+.kj-input {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
+.kj-input.needs-fix {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+}
+
+.kj-input-title {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* 라벨 글자 + 선택 상자 한 줄 (좁으면 줄바꿈) */
+.kj-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.kj-select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+/* 순서가 있는 목록 (key 열·결과 열): 이름 + 입력란 + 위로/아래로 */
+.kj-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kj-list > li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.kj-list .bd-input {
+  margin-top: 0;
+}
+
+.kj-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 가져올 열 체크 목록 */
+.kj-cols {
+  display: grid;
+  gap: 4px;
+}
+
+.kj-cols label {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kj-cols input[type='checkbox'] {
+  flex: none;
+  margin-top: 3px;
+}
+
+.kj-scope {
+  display: grid;
+  gap: 6px;
+}
+
+.kj-scope label {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.kj-scope input[type='radio'] {
+  flex: none;
+  margin-top: 3px;
+}
+
+/* 상태 알림 한 곳 (비어 있어도 자리를 유지해 글자가 바뀔 때 화면이 흔들리지 않음) */
+.kj-status {
+  margin: 0;
+  min-height: 1.5em;
+  overflow-wrap: anywhere;
+}
+
+.kj-summary {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.kj-summary dt {
+  font-weight: 600;
+}
+
+.kj-summary dd {
+  margin: 0 0 0 12px;
+  overflow-wrap: anywhere;
+}
+
+/* 표 칸은 줄바꿈 허용 — 긴 이름·값이 표를 화면보다 넓히지 않게 (표는 upload-table-wrap 안에서만 가로 스크롤) */
+.kj-table th,
+.kj-table td {
+  white-space: normal;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.kj-preview th,
+.kj-preview td {
+  min-width: 5em;
+  max-width: 22em;
+}
+
+.kj-preview .kj-key {
+  color: var(--muted);
+}
+
+/* 확인·만들기·순서 버튼은 진행 중·경계에서도 disabled로 바꾸지 않는다 (초점이 사라지지 않게) — 보기만 비활성처럼 */
+.kj-actions .mapping-run[aria-disabled='true'] {
+  border-color: var(--tag-bg);
+  background: var(--tag-bg);
+  color: #6b7280;
+  cursor: not-allowed;
+}
+
+.kj-actions .mapping-confirm[aria-disabled='true'],
+.kj-list .mapping-confirm[aria-disabled='true'] {
+  color: #6b7280;
+  cursor: not-allowed;
+}
