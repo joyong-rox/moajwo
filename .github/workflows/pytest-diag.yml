@@ -1,0 +1,62 @@
+# 진단 전용: 최종 통합 후보의 백엔드 시험 전체(SQLite·PostgreSQL 17)와 계정 보존 확인을 격리 러너에서 한 번에.
+# 'ci/pytest-*' 브랜치를 올릴 때만 돈다 — main·PR에는 영향이 없다. 운영·Render·Neon 서비스로 요청하지 않는다.
+name: pytest (diagnostic)
+
+on:
+  push:
+    branches: ["ci/pytest-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # 이 러너 안의 일회용 시험 서버 값 (밖에서 닿지 않음, 실행이 끝나면 사라짐)
+          POSTGRES_PASSWORD: ci-throwaway-pg
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      PG_ADMIN: postgresql://postgres:ci-throwaway-pg@127.0.0.1:5432/postgres
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: install (requirements.txt is resolved for Python 3.11 / linux) and the PostgreSQL 17 client tools
+        run: |
+          python -m pip install -r backend/requirements-dev.txt
+          python -m pip check
+          mkdir -p out
+          python -m pip freeze > out/pip-freeze.txt
+          sudo apt-get install -y -q postgresql-common > /dev/null
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y > /dev/null
+          sudo apt-get install -y -q postgresql-client-17 > /dev/null
+          /usr/lib/postgresql/17/bin/pg_dump --version | tee out/pg-client.txt
+      - name: backend tests on SQLite
+        working-directory: backend
+        run: python -m pytest -q -rs -p no:cacheprovider --junitxml=../out/pytest-sqlite-junit.xml 2>&1 | tee ../out/pytest-sqlite.txt; exit ${PIPESTATUS[0]}
+      - name: backend tests on PostgreSQL 17
+        if: always()
+        working-directory: backend
+        # 관리자 주소: 시험마다 빈 DB를 새로 만드는 시험(이관 도구·마이그레이션·여러 프로세스)도 돌게 (이 러너 안의 일회용 서버)
+        run: |
+          python -c "import os; from sqlalchemy import create_engine, text; e = create_engine(os.environ['PG_ADMIN'].replace('postgresql://', 'postgresql+psycopg://'), isolation_level='AUTOCOMMIT'); e.connect().execute(text('CREATE DATABASE ci_tests'))"
+          export MOAJWO_TEST_DATABASE_URL="${PG_ADMIN%/postgres}/ci_tests" MOAJWO_TEST_PG_ADMIN_URL="$PG_ADMIN"
+          python -m pytest -q -rs -p no:cacheprovider --junitxml=../out/pytest-postgres-junit.xml 2>&1 | tee ../out/pytest-postgres.txt; exit ${PIPESTATUS[0]}
+      - name: account preservation check (real processes, admin address only through an environment variable)
+        if: always()
+        run: python diagnostics/scripts/external_db_check.py --admin-env PG_ADMIN --backend backend --out out/extdb --pg-bin /usr/lib/postgresql/17/bin
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: postgres-check
+          path: out
+          retention-days: 30
