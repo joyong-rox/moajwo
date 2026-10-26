@@ -155,7 +155,6 @@ class _Built:
     control: list[str] = field(default_factory=list)
     control_count: int = 0
     control_glossary: int = 0
-    control_names: set[str] = field(default_factory=set)  # 그 가운데 이름(파일·시트·열)으로 알린 글자
 
 
 # ---------------------------------------------------------------- 값 비교
@@ -333,7 +332,6 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
             built.files.append({"id": fid, "name": record.original_name, "excluded": True, "sheets": []})
             if _bad_text(record.original_name):  # 처리 요약 시트에 쓴다
                 _control_at(built, f"파일 #{fid}: 파일 이름")
-                built.control_names.add(record.original_name)
     org_codes = load_org_codes(db)
     for fid in file_ids:
         record, parsed = load_parsed(db, fid)
@@ -341,18 +339,15 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
         info: dict[str, Any] = {"id": fid, "name": record.original_name, "excluded": False, "sheets": []}
         if _bad_text(record.original_name):
             _control_at(built, f"파일 #{fid}: 파일 이름")
-            built.control_names.add(record.original_name)
         for sheet in parsed.sheets:
             # 시트·열 이름은 결과 파일(출처 열·변경 내역·처리 요약)에 그대로 쓴다 — 쓰지 않는 열 이름도 요약에 남는다
             where = f"파일 #{fid} · {sheet_place(sheet)}"
             built.sheets[(fid, sheet.name)] = where
             if _bad_text(sheet.name):
                 _control_at(built, f"{where}: 시트 이름")
-                built.control_names.add(sheet.name)
             for j, name in enumerate(sheet.columns):
                 if _bad_text(name):
                     _control_at(built, f"{where} · {column_place(sheet, j)}: 열 이름")
-                    built.control_names.add(name)
             mappings = engine.map_columns(
                 sheet.columns,
                 sheet.samples,
@@ -431,10 +426,11 @@ def build(db: Session, session: ReviewSession, include_unmapped: bool = False) -
                     row[label_index[c.label]] = value
                     place = f"{where} · {cell_place(sheet, entry['row'], c.index)}"
                     # 결과 칸·변경 내역(이전 값)에 쓸 수 없는 글자 — 원본 칸에서 왔는지, 칸 값을 바꾼 용어사전 표시
-                    # 이름에서 왔는지 나눠 알린다 (용어사전 글자는 원본을 고쳐도 남는다)
+                    # 이름에서 왔는지 나눠 알린다 (용어사전 글자는 원본을 고쳐도 남는다). 시군구는 결과 칸에 정식명칭의
+                    # 시도 뒤만 쓰지만 변경 사유(변경 내역 '근거'·셀 메모)에는 정식명칭 전체가 들어가므로 사유도 본다
                     if _bad_text(original) or (kind != "entity" and _bad_text(value)):
                         _control_at(built, place)
-                    elif _bad_text(value):
+                    elif _bad_text(value) or (kind == "entity" and _bad_text(reason)):
                         _control_at(built, f"용어사전 {ref.code} 항목의 이름 ({place}에 쓰려던 값)", glossary=True)
                     if same(original, value):
                         continue
@@ -519,17 +515,21 @@ def _autosize(ws: Any, widths: dict[int, int]) -> None:
         ws.column_dimensions[get_column_letter(col)].width = max(8, min(60, width + 2))
 
 
-def _formula_like(values: list[Any]) -> bool:
-    return any(isinstance(v, str) and v.startswith("=") for v in values)
-
-
-def _as_text(ws: Any, row: int) -> None:
+def _as_text(ws: Any) -> None:
     """결과 파일에는 수식을 쓰지 않는다. openpyxl은 '='로 시작하는 글자를 수식으로 저장하므로, 원본 값·열 이름·사유가
     '='로 시작해도 글자 칸으로 둔다 — 결과를 Excel로 열 때 HYPERLINK 같은 수식이 실행되지 않게
-    (묶기·분석 결과와 같은 규칙)."""
-    for cell in ws[row]:
-        if cell.data_type == "f":
-            cell.data_type = "s"
+    (묶기·분석 결과와 같은 규칙). 다 쓴 시트를 한 번만 훑는다 — 행마다 ws[row]를 부르면 openpyxl이 그때마다 모든
+    칸에서 열 수를 다시 구해 행 수 × 칸 수가 된다."""
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.data_type == "f":
+                cell.data_type = "s"
+
+
+def _printable(value: Any) -> Any:
+    """처리 요약의 설명 글(검증 경고 사유·기준 기간)에서 엑셀(XML)에 쓸 수 없는 제어 문자를 '�'로 — 이 글은 이미
+    개인정보를 가린 설명이고 원본 값이 아니다. 결과 칸·이름·변경 내역의 글자는 build가 그 자리로 거절한다."""
+    return ILLEGAL_CHARACTERS_RE.sub("\ufffd", value) if isinstance(value, str) else value
 
 
 def write_workbook(path: Path, built: _Built, summary: dict[str, Any]) -> int:
@@ -538,13 +538,11 @@ def write_workbook(path: Path, built: _Built, summary: dict[str, Any]) -> int:
     data = wb.active
     data.title = SHEET_DATA
     data.append(built.labels)
-    _as_text(data, 1)
     for cell in data[1]:
         cell.font, cell.fill = BOLD, HEADER_FILL
     for row in built.rows:
         data.append(row)
-        if _formula_like(row):
-            _as_text(data, data.max_row)
+    _as_text(data)
     painted = 0
     widths: dict[int, int] = {i + 1: len(str(label)) * 2 for i, label in enumerate(built.labels)}
     for ch in built.changes:
@@ -587,7 +585,6 @@ def write_workbook(path: Path, built: _Built, summary: dict[str, Any]) -> int:
                 ch.confidence,
             ]
         )
-        _as_text(changes, n + 1)  # 이전·이후 값과 사유도 글자로 (변경 행은 많지 않다)
         changes.cell(row=n + 1, column=10).fill = PatternFill("solid", fgColor=FILLS[ch.kind])
         changes.cell(row=n + 1, column=12).number_format = "0%"
     _autosize(changes, {1: 4, 2: 24, 3: 10, 4: 6, 5: 6, 6: 16, 7: 16, 8: 16, 9: 16, 10: 10, 11: 60, 12: 6})
@@ -596,11 +593,11 @@ def write_workbook(path: Path, built: _Built, summary: dict[str, Any]) -> int:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
     changes.freeze_panes = "A2"
     changes.auto_filter.ref = changes.dimensions
+    _as_text(changes)  # 이전·이후 값과 사유도 글자로
 
     summary_ws = wb.create_sheet(SHEET_SUMMARY)
     _write_summary(summary_ws, built, summary)
-    for row in range(1, summary_ws.max_row + 1):  # 파일·시트·열 이름도 글자로 (요약 시트는 작다)
-        _as_text(summary_ws, row)
+    _as_text(summary_ws)  # 파일·시트·열 이름도 글자로
     wb.save(path)
     return painted
 
@@ -618,7 +615,7 @@ def _write_summary(ws: Any, built: _Built, summary: dict[str, Any]) -> None:
         ("통합 실행 번호", summary["run_id"]),
         ("검토 번호", summary["review_id"]),
         ("검증 번호", summary["validation_run_id"]),
-        ("기준 기간", summary["expected_period"] or "(지정 안 함)"),
+        ("기준 기간", _printable(summary["expected_period"]) or "(지정 안 함)"),
         ("통합 행 수", summary["row_count"]),
         ("변경 건수 (셀)", summary["cell_change_count"]),
         ("열 이름 매핑", summary["column_change_count"]),
@@ -649,7 +646,7 @@ def _write_summary(ws: Any, built: _Built, summary: dict[str, Any]) -> None:
         for cell in ws[ws.max_row]:
             cell.font, cell.fill = BOLD, HEADER_FILL
         for w in summary["warnings"]:
-            ws.append([w["kind"], w["file"], w["sheet"], w["row"], w["column"], w["reason"]])
+            ws.append([w["kind"], w["file"], w["sheet"], w["row"], w["column"], _printable(w["reason"])])
 
     title("변경 종류별 건수")
     for kind, count in summary["change_counts"].items():
@@ -812,16 +809,8 @@ def _integrate(db: Session, session: ReviewSession, include_unmapped: bool | Non
          "column": i.column, "reason": mask_text(i.reason)}
         for i in shown
     ]  # fmt: skip
-    for w, i in zip(warnings, shown, strict=True):  # 처리 요약 시트에 쓴다 (경고 사유에 칸 값이 들어갈 수 있음)
-        # 사유에 든 파일·시트·열 이름의 글자는 build가 그 이름의 자리로 이미 알렸다 — 그 이름을 뺀 나머지로 본다 (이름을
-        # 뺄 때는 build가 이미 거절할 곳을 셌으므로 통과하지 않는다). 남은 글자는 경고가 가리킨 열이 아니라 그 행의 다른
-        # 칸(합계 행의 이름 칸 등)에서 왔을 수 있어 행까지만
-        rest = w["reason"]
-        for name in built.control_names:
-            rest = rest.replace(name, "")
-        if _bad_text(rest):
-            base = built.sheets.get((i.file_id or 0, i.sheet or "")) or f"파일 #{i.file_id}"
-            _control_at(built, f"{base}{f' · {i.row}행' if i.row else ''} (검증 경고 사유 — 그 행의 칸에서 온 글자)")
+    # 경고 사유는 처리 요약에 쓸 때 쓸 수 없는 문자를 '�'로 바꾼다 (_printable) — 거절하지 않는다. 사유의 글자는
+    # 이름·결과 칸(build가 그 자리로 거절)이거나 결과에 쓰지 않는 칸(합계 행의 이름 등 — 막을 까닭이 없음)에서 온다
     _check_text(built)  # 결과 파일에 쓸 수 없는 제어 문자 — 실행 기록을 만들기 전에 거절
     file_ids = [f["id"] for f in built.files if not f["excluded"]]
     # 자동화가 만든 '검토 대기' 행은 DB에서도 그 상태일 때만 이어 쓴다 (겹친 두 요청이 같은 행을 쓰지 않게)

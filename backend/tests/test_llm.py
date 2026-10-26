@@ -171,3 +171,12 @@ def test_engine_uses_selected_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         llm.set_current(None)
     assert calls == ["anthropic", "ollama"]
+
+
+def test_model_reason_loses_control_characters_it_cannot_store() -> None:
+    # 모델이 만든 근거 문장의 제어 문자(NUL 등)는 지운다 — 원본 파일에 없는 글자 때문에 검토가 거절되지 않게
+    # (검증 지적 R48-IV-5)
+    from app.mapping import clean_reason
+
+    assert clean_reason("인구\x00 수를 뜻함\x01") == "인구 수를 뜻함"
+    assert clean_reason("줄\n바꿈\t유지") == "줄\n바꿈\t유지"
