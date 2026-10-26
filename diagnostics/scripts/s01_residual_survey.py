@@ -82,7 +82,8 @@ def survey_tables(con: sqlite3.Connection) -> dict:
 def read_all(path: Path, name: str) -> tuple[dict, dict]:
     ext = path.suffix.lower()
     if ext == ".xlsx":
-        return parsing._read_xlsx(path)
+        sheets, filled, _ = parsing._read_xlsx(path)  # 셋째 값은 원본 탭 순번 (이 조사에는 쓰지 않음)
+        return sheets, filled
     if ext == ".xls":
         return parsing._read_xls(path)
     sheets, _ = parsing._read_csv(path, Path(name).stem)
