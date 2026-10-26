@@ -35,9 +35,10 @@
   - 0020_run_worker_lease + 열 있음: 위 동작.
   - 0019_analysis_runs + 열 없음(예: 반영 전 운영 DB): status는 실행 기록의 상태별 건수만 보여 주고(종료 0),
     recover·resolve는 아무것도 바꾸지 않고 종료 1.
-  - 그 밖(리비전 없음·여러 개·이 판이 다루지 않는 리비전·리비전과 열이 맞지 않음·runs 표 없음): status를 포함해
+  - 그 밖(리비전 없음·빈 값·여러 개·이 판이 다루지 않는 리비전·리비전과 열이 맞지 않음·runs 표 없음): status를 포함해
     진단만 알리고 종료 1 — 어느 판이라고 짐작하지 않고 아무것도 바꾸지 않는다. DB를 읽지 못해도 종료 1.
-  진단·오류에는 리비전 이름·열 이름·오류 종류만 (주소·SQL·값 없음).
+  - SQLite DB 파일이 없으면 열지 않는다 (열면 빈 파일이 생김) — 데이터 폴더·볼륨을 확인하라고 알리고 종료 1.
+  진단·오류에는 리비전 이름·열 이름·오류 종류만 (주소·경로·SQL·값 없음). 확인 뒤의 조회·쓰기 실패도 같다.
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import delete, func, inspect, select, text, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import db as app_db
@@ -434,8 +436,20 @@ LEGACY_REVISION = "0019_analysis_runs"  # 그 바로 앞 판 — status는 상�
 LEASE_COLUMNS = frozenset({"worker", "heartbeat_at"})
 
 
+def _sqlite_file() -> Path | None:
+    """SQLite면 그 DB 파일 (메모리 DB면 None) — 출력에는 쓰지 않는다."""
+    url = app_db.engine.url
+    if url.get_backend_name() != "sqlite" or url.database in (None, "", ":memory:"):
+        return None
+    return Path(url.database)
+
+
 def schema() -> dict[str, Any]:
-    """리비전(alembic_version의 모든 행)과 runs 표의 0020 열 — 읽기만 한다."""
+    """리비전(alembic_version의 모든 행)과 runs 표의 0020 열 — 읽기만 한다. SQLite DB 파일이 없으면 열지 않는다
+    (연결하면 빈 파일이 생겨, 잘못 고른 데이터 폴더·볼륨에 DB가 있는 것처럼 남는다)."""
+    path = _sqlite_file()
+    if path is not None and not path.is_file():
+        return {"db_file": False, "revisions": [], "runs_table": False, "lease_columns": []}
     with app_db.engine.connect() as c:
         found = inspect(c)
         has_runs = found.has_table("runs")
@@ -445,14 +459,19 @@ def schema() -> dict[str, Any]:
             if found.has_table("alembic_version")
             else []
         )
-    return {"revisions": revisions, "runs_table": has_runs, "lease_columns": sorted(LEASE_COLUMNS & columns)}
+    return {"db_file": True, "revisions": revisions, "runs_table": has_runs,
+            "lease_columns": sorted(LEASE_COLUMNS & columns)}  # fmt: skip
 
 
 def schema_problem(info: dict[str, Any]) -> tuple[str | None, str | None]:
     """(판, 문제): 판은 'lease'(0020 + 열) · 'legacy'(0019 + 열 없음), 문제는 그 밖일 때의 진단 (원문 없이)."""
     revisions, have = info["revisions"], set(info["lease_columns"])
+    if not info.get("db_file", True):
+        return None, "DB 파일이 없습니다"
     if not revisions:
         return None, "리비전 기록(alembic_version)이 없습니다"
+    if any(r is None for r in revisions):
+        return None, f"리비전 기록(alembic_version)에 빈 값이 있습니다 ({len(revisions)}행)"
     if len(revisions) > 1:
         return None, f"리비전이 {len(revisions)}개입니다 ({', '.join(revisions)})"
     revision = revisions[0]
@@ -487,6 +506,14 @@ def _print(out: dict[str, Any]) -> None:
     print(json.dumps(out, ensure_ascii=encoding != "utf8", indent=1, default=str))
 
 
+def _error_kind(exc: BaseException) -> str:
+    """오류 종류만 — 예외 이름과 SQLSTATE·SQLite 오류 이름 (주소·경로·SQL·매개변수·값 없이)."""
+    orig = getattr(exc, "orig", None)
+    code = getattr(orig, "sqlstate", None) or getattr(orig, "sqlite_errorname", None)
+    kind = type(orig if orig is not None else exc).__name__
+    return f"{kind} {code}" if code else kind
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m app.recovery", description="멈춘 결과 실행 확인·정리 (docs/DEPLOY.md)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -503,13 +530,17 @@ def main(argv: list[str] | None = None) -> int:
             _print(legacy_status(LEGACY_REVISION))
             return 0
     except Exception as exc:  # noqa: BLE001 — DB에 닿지 못함·DB가 아닌 파일 등. 종류만 (주소·SQL 없이)
-        _print({"error": f"DB를 확인하지 못했습니다 ({type(exc).__name__}) — 아무것도 바꾸지 않았습니다."})
+        _print({"error": f"DB를 확인하지 못했습니다 ({_error_kind(exc)}) — 아무것도 바꾸지 않았습니다."})
         return 1
     revision = info["revisions"][0] if len(info["revisions"]) == 1 else None
     if problem is not None:
         error = (
-            f"{problem} — 마이그레이션이 끝나지 않았거나 다른 판·손으로 바뀐 DB일 수 있어 {a.cmd}를 하지 않았습니다 "
-            "(아무것도 바꾸지 않음). 백업한 뒤 'alembic current'와 runs 표 구조를 확인하세요 (docs/DEPLOY.md)."
+            f"{problem} — 데이터 폴더(MOAJWO_DATA_DIR)나 연결한 볼륨이 맞는지 확인하세요. {a.cmd}를 하지 않았고 DB "
+            "파일을 만들지 않았습니다 (아무것도 바꾸지 않음, docs/DEPLOY.md)."
+            if not info["db_file"]
+            else f"{problem} — 마이그레이션이 끝나지 않았거나 다른 판·손으로 바뀐 DB일 수 있어 {a.cmd}를 하지 "
+            "않았습니다 (아무것도 바꾸지 않음). 백업한 뒤 'alembic current'와 runs 표 구조를 확인하세요 "
+            "(docs/DEPLOY.md)."
         )
         _print({"revisions": info["revisions"], "lease_columns": info["lease_columns"], "error": error})
         return 1
@@ -520,17 +551,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         _print({"revision": revision, "error": error})
         return 1
-    if a.cmd == "status":
-        out, ok = {"revision": revision, **status()}, True
-    elif a.cmd == "recover":  # 0: 담당이 있는 실행 중 행 없음, 2: 남음(살아 있거나 근거를 기다림), 1: 오류
-        out = recover()
-        if out["complete"] and out["blocking"]:
-            _print(out)
-            return 2
-        ok = out["complete"] and out["blocking"] == 0
-    else:
-        out = resolve_failed(a.run_id)
-        ok = out["changed"]
+    try:  # 확인 뒤의 조회·쓰기 실패(잠김·연결 끊김 등)도 종류만 알린다 — 오류 추적(SQL·매개변수)을 내보내지 않는다
+        if a.cmd == "status":
+            out, ok = {"revision": revision, **status()}, True
+        elif a.cmd == "recover":  # 0: 담당이 있는 실행 중 행 없음, 2: 남음(살아 있거나 근거를 기다림), 1: 오류
+            out = recover()
+            if out["complete"] and out["blocking"]:
+                _print(out)
+                return 2
+            ok = out["complete"] and out["blocking"] == 0
+        else:
+            out = resolve_failed(a.run_id)
+            ok = out["changed"]
+    except (SQLAlchemyError, OSError) as exc:
+        after = "읽기만 하는 명령이라 바뀐 것은 없습니다" if a.cmd == "status" else "status로 실행 상태를 확인하세요"
+        _print({"revision": revision, "error": f"{a.cmd}를 끝내지 못했습니다 ({_error_kind(exc)}) — {after}."})
+        return 1
     _print(out)
     return 0 if ok else 1
 
