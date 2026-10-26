@@ -128,7 +128,8 @@ def remove_automation(
 class RunIn(BaseModel):
     file_ids: list[int] = Field(min_length=1)
     baseline_file_ids: list[int] = []
-    expected_period: str | None = None
+    # 검증 API와 같은 형식 (2026 · 2026-09) — 다른 값은 기간 계산에서 500이 됐다
+    expected_period: str | None = Field(default=None, pattern=r"^(19|20)\d{2}(-(0[1-9]|1[0-2]))?$")
 
 
 class AutomationRunOut(BaseModel):
