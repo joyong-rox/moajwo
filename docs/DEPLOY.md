@@ -109,13 +109,17 @@ docker inspect moajwo-backend-1 --format '{{.Image}}'   # 로그의 새 backend 
 저장소 폴더에서 Git Bash로 0단계부터 차례로 붙여 넣습니다. **각 단계는 앞 단계 끝에 `[N 완료]`가 찍힌 것을 본 뒤에만** 실행합니다.
 1~7단계 상자는 `( … )` 안에서 돌아 실패해도 창이 닫히지 않고, 실패하면 `[중단] …`과 다음 행동을 알립니다 — 그때는 다음 단계(백업·정리·downgrade·이미지
 전환)를 실행하지 않고 아래 '멈췄을 때' 표를 봅니다. 반영이 DB 리비전을 바꾸지 않았으면(0단계 출력의 '리비전 X → X') 3~5단계를 건너뜁니다.
-0단계는 **가장 최근 반영 로그 하나만** 읽습니다 — 다른 로그의 배포 단위를 대신 고르지 않습니다. 그 앞 반영을 되돌리려면 0단계 전에
-`LOGF=backups/deploy-<그 반영 시각>.log`로 지정합니다. 1단계는 실행 중 backend가 `latest`이고 그 로그가 띄운 이미지인지 확인한 뒤에만 멈춥니다.
+되돌리기를 다시 시작할 때는 같은 창이라도 0단계부터 붙여 넣습니다 — 0단계가 로그와 값을 매번 새로 읽습니다.
+0단계는 **가장 최근 반영 로그 하나만** 읽습니다 — 다른 로그의 배포 단위를 대신 고르지 않습니다. 그 앞 반영을 되돌리려면 0단계 바로 전에
+`ROLLBACK_LOG=backups/deploy-<그 반영 시각>.log`를 입력합니다 (0단계가 한 번 쓰고 지우므로 다음 0단계는 다시 가장 최근 로그를 읽습니다).
+1단계는 실행 중 backend가 `latest`이고 그 로그가 띄운 이미지인지, 이미 되돌린 상태(backend·frontend의 `latest`가 모두 롤백 태그 이미지)가
+아닌지 확인한 뒤에만 멈춥니다.
 
 <!-- rollback-step:0 -->
 ```bash
-# 0) 되돌릴 배포 단위 읽기 (바꾸는 것 없음) — 가장 최근 반영 로그 하나만 (앞 반영은 먼저 LOGF=backups/deploy-<시각>.log)
-LOGF=${LOGF:-$(ls backups/deploy-*.log 2>/dev/null | sort | tail -1)}; echo "반영 로그: ${LOGF:-(없음)}"
+# 0) 되돌릴 배포 단위 읽기 (바꾸는 것 없음) — 가장 최근 반영 로그 하나만 (앞 반영은 바로 전에 ROLLBACK_LOG=backups/deploy-<시각>.log)
+LOGF=${ROLLBACK_LOG:-$(ls backups/deploy-*.log 2>/dev/null | sort | tail -1)}; unset ROLLBACK_LOG   # 한 번만 쓰고 창에 남기지 않음
+echo "반영 로그: ${LOGF:-(없음)}"; [ -z "$LOGF" ] || [ -f "$LOGF" ] || echo "[중단] 반영 로그 $LOGF 가 없음 — 파일 이름 확인"
 HOSTDIR=$(pwd -W 2>/dev/null || pwd)   # Git Bash는 Windows 경로, 리눅스는 그대로
 dbrev() {  # 데이터 볼륨 DB의 리비전 (읽기 전용 — 서버가 떠 있든 멈췄든)
   docker run --rm --entrypoint python -v moajwo_moajwo-data:/data:ro moajwo-backend:latest -c \
@@ -123,6 +127,7 @@ dbrev() {  # 데이터 볼륨 DB의 리비전 (읽기 전용 — 서버가 떠 �
 }
 UNIT=$(grep -h "배포 단위:" "$LOGF" 2>/dev/null | tail -1)
 HINT=$(grep -h "\[중단\].*docs/DEPLOY.md 4장 (백업 " "$LOGF" 2>/dev/null | tail -1)
+START=$(grep -h "· 롤백 태그 .*:rollback-[0-9-]*$" "$LOGF" 2>/dev/null | tail -1)   # deploy.sh 2단계 줄 (반영 전 리비전·롤백 태그)
 NEWB=$(grep -h "전환 완료:" "$LOGF" 2>/dev/null | tail -1 | sed -n 's|.* backend \([0-9a-f]\{12\}\) .*|\1|p')
 TS= PREV= NEWREV=
 if [ -n "$UNIT" ]; then   # 전환을 마친 반영
@@ -130,13 +135,23 @@ if [ -n "$UNIT" ]; then   # 전환을 마친 반영
   TS=$(printf '%s\n' "$UNIT" | sed -n 's|.*backups/rollback-\([0-9-]*\)\.compose\.yml.*|\1|p')
   PREV=$(printf '%s\n' "$UNIT" | sed -n 's|.*리비전 \([0-9a-z_]*\) → .*|\1|p')
   NEWREV=$(printf '%s\n' "$UNIT" | sed -n 's|.*리비전 [0-9a-z_]* → \([0-9a-z_]*\).*|\1|p')
-elif [ -n "$HINT" ]; then  # 전환에서 멈춘 반영 — 마이그레이션이 진행됐을 수 있어 반영 후 리비전은 지금 DB에서 읽는다
-  printf '%s\n' "$HINT" | sed 's/^\[[0-9:]*\] \[중단\] /반영 로그(전환에서 멈춤): /'
-  TS=$(printf '%s\n' "$HINT" | sed -n 's|.*롤백 태그 rollback-\([0-9-]*\),.*|\1|p')
-  PREV=$(printf '%s\n' "$HINT" | sed -n 's|.*반영 전 리비전 \([0-9a-z_]*\)).*|\1|p')
-  NEWREV=$(dbrev) && echo "전환에서 멈춘 반영 — 지금 DB 리비전 $NEWREV"
+elif [ -n "$HINT" ] || { [ -n "$START" ] && grep -q "== 6\. 새 이미지로 전환" "$LOGF"; }; then
+  # 전환에서 멈춘 반영(또는 전환 도중에 로그가 끊긴 반영) — 마이그레이션이 진행됐을 수 있어 반영 후 리비전은 지금 DB에서 읽는다
+  if [ -n "$HINT" ]; then
+    printf '%s\n' "$HINT" | sed 's/^\[[0-9:]*\] \[중단\] /반영 로그(전환에서 멈춤): /'
+    TS=$(printf '%s\n' "$HINT" | sed -n 's|.*롤백 태그 rollback-\([0-9-]*\),.*|\1|p')
+    PREV=$(printf '%s\n' "$HINT" | sed -n 's|.*반영 전 리비전 \([0-9a-z_]*\)).*|\1|p')
+  else
+    echo "[주의] 반영 로그가 전환(deploy.sh 6단계) 도중에 끝남 — 창 닫힘·재부팅 등으로 끊긴 반영으로 보고 전환에서 멈춘 반영처럼 다룸"
+    TS=$(printf '%s\n' "$START" | sed -n 's|.*:rollback-\([0-9-]*\)$|\1|p')
+    PREV=$(printf '%s\n' "$START" | sed -n 's|.*반영 전 리비전 \([0-9a-z_]*\) (예상과 같음).*|\1|p')
+  fi
+  if NEWREV=$(dbrev); then echo "전환에서 멈춘 반영 — 지금 DB 리비전 $NEWREV"
+  else NEWREV=; echo "[중단] 지금 DB 리비전을 읽지 못함 — 데이터 볼륨·moajwo-backend:latest 이미지 확인 (1단계가 멈춤)"; fi
 else
-  echo "[안내] 이 로그에는 배포 단위도 4장 안내도 없음 — 그 반영은 전환 전에 멈춰 서비스가 그대로입니다 (로그의 [중단] 줄). 앞 반영은 LOGF 지정"
+  echo "[안내] 이 로그로는 되돌릴 배포 단위를 정하지 않음 (배포 단위 줄·전환 실패 줄 없음) — 로그 끝을 보고 판단:"
+  echo "  '기존 서비스 재개'가 있으면 반영 전 판이 다시 떠 있어 되돌릴 것이 없음 · '[수동 확인 필요]'가 있으면 그 아래 안내대로"
+  echo "  둘 다 없으면 로그 이름을 확인 (앞 반영은 ROLLBACK_LOG를 지정해 0단계부터)"
 fi
 TAG="rollback-$TS"; RBF="backups/rollback-$TS.compose.yml"; RB="-f docker-compose.yml -f $RBF"
 PORTS_PY='import json, sys
@@ -175,13 +190,18 @@ echo "되돌릴 배포 단위: 시각 ${TS:-(없음)} · 리비전 ${PREV:-(없�
 # 1) 대상·이전 이미지·이전 포트 파일 확인(바꾸는 것 없음) → 쓰기 중지 → 쓰는 프로세스가 없는지 확인
 ( set -euo pipefail
   [ -n "$TS" ] && [ -n "$PREV" ] && [ -n "$NEWREV" ] \
-    || { echo "[중단] 배포 단위를 읽지 못함 — 0단계 출력 확인 (아무것도 바꾸지 않음)"; exit 1; }
+    || { echo "[중단] 되돌릴 배포 단위(시각 ${TS:-?} · 반영 전 리비전 ${PREV:-?} · 반영 후 리비전 ${NEWREV:-?})를 다 정하지 못함 — 0단계 출력의 [안내]·[중단] 줄 확인 (아무것도 바꾸지 않음)"; exit 1; }
   [ "$(docker compose config | sed -n 's/^name: //p')" = moajwo ] || { echo "[중단] Compose 프로젝트가 moajwo가 아님"; exit 1; }
   docker volume inspect moajwo_moajwo-data --format '데이터 볼륨 {{.Name}}' \
     || { echo "[중단] 데이터 볼륨 moajwo_moajwo-data 없음 (아무것도 바꾸지 않음)"; exit 1; }
   [ -f "$RBF" ] || { echo "[중단] 이전 포트 파일 $RBF 없음 — 이미지만 되돌리지 않음 (아무것도 바꾸지 않음)"; exit 1; }
   docker image inspect "moajwo-backend:$TAG" "moajwo-frontend:$TAG" --format '{{.Id}}' > /dev/null \
-    || { echo "[중단] 롤백 태그 $TAG 이미지 없음 (아무것도 바꾸지 않음)"; exit 1; }
+    || { echo "[중단] 롤백 태그 $TAG 이미지 없음 — '멈췄을 때'의 R 상자 (아무것도 바꾸지 않음)"; exit 1; }
+  lb=$(docker image inspect moajwo-backend:latest --format '{{.Id}}') && lf=$(docker image inspect moajwo-frontend:latest --format '{{.Id}}') \
+    || { echo "[중단] latest 이미지를 조회하지 못함 (아무것도 바꾸지 않음)"; exit 1; }
+  [ "$lb" != "$(docker image inspect "moajwo-backend:$TAG" --format '{{.Id}}')" ] \
+    || [ "$lf" != "$(docker image inspect "moajwo-frontend:$TAG" --format '{{.Id}}')" ] \
+    || { echo "[중단] latest가 backend·frontend 모두 롤백 태그 $TAG 이미지와 같음 — 이미 되돌렸거나 이 반영이 이미지를 바꾸지 않음. 되돌릴 것이 없어 멈추지 않음 (아무것도 바꾸지 않음)"; exit 1; }
   want=$(awk '/^  [a-z]+:$/ {s = $1; sub(":", "", s)} /^      - "/ {p = $2; gsub("\"", "", p); print s, p}' "$RBF" | sort)
   got=$(docker compose $RB config --format json | docker run --rm -i --entrypoint python "moajwo-backend:$TAG" -c "$PORTS_PY" | sort) \
     || { echo "[중단] 덧붙인 Compose 설정을 읽지 못함 (아무것도 바꾸지 않음)"; exit 1; }
@@ -192,10 +212,10 @@ echo "되돌릴 배포 단위: 시각 ${TS:-(없음)} · 리비전 ${PREV:-(없�
     || { echo "[중단] 지금 DB 리비전($rev)이 배포 단위의 반영 후 리비전($NEWREV)과 다름 (아무것도 바꾸지 않음)"; exit 1; }
   run_b=$(docker inspect moajwo-backend-1 --format '{{.Image}}') \
     || { echo "[중단] backend 컨테이너를 찾지 못함 (아무것도 바꾸지 않음)"; exit 1; }
-  [ "$run_b" = "$(docker image inspect moajwo-backend:latest --format '{{.Id}}')" ] \
+  [ "$run_b" = "$lb" ] \
     || { echo "[중단] backend 컨테이너 이미지(${run_b:7:12})가 latest가 아님 — 3~5단계가 다른 코드로 돌 수 있음 (아무것도 바꾸지 않음)"; exit 1; }
   [ -z "$NEWB" ] || [ "${run_b:7:12}" = "$NEWB" ] \
-    || { echo "[중단] backend 컨테이너 이미지(${run_b:7:12})가 이 로그가 띄운 이미지($NEWB)가 아님 — 되돌릴 반영(LOGF) 확인 (아무것도 바꾸지 않음)"; exit 1; }
+    || { echo "[중단] backend 컨테이너 이미지(${run_b:7:12})가 이 로그가 띄운 이미지($NEWB)가 아님 — 되돌릴 반영(ROLLBACK_LOG) 확인 (아무것도 바꾸지 않음)"; exit 1; }
   docker compose stop -t 30 frontend backend || { echo "[중단] 정지 명령 실패 — 1단계부터 다시 (백업·정리를 하지 않음)"; exit 1; }
   left=$(docker compose ps --status running --services) \
     || { echo "[중단] 정지 뒤 실행 중 서비스를 조회하지 못함 — 1단계부터 다시 (백업·정리를 하지 않음)"; exit 1; }
@@ -284,7 +304,7 @@ docker compose run --rm --no-deps backend python -m app.recovery resolve <실행
   want=$(awk '/^  [a-z]+:$/ {s = $1; sub(":", "", s)} /^      - "/ {p = $2; gsub("\"", "", p); print s, p}' "$RBF" | sort)
   got=$(for s in backend frontend; do
           docker inspect "moajwo-$s-1" --format '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}:{{.HostPort}}:{{$p}} {{end}}{{end}}' \
-            | tr ' ' '\n' | sed "/^$/d; s/^/$s /"
+            | tr ' ' '\n' | sed "/^$/d; s/^/$s /" || exit 1
         done | sort) || { echo "[중단] 실제 포트 연결을 조회하지 못함 — docker compose $RB ps 확인"; exit 1; }
   [ "$want" = "$got" ] || { echo "[중단] 실제 포트 연결($got)이 이전 포트 파일($want)과 다름"; exit 1; }
   for s in backend frontend; do
@@ -314,30 +334,81 @@ docker compose run --rm --no-deps backend python -m app.recovery resolve <실행
 
 | 멈춘 곳 | 바뀐 것 | 할 일 |
 | --- | --- | --- |
-| 1단계, 정지 전 확인 (배포 단위·프로젝트·포트 파일·롤백 태그·덧붙인 설정의 포트·DB 리비전·실행 중 backend 이미지) | 없음 — 서비스 그대로 | 이름은 반영 로그의 배포 단위 줄(또는 `[중단] … 4장 (…)` 줄)에 있음. 로그를 잘못 골랐으면 `LOGF`를 지정해 0단계부터. 포트 파일이 없는 예전 반영은 `git show <이전 main SHA>:docker-compose.yml`로 이전 설정을 꺼내 덧붙임 파일을 만든 뒤 (이미지만 되돌리지 않음). 롤백 태그 이미지가 없으면 B·A 모두 할 수 없음 — 이전 커밋을 다시 빌드해 반영 (1·2장, 별도 승인) |
+| 1단계, 정지 전 확인 (배포 단위·프로젝트·포트 파일·덧붙인 설정의 포트·DB 리비전) | 없음 — 서비스 그대로 | 이름은 반영 로그의 배포 단위 줄(또는 `[중단] … 4장 (…)` 줄)에 있음. 로그를 잘못 골랐으면 `ROLLBACK_LOG`를 입력하고 0단계부터. 포트 파일이 없는 예전 반영은 `git show <이전 main SHA>:docker-compose.yml`로 이전 설정을 꺼내 덧붙임 파일을 만든 뒤 (이미지만 되돌리지 않음) |
+| 1단계 '이미 되돌렸거나 이미지를 바꾸지 않음' | 없음 — 서비스 그대로 | 되돌릴 것이 없음 — 다시 되돌리지 않음 (A도 하지 않음: 되돌린 뒤 생긴 자료가 빠짐). 다른 반영을 되돌리려던 것이면 `ROLLBACK_LOG`를 입력하고 0단계부터 |
+| 1단계 '롤백 태그 이미지 없음' | 없음 — 서비스 그대로 | 아래 **R 상자**로 이전 커밋의 이미지를 다시 만들어 롤백 태그를 붙인 뒤 1단계부터. `scripts/deploy.sh`로 이전 커밋을 반영하지 않음 — 이전 코드는 새 리비전을 몰라 전환(기동 때 `alembic upgrade head`)에서 멈춤 |
+| 1단계 'latest가 아님'·'backend 컨테이너를 찾지 못함'·'이 로그가 띄운 이미지가 아님' | 없음 | 나중 반영이 빌드 뒤(4·5단계) 멈춰 기존 서비스를 재개했다면 `latest`만 그 빌드를 가리킴 — 실행 중 이미지로 되돌린 뒤(`docker tag $(docker inspect moajwo-backend-1 --format '{{.Image}}') moajwo-backend:latest`, frontend도 같게) 0단계부터. 전환 실패 로그인데 backend 컨테이너가 롤백 태그 이미지이거나 없으면(전환이 컨테이너를 바꾸기 전에 멈춤) 2~5단계 없이 6·7단계 — 6단계가 DB 리비전이 반영 전인지 먼저 확인하고, 아니면 멈춤(그때는 이 표 밖 — 상태를 기록해 판단) |
 | 1단계, 정지 뒤 확인 (실행 중 서비스·볼륨을 쓰는 컨테이너 — 조회 실패 포함) | 서비스만 멈춤 | 남은 컨테이너·조회 오류를 확인해 멈춘 뒤 1단계부터. 되돌리지 않으려면 `docker compose start backend frontend` (지금 판 재개) |
 | 2단계 (백업·검증·정리 전 상태) | 서비스 멈춤. 검증을 통과한 백업에만 `.sha256` 파일이 생김 — `.sha256`이 없는 `moajwo-data-before-rollback-*.tgz`는 만들다 만 백업이라 쓰지 않음 | 원인(백업 폴더 권한·디스크)을 고친 뒤 2단계부터, 또는 지금 판 재개. 정리 전 `status`가 '리비전과 열이 맞지 않음'으로 멈추면(전환이 마이그레이션 도중 멈춘 경우 등) 지금 판도 뜨지 않을 수 있음 — A를 판단 |
 | 3단계 종료 2 | 서비스 멈춤 (정리된 행이 있을 수 있음 — 출력) | `next_s`초 뒤 3단계만 다시. 계속 2면 같은 DB를 쓰는 다른 서버가 떠 있는지 확인 |
 | 3단계 종료 1 | 서비스 멈춤 | 출력의 `errors`를 보고 3단계를 다시, 또는 지금 판 재개 |
 | 4단계 | 서비스 멈춤 | 3단계부터 다시 |
-| 5단계 | 리비전을 확인 (`dbrev` — 0단계에서 정의) | downgrade 거절(이 판에서 시작한 실행 중 행)이면 리비전 그대로 — 3단계부터 다시, 또는 지금 판 재개. 그 밖의 실패로 리비전이 반영 후와 다르면(SQLite downgrade는 표를 다시 만드는 방식이라 실패하면 일부만 바뀔 수 있음) 지금 판을 재개하지 않고, 2단계 백업을 A 상자로 풀어(`BK=moajwo-data-before-rollback-<시각>.tgz`) 반영 후 리비전으로 되돌린 뒤 3단계부터 다시. A 기본값(반영 직전 백업)은 반영 뒤 생긴 자료가 빠짐 |
+| 5단계 | 리비전을 확인 (`dbrev` — 0단계에서 정의) | 리비전이 반영 후 그대로면: downgrade 거절(이 판에서 시작한 실행 중 행)은 3단계부터 다시, 그 밖의 실패(예: 남은 임시 표 `_alembic_tmp_*`로 시작하자마자 실패)는 출력을 보고 원인을 고친 뒤 5단계를 다시 — 어느 쪽이든 지금 판 재개(`docker compose start backend frontend`)도 됨. 리비전이 반영 후와 다르면(SQLite downgrade는 표를 다시 만드는 방식이라 실패하면 일부만 바뀔 수 있음) 지금 판을 재개하지 않고, 2단계 백업을 A 상자로 풀어(A 바로 전에 `RESTORE_BACKUP=moajwo-data-before-rollback-<시각>.tgz`) 반영 후 리비전으로 되돌린 뒤 3단계부터 다시. A 기본값(반영 직전 백업)은 반영 뒤 생긴 자료가 빠짐 |
 | 6단계, 앞 확인(DB 리비전 ≠ 반영 전) | 없음 | 5단계(또는 A)를 끝낸 뒤 6단계 |
 | 6단계, 태그 바꾸기·기동·확인 | 이미지 태그가 이전 판을 가리킴(태그 바꾸기에서 멈췄으면 하나만 바뀌었을 수 있음 — `docker image inspect moajwo-backend:latest moajwo-frontend:latest`를 롤백 태그와 비교), DB는 반영 전 리비전 | 태그를 마저 바꾸고 6단계부터, 또는 `docker compose $RB ps`·`logs`로 원인 확인. 새 판으로 돌아가려면 반영 로그 '전환 완료' 줄의 backend·frontend 이미지 ID로 `latest`를 다시 태그하고 `docker compose up -d --no-build --wait` (덧붙임 없이 — DB는 반영 전 리비전이라 새 backend가 기동 때 다시 올림). `scripts/deploy.sh`는 실행 중 컨테이너가 있어야 해서 이 상태에서는 쓰지 못함 |
 | 7단계 | 이전 판이 떠 있음 | 실패한 확인 항목을 보고 (서비스는 그대로) |
-| A, 백업 확인 | 없음 | 검증 기록(반영 직전 백업은 요약 `verified yes`·sha256, 2단계 백업은 `.sha256`)이 있는 백업으로 다시 |
+| A, 서비스·볼륨 확인 (실행 중 서비스·볼륨을 쓰는 컨테이너 — 조회 실패 포함) | 없음 | B 0·1단계로 먼저 멈춘 뒤 A |
+| A, 백업 확인 | 없음 | '이 반영의 백업이 아님'이면 `RESTORE_BACKUP`을 확인 (창에 남은 다른 반영의 값 등 — 반영 직전 백업이면 입력하지 않음). 그 밖에는 검증 기록(반영 직전 백업은 요약 `verified yes`·sha256, 2단계 백업은 `.sha256`)이 있는 백업으로 다시 |
 | A, 옮긴 뒤 풀기 | 지금 자료는 볼륨의 `_pre_rollback_<시각>/`에 있음, `/data`는 비었거나 일부만 풀림 | 보존 폴더를 지우거나 A를 다시 돌리지 않음(보존 폴더가 있으면 A가 거절 — 덮지 않게). 원인을 고친 뒤 보존 폴더를 볼륨 안에서 다른 이름으로 옮기고 A를 다시, 또는 보존 폴더의 자료를 `/data`로 되돌려 놓고 지금 판 재개 |
+| R | 없음 — 서비스·DB·`latest` 그대로 (빌드에서 멈췄으면 롤백 태그가 하나만 생겼을 수 있음) | 출력의 원인(커밋 없음 → `git fetch`, 꺼낼 폴더가 이미 있음 → 확인 뒤 옮김, 빌드 실패)을 고친 뒤 R을 다시. 하나만 생긴 태그는 R이 거절하지 않고 둘 다 다시 만듦 |
+
+### R. 롤백 태그 이미지가 없을 때 — 이전 커밋으로 다시 만들기
+
+1단계가 '롤백 태그 이미지 없음'으로 멈췄을 때만 씁니다 (정리 명령으로 태그가 지워진 경우 등). 이전 커밋을 다른 폴더에 꺼내 backend·frontend
+이미지를 만들고 롤백 태그(`rollback-<시각>`)를 붙입니다 — 서비스·DB·`latest`는 바꾸지 않습니다. 이전 커밋은 반영 승인 문서의 '이전 main'
+또는 앞 반영 로그의 배포 단위 줄 '대상'이며, R 상자 바로 전에 `REBUILD_FROM=<이전 main SHA>`를 입력합니다 (한 번만 쓰임). 다시 만든 이미지는
+기반 이미지·패키지가 그사이 바뀌었으면 원래 이미지와 같지 않을 수 있습니다. 끝나면 1단계부터 합니다.
+
+<!-- rollback-step:R -->
+```bash
+# R) 이전 커밋으로 이미지를 다시 만들어 롤백 태그를 붙인다 (서비스·DB·latest는 그대로) — 바로 전에 REBUILD_FROM=<이전 main SHA>
+SRC=${REBUILD_FROM:-}; unset REBUILD_FROM   # 한 번만 쓰고 창에 남기지 않음
+( set -euo pipefail
+  [ -n "$TS" ] || { echo "[중단] 배포 단위를 읽지 못함 — 0단계 출력 확인 (아무것도 바꾸지 않음)"; exit 1; }
+  [ -n "$SRC" ] || { echo "[중단] REBUILD_FROM=<이전 main SHA> 를 먼저 입력 (아무것도 바꾸지 않음)"; exit 1; }
+  sha=$(git rev-parse --verify --quiet "$SRC^{commit}") || { echo "[중단] 커밋 $SRC 를 찾지 못함 — git fetch 뒤 다시 (아무것도 바꾸지 않음)"; exit 1; }
+  if docker image inspect "moajwo-backend:$TAG" > /dev/null 2>&1 && docker image inspect "moajwo-frontend:$TAG" > /dev/null 2>&1; then
+    echo "[중단] 롤백 태그 $TAG 이미지가 이미 있음 — 다시 만들지 않음 (1단계로)"; exit 1
+  fi
+  dir="../moajwo-rebuild-$TS"
+  [ ! -e "$dir" ] || { echo "[중단] $dir 가 이미 있음 — 지우지 않고 멈춤 (확인 뒤 다른 곳으로 옮기고 다시)"; exit 1; }
+  git worktree add --detach "$dir" "$sha" > /dev/null || { echo "[중단] 이전 커밋을 $dir 에 꺼내지 못함 (아무것도 바꾸지 않음)"; exit 1; }
+  rc=0
+  docker build -q -t "moajwo-backend:$TAG" "$dir/backend" && docker build -q -t "moajwo-frontend:$TAG" "$dir/frontend" || rc=$?
+  git worktree remove "$dir" || echo "[주의] $dir 정리 실패 — 나중에 git worktree remove $dir"
+  [ "$rc" -eq 0 ] || { echo "[중단] 이전 커밋 이미지 빌드 실패 — 롤백 태그가 하나만 생겼을 수 있음 (서비스·DB·latest는 그대로)"; exit 1; }
+  got="$(docker image inspect "moajwo-backend:$TAG" --format '{{.Id}}' | cut -c8-19) $(docker image inspect "moajwo-frontend:$TAG" --format '{{.Id}}' | cut -c8-19)"
+  orig=$(sed -n 's/^# 롤백 태그: .*:rollback-[0-9-]* \([0-9a-f]\{12\}\) · .*:rollback-[0-9-]* \([0-9a-f]\{12\}\)$/\1 \2/p' "$RBF" 2>/dev/null || true)
+  if [ "$got" = "$orig" ]; then same="반영 전 이미지(이전 포트 파일의 기록)와 같음"
+  else same="[주의] 반영 전 이미지(${orig:-기록 없음})와 다름 — REBUILD_FROM이 그 반영 전 커밋인지 확인 (기반 이미지·패키지가 바뀌어도 다를 수 있음)"; fi
+  echo "[R 완료] 이전 커밋 ${sha:0:12}로 롤백 태그 $TAG 이미지를 만듦 · backend·frontend $got · $same — 다음: 1단계"
+)
+```
 
 ### A. 배포 전 백업으로 복원 (별도 승인)
 
-B의 0·1단계(배포 단위 읽기·확인·정지)를 먼저 하고, 반영 직전 백업(`moajwo-data-$TS.tgz`)을 풉니다. 풀기 전에 검증 기록을 봅니다 —
+B의 0·1단계(배포 단위 읽기·확인·정지)를 먼저 하고, 반영 직전 백업(`moajwo-data-$TS.tgz`)을 풉니다. 다른 백업(4장 B 2단계 백업 등)은 A 상자
+바로 전에 `RESTORE_BACKUP=moajwo-data-before-rollback-<시각>.tgz`를 입력합니다 (한 번만 쓰임). A 상자는 쓸 백업 이름을 먼저 보여 주고,
+서비스가 멈춰 있고 볼륨을 쓰는 컨테이너가 없을 때만 풉니다. 풀기 전에 검증 기록을 봅니다 —
 반영 직전 백업은 반영 로그와 함께 남는 요약(`moajwo-data-$TS.txt`의 `verified yes`·`sha256`), 4장 B 2단계 백업은 `.sha256` 파일.
 
 <!-- rollback-step:A -->
 ```bash
 # A) 검증된 백업인지 확인 → 지금 자료를 지우지 않고 _pre_rollback_<시각>/ 으로 옮긴 뒤 백업을 푼다 (uid 1000 → 소유권 유지).
 #    moajwo.db-journal(또는 WAL 모드라면 -wal·-shm)이 있으면 DB와 함께 옮겨지고 지워지지 않는다
+BK=${RESTORE_BACKUP:-moajwo-data-$TS.tgz}; unset RESTORE_BACKUP   # 기본: 반영 직전 백업. 한 번만 쓰고 창에 남기지 않음
+echo "풀 백업: backups/$BK"
 ( set -euo pipefail
-  BK=${BK:-moajwo-data-$TS.tgz}   # 기본: 반영 직전 백업. 4장 B 2단계 백업은 BK=moajwo-data-before-rollback-<시각>.tgz
+  [ -n "$TS" ] && [ -n "$PREV" ] || { echo "[중단] 배포 단위를 읽지 못함 — 0단계 출력 확인 (아무것도 바꾸지 않음)"; exit 1; }
+  left=$(docker compose ps --status running --services) \
+    || { echo "[중단] 실행 중 서비스를 조회하지 못함 (아무것도 바꾸지 않음)"; exit 1; }
+  [ -z "$left" ] || { echo "[중단] 실행 중인 서비스: $left — B 0·1단계로 먼저 멈춤 (아무것도 바꾸지 않음)"; exit 1; }
+  w=$(docker ps --filter volume=moajwo_moajwo-data --format '{{.Names}}') \
+    || { echo "[중단] 데이터 볼륨을 쓰는 컨테이너를 조회하지 못함 (아무것도 바꾸지 않음)"; exit 1; }
+  [ -z "$w" ] || { echo "[중단] 데이터 볼륨을 쓰는 컨테이너가 남음: $w (아무것도 바꾸지 않음)"; exit 1; }
+  bts=${BK#moajwo-data-before-rollback-}; bts=${bts%.tgz}   # 이 반영의 백업만: 반영 직전 백업, 또는 반영 뒤에 만든 2단계 백업
+  [ "$BK" = "moajwo-data-$TS.tgz" ] || { [[ "$bts" =~ ^[0-9]{8}-[0-9]{6}$ ]] && [[ "$bts" > "$TS" ]]; } \
+    || { echo "[중단] $BK 는 이 반영($TS)의 백업이 아님 (moajwo-data-$TS.tgz 또는 그 뒤의 moajwo-data-before-rollback-<시각>.tgz) — 풀지 않음 (아무것도 바꾸지 않음)"; exit 1; }
   sum="backups/${BK%.tgz}.txt"
   if [ -f "$sum" ]; then
     grep -qx "verified yes" "$sum" || { echo "[중단] $BK 는 검증되지 않은 백업 (요약에 verified yes 없음) — 풀지 않음 (아무것도 바꾸지 않음)"; exit 1; }
@@ -351,11 +422,15 @@ B의 0·1단계(배포 단위 읽기·확인·정지)를 먼저 하고, 반영 �
   docker run --rm --entrypoint sh -v moajwo_moajwo-data:/data -v "$HOSTDIR/backups:/backup:ro" "moajwo-backend:$TAG" -c \
     "set -e; gzip -t /backup/$BK; tar tzf /backup/$BK | grep -qx ./moajwo.db; d=/data/_pre_rollback_$TS; [ ! -e \$d ] || { echo '[중단] 보존 폴더가 이미 있음 — A를 다시 돌리지 않음 (옮겨 둔 자료를 덮지 않게)'; exit 1; }; mkdir \$d; for f in /data/* /data/.[!.]*; do [ -e \"\$f\" ] || continue; case \"\$f\" in /data/_pre_rollback_*) ;; *) mv \"\$f\" \$d/;; esac; done; tar xzf /backup/$BK -C /data; ls -ln /data" \
     || { echo "[중단] A 실패 — 출력 확인. 보존 폴더 _pre_rollback_$TS 를 지우거나 덮지 않음 ('멈췄을 때' A)"; exit 1; }
-  echo "[A 완료] $BK 를 풀었음 · 옮긴 자료는 볼륨의 _pre_rollback_$TS/ · 다음: B 6·7단계 (반영 직전 백업이면 3~5단계 없음)"
+  if ! rev=$(dbrev); then next="리비전을 읽지 못함 — 6단계가 먼저 확인"
+  elif [ "$rev" = "$PREV" ]; then next="B 6·7단계 (반영 전 리비전 $rev — 3~5단계 없음)"
+  else next="B 3단계부터 (리비전 $rev — 반영 전 $PREV 가 아님: 2단계 백업 등 반영 후 백업)"; fi
+  echo "[A 완료] $BK 를 풀었음 · 옮긴 자료는 볼륨의 _pre_rollback_$TS/ · 다음: $next"
 )
 ```
 
-그다음 B의 6·7단계(이전 이미지 + 이전 포트, 확인)를 그대로 합니다 — 반영 직전 백업은 반영 전 리비전이라 3~5단계가 없습니다 (6단계가 DB 리비전을 먼저 확인).
+그다음 `[A 완료]`가 알린 단계로 갑니다 — 반영 직전 백업은 반영 전 리비전이라 B 6·7단계(이전 이미지 + 이전 포트, 확인 — 3~5단계 없음), 2단계
+백업처럼 반영 후 리비전인 백업은 B 3단계부터 (6단계가 DB 리비전을 먼저 확인하므로 순서를 건너뛰면 멈춤).
 
 - **유실되는 것**: 백업 이후 반영된 버전에서 생긴 모든 변경(새 업로드 원본, 통합 결과, 매핑 확정·학습, 검토·실행 기록, 계정·설정·용어사전 변경). 지워지지 않고 볼륨의 `_pre_rollback_<시각>/`에 남으므로 필요하면 수동으로 옮겨옵니다.
 - 각 downgrade는 그 리비전이 넣은 데이터만 지우고 사용자 별칭이 가리키는 기본 항목은 남깁니다 (0015는 `owner_setup` 표시 한 행만).
@@ -580,7 +655,8 @@ docker compose exec -T backend python -m app.recovery resolve <실행 번호> --
   | 그 밖 — 리비전 없음·빈 값·여러 개·다루지 않는 리비전, 리비전과 열이 맞지 않음(전부·일부), `runs` 표 없음 | 진단만, 종료 1 | 진단만, 종료 1 |
   | SQLite DB 파일 없음 | 진단만, 종료 1 (파일을 만들지 않음) | 같음 |
 
-  진단에는 리비전·열 이름과 오류 종류만 나옵니다 (주소·경로·SQL·값 없음). 그 밖의 경우는 마이그레이션이 끝나지 않았거나 다른 판·손으로 바뀐 DB일 수 있으니 백업한 뒤 `alembic current`와 `runs` 표 구조(`PRAGMA table_info(runs)` 등 읽기 전용)를 확인합니다. DB 파일 없음은 데이터 폴더(`MOAJWO_DATA_DIR`)나 one-off에 붙인 볼륨을 잘못 고른 경우입니다. 확인을 통과한 뒤의 조회·쓰기 실패(다른 연결의 쓰기 잠금 등)도 종류만 알리고 종료 1 — `status`로 상태를 다시 봅니다.
+  진단에는 리비전·열 이름과 오류 종류만 나옵니다 (주소·경로·SQL·값 없음). 그 밖의 경우는 마이그레이션이 끝나지 않았거나 다른 판·손으로 바뀐 DB일 수 있으니 백업한 뒤 `alembic current`와 `runs` 표 구조(`PRAGMA table_info(runs)` 등 읽기 전용)를 확인합니다. DB 파일 없음은 데이터 폴더(`MOAJWO_DATA_DIR`)나 one-off에 붙인 볼륨을 잘못 고른 경우입니다 (`DATABASE_URL`이 `sqlite:///file:<경로>?mode=ro&uri=true` 꼴이면 그 경로의 파일로 봅니다). 확인을 통과한 뒤의 실패(다른 연결의 쓰기 잠금 등 — 어떤 예외든)도 종류만 알리고 종료 1 — `status`로 상태를 다시 봅니다. 결과 폴더 식별자(`outputs/.disk-id`)가 깨져 있으면 그 원인 문구를 알립니다 (경로·값 없음).
+  이 표와 문장은 통합 후보의 `backend/app/recovery.py`(#41 `fix/output-memory-budget`) 기준입니다 — 이 문서만 따로 main에 들어가면 맞지 않으므로 통합 PR(#42)로 함께 병합합니다.
 
 ### 롤백 B — 데이터를 지키며 0019로 되돌리기 (별도 승인 후 수동)
 
