@@ -1070,6 +1070,26 @@ def test_cli_reports_a_broken_output_folder_id_by_its_cause_without_a_trace(tmp_
     assert _sha(data / "moajwo.db") == before
 
 
+@pytest.mark.usefixtures("head_revision")
+@pytest.mark.parametrize("cmd", ["status", "recover"])
+def test_cli_failure_of_any_kind_after_the_check_prints_only_its_kind(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], cmd: str
+) -> None:
+    """확인 뒤 DB·파일 오류가 아닌 예외도 오류 추적·문구 없이 종류만 (문구에 경로·값이 들어갈 수 있다 — 지적 N2)."""
+    from app import recovery
+
+    def boom(*_: Any, **__: Any) -> dict[str, Any]:
+        raise ValueError("C:/비밀/경로 010-0000-0000")
+
+    monkeypatch.setattr(recovery, cmd, boom)
+    assert recovery.main([cmd]) == 1
+    shown = capsys.readouterr()
+    after = "읽기만 하는 명령이라 바뀐 것은 없습니다" if cmd == "status" else "status로 실행 상태를 확인하세요"
+    assert json.loads(shown.out)["error"] == f"{cmd}를 끝내지 못했습니다 (ValueError) — {after}.", shown.out
+    assert "비밀" not in shown.out + shown.err and "010-0000-0000" not in shown.out + shown.err
+    assert "Traceback" not in shown.out + shown.err
+
+
 def test_heartbeat_runs_only_while_a_run_is_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
     from sqlalchemy import event
 
