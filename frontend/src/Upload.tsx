@@ -88,8 +88,11 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
       const uploaded = await uploadFiles(accepted, setSent)
       setResults((prev) => [...uploaded, ...prev])
       // 누적 목록이 아니라 이번 요청의 결과만 센다. 일부 실패도 일반 상태로 전한다 (즉시 대응이 필요한 전체 실패만 alert).
+      // 실패 사유도 같이 읽는다 — 카드에만 보이면 화면 읽기 사용자는 건수만 듣는다 (서버 문구 그대로, 같은 사유는 한 번)
       const failedNow = uploaded.filter((r) => r.error).length
-      announce(`업로드를 마쳤습니다: 이번 요청 ${uploaded.length}개 중 성공 ${uploaded.length - failedNow}개, 실패 ${failedNow}개.`)
+      const reasons = [...new Set(uploaded.flatMap((r) => (r.error ? [r.error] : [])))]
+      const why = reasons.length ? ` 실패 사유: ${reasons.slice(0, 3).join(' / ')}${reasons.length > 3 ? ` 외 ${reasons.length - 3}가지` : ''}` : ''
+      announce(`업로드를 마쳤습니다: 이번 요청 ${uploaded.length}개 중 성공 ${uploaded.length - failedNow}개, 실패 ${failedNow}개.${why}`)
       onUploaded?.()
     } catch (err) {
       announce('') // 요청 전체 실패는 아래 오류 알림(alert)이 전한다 — 같은 내용을 두 번 읽지 않게 상태는 비운다
