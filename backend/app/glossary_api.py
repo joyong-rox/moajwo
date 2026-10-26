@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, model_validator
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -19,7 +19,7 @@ from app.db import get_session
 from app.glossary import AliasEntry, EntityRef, Entry, Glossary, normalize_name, period_end
 from app.glossary_import import CODE_PATTERN, export_csv, import_file, template_csv
 from app.models import GlossaryAlias, GlossaryEntry
-from app.name_limits import GLOSSARY_NAME_MAX, NUL, VALUE_HAS_NUL, name_problem
+from app.name_limits import GLOSSARY_NAME_MAX, NUL, VALUE_HAS_NUL, name_problem, no_nul
 from app.parsing import SUPPORTED_EXTENSIONS
 from app.pii import has_pii
 
@@ -143,7 +143,7 @@ def _aliases_by_code(session: Session, include_base: bool = True) -> dict[str, l
 @router.get("/entries", response_model=list[EntryOut])
 def list_entries(
     session: Annotated[Session, Depends(get_session)],
-    q: Annotated[str | None, Query(max_length=100)] = None,
+    q: Annotated[str | None, Query(max_length=100), AfterValidator(no_nul)] = None,  # LIKE 매개변수 — NUL은 422
     scope: Literal["all", "org", "region"] = "all",
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[EntryOut]:

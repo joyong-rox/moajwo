@@ -17,6 +17,7 @@ from app.automation import AutomationError, delete_automation, run_automation, s
 from app.db import get_session
 from app.integration_api import RunOut, runs_out
 from app.models import Automation, IntegrationRun, SourceFile, User
+from app.name_limits import StoredText
 from app.pii import mask_text
 from app.review import session_items, summarize
 from app.timefmt import stored_kst, utc_to_kst
@@ -81,7 +82,7 @@ def _get(db: Session, automation_id: int, user: CurrentUser) -> Automation:
 
 
 class SaveIn(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
+    name: StoredText = Field(min_length=1, max_length=100)  # automations.name — NUL은 두 DB 같은 422로 (쓰기 전)
 
 
 @router.post("/runs/{run_id}/automation", response_model=AutomationOut, status_code=status.HTTP_201_CREATED)

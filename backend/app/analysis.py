@@ -51,7 +51,7 @@ from functools import lru_cache
 from typing import Any, Literal
 
 from fastapi import HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.admin_codes import infer_region_codes
@@ -63,6 +63,7 @@ from app.glossary import parse_date_value
 from app.mail_fields import MAIL_MEASURE_FIELDS
 from app.mapping import TOTAL_WORDS, load_dictionary, normalize, split_column_name
 from app.mapping_review import SheetView, declared_units, file_view, raw_mark, sheet_id
+from app.name_limits import OptionalStoredText, StoredText, no_nul
 from app.parsing import is_missing
 from app.pii import mask_text
 from app.quantity import quantity_value
@@ -194,7 +195,7 @@ class TargetIn(BaseModel):
     file_id: int
     sheet_id: str | None = Field(default=None, pattern=r"^s\d{1,3}$")  # 없으면 이 항목이 확정된 시트 모두
     column_id: str | None = Field(default=None, pattern=r"^c\d{1,4}$")  # 같은 구분의 열이 여러 개일 때만
-    unit: str | None = Field(default=None, min_length=1, max_length=20)  # 표에 단위가 없을 때 사용자가 확인한 단위
+    unit: OptionalStoredText = Field(default=None, min_length=1, max_length=20)  # 표에 단위가 없을 때 확인한 단위
     period: str | None = Field(default=None, pattern=r"^(19|20)\d{2}(-(0[1-9]|1[0-2]))?$")  # 기간을 못 찾을 때만
     # 같은 대상의 행이 반복될 때, 사용자가 '서로 다른 기록(거래·발생 건)'이라고 확인했으면 모두 더한다
     rows_are_records: bool = False
@@ -205,7 +206,7 @@ class TargetIn(BaseModel):
 class BinIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    label: str | None = Field(default=None, max_length=40)
+    label: OptionalStoredText = Field(default=None, max_length=40)
     min: float | None = None
     max: float | None = None
     min_inclusive: bool = True
@@ -228,15 +229,26 @@ class FiltersIn(BaseModel):
     value_min: float | None = None
     value_max: float | None = None
 
+    @field_validator("dims")
+    @classmethod
+    def _dims_without_nul(cls, dims: dict[str, list[str]]) -> dict[str, list[str]]:
+        # 항목 이름(키)·값 모두 — 키를 StoredText로 두면 오류 위치(loc)에 그 키가 그대로 들어가므로 필드 단위로 본다
+        for key, values in dims.items():
+            no_nul(key)
+            for value in values:
+                no_nul(value)
+        return dims
+
 
 class AnalysisIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     field_key: str = Field(max_length=64)
-    variant: str | None = Field(default=None, max_length=200)  # 열 이름의 구분 ('' = 구분 없음, None = 하나뿐이면 자동)
-    unit: str | None = Field(default=None, max_length=20)  # 단위가 다른 자료가 섞였을 때 계산할 단위
+    # 사용자가 적은 글자(JSON 저장·응답에 되돌림)의 NUL은 요청에서 막는다 — 값은 바꾸지 않음 (가림은 normalize_request)
+    variant: OptionalStoredText = Field(default=None, max_length=200)  # 열 이름의 구분 ('' = 없음, None = 자동)
+    unit: OptionalStoredText = Field(default=None, max_length=20)  # 단위가 다른 자료가 섞였을 때 계산할 단위
     targets: list[TargetIn] = Field(min_length=1, max_length=MAX_TARGETS)
-    group_by: list[str] = Field(default_factory=list, max_length=3)
+    group_by: list[StoredText] = Field(default_factory=list, max_length=3)
     filters: FiltersIn = Field(default_factory=FiltersIn)
     aggregates: list[Literal["sum", "mean", "min", "max", "count"]] = Field(default_factory=lambda: list(AGGREGATES))
     bins: BinsIn | None = None

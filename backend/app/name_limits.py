@@ -11,14 +11,20 @@ PostgreSQL은 varchar(n)보다 긴 값을 쓰는 순간 DB 오류(22001 → 500)
   않는다 (가림이 제어 문자가 섞인 글자까지 안전하게 가린다고 보지 않는다).
 - 한도는 모델 정의에서 읽는다 — 스키마를 넓히면 함께 바뀐다. 긴 이름 자체를 받으려면 확정·학습·승격·고유 키를
   함께 바꾸는 별도 설계가 필요하다 (고유 제약·색인이 걸린 열이라 한 열만 넓혀서는 안 됨).
+- 직접 입력한 요청 글자(JSON 본문·쿼리 — 표시 이름·사유·자동화 이름·심사 메모·검색어 등)의 NUL은 요청 검증에서
+  거절한다 (StoredText·OptionalStoredText — 아래). 두 DB 모두 pydantic 422 목록형(loc·type 'value_has_nul'·msg 끝
+  [VALUE_HAS_NUL])이고 값은 되돌리지 않으며(main.validation_error가 input을 뺌) 아무것도 쓰기 전이다. PostgreSQL
+  드라이버의 거절을 422로 바꾸는 app/main.py의 안전망은 마지막 방어선으로만 남는다.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Annotated, Protocol
 
+from pydantic import AfterValidator
+from pydantic_core import PydanticCustomError
 from sqlalchemy import Column
 
 from app.models import (
@@ -82,6 +88,24 @@ HINTS = {
     TOO_LONG: "원본 파일에서 이름을 줄인 뒤 다시 올리세요.",
     HAS_NUL: "원본 파일에서 이름의 NUL(0x00) 문자를 지운 뒤 다시 올리세요.",
 }
+# 직접 입력한 요청 글자의 NUL 거절 안내 — 고정 문구 + 코드 (값은 넣지 않는다)
+VALUE_HAS_NUL_MSG = f"NUL(0x00) 문자가 있어 저장할 수 없습니다 — 그 문자를 지운 뒤 다시 하세요. [{VALUE_HAS_NUL}]"
+
+
+def no_nul(value: str | None) -> str | None:
+    """pydantic AfterValidator: 요청 글자에 NUL(0x00)이 있으면 거절한다 (type 'value_has_nul', 고정 문구, 값 없음).
+    값을 고치지 않고(NUL을 지우지 않음) 막는 글자는 NUL 하나다. None은 그대로 둔다 (비울 수 있는 필드에 함께 쓴다)."""
+    if value is not None and NUL in value:
+        raise PydanticCustomError("value_has_nul", VALUE_HAS_NUL_MSG)
+    return value
+
+
+# DB에 저장하거나 SQL 매개변수로 쓰는 요청 글자(JSON 본문)의 타입 — 길이 한도는 지금처럼 Field(max_length=…)에 둔다.
+# 필수 필드는 StoredText, 비울 수 있는 필드는 OptionalStoredText: `StoredText | None`에 바깥 Field(max_length)를
+# 주면 pydantic이 제약을 str 스키마에 넣지 못해 길이 초과의 오류 종류가 string_too_long에서 too_long('… items …')으로
+# 바뀐다 (pydantic 2.13에서 확인). 쿼리 글자는 Annotated[str | None, Query(max_length=…), AfterValidator(no_nul)].
+StoredText = Annotated[str, AfterValidator(no_nul)]
+OptionalStoredText = Annotated[str | None, AfterValidator(no_nul)]
 
 
 class NameNotStorable(ValueError):
