@@ -52,6 +52,8 @@ for n in frontend frontend-render; do
   res "image_$n" "$(docker image inspect "moajwo-$n:check" --format '{{.Id}}' | cut -c1-19)" "최종 이미지 ID"
   res "apk_brotli_$n" "$(grep -E '^brotli-libs-' "$OUT/apk-$n.txt" | tr '\n' ' ')" \
     "설치된 brotli-libs (기반: $(grep -E '^brotli-libs-' "$OUT/apk-base-nginx.txt" | tr '\n' ' '))"
+  res "apk_curl_$n" "$(grep -E '^(curl|libcurl)-[0-9]' "$OUT/apk-$n.txt" | tr '\n' ' ')" \
+    "설치된 curl·libcurl (기반: $(grep -E '^(curl|libcurl)-[0-9]' "$OUT/apk-base-nginx.txt" | tr '\n' ' '))"
   res "apk_changes_$n" "$(diff "$OUT/apk-base-nginx.txt" "$OUT/apk-$n.txt" | grep '^[<>]' | tr '\n' ' ')" \
     "기반 nginx 대비 패키지 변경 (< 기반 · > 최종, 비면 변경 없음 — apk-$n.txt)"
 done
@@ -280,8 +282,8 @@ if grep "  $TGZ\$" trivy.sum | sha256sum -c - >> "$LOG" 2>&1; then
 import json, sys
 d = json.load(open(sys.argv[1]))
 v = [x for r in d.get("Results", []) for x in r.get("Vulnerabilities") or []]
-hit = [f"{x['PkgName']} {x['InstalledVersion']} (수정 {x.get('FixedVersion') or '-'})" for x in v
-       if x["VulnerabilityID"] == "CVE-2026-111497"]
+hit = [f"{x['VulnerabilityID']} {x['PkgName']} {x['InstalledVersion']} (수정 {x.get('FixedVersion') or '-'})" for x in v
+       if x["VulnerabilityID"] in ("CVE-2026-111497", "CVE-2026-92392")]
 os_ = (d.get("Metadata") or {}).get("OS") or {}
 try:
     db = json.load(open(sys.argv[2])).get("VulnerabilityDB") or {}
@@ -291,7 +293,7 @@ print(("남음: " + "; ".join(hit)) if hit else "검출 없음", "· 모든 심�
       "· OS", os_.get("Family", "-"), os_.get("Name", "-"),
       "· 검사 대상", [r.get("Type") for r in d.get("Results", [])], "· DB", (db.get("UpdatedAt") or "-")[:19])
 PY
-)" "CVE-2026-111497 (brotli-libs) — trivy-all-$n.json · DB 시각 trivy-version.json (OS 패키지 대상이 없으면 검사가 안 된 것)"
+)" "CVE-2026-111497 (brotli-libs)·CVE-2026-92392 (curl·libcurl) — trivy-all-$n.json · DB 시각 trivy-version.json (OS 패키지 대상이 없으면 검사가 안 된 것)"
   done
   for n in backend frontend frontend-render; do
     ./trivy image --quiet --skip-db-update --format json --scanners vuln --severity HIGH,CRITICAL -o "$OUT/trivy-$n.json" "moajwo-$n:check" 2>> "$LOG"
