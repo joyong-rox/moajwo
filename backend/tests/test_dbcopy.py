@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
 from app import dbcopy
@@ -638,6 +639,115 @@ def test_app_writes_wait_while_the_copy_holds_the_tables(pg_env, target, monkeyp
     th.join(120)
     assert errors == ["55P03", "55P03"]  # 잠금 대기 제한 초과 — 복사 중인 표를 쓰거나 비어 있는 것으로 읽지 못함
     assert out["db_applied"] == "yes" and out["after_commit"]["verified"]
+
+
+def _dbcopy_backends(url: str) -> list[dict[str, Any]]:
+    """이 DB에 붙은 이관 도구 백엔드(application_name = dbcopy.TOOL)의 상태와 쥔 표 잠금(granted relation lock) 수."""
+    e = create_engine(url.replace("postgresql://", "postgresql+psycopg://", 1), isolation_level="AUTOCOMMIT")
+    sql = (
+        "SELECT a.pid, a.state, a.wait_event_type, (SELECT count(*) FROM pg_locks l WHERE l.pid = a.pid"
+        " AND l.locktype = 'relation' AND l.granted) AS held FROM pg_stat_activity a"
+        " WHERE a.datname = current_database() AND a.application_name = :app AND a.pid <> pg_backend_pid()"
+    )
+    with e.connect() as c:
+        rows = [dict(r) for r in c.execute(text(sql), {"app": dbcopy.TOOL}).mappings().all()]
+    e.dispose()
+    return rows
+
+
+@pg
+def test_the_check_stage_holds_no_locks_and_the_lock_stage_rechecks_inside_the_lock(
+    pg_env, target, monkeypatch
+) -> None:
+    """확인 단계(표별 건수까지 센 뒤)에는 트랜잭션도 표 잠금도 들고 있지 않다(자동 커밋 읽기) — 같은 순간 잠금 단계에 든
+    다른 이관과 서로 기다리는 교착(SQLSTATE 40P01, 2026-10-26 R12 관찰)의 조건을 없앤다. 잠금문은 alembic_version을
+    먼저 잠근다. 확인 뒤·잠금 전에 대상에 행이 생기면(가입 등) 잠금 안 재확인이 거절하고 아무것도 쓰지 않는다 —
+    진단 게이트 자리(_gate)를 바꿔 그 순간을 잡는다 (MOAJWO_DBCOPY_GATE 환경 변수는 쓰지 않음)."""
+    seen: dict[str, list[dict[str, Any]]] = {}
+    statements: list[str] = []
+    real_text = dbcopy.text
+    writer = create_engine(target.replace("postgresql://", "postgresql+psycopg://", 1), isolation_level="AUTOCOMMIT")
+
+    def capture(sql: str):  # noqa: ANN202
+        statements.append(sql)
+        return real_text(sql)
+
+    def at(stage: str) -> None:
+        seen[stage] = _dbcopy_backends(target)
+        if (
+            stage == "checked"
+        ):  # 확인이 끝난 순간 다른 연결이 가입 행을 넣는다 — 이관이 잠금을 들고 있지 않아 바로 들어간다
+            with writer.connect() as c:
+                c.execute(text("SET lock_timeout = '2s'"))
+                c.execute(text(
+                    "INSERT INTO users (username, display_name, password_hash, role, is_active, status, auth_version,"
+                    " failed_logins) VALUES ('dc-late', 'l', 'x', 'user', false, 'pending', 0, 0)"
+                ))  # fmt: skip
+
+    monkeypatch.setattr(dbcopy, "text", capture)
+    monkeypatch.setattr(dbcopy, "_gate", at)
+    report: dict[str, Any] = {}
+    with pytest.raises(dbcopy.CopyError, match=r"이미 자료가 있습니다 \(users\)"):
+        dbcopy.copy(_src(pg_env), target, apply=True, report=report)
+    writer.dispose()
+    assert report["stage"] == "잠금" and report["db_applied"] == "no"
+    checked = seen["checked"]  # 확인 단계 끝: 연결은 트랜잭션 밖(idle)이고 쥔 표 잠금이 없다
+    assert checked and all(b["state"] == "idle" and b["held"] == 0 for b in checked), checked
+    locked = seen["locked"]  # 잠금 단계: 쓰기 연결 하나가 트랜잭션 안에서 모든 표를 쥐고 있다
+    holders = [b for b in locked if b["held"]]
+    assert len(holders) == 1 and holders[0]["state"] == "idle in transaction", locked
+    assert holders[0]["held"] >= len(list(dbcopy.Base.metadata.sorted_tables)) + 1
+    lock = next(s for s in statements if s.startswith("LOCK TABLE"))
+    assert lock.startswith('LOCK TABLE "alembic_version", ') and lock.endswith(" IN ACCESS EXCLUSIVE MODE")
+    e = create_engine(target.replace("postgresql://", "postgresql+psycopg://", 1))
+    with e.connect() as c:
+        users = c.execute(text("SELECT username FROM users ORDER BY 1")).scalars().all()
+    e.dispose()
+    assert users == ["dc-late"] and _state(target)["marker"] == 0  # 가입 행만 남고 이관은 쓰지 않음
+
+
+@pg
+def test_a_lock_wait_timeout_while_reading_the_revision_is_reported_as_such(pg_env, target, capsys) -> None:
+    """다른 이관이 표를 잠근 동안 확인 단계가 리비전을 읽다 잠금 대기 한도를 넘으면 그 오류(LockNotAvailable
+    55P03)로 멈춘다 — '리비전이 최신이 아닙니다'로 보이지 않는다 (앞 판은 _revision이 모든 오류를 None으로 삼켰다)."""
+    holder = create_engine(target.replace("postgresql://", "postgresql+psycopg://", 1))
+    hold = holder.connect()
+    hold.execute(text('LOCK TABLE "alembic_version" IN ACCESS EXCLUSIVE MODE'))  # 트랜잭션을 열어 둔 채
+    try:
+        reader = create_engine(
+            target.replace("postgresql://", "postgresql+psycopg://", 1), isolation_level="AUTOCOMMIT"
+        )
+        with reader.connect() as c:
+            c.execute(text("SET lock_timeout = '1s'"))
+            with pytest.raises(OperationalError) as exc:
+                dbcopy._revision(c)
+            assert exc.value.orig.sqlstate == "55P03"
+        reader.dispose()
+        code, out = _run(capsys, "--source", _src(pg_env), "--target", target, "--lock-timeout-s", "1")
+        assert code == 1 and out["stage"] == "확인" and out["db_applied"] == "no"
+        assert "LockNotAvailable" in out["error"] and "SQLSTATE 55P03" in out["error"]
+        assert "최신" not in out["error"]
+    finally:
+        hold.rollback()
+        hold.close()
+        holder.dispose()
+
+
+def test_the_diagnostic_gate_does_nothing_without_its_variable_and_waits_for_the_go_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("MOAJWO_DBCOPY_GATE", raising=False)
+    t0 = time.monotonic()
+    dbcopy._gate("checked")
+    assert time.monotonic() - t0 < 0.5 and not list(tmp_path.iterdir())
+    monkeypatch.setenv("MOAJWO_DBCOPY_GATE", str(tmp_path))
+    (tmp_path / "go-checked").write_text("x", encoding="utf-8")
+    dbcopy._gate("checked")  # go 파일이 이미 있으면 도착 표시만 남기고 지나간다
+    assert (tmp_path / f"arrived-checked-{os.getpid()}").exists()
+    threading.Timer(0.3, lambda: (tmp_path / "go-locked").write_text("x", encoding="utf-8")).start()
+    t0 = time.monotonic()
+    dbcopy._gate("locked")  # go 파일이 생길 때까지 기다린다
+    assert 0.25 <= time.monotonic() - t0 < 5
 
 
 @pg
