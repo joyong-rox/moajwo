@@ -166,7 +166,7 @@ def test_pii_in_title_sheet_and_file_name_not_in_review_or_batch(fx, caplog) -> 
         assert res.status_code == 200 and not any(r in res.text for r in RAW), path
     listed = next(f for f in u.get("/files").json() if f["id"] == a)
     assert EMAIL not in listed["display_name"] and listed["display_name"].endswith(".xlsx")  # 화면 표시용은 가림
-    assert listed["original_name"] == f"개인정보 {EMAIL}.xlsx"  # 원래 이름은 바꾸지 않음 (기존 화면·식별 호환)
+    assert listed["original_name"] == listed["display_name"]  # 호환 필드도 가린 이름 (2026-10-27) — 식별은 id
     sheet_id = u.get(f"/files/{a}/preview").json()["sheet_id"]
     assert u.get(f"/files/{a}/preview", params={"sheet_id": sheet_id}).status_code == 200  # 식별은 sheet_id로
     assert not any(r in caplog.text for r in RAW)
