@@ -304,7 +304,7 @@ def test_6_1_base_scope_matches_the_constants_cell_by_cell(kj, abcd) -> None:
     assert "key 열은 글자 형식" in text and "0 아님" in text and "선택하지 않은 열" in text
     # 실행 기록
     s = run["summary"]
-    assert s["mode"] == "keyjoin" and s["mode_label"] == "공통 key 연결" and s["policy"] == "keyjoin-policy-1"
+    assert s["mode"] == "keyjoin" and s["mode_label"] == "공통 key 연결" and s["policy"] == "keyjoin-policy-2"
     assert (
         s["scope"] == "base" and s["input_count"] == 4 and len(s["inputs"]) == 4 and s["basis"] == plan_basis(u, abcd)
     )
