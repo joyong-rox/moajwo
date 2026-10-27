@@ -41,11 +41,12 @@ def test_upload_multiple(client: TestClient) -> None:
 
 def test_original_saved_read_only_with_new_name(client: TestClient) -> None:
     data = (FIXTURES / "members.xls").read_bytes()
+    before = set((DATA_DIR / "uploads").glob("*.xls"))  # 같은 세션의 다른 시험이 올린 xls는 보지 않는다
     res = client.post("/files", files=[("files", ("../../evil.xls", data, "application/vnd.ms-excel"))])
     body = res.json()[0]
     assert body["original_name"] == "evil.xls"
 
-    stored = list((DATA_DIR / "uploads").glob("*.xls"))
+    stored = [p for p in (DATA_DIR / "uploads").glob("*.xls") if p not in before]
     assert stored, "원본이 uploads 아래에 저장되어야 한다"
     for path in stored:
         assert path.read_bytes() == data
