@@ -55,7 +55,7 @@ from app.xmltext import ILLEGAL_RE
 
 logger = logging.getLogger(__name__)
 
-POLICY = "bundle-policy-1"  # 시트 구성·이름·쓰기 규칙이 바뀌면 올린다 (basis·실행 기록에 남음)
+POLICY = "bundle-policy-2"  # 시트 구성·이름·쓰기 규칙이 바뀌면 올린다 (basis·실행 기록에 남음) — 2: 글자는 모두 글자 칸
 MODE = "sheets"
 BUNDLE_FAILED = "BUNDLE_FAILED"  # 결과를 만드는 중 예기치 않은 실패 (예외 종류만 알림)
 MAX_FILES = 50  # 한 번에 고를 수 있는 파일 (홈 검사 대상 한도와 같음)
@@ -68,7 +68,7 @@ NAME_MAX = 31  # 엑셀 시트 이름 길이 한도
 EXCEL_DIGITS = 15  # 엑셀 숫자 칸이 정확히 담는 자릿수
 FORBIDDEN = re.compile(r"[\[\]:*?/\\]")
 RESERVED = (SUMMARY_SHEET, "처리 요약", "History")  # 요약 시트·통합표 시트 이름, 엑셀 예약 이름
-FORMULA_START = ("=", "+", "-", "@", "\t", "\r")  # analysis_api와 같은 규칙: 이 글자로 시작하면 글자 형식으로 쓴다
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")  # 수식으로 읽힐 수 있는 첫 글자 (기록용 — 이제 글자는 모두 글자 칸)
 KIND_TEXT = {"data": "데이터", "subtotal": "소계·합계", "note": "주석"}
 LEAD = ["원본 행", "행 종류"]
 HEAD_FILL = PatternFill("solid", fgColor="EEF1F6")
@@ -779,9 +779,11 @@ def _basis(plan: Plan, records: dict[int, SourceFile]) -> str:
 
 
 def _put(ws: Any, row: int, col: int, value: Any) -> Any:
-    """칸에 값을 쓴다. 글자는 수식으로 저장되지 않게 항상 글자 형식으로 둔다 ('=1+1' → 글자 그대로)."""
+    """칸에 값을 쓴다. 글자는 항상 글자 칸으로 둔다 — openpyxl은 '='로 시작하는 글자를 수식으로, '#N/A'·'#REF!' 같은
+    오류 코드 모양 글자를 오류 칸('e')으로 저장하므로, 입력이 글자였으면 결과도 글자("s")다. 숫자·날짜·참거짓·빈 칸은
+    그대로다 (값을 글자로 바꾸지 않는다)."""
     cell = ws.cell(row=row, column=col, value=value)
-    if isinstance(value, str) and value.startswith(FORMULA_START):
+    if isinstance(value, str):
         cell.data_type = "s"
     return cell
 
