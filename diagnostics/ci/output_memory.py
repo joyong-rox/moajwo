@@ -745,8 +745,8 @@ def part_k5(c: Client) -> None:
     """범위 비교(2026-10-27 지시 8장 K5): 같은 입력(기준 15,000행 + 겹치는 입력 3 × 3,000행 — 세 범위 모두 예산 안)에서
     base·common·all을 캐시 비움(범위마다 새로 올린 파일의 첫 요청)·적중(같은 요청 다시) 상태로 — common은 결과(3,000행)가
     작은데 인덱스는 같다. key가 대부분 겹치지 않는 입력(기준에 없는 key 3 × 3,000행): base는 가져온 값이 빈 15,000행,
-    common은 교집합 0이라 만들지 않음(plan만), all은 합집합 18,000행. 20개 입력에 분산(기준 5,000행 + 입력 20 × 250행,
-    결과 열 1 + 20). 모두 최종 Render 권장값(512MiB)."""
+    common은 교집합 0이라 만들지 않음(plan만), all은 합집합 18,000행. 20개 입력에 분산(기준 5,000행 + 입력 19 × 250행 = MAX_INPUTS 20개,
+    결과 열 1 + 20; 21개는 422). 모두 최종 Render 권장값(512MiB)."""
     for scope in ("base", "common", "all"):
         fids = upload(c, ["kj_base_15000.csv", *[f"kj_in_{i}.csv" for i in range(3)]], confirm=False)
         keyjoin(c, f"K5 {scope} 기준 15,000행 + 겹치는 입력 3 × 3,000행 (cold — 새로 올린 파일의 첫 요청)", fids, scope)
@@ -759,9 +759,11 @@ def part_k5(c: Client) -> None:
         keyjoin(c, f"K5 {scope} 겹치지 않는 입력 같은 요청 다시 (warm)", fids, scope)
         if not alive():
             return
-    fids = upload(c, ["kj_base_5000.csv", *[f"kj_split_{i}.csv" for i in range(20)]], confirm=False)
-    keyjoin(c, "K5 base 기준 5,000행 + 입력 20 × 250행 (cold)", fids)
-    keyjoin(c, "K5 base 20개 입력 같은 요청 다시 (warm)", fids)
+    fids = upload(c, ["kj_base_5000.csv", *[f"kj_split_{i}.csv" for i in range(19)]], confirm=False)  # 기준 포함 20개 = MAX_INPUTS
+    keyjoin(c, "K5 base 기준 5,000행 + 입력 19 × 250행 (입력 20개 = 한도, cold)", fids)
+    keyjoin(c, "K5 base 입력 20개 같은 요청 다시 (warm)", fids)
+    over = upload(c, ["kj_split_0.csv"], confirm=False)  # 21개째 — 요청 검증(422)에서 파싱 전에 거절
+    keyjoin(c, "K5 base 입력 21개 (MAX_INPUTS 초과 — 422, 파싱 전)", fids + over)
     _small_ok(c, "K5")
 
 
