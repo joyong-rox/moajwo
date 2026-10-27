@@ -70,9 +70,9 @@ Neon `moajwo-test`(PostgreSQL 17, 무료 — 그날 조건 재확인)·앱 계�
 
 ## 9. 2026-10-27 후속 — 보안 승인 준비·TLS verify-full·후보 선택 (REPORT-20261027.md 7·9장)
 
-- **후보**: 보안 우선 `b4dedf7`(#42 + #50) 또는 key 포함 `2a95036`. Render에 올릴 이미지는 그 후보의 `backend/Dockerfile`·`frontend/Dockerfile.render`(둘 다 #50 포함 — 앞단 `proxy_ssl_verify on`, node 24.22.1 digest, pip 26.2.2 해시 설치, OS CA 갱신).
+- **후보**: 보안 우선 `b4dedf7`(#42 + #50) 또는 key 포함 코드 `c078bdd`(최종 HEAD는 문서 커밋 — 최종 Draft PR 본문; 1차 `2a95036`·2차 `434d101`을 거친 3차). Render에 올릴 이미지는 그 후보의 `backend/Dockerfile`·`frontend/Dockerfile.render`(둘 다 #50 포함 — 앞단 `proxy_ssl_verify on`, node 24.22.1 digest, pip 26.2.2 해시 설치, OS CA 갱신).
 - **실제 상류 확인**: 격리 러너에서 후보 이미지가 실제 `moajwo-test-api.onrender.com`과 체인·이름 검증으로 통신했습니다(run 40439111560·40447071375: `onrender.com ← GTS WE1 ← GTS Root R4`, `/api/health` 200). 이것은 후보 이미지의 확인이지 실제 인스턴스가 바뀐 것이 아닙니다. 전환 뒤 첫 배포에서 `/api/health` 200·앞단 로그에 SSL 오류 없음을 확인합니다.
-- **외부 DB 주소(전환 때 입력할 값)**: `sslmode=verify-full&sslrootcert=system&channel_binding=require` — `require`가 아닙니다(`docs/EXTERNAL_DB.md` 3-2). 직접 연결(마이그레이션 `MOAJWO_MIGRATION_DATABASE_URL`·이관·백업)과 풀러(앱 `DATABASE_URL`)를 구분하고, 풀러에서 `channel_binding=require`가 안 되면 **풀러 주소에서만** `prefer`로 낮추고 승인 묶음 12번에 적습니다(`verify-full`은 낮추지 않음). 실제 Neon 끝점의 인증서·풀러 동작은 전환 때 `pg_stat_ssl` 명령으로 처음 확인합니다.
+- **외부 DB 주소(전환 때 입력할 값)**: `sslmode=verify-full&sslrootcert=system&channel_binding=require` — `require`가 아닙니다(`docs/EXTERNAL_DB.md` 3-2). 직접 연결(마이그레이션 `MOAJWO_MIGRATION_DATABASE_URL`·이관·백업)과 풀러(앱 `DATABASE_URL`)를 구분하고, 풀러에서 `channel_binding=require`가 안 되면 **먼저 오류 원인을 구분**하고(`docs/EXTERNAL_DB.md` 3-2 표 — 인증서·호스트 이름·만료·인증·네트워크·채널 바인딩), 실제로 채널 바인딩 미지원이 확인된 끝점만 근거(오류 문구·날짜)와 대안을 붙여 승인 묶음 12번에 **별도 예외**로 올립니다. 자동 재시도나 스크립트가 보안 설정을 낮추는 일은 없고 `verify-full`을 낮추는 예외도 없습니다 *(2026-10-27 2차 정정 — 앞 판의 '풀러 주소에서만 prefer로 낮춘다'는 포괄 절차를 삭제)*. 실제 Neon 끝점의 인증서·풀러 동작은 전환 때 `pg_stat_ssl` 명령으로 처음 확인합니다.
 - **Render 서비스 표(1장)**는 10-25 관측 그대로이며 10-27에 다시 읽지 못했습니다(관리 API 접근 수단 없음) — 전환 직전 읽기 확인은 그대로 필요합니다. `moajwo-test-web`은 삭제·중지하지 않습니다.
 - **Oracle CVE-2026-91403**은 Java/JSSE 제품 권고로 구분해 기록했고(공식 안내는 이 환경에서 403), Java가 없다는 사실을 Node·Python·OS CA의 영향 없음으로 쓰지 않습니다 — 그쪽은 #50의 CA 갱신·검증이 다룹니다.
 - 두 후보 중 어느 쪽을 Render에 올릴지는 로컬 운영 배포 승인(APPROVAL-local-deploy 9장)과 같은 결정입니다 — 서로 다른 HEAD를 로컬과 Render에 올리지 않습니다.
