@@ -345,7 +345,7 @@ def test_6_1_all_and_common_scopes(kj, abcd) -> None:
     assert [tuple(c.value for c in r) for r in wb["연결 결과"].iter_rows(min_row=2)] == EXPECTED_COMMON
     assert (
         _first(plan, "KEYJOIN_EXCLUDED", "warnings")["count"] == 5
-        and "5명" in _first(plan, "KEYJOIN_EXCLUDED", "warnings")["text"]
+        and "5개" in _first(plan, "KEYJOIN_EXCLUDED", "warnings")["text"]
     )
     assert all(ip["keys"]["unlinked"] == 0 for ip in plan["inputs"])
     assert run["summary"]["counts"]["excluded"] == 5 and run["row_count"] == 1

@@ -271,7 +271,7 @@ npm run lint && npm run build
 
 ## 공통 key 연결 (`/keyjoin`)
 
-여러 파일(또는 한 파일의 여러 시트)의 같은 사용자를 key(사번·ID 등)로 연결해 사용자별 한 행을 만들고, 입력마다 고른 열만 결과에 넣습니다.
+여러 파일(또는 한 파일의 여러 시트)의 같은 대상의 자료를 공통 key(사번·기관코드·업무번호 등)로 연결해 key마다 한 행을 만들고, 입력마다 고른 열만 결과에 넣습니다.
 열 매핑·검토 없이 쓸 수 있으며 하나의 통합표·파일별 시트 묶기와 별개입니다. 자세한 규칙은 [docs/KEYJOIN.md](docs/KEYJOIN.md).
 
 - `POST /keyjoin/plan` (읽기 전용): 입력(`file_id`·`sheet_id`·`key_columns`·`columns[{column_id, out_name}]`)·범위(`base`/`all`/`common`)·

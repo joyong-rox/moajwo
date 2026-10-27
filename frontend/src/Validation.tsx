@@ -44,7 +44,7 @@ const MODES: { value: ResultMode; title: string; desc: string; example: string }
   {
     value: 'keyjoin',
     title: '공통 key로 연결하기',
-    desc: '여러 파일의 같은 사용자를 key(사번·ID 등)로 연결해 사용자별 한 행을 만듭니다. 열 매핑·검토 없이도 됩니다.',
+    desc: '공통 key로 같은 대상의 자료를 연결하고, 파일별로 고른 열을 모읍니다(key마다 한 행). 열 매핑·검토 없이도 됩니다.',
     example: '예: A(사번·부서)+B(사용자번호·교육 건수)… → 시트 「연결 결과」 (+ 출처·연결 요약)',
   },
 ]

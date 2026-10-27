@@ -1708,7 +1708,7 @@ export async function runBundle(body: BundleRequest, basis: string): Promise<Int
 // ---------------------------------------------------------------- 공통 key로 연결하기 (취합 방식 'keyjoin')
 // 모든 선택은 파일 ID·시트 ID·열 ID로만 보낸다 (가린 표시 이름은 식별자가 아님). 시트·열 목록은 fetchPreview가 준다.
 
-export type KeyJoinScope = 'base' | 'all' | 'common' // 기준 파일의 사용자만 · 모든 파일의 사용자(합집합) · 공통 사용자(교집합)
+export type KeyJoinScope = 'base' | 'all' | 'common' // 기준 파일의 key만 · 모든 파일의 key(합집합) · 모든 파일에 공통인 key만(교집합)
 export type KeyJoinSheetRef = { file_id: number; sheet_id: string }
 export type KeyJoinColumnIn = { column_id: string; out_name: string | null } // out_name null = 서버 기본(원본 열 이름)
 // key_columns: 순서 있음, 모든 입력이 같은 개수 (복합 key의 i번째끼리 대응). columns에 key 열은 넣지 않는다

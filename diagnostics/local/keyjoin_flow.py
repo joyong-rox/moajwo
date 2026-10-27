@@ -67,7 +67,7 @@ UNPICKED_NAMES = ["입사연도", "비고", "지역", "담당"]  # 열 이름 �
 UNPICKED_VALUES = ["온라인", "집합", "세종", "대전", "부산", "민원", "통계", "감사", "2019", "2021", "2020", 2019, 2021, 2020]
 KEYS_ALL = ["001", "002", "003", "004", "005", "006"]
 PHONE = "010-0000-0001"  # 합성 전화번호 (개인정보 확인 경로)
-SCOPE_LABEL = {"base": "기준 파일의 사용자만", "all": "모든 파일의 사용자", "common": "모든 파일의 공통 사용자"}
+SCOPE_LABEL = {"base": "기준 파일의 key만", "all": "모든 파일의 key", "common": "모든 파일에 공통인 key만"}
 SCOPE_SHORT = {"base": "기준", "all": "모든", "common": "공통"}
 STALE_TEXT = "확인하는 동안 설정이 바뀌어 이전 설정의 결과는 쓰지 않았습니다 — 지금 설정으로 다시 확인하세요."
 CHANGED_TEXT = "설정을 바꿨습니다 — 다시 확인해야 만들 수 있습니다."
@@ -498,11 +498,11 @@ def check_workbook(item: str, scope: str, path: Path, fids: list[int]) -> None:
         and any("포함/제외 확인" in n for n in notes) and any("병합 칸" in n for n in notes) and any("오류 코드 모양" in n for n in notes)
         and any(SCOPE_LABEL[scope] == str(r[1].value) for r in ws3.iter_rows() if r[0].value == "범위"),
         {"key_hits": key_hits[:8], "labels": labels[:14], "notes": len(notes)})  # fmt: skip
-    counts = {str(r[0].value): r[1].value for r in ws3.iter_rows() if r[0].value in ("결과 행", "모든 입력의 사용자(합집합)",
-                                                                                   "모든 입력에 있는 사용자(교집합)", "범위에서 빠진 사용자")}  # fmt: skip
+    counts = {str(r[0].value): r[1].value for r in ws3.iter_rows() if r[0].value in ("결과 행", "전체 key", "공통 key",
+                                                                                   "선택한 범위에 없어 제외된 key")}  # fmt: skip
     rec(item, f"{scope}: 요약 시트 개수 (결과 행 {len(rows_exp)} · 합집합 {union} · 교집합 {inter} · 빠짐 {excluded})",
-        counts == {"결과 행": len(rows_exp), "모든 입력의 사용자(합집합)": union, "모든 입력에 있는 사용자(교집합)": inter,
-                   "범위에서 빠진 사용자": excluded}, counts)  # fmt: skip
+        counts == {"결과 행": len(rows_exp), "전체 key": union, "공통 key": inter, "선택한 범위에 없어 제외된 key": excluded},
+        counts)  # fmt: skip
     wb.close()
 
 
@@ -607,7 +607,7 @@ def step_home(page: Page) -> None:
     btn = page.get_by_role("button", name=re.compile(r"^다음: key·가져올 열 설정"))
     pw_expect(btn).to_be_visible(timeout=10000)
     note = page.locator(".wk-mode-next p.wk-why[role=note]").first
-    rec("2", "홈 결과 형태 카드 '공통 key로 연결하기' (설명·예시 문구)", "사용자별 한 행" in desc and "「연결 결과」" in desc and "열 매핑·검토 없이도" in desc,
+    rec("2", "홈 결과 형태 카드 '공통 key로 연결하기' (설명·예시 문구)", "key마다 한 행" in desc and "「연결 결과」" in desc and "열 매핑·검토 없이도" in desc,
         desc[:200])  # fmt: skip
     rec("2", "파일 1개: '다음' 버튼 비활성 + '누를 수 없음' 안내 (2개 이상)", btn.is_disabled() and "2개 이상" in text_of(note),
         {"button": text_of(btn), "note": text_of(note)})  # fmt: skip
@@ -659,8 +659,8 @@ def step_base(page: Page) -> None:
         {"disabled": disabled, "lists": lists, "placeholders": placeholders, "key_name_placeholder": key_name.get_attribute("placeholder")})  # fmt: skip
     radios = page.locator(f"{FS[4]} .kj-scope input[type=radio]")
     checked = [radios.nth(i).is_checked() for i in range(radios.count())]
-    base_sel = page.locator(f"{FS[4]} select[aria-label='기준 입력 (파일·시트)']")
-    rec("3", "4단계: 범위 라디오 3개 (기본 '기준 파일의 사용자만')·기준 입력 select (첫 입력)", checked == [True, False, False]
+    base_sel = page.locator(f"{FS[4]} select[aria-label='기준 파일·시트']")
+    rec("3", "4단계: 범위 라디오 3개 (기본 '기준 파일의 key만')·기준 파일·시트 select (첫 입력)", checked == [True, False, False]
         and base_sel.input_value() == f"{fids[0]}:s0" and base_sel.locator("option").count() == 4,
         {"checked": checked, "base": base_sel.input_value(), "options": base_sel.locator("option").all_inner_texts()})  # fmt: skip
     before = page.locator(MAKE_BTN).get_attribute("aria-disabled")
@@ -757,7 +757,7 @@ def step_scope(item: str, page: Page, scope: str) -> None:
     rec(item, f"{scope}: 미리보기 key 순서 {[r[0] for r in rows_exp]}", keys == [r[0] for r in rows_exp], keys)
     if scope == "common":
         scope_line = text_of(page.locator(f"{FS[4]} p.mw-muted", has_text="확인 결과"))
-        rec(item, "common: 4단계에 '빠지는 사용자 5명'", "빠지는 사용자 5명" in scope_line and "합집합 6명" in scope_line and "공통 1명" in scope_line, scope_line)
+        rec(item, "common: 4단계에 '선택한 범위에 없어 제외된 key 5개'", "선택한 범위에 없어 제외된 key 5개" in scope_line and "전체 key 6개" in scope_line and "공통 key 1개" in scope_line, scope_line)
     runs_before = runs_count(page)
     status, run = do_make(page)
     FACTS[f"run_{scope}"] = run.get("id")
@@ -1044,7 +1044,7 @@ def step_keyboard(page: Page) -> None:
     pw_expect(radios.nth(1)).to_be_checked()
     page.keyboard.press("ArrowUp")
     pw_expect(radios.nth(0)).to_be_checked()
-    base_sel = page.locator(f"{FS[4]} select[aria-label='기준 입력 (파일·시트)']")
+    base_sel = page.locator(f"{FS[4]} select[aria-label='기준 파일·시트']")
     presses["base"] = tab_to(page, base_sel)
     page.keyboard.press("ArrowDown")
     page.keyboard.press("ArrowUp")

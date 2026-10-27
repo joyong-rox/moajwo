@@ -642,6 +642,35 @@ def test_0021_request_key_backfills_keyjoin_runs_and_downgrades_cleanly(tmp_path
     db.close()
 
 
+def test_0021_refusal_in_the_chain_from_0019_leaves_sqlite_at_0020(tmp_path: Path) -> None:
+    """0019에서 'upgrade head'를 돌리다 0021이 거절되면 SQLite는 **0020까지 올라가 있다**(0020의 DDL·리비전 기록이
+    그대로 남음 — SQLite는 마이그레이션마다 바로 반영되고 PostgreSQL처럼 전체가 되돌아가지 않음). 0021의 열·색인은 없고
+    행은 그대로다.
+    거절됐다는 이유로 시작 리비전(0019)과 같다고 추정하면 안 된다 — docs/DEPLOY.md 10장."""
+    _alembic(tmp_path, "upgrade", "0019_analysis_runs")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute(
+        "INSERT INTO users (id, username, display_name, password_hash, role, is_active, status, failed_logins,"
+        " auth_version) VALUES (1, 'u1', 'u1', 'scrypt$synthetic', 'user', 1, 'active', 0, 0)"
+    )
+    db.execute(RUN_SQL, (1, 1, "done", _keyjoin_summary(RID1)))
+    db.execute(RUN_SQL, (2, 1, "done", _keyjoin_summary(RID1)))  # 같은 사용자·같은 번호 둘 → 0021이 멈춘다
+    db.commit()
+    before = db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall()
+    db.close()
+    try:
+        _alembic(tmp_path, "upgrade", "head")
+        raise AssertionError("0021이 올라갔다")
+    except subprocess.CalledProcessError as exc:
+        assert "0021로 올리지 않습니다" in exc.stderr.decode("utf-8", "replace")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0020_run_worker_lease"
+    assert {"worker", "heartbeat_at"} <= _run_columns(db) and not REQUEST_COLUMNS & _run_columns(db)
+    assert not _request_index(db)
+    assert db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall() == before
+    db.close()
+
+
 def test_0021_refuses_to_downgrade_while_a_run_of_this_version_is_running(tmp_path: Path) -> None:
     """이 판에서 시작해 실행 중인 행(담당 있음)이 있으면 0021도 내리지 않는다 — 'downgrade 0019'가 0021에서 멈춰
     리비전·열·색인·행이 그대로다(보호가 0020에만 있으면 0021→0020은 내려가고 0020→0019에서 거절돼 0020에 남는다 —

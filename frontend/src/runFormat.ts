@@ -64,11 +64,11 @@ export const OUTCOME_CLASS = { muted: 'mw-muted', warn: 'run-check', error: 'upl
 /** 실행 기록의 방식 열 표기 — '직접 검토'·'시트 묶기'와 같은 길이로 표 열 너비를 바꾸지 않는다 */
 export const KEYJOIN_MODE_SHORT = 'key 취합'
 export const KEYJOIN_MODE_TITLE = '공통 key로 연결하기 (검토 없음)'
-/** 포함할 사용자 범위 문구 (연결 화면의 선택지·실행 기록 공용) */
+/** 포함할 key 범위 문구 (연결 화면의 선택지·실행 기록 공용) — 연결 대상은 사람이 아닐 수 있어 '사용자'라 하지 않는다 */
 export const KEYJOIN_SCOPE_LABEL: Record<KeyJoinScope, string> = {
-  base: '기준 파일의 사용자만',
-  all: '모든 파일의 사용자',
-  common: '모든 파일의 공통 사용자',
+  base: '기준 파일의 key만',
+  all: '모든 파일의 key',
+  common: '모든 파일에 공통인 key만',
 }
 export const KEYJOIN_SCOPE_SHORT: Record<KeyJoinScope, string> = { base: '기준', all: '모든', common: '공통' }
 

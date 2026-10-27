@@ -118,6 +118,27 @@ def test_0020_0021_0020_0021_backfills_keyjoin_runs_and_keeps_the_rows(tmp_path:
 
 
 @needs_admin
+def test_0021_refusal_in_the_chain_from_0019_rolls_the_whole_run_back_on_postgres(tmp_path: Path) -> None:
+    """0019에서 'upgrade head'를 돌리다 0021이 거절되면 PostgreSQL은 **0019 그대로**다 — env.py가 한 트랜잭션으로 돌려
+    0020도 함께 되돌아간다(SQLite는 0020에 남음 — test_migrations). 열·리비전·행 모두 시작 상태."""
+    url = pg_database("mig_0021_chain")
+    try:
+        assert _ok(_alembic(url, tmp_path, "upgrade", "0019_analysis_runs"))
+        u1 = _user(url, "mig-chain")
+        _run(url, u1, "done", _keyjoin_summary(RID1))
+        _run(url, u1, "done", _keyjoin_summary(RID1))  # 같은 사용자·같은 번호 둘 → 0021이 멈춘다
+        before = _rows(url)
+        refused = _alembic(url, tmp_path, "upgrade", "head")
+        assert refused.returncode != 0 and "0021로 올리지 않습니다" in refused.stderr
+        assert _revision(url) == "0019_analysis_runs" and _request_columns(url) == set() and not _has_index(url)
+        lease = _sql(url, "SELECT column_name FROM information_schema.columns WHERE table_name = 'runs'"
+                           " AND column_name IN ('worker', 'heartbeat_at')")  # fmt: skip
+        assert lease == [] and _rows(url) == before
+    finally:
+        pg_database("mig_0021_chain", drop=True)
+
+
+@needs_admin
 def test_0021_refuses_to_downgrade_while_a_run_of_this_version_is_running(tmp_path: Path) -> None:
     """이 판에서 시작해 실행 중인 행(담당 있음)이 있으면 0021도 내리지 않는다 — 'downgrade 0019'가 0021에서 멈춰
     리비전·열·색인·행이 그대로다(보호가 0020에만 있으면 0021→0020은 내려가고 0020→0019에서 거절돼 0020에 남는다 —
