@@ -157,6 +157,7 @@ https://neon.com/docs/connect/connect-securely — 2026-10-27 확인)
 `require`는 모르는 CA도 통과(신원 확인 없음), `verify-ca`는 이름이 달라도 통과, `verify-full`은 이름이 다르면 거절,
 `sslrootcert=system`은 사설 CA 거절(공인 CA는 OS 저장소에 있을 때 통과 — 여기서는 미검증), `system`+`require`는 오류,
 `disable`은 서버가 거절, `channel_binding=require`는 SCRAM에서 통과. 결과 표는 워크플로 요약·아티팩트 `pg-tls`에 남습니다.
+실행 기록: run 40446062371(`a5e3cff`, PostgreSQL 17.11·psycopg 3.3.6·libpq 18.0.6·OpenSSL 3.0.13) — 11가지 모두 기대와 같음, `verify-full`+host 불일치는 "server certificate for \"localhost\" … does not match host name"로, `system`+`require`는 "weak sslmode \"require\" may not be used with sslrootcert=system"으로 거절됐습니다 (사본 `backups/review-20261027/pg-tls/ci-a5e3cff/`).
 
 **전환 때 실제 확인(승인 뒤, 8-3 단계 안에서):** 사용자 PC에서 서비스 파일로 `psql "service=moajwo-migrate" -c "SELECT ssl,
 version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()"` → `ssl = t`와 TLS 판을 적고, Render의 backend는 배포 뒤
