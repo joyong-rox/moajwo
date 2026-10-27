@@ -620,6 +620,8 @@ bash scripts/deploy.sh <후보 HEAD SHA> 0019_analysis_runs
 
 롤백 뒤 다시 후보로: 같은 `bash scripts/deploy.sh <후보 HEAD SHA> 0019_analysis_runs` (덧붙임 파일 없이 `docker-compose.yml`만 씀 → 8080:8080으로 다시 만들어지고 0020으로 다시 upgrade).
 
+**보안 수정 전 이미지로 되돌릴 때의 위험**: 2026-10 인증서 사고 보완(`docs/SECURITY-CA-20261026.md` — pip·CA 묶음 갱신, Render 앞단의 상류 인증서 검증)이 든 이미지에서 롤백 태그(그 전 이미지)로 되돌리면 그 보완이 없는 상태로 돌아갑니다. 로컬 운영은 아웃바운드 TLS가 없어 운영 중 영향은 없지만, 되돌린 뒤 다시 빌드할 때는 수정판 pip·CA로 빌드되는 보완 포함 커밋을 쓰고, Render에는 보완 전 이미지를 다시 배포하지 않습니다.
+
 **frontend 단독 반영 경로**(`docker compose up -d --no-deps frontend`)는 이번 반영에 쓰지 않습니다 — backend도 바뀌고, 포트 설정과 이미지가 함께 바뀌어야 하기 때문입니다. 이번 반영 뒤 frontend만 바뀌는 다음 반영에서는 포트가 그대로(8080)라 그 경로를 쓸 수 있지만, 그때 이 반영 이전 frontend 이미지로 되돌리려면 이번 반영의 `rollback-<시각>.compose.yml`이 필요합니다.
 
 **격리 확인**: 지금 절차(4장 B 단계 상자 그대로)는 아래 '리허설 결과' 7차. 5차(포트, 0019 그대로)·6차(통합 후보 — 0020 downgrade 포함)는 이 정리 전 8장 명령의 기록입니다. Windows Docker Desktop에서는 `ports: !override` 덧붙임과 `pwd -W` 경로 백업 마운트를 명령 수준으로만 확인했습니다 (6차 아래).

@@ -68,12 +68,17 @@ that the API or authentication is healthy. Check both services' runtime logs
 if API requests fail. This file targets the existing test API hostname; update
 nginx.render.conf before using it for another environment.
 
-The proxy does not verify the API's certificate: `proxy_ssl_verify` is not set
-(nginx defaults to off), the same as the current `moajwo-test` image. The
-connection is encrypted, but nginx does not check that it reached the real API.
-Turning it on needs `proxy_ssl_verify on` with a CA bundle
-(`proxy_ssl_trusted_certificate`) and a test against the real Render
-certificate chain; it is left as an owner decision.
+The proxy verifies the API's certificate (since 2026-10-26, eMudhra CA
+incident): `proxy_ssl_verify on` with the image's OS CA bundle
+(`/etc/ssl/certs/ca-certificates.crt`, refreshed at build time), the
+proxy_pass host as the verified name, depth 3 and TLS 1.2/1.3. A failed
+verification ends the request with 502; there is no fallback that turns
+verification off or goes back to http. The current `moajwo-test` image
+(`Dockerfile.render-test` on another branch) still does not verify; the
+setting takes effect only when this image is deployed after the switch
+approval. If the real API chain is deeper than 3, `/api/health` answers 502
+on the first deploy — raise the depth with the observed chain as evidence.
+See `docs/SECURITY-CA-20261026.md`.
 
 Optional local container verification (requires Docker):
 
@@ -83,6 +88,11 @@ docker run --rm moajwo-render-check nginx -t
 ```
 
 `diagnostics/ci/image_check.sh` also runs the image in an isolated network in
-front of an HTTPS stand-in API with the same host name (self-signed; it does
-not check SNI or Host) to test login through the proxy, cookie attributes and
-security headers. It never contacts Render.
+front of an HTTPS stand-in API with the same host name. The stand-in's
+certificate is signed by a test CA (root -> intermediate -> server) and the
+frontend container gets a bundle holding only that root, so the harness checks
+that a trusted chain passes, that an untrusted CA, an expired certificate, a
+wrong name and a missing intermediate end with 502 without reaching the
+backend, and that the normal chain recovers; then login, cookies, headers,
+upload and download through the proxy. It also lets the image's own bundle
+reject the advisory's public test hosts. It never contacts Render.
