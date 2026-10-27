@@ -95,7 +95,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import make_url
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.pool import NullPool
 
 from app import models  # noqa: F401  (메타데이터에 모델 등록)
@@ -238,10 +238,18 @@ def _head() -> str:
 
 
 def _revision(conn: Connection) -> str | None:
+    """alembic_version의 리비전 — 표가 없으면 None. 잠금 대기 초과(55P03)·끊김 같은 다른 오류는 그대로 올린다 (앞 판은
+    모든 오류를 '리비전 없음'으로 삼켜, 다른 이관이 잠근 동안의 시간 초과가 '최신(head)이 아닙니다'로 보였다)."""
     try:
         return conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    except Exception:
-        return None
+    except ProgrammingError as exc:  # PostgreSQL: 없는 표 (SQLSTATE 42P01)
+        if getattr(getattr(exc, "orig", None), "sqlstate", None) == "42P01":
+            return None
+        raise
+    except OperationalError as exc:  # SQLite: no such table
+        if "no such table" in str(getattr(exc, "orig", exc)):
+            return None
+        raise
 
 
 def _tables() -> list[Table]:
@@ -439,9 +447,16 @@ def _copy(src: Engine, dst: Engine, report: dict[str, Any], apply: bool, fail_at
     with ExitStack() as stack:
         s = stack.enter_context(src.connect())
         report["stage"] = "대상 접속"  # 대상 주소·서비스 파일·인증 실패가 원천 문제처럼 보이지 않게
-        d = stack.enter_context(dst.connect())
+        # 확인 단계는 자동 커밋으로 읽는다 — 조회마다 트랜잭션이 끝나 표 잠금(ACCESS SHARE)을 들고 다음 조회를
+        # 기다리지 않는다. (앞 판은 한 트랜잭션 안에서 alembic_version을 먼저 읽고 표별 건수를 세어, 같은 순간
+        # 잠금 단계에 든 다른 이관이 표를 먼저·alembic_version을 마지막에 잠그면 서로를 기다리는 교착(40P01)이
+        # 났다.) 다른 이관이 잠근 표를 읽을 때는 lock_s초만 기다리고 멈춘다 — 무한 대기 없음.
+        d = stack.enter_context(dst.connect().execution_options(isolation_level="AUTOCOMMIT"))
+        if d.dialect.name == "postgresql":  # 시험은 빈 SQLite를 대상으로 두기도 한다 (리비전 조회 하나만 보낸다)
+            d.execute(text(f"SET lock_timeout = '{int(lock_s)}s'"))
         report["stage"] = "확인"
         report["revision"] = {"head": head, "source": _revision(s), "target": _revision(d)}
+        _gate("revision")
         if report["revision"]["source"] != head or report["revision"]["target"] != head:
             raise CopyError(
                 "원천·대상 리비전이 최신(head)이 아닙니다 — 둘 다 'alembic upgrade head'로 맞춘 뒤 다시 하세요"
@@ -484,20 +499,27 @@ def _copy(src: Engine, dst: Engine, report: dict[str, Any], apply: bool, fail_at
         counts = {t.name: {"source": _count(s, t.name), "target_before": _count(d, t.name)} for t in tables}
         report["counts"] = counts
         _refuse_if_busy(d, report)
+        _gate("checked")
         if not apply:
             report["result"] = "dry-run — 쓰지 않음"
             return
-        d.rollback()  # 위 확인 조회가 연 트랜잭션을 닫고, 쓰기는 새 트랜잭션 하나로 한다
-        pid = d.execute(text("SELECT pg_backend_pid()")).scalar()
-        d.rollback()
-        tx = d.begin()
+        # 쓰기는 새 연결의 트랜잭션 하나로 한다 (자동 커밋 연결은 확인 전용으로 둔다)
+        w = stack.enter_context(dst.connect())
+        pid = w.execute(text("SELECT pg_backend_pid()")).scalar()
+        w.rollback()
+        tx = w.begin()
+        d = w
         try:
             report["stage"] = "잠금"
             d.execute(text(f"SET LOCAL lock_timeout = '{int(lock_s)}s'"))  # 잠금을 오래 기다리지 않고 멈춘다
             d.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": MIGRATION_LOCK_KEY})
-            names = [t.name for t in Base.metadata.sorted_tables] + ["alembic_version"]
+            # 잠금 순서는 확인 단계의 읽기 순서와 같게 alembic_version을 먼저, 표는 metadata 순서로 — 어느 이관의
+            # 확인 단계도 잠금 단계보다 뒤에 있는 표를 들고 앞의 표를 기다리지 않는다(자동 커밋 읽기와 함께 교착 없음)
+            names = ["alembic_version"] + [t.name for t in Base.metadata.sorted_tables]
             d.execute(text(f"LOCK TABLE {', '.join(_q(n) for n in names)} IN ACCESS EXCLUSIVE MODE"))
-            # 잠금 안에서 다시 확인 — 앞의 확인과 복사 사이에 다른 이관·가입·최초 설정이 끼어들지 않았는지
+            _gate("locked")
+            # 잠금 안에서 다시 확인 — 앞의 확인과 복사 사이에 다른 이관·가입·최초 설정이 끼어들지 않았는지. 잠금 앞의
+            # 확인 결과(자동 커밋 읽기)는 믿지 않고 리비전·이관 표시·빈 대상을 모두 다시 본다
             if _revision(d) != head:
                 raise CopyError("잠금 뒤 대상 리비전이 바뀌었습니다 — 멈춥니다")
             _refuse_if_busy(d, report)
@@ -580,6 +602,20 @@ def _rollback(tx: Any) -> None:
         tx.rollback()
     except Exception:  # 연결이 이미 끊겼으면 서버가 커밋 전 트랜잭션을 버린다 — 적용되지 않음
         pass
+
+
+def _gate(stage: str) -> None:
+    """진단용 단계 멈춤 (MOAJWO_DBCOPY_GATE=<폴더>가 있을 때만): 이 프로세스가 그 단계에 이르렀음을 파일로 알리고
+    go-<단계> 파일이 생길 때까지 기다린다 — 별도 프로세스 동시 적용 시험이 sleep 운이 아니라 순서를 정하게. 운영에서는
+    환경 변수가 없어 아무것도 하지 않는다. 기다림은 최대 180초."""
+    folder = os.environ.get("MOAJWO_DBCOPY_GATE")
+    if not folder:
+        return
+    gate = Path(folder)
+    (gate / f"arrived-{stage}-{os.getpid()}").write_text("x", encoding="utf-8")
+    deadline = time.monotonic() + 180
+    while not (gate / f"go-{stage}").exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
 
 
 def _refuse_if_busy(conn: Connection, report: dict[str, Any]) -> None:
