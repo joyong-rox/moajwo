@@ -111,9 +111,9 @@ def _xls(tmp_path: Path, rows: list[list[object]], name: str = "k.xls") -> Path:
     return tmp_path / name
 
 
-def _index(path: Path, key_ids: list[int] = [0], pick_ids: list[int] = [1]):  # noqa: B006 — 읽기만
+def _index(path: Path, key_ids: list[int] = [0], pick_ids: list[int] = [1], decisions=None):  # noqa: B006, ANN001 — 읽기만
     sheet = parse_file(path, path.name).sheets[0]
-    return analyze_input(sheet, key_ids, pick_ids, set(), {}, keep_all=True)
+    return analyze_input(sheet, key_ids, pick_ids, set(), {}, keep_all=True, decisions=decisions)
 
 
 def test_csv_keys_keep_leading_zeros_spaces_and_digits_even_when_the_parser_made_numbers(tmp_path: Path) -> None:
@@ -165,7 +165,19 @@ def test_values_keep_zero_and_blank_apart_and_long_ints_become_text(tmp_path: Pa
     assert ix.long_numbers == 1 and math.isfinite(0)
 
 
-def test_subtotal_and_note_rows_are_counted_not_indexed(tmp_path: Path) -> None:
-    ix = _index(_csv(tmp_path, [["id", "v"], ["a", "1"], ["합계", "1"], ["※ 자료: 시험", ""], ["", "9"]]))
-    assert list(ix.rows) == [("a",)] and ix.data_rows == 2 and ix.skipped["subtotal"].first == [3]
-    assert ix.skipped["note"].first == [4] and ix.rejects[KEY_EMPTY].first == [5]  # 값이 있는 행의 빈 key만 데이터 행
+def test_subtotal_and_note_rows_with_a_key_wait_for_a_decision_and_follow_it(tmp_path: Path) -> None:
+    """key 칸이 있는 소계·주석 추정 행은 자동으로 빼지 않고 결정을 기다린다(미결정 — 인덱스에 넣지 않음). 포함하면
+    데이터 행처럼 인덱스에 들어가고 제외하면 세기만 한다. 값이 있는 행의 빈 key는 그대로 데이터 행(KEY_EMPTY)."""
+    rows = [["id", "v"], ["a", "1"], ["합계", "1"], ["※ 자료: 시험", ""], ["", "9"]]
+    ix = _index(_csv(tmp_path, rows))
+    assert list(ix.rows) == [("a",)] and ix.data_rows == 2 and ix.skipped == {}
+    assert [(r["row"], r["reason"], r["in_key"], r["decision"]) for r in ix.review] == [
+        (3, "subtotal", True, None),
+        (4, "note", False, None),
+    ]
+    assert (ix.unresolved_rows, ix.included_rows, ix.excluded_rows) == (2, 0, 0)
+    assert ix.rejects[KEY_EMPTY].first == [5]  # 값이 있는 행의 빈 key만 데이터 행
+    decided = _index(_csv(tmp_path, rows), decisions=({3}, {4}))
+    assert list(decided.rows) == [("a",), ("합계",)] and decided.values[("합계",)] == [1]
+    assert (decided.unresolved_rows, decided.included_rows, decided.excluded_rows) == (0, 1, 1)
+    assert decided.excluded_first == [4] and [r["decision"] for r in decided.review] == ["include", "exclude"]

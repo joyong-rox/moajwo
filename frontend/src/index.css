@@ -5568,6 +5568,17 @@ ul.bd-item-problems,
   overflow-wrap: anywhere;
 }
 
+/* 확인이 필요한 행 — 결정하지 않은 행은 '고칠 것'과 같은 왼쪽 띠로 표시 */
+.kj-review {
+  display: grid;
+  gap: 8px;
+}
+
+.kj-review tr.needs-fix th,
+.kj-review tr.needs-fix td {
+  border-left: 3px solid var(--warning-border);
+}
+
 .kj-summary {
   display: grid;
   gap: 4px;

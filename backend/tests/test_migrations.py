@@ -1,5 +1,6 @@
 """마이그레이션 0011: 기본 광역 항목과 빈 시도·시군구 코드 채우기 (빈 임시 DB에 alembic을 실제로 실행)."""
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -478,8 +479,12 @@ def test_0019_analysis_runs_up_down_and_up_again(tmp_path: Path) -> None:
     _alembic(tmp_path, "upgrade", "head")
     db = sqlite3.connect(tmp_path / "moajwo.db")
     assert db.execute("SELECT count(*) FROM analysis_runs").fetchone()[0] == 0
-    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0020_run_worker_lease"
+    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD
     db.close()
+
+
+HEAD = "0021_run_request_key"  # 지금 head — 바뀌면 여기와 docs/DEPLOY.md를 함께
+REQUEST_COLUMNS = {"request_kind", "request_id", "request_hash"}
 
 
 def _run_columns(db: sqlite3.Connection) -> set[str]:
@@ -491,8 +496,9 @@ def test_0020_run_worker_lease_up_down_and_up_again(tmp_path: Path) -> None:
     시작해 실행 중인 행(담당 있음)이 있으면 내리지 않는다 (이전 판은 그 행을 정리하지 못함). 이 판 전에 시작한 실행 중
     행(담당 없음)은 이전 판이 남긴 그대로라 막지 않는다 — 막으면 서버를 멈춘 롤백에서 정리할 길이 없다."""
     _alembic(tmp_path, "upgrade", "head")
+    _alembic(tmp_path, "downgrade", "0020_run_worker_lease")  # 0020 자체의 경계를 본다 (0021은 아래 시험)
     db = sqlite3.connect(tmp_path / "moajwo.db")
-    assert {"worker", "heartbeat_at"} <= _run_columns(db)
+    assert {"worker", "heartbeat_at"} <= _run_columns(db) and not REQUEST_COLUMNS & _run_columns(db)
     run = (
         "INSERT INTO runs (id, status, trigger, input_file_count, file_ids, row_count, change_count,"
         " warning_count, summary, worker, heartbeat_at, output_path, error)"
@@ -531,6 +537,146 @@ def test_0020_run_worker_lease_up_down_and_up_again(tmp_path: Path) -> None:
     db.close()
     _alembic(tmp_path, "upgrade", "head")
     db = sqlite3.connect(tmp_path / "moajwo.db")
-    assert {"worker", "heartbeat_at"} <= _run_columns(db)
+    assert {"worker", "heartbeat_at"} | REQUEST_COLUMNS <= _run_columns(db)
     assert db.execute("SELECT worker, heartbeat_at FROM runs WHERE id = 1").fetchone() == (None, None)
+    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD
+    db.close()
+
+
+RUN_SQL = (
+    "INSERT INTO runs (id, user_id, status, trigger, input_file_count, file_ids, row_count, change_count,"
+    " warning_count, summary) VALUES (?, ?, ?, 'manual', 0, '[]', 0, 0, 0, ?)"
+)
+RID1, RID2 = "a" * 32, "b" * 32
+
+
+def _keyjoin_summary(rid: str | None) -> str:
+    data = {"mode": "keyjoin", "mode_label": "공통 key 연결", "basis": "x" * 64}
+    if rid is not None:
+        data["request_id"] = rid
+    return json.dumps(data, ensure_ascii=False)
+
+
+def _at_0020(tmp_path: Path) -> sqlite3.Connection:
+    _alembic(tmp_path, "upgrade", "0020_run_worker_lease")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute(
+        "INSERT INTO users (id, username, display_name, password_hash, role, is_active, status, failed_logins,"
+        " auth_version) VALUES (1, 'u1', 'u1', 'scrypt$synthetic', 'user', 1, 'active', 0, 0)"
+    )
+    db.execute(
+        "INSERT INTO users (id, username, display_name, password_hash, role, is_active, status, failed_logins,"
+        " auth_version) VALUES (2, 'u2', 'u2', 'scrypt$synthetic', 'user', 1, 'active', 0, 0)"
+    )
+    db.commit()
+    return db
+
+
+def _request_index(db: sqlite3.Connection) -> bool:
+    return bool(
+        db.execute("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'uq_runs_request'").fetchall()
+    )
+
+
+def test_0021_request_key_backfills_keyjoin_runs_and_downgrades_cleanly(tmp_path: Path) -> None:
+    """0021: 요청 번호 열 3개와 고유 색인(user_id, request_kind, request_id). 이 판 전의 key 연결 실행은 요약의 요청
+    번호로 request_kind·request_id만 채우고 해시는 비워 둔다. 다른 실행(묶기 — 'keyjoin' 글자가 파일 이름에만 든 것
+    포함)은 비워 둔다. 색인이 같은 사용자의 중복을 막고, 내리면 열·색인만 빠지고 행은 그대로다."""
+    db = _at_0020(tmp_path)
+    db.execute(RUN_SQL, (1, 1, "done", _keyjoin_summary(RID1)))
+    db.execute(RUN_SQL, (2, 2, "done", _keyjoin_summary(RID1)))  # 다른 사용자 — 같은 번호여도 된다
+    db.execute(RUN_SQL, (3, 1, "failed", _keyjoin_summary(RID2)))
+    db.execute(RUN_SQL, (4, 1, "done", json.dumps({"mode": "bundle", "files": ["keyjoin 결과.xlsx"]})))
+    db.execute(RUN_SQL, (5, 1, "done", "{}"))
+    db.execute(RUN_SQL, (6, None, "done", _keyjoin_summary(RID2)))  # 사용자가 지워진 행 — NULL은 겹치지 않는다
+    db.commit()
+    before = db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall()
+    db.close()
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD
+    assert REQUEST_COLUMNS <= _run_columns(db) and _request_index(db)
+    rows = db.execute("SELECT id, request_kind, request_id, request_hash FROM runs ORDER BY id").fetchall()
+    assert rows == [
+        (1, "keyjoin", RID1, None),
+        (2, "keyjoin", RID1, None),
+        (3, "keyjoin", RID2, None),
+        (4, None, None, None),
+        (5, None, None, None),
+        (6, "keyjoin", RID2, None),
+    ]
+    assert db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall() == before
+    try:
+        db.execute(
+            "INSERT INTO runs (id, user_id, status, trigger, input_file_count, file_ids, row_count, change_count,"
+            " warning_count, summary, request_kind, request_id) VALUES (7, 1, 'running', 'manual', 0, '[]', 0, 0, 0,"
+            " '{}', 'keyjoin', ?)",
+            (RID1,),
+        )
+        raise AssertionError("같은 사용자·같은 요청 번호의 둘째 행이 들어갔다")
+    except sqlite3.IntegrityError:
+        db.rollback()
+    db.execute(
+        "INSERT INTO runs (id, user_id, status, trigger, input_file_count, file_ids, row_count, change_count,"
+        " warning_count, summary, request_kind, request_id) VALUES (8, 1, 'done', 'manual', 0, '[]', 0, 0, 0, '{}',"
+        " NULL, NULL)"
+    )
+    db.execute(
+        "INSERT INTO runs (id, user_id, status, trigger, input_file_count, file_ids, row_count, change_count,"
+        " warning_count, summary, request_kind, request_id) VALUES (9, 1, 'done', 'manual', 0, '[]', 0, 0, 0, '{}',"
+        " NULL, NULL)"
+    )  # 번호가 없는 실행은 몇 개든 (NULL끼리는 겹치지 않음)
+    db.commit()
+    after = db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall()
+    db.close()
+    _alembic(tmp_path, "downgrade", "0020_run_worker_lease")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert not REQUEST_COLUMNS & _run_columns(db) and not _request_index(db)
+    assert {"worker", "heartbeat_at"} <= _run_columns(db)
+    assert db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall() == after
+    db.close()
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    rows = db.execute("SELECT id, request_kind, request_id FROM runs WHERE id <= 3 ORDER BY id").fetchall()
+    assert rows == [(1, "keyjoin", RID1), (2, "keyjoin", RID1), (3, "keyjoin", RID2)]  # 다시 올려도 같은 채움
+    db.close()
+
+
+@pytest.mark.parametrize(
+    ("case", "rows", "told"),
+    [
+        (
+            "duplicate",
+            [(1, 1, _keyjoin_summary(RID1)), (2, 1, _keyjoin_summary(RID1))],
+            "같은 요청 번호의 key 연결 실행 2건",
+        ),
+        ("unreadable", [(1, 1, '{"mode": "keyjoin", "request_id": ')], "읽을 수 없는 실행 1건"),
+        (
+            "no_request",
+            [(1, 1, _keyjoin_summary(None)), (2, 1, _keyjoin_summary("짧음"))],
+            "모양이 다른 key 연결 실행 2건",
+        ),
+    ],
+)
+def test_0021_stops_before_changing_anything_when_request_ids_cannot_be_filled(
+    tmp_path: Path, case: str, rows: list[tuple], told: str
+) -> None:
+    """채울 수 없는 실행 기록이 있으면 열·색인을 만들기 전에 멈춘다 — 리비전·열·행 모두 그대로, 지우거나 덮지 않는다."""
+    db = _at_0020(tmp_path)
+    for run_id, user_id, summary in rows:
+        db.execute(RUN_SQL, (run_id, user_id, "done", summary))
+    db.commit()
+    before = db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall()
+    db.close()
+    try:
+        _alembic(tmp_path, "upgrade", "head")
+        raise AssertionError(f"{case}: 채울 수 없는 행이 있는데 올라갔다")
+    except subprocess.CalledProcessError as exc:
+        err = exc.stderr.decode("utf-8", "replace")
+        assert "0021로 올리지 않습니다" in err and told in err and "실행 [1" in err, err[-600:]
+        assert "example" not in err and "basis" not in err  # 요약 원문은 알리지 않는다 — 실행 번호만
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0020_run_worker_lease"
+    assert not REQUEST_COLUMNS & _run_columns(db) and not _request_index(db)
+    assert db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall() == before
     db.close()

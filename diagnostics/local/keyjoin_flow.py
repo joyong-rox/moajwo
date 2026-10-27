@@ -494,7 +494,8 @@ def check_workbook(item: str, scope: str, path: Path, fids: list[int]) -> None:
                 key_hits.append(cell_desc(c))
     labels = [str(r[0].value) for r in ws3.iter_rows() if r and r[0].value is not None]
     notes = [str(r[1].value) for r in ws3.iter_rows() if r and r[0].value == "안내" and len(r) > 1]
-    rec(item, f"{scope}: 연결 요약 시트에 key 원문 없음 · 고정 안내 6줄(병합 채움·오류 코드 글자 포함)·범위 문구", not key_hits and len(notes) == 6
+    rec(item, f"{scope}: 연결 요약 시트에 key 원문 없음 · 고정 안내 7줄(행 포함/제외 확인·병합 채움·오류 코드 글자 포함)·범위 문구", not key_hits and len(notes) == 7
+        and any("포함/제외 확인" in n for n in notes) and any("병합 칸" in n for n in notes) and any("오류 코드 모양" in n for n in notes)
         and any(SCOPE_LABEL[scope] == str(r[1].value) for r in ws3.iter_rows() if r[0].value == "범위"),
         {"key_hits": key_hits[:8], "labels": labels[:14], "notes": len(notes)})  # fmt: skip
     counts = {str(r[0].value): r[1].value for r in ws3.iter_rows() if r[0].value in ("결과 행", "모든 입력의 사용자(합집합)",
@@ -1391,6 +1392,81 @@ def with_csp(route, request) -> None:  # 문서 응답에 nginx와 같은 CSP를
         route.abort()
 
 
+def step_rows(page: Page) -> None:
+    """13. 소계로 추정되지만 key가 있는 행(선택하지 않은 메모 열의 'Total'): 자동 제외 없이 '확인이 필요한 행'에서 포함/제외를 정한다."""
+    r1 = api_upload(page, "R_소계추정.csv", "사번,부서,구분\n001,총무,일반\n002,기획,Total\n003,정보,일반\n".encode("utf-8-sig"))
+    r2 = api_upload(page, "R_소계추정b.csv", "사번,건수\n001,1\n002,2\n003,3\n".encode("utf-8-sig"))
+    page.goto(f"{URL}/keyjoin?files={r1},{r2}")
+    wait_meta(page, 2)
+    configure(page, 2)
+    status, plan = do_check(page)
+    alert = page.locator(ALERT)
+    pw_expect(alert).to_be_visible(timeout=30000)
+    review = page.locator(f"{SEC} section.kj-review")
+    head = text_of(review.locator("h3")) if review.count() else ""
+    rows = review.locator("tbody tr")
+    cells = [text_of(x) for x in rows.nth(0).locator("th, td").all()] if rows.count() else []
+    counts = text_of(page.locator(f"{FS[5]} p.mw-muted", has_text="행 수 (입력별"))
+    rec("13", "확인 결과: 차단 KEYJOIN_ROWS_UNRESOLVED(role=alert)·'확인이 필요한 행' 표 1행(3행 · C열 · 소계 근거, 미결정 띠)·행 수 줄(원본 3 · 대상 2 · 제외 0 · 미해결 1)",
+        status == 200 and plan.get("ready") is False and "KEYJOIN_ROWS_UNRESOLVED" in [p["code"] for p in plan["problems"]]
+        and review.count() == 1 and "확인이 필요한 행 1행" in head and "미결정 1" in head and rows.count() == 1 and cells[:3] == ["3행", "C열", "소계·합계로 보이는 값"]
+        and "needs-fix" in (rows.nth(0).get_attribute("class") or "") and "입력 1 3 · 2 · 0 · 1" in counts
+        and plan["inputs"][0]["row_review"]["items"] == [{"row": 3, "column": "C", "reason": "subtotal", "in_key": False, "decision": None}],
+        {"status": status, "head": head, "cells": cells, "counts": counts, "codes": [p["code"] for p in plan.get("problems", [])]})  # fmt: skip
+    plan_text = json.dumps(plan, ensure_ascii=False)
+    rec("13", "차단 문구·목록에 칸 값('Total'·'기획')이 없다 — 위치(행·열 문자)만", "Total" not in plan_text and "기획" not in plan_text
+        and "Total" not in text_of(review) and "기획" not in text_of(review), "")  # fmt: skip
+    include = review.get_by_role("radio", name="3행 포함")
+    include.focus()
+    mark_active(page)
+    page.keyboard.press("Space")
+    pw_expect(include).to_be_checked()
+    changed = status_text(page)
+    rec("13", "포함 선택(키보드 Space): 초점 그대로·상태 줄 '설정을 바꿨습니다'·만들기 비활성(다시 확인)", same_active(page) and changed == CHANGED_TEXT
+        and page.locator(MAKE_BTN).get_attribute("aria-disabled") == "true", {"status": changed})  # fmt: skip
+    status, plan = do_check(page)
+    rr = plan["inputs"][0]["row_review"]
+    rec("13", "포함 뒤 다시 확인: ready·결과 3행·row_review included 1·미해결 0·차단 없음", status == 200 and plan["ready"] and plan["result"]["rows"] == 3
+        and rr["included"] == 1 and rr["unresolved"] == 0 and rr["link_rows"] == 3 and plan["problems"] == [], {"result": plan.get("result"), "rr": rr})  # fmt: skip
+    status, run = do_make(page)
+    path, _ = download_made(page, f"keyjoin-rows-include-{run.get('id')}.xlsx")
+    wb = openpyxl.load_workbook(path, read_only=True)
+    got = [[c.value for c in r] for r in wb[SHEETS[0]].iter_rows()]
+    wb.close()
+    rec("13", "포함으로 만든 결과: 연결 결과 3행 (002 기획 2 포함)", status == 201 and got[1:] == [["001", "총무", 1], ["002", "기획", 2], ["003", "정보", 3]], got)
+    exclude = review.get_by_role("radio", name="3행 제외")
+    exclude.check()
+    pw_expect(page.locator(STATUS)).to_have_text(CHANGED_TEXT, timeout=10000)
+    status, plan = do_check(page)
+    rr = plan["inputs"][0]["row_review"]
+    rec("13", "제외로 바꿔 다시 확인: ready·결과 2행·excluded 1·참고 KEYJOIN_ROWS_EXCLUDED", status == 200 and plan["ready"] and plan["result"]["rows"] == 2
+        and rr["excluded"] == 1 and "KEYJOIN_ROWS_EXCLUDED" in [w["code"] for w in plan["warnings"]], {"result": plan.get("result"), "rr": rr})  # fmt: skip
+    status, run = do_make(page)
+    path, _ = download_made(page, f"keyjoin-rows-exclude-{run.get('id')}.xlsx")
+    wb = openpyxl.load_workbook(path, read_only=True)
+    got = [[c.value for c in r] for r in wb[SHEETS[0]].iter_rows()]
+    summary = [[c.value for c in r] for r in wb[SHEETS[2]].iter_rows()]
+    wb.close()
+    listed = any(r and r[0] == "제외한 행" and r[1] == "입력 1" and str(r[2]) == "3" for r in summary)
+    rec("13", "제외로 만든 결과: 연결 결과 2행·연결 요약에 '제외한 행 입력 1 3'", status == 201 and got[1:] == [["001", "총무", 1], ["003", "정보", 3]] and listed,
+        {"rows": got[1:], "listed": listed})  # fmt: skip
+    page.set_viewport_size({"width": 320, "height": 900})
+    page.wait_for_timeout(300)
+    o = overflow(page)
+    wrap = review.locator(".upload-table-wrap")
+    rec("13", "320px: 확인이 필요한 행 표가 페이지를 넓히지 않음(가로 넘침 0)·표 래퍼가 스크롤이면 region+tabindex", o["page_overflow_px"] <= 0 and not o["outside"]
+        and (wrap.count() == 0 or wrap.evaluate("(e) => e.scrollWidth <= e.clientWidth + 1 || (e.getAttribute('role') === 'region' && e.getAttribute('tabindex') === '0')")),
+        o)  # fmt: skip
+    shot(page, "narrow-13-rows", full=True)
+    page.set_viewport_size({"width": 1366, "height": 900})
+    page.locator(f"{SEC} section.kj-review").get_by_role("button", name="결정 지우기").click()
+    pw_expect(page.locator(STATUS)).to_have_text(CHANGED_TEXT, timeout=10000)
+    draft = page.evaluate("() => JSON.parse(sessionStorage.getItem('moajwo.keyjoin.draft') || 'null')")
+    rows_draft = (draft or {}).get("draft", {}).get("rows", {})
+    rec("13", "'결정 지우기' 뒤 저장 초안의 행 결정이 비고 상태 줄 '설정을 바꿨습니다'", all(not v.get("include") and not v.get("exclude") for v in rows_draft.values()),
+        {"rows_draft": rows_draft})  # fmt: skip
+
+
 def new_page(br, width: int, height: int, label: str, axe: bool = False):
     cx = br.new_context(viewport={"width": width, "height": height}, locale="ko-KR", accept_downloads=True)
     cx.route("**/*", with_csp)
@@ -1402,7 +1478,7 @@ def new_page(br, width: int, height: int, label: str, axe: bool = False):
     return cx, page
 
 
-ITEMS = ["준비", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "공통"]
+ITEMS = ["준비", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "공통"]
 
 
 def summarize() -> dict:
@@ -1434,6 +1510,7 @@ def main() -> int:
         guarded("7", "거절 경로 (중복 key·공통 없음)", page, lambda: step_rejections(page))
         guarded("7", "싼 검사 차단(개인정보)·가림·다운로드", page, lambda: step_pii(page))
         guarded("8", "초점 불변·늦은 응답·파일 빼기", page, lambda: step_focus(page))
+        guarded("13", "확인이 필요한 행 포함/제외", page, lambda: step_rows(page))
         guarded("12", "통합·재검사", page, lambda: step_smoke_integration(page))
         guarded("12", "묶기 요약 끔/켬·내려받기", page, lambda: step_smoke_bundle(page))
         cx.close()

@@ -1712,7 +1712,9 @@ export type KeyJoinScope = 'base' | 'all' | 'common' // 기준 파일의 사용�
 export type KeyJoinSheetRef = { file_id: number; sheet_id: string }
 export type KeyJoinColumnIn = { column_id: string; out_name: string | null } // out_name null = 서버 기본(원본 열 이름)
 // key_columns: 순서 있음, 모든 입력이 같은 개수 (복합 key의 i번째끼리 대응). columns에 key 열은 넣지 않는다
-export type KeyJoinInput = KeyJoinSheetRef & { key_columns: string[]; columns: KeyJoinColumnIn[] }
+// rows: 소계·주석으로 추정된(key는 있는) 행의 포함/제외 — 원본 행 번호. 없으면 모두 '확인 필요'(서버가 차단)
+export type KeyJoinRowDecisions = { include: number[]; exclude: number[] }
+export type KeyJoinInput = KeyJoinSheetRef & { key_columns: string[]; columns: KeyJoinColumnIn[]; rows?: KeyJoinRowDecisions }
 // key_names null = 기준 입력의 key 열 이름. base는 inputs 중 하나 (모든 범위에서 필수 — 출력 순서의 기준)
 export type KeyJoinRequest = { inputs: KeyJoinInput[]; scope: KeyJoinScope; base: KeyJoinSheetRef; key_names: string[] | null }
 
@@ -1757,6 +1759,17 @@ export type KeyJoinPlanInput = {
   key_columns: { column_id: string; name: string; letter: string; kinds: KeyJoinKinds | null }[]
   picked: { column_id: string; name: string; letter: string; out_name: string; default_name: boolean }[]
   rows: { data: number; subtotal: number; note: number; empty: number } | null
+  // 확인이 필요한 행(소계·주석 추정 + key 있음): 위치·근거·결정만 (칸 값 없음). items는 listed개까지
+  row_review: {
+    total: number
+    listed: number
+    included: number
+    excluded: number
+    unresolved: number
+    source_rows: number // 데이터 행 + 추정 행
+    link_rows: number // 데이터 행 + 포함한 행
+    items: { row: number; column: string | null; reason: 'subtotal' | 'note'; in_key: boolean; decision: 'include' | 'exclude' | null }[]
+  } | null
   // 싼 검사(권한·pii·한도)에서 차단된 요청은 key 분석을 하지 않아 null
   keys: {
     indexed: number

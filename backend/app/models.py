@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Date, DateTime, Float, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Date, DateTime, Float, ForeignKey, Index, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -175,9 +175,12 @@ class IntegrationRun(Base):
             / check(확인 필요 — 멈춘 실행을 정리할 때 결과를 판정할 근거가 모자람, app/recovery.py)
     trigger: manual(검토 패널에서 직접) / automation(저장된 자동화로 실행)
     worker·heartbeat_at: 결과를 만드는 서버 프로세스와 마지막 생존 신호 (app/runlease.py)
+    request_kind·request_id·request_hash: 같은 생성 요청의 재전송·동시 제출을 하나로 — 사용자·종류·요청 번호가 고유하고,
+        내용 해시가 다르면 거절한다 (0021, 지금은 공통 key 연결만 씀). 해시는 응답·요약에 내보내지 않는다.
     """
 
     __tablename__ = "runs"
+    __table_args__ = (Index("uq_runs_request", "user_id", "request_kind", "request_id", unique=True),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     review_session_id: Mapped[int | None] = mapped_column(ForeignKey("review_sessions.id", ondelete="SET NULL"))
@@ -199,6 +202,9 @@ class IntegrationRun(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     worker: Mapped[str | None] = mapped_column(String(40))  # "<결과 폴더 식별자>-<프로세스 식별자>"
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # UTC
+    request_kind: Mapped[str | None] = mapped_column(String(16))  # 요청 번호를 쓰는 작업 종류 (keyjoin)
+    request_id: Mapped[str | None] = mapped_column(String(32))  # 화면이 만든 요청 번호 (32자리 16진수)
+    request_hash: Mapped[str | None] = mapped_column(String(64))  # 서버가 계산한 요청 내용 해시 (이전 판 행은 빈 값)
 
 
 class RunChange(Base):

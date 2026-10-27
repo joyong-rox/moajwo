@@ -7,6 +7,7 @@
   '00123'과는 다르다. 참거짓·날짜·소수·16자리 이상 숫자 칸·병합으로 채운 칸·빈 칸·결측 표기는 key로 쓰지 않고 안내한다.
   다른 기능의 숫자 해석(cells·text_columns)은 건드리지 않는다.
 - 한 입력(파일·시트) 안에서 key가 겹치면 만들지 않는다 (합치거나 고르지 않음). 입력 사이의 같은 key는 정상 연결이다.
+- 소계·주석으로 추정되지만 key 칸이 있는 행은 자동으로 빼지 않는다 — 사용자가 행마다 포함/제외를 정해야 만든다 (정책 2).
 - 범위: 기준 입력의 사용자만(base, 기본) · 모든 입력의 사용자(all) · 모든 입력에 있는 사용자(common).
 - 결과: 시트 「연결 결과」(key + 고른 열, 미연결은 빈 칸 — 0 아님), 「출처」(결과 행마다 입력별 원본 행), 「연결 요약」.
   선택하지 않은 열은 어디에도 넣지 않는다. key 칸은 항상 글자 칸이다.
@@ -34,6 +35,7 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import runlease
@@ -67,7 +69,9 @@ from app.xmltext import has_illegal, printable
 
 logger = logging.getLogger(__name__)
 
-POLICY = "keyjoin-policy-1"  # key 정규형·범위·출력 규칙이 바뀌면 올린다 (basis·실행 기록에 남음)
+POLICY = (
+    "keyjoin-policy-2"  # key 정규형·범위·출력 규칙이 바뀌면 올린다 (basis·실행 기록에 남음) — 2: 추정 행 포함/제외 확인
+)
 MODE = "keyjoin"
 MODE_LABEL = "공통 key 연결"
 KEYJOIN_FAILED = "KEYJOIN_FAILED"  # 결과를 만드는 중 예기치 않은 실패 (예외 종류만 알림)
@@ -79,10 +83,12 @@ MAX_ROWS = 300_000  # 모든 입력의 데이터 행 합계 (묶기·데이터 �
 PREVIEW_ROWS = 20  # 미리보기 행
 PREVIEW_POOL = 200  # 미리보기 값을 두는 key 수 (기준 입력 앞 200개, all은 입력마다 앞 200개 더)
 PROBLEM_ROWS = 5  # 문제 문구에 적는 행 번호 수
+ROW_REVIEW_MAX = 2000  # 입력 하나에서 포함/제외 확인을 요구하는 추정 행 수 — 넘으면 차단 (원본을 나눠 올리게)
+EXCLUDED_LISTED = 50  # 연결 요약 시트에 적는 제외 행 번호 수
 OUT_NAME_MAX = 255  # 결과 열 이름 길이
 INDEX_WEIGHT = 1.0  # key 인덱스 칸 하나를 결과 칸 몇 개로 셈하는지 (측정 뒤 조정 — docs/MEMORY.md)
 TEXT_WEIGHT = 2  # 글자 추정치에 곱하는 안전 계수 (측정 뒤 완화 — docs/MEMORY.md)
-REQUEST_LOOKBACK = 50  # 같은 요청 번호(request_id)를 찾는 최근 실행 수
+REQUEST_HASH_VERSION = 1  # 요청 내용 정규형이 바뀌면 올린다 (해시에 들어감)
 SUMMARY_LINES = 40  # 연결 요약 시트의 고정 줄 수 추정 (칸 예산)
 SUMMARY_PER_INPUT = 16  # 연결 요약 시트에서 입력 하나가 차지하는 칸 수 추정
 RESULT_SHEET, SOURCE_SHEET, SUMMARY_SHEET = "연결 결과", "출처", "연결 요약"
@@ -93,6 +99,9 @@ KINDS = ("text", "int", "float", "bool", "date", "empty", "filled", "missing_mar
 KEY_EMPTY, KEY_MISSING, KEY_PARTIAL = "KEYJOIN_KEY_EMPTY", "KEYJOIN_KEY_MISSING_MARK", "KEYJOIN_KEY_PARTIAL"
 KEY_FILLED, KEY_TYPE, KEY_PRECISION = "KEYJOIN_KEY_FILLED", "KEYJOIN_KEY_TYPE", "KEYJOIN_KEY_PRECISION"
 KEY_ILLEGAL, KEY_DUPLICATE, VALUE_ILLEGAL = "KEYJOIN_KEY_ILLEGAL", "KEYJOIN_KEY_DUPLICATE", "KEYJOIN_VALUE_ILLEGAL"
+# 소계·주석으로 추정되지만 key 칸이 있는 행: 자동으로 빼지 않고 사용자의 포함/제외 결정을 요구한다 (정책 2)
+ROWS_UNRESOLVED, ROWS_TOO_MANY = "KEYJOIN_ROWS_UNRESOLVED", "KEYJOIN_ROWS_TOO_MANY"
+ROW_DECISION_STALE, ROWS_EXCLUDED = "KEYJOIN_ROW_DECISION_STALE", "KEYJOIN_ROWS_EXCLUDED"
 KIND_CODE = {
     "float": KEY_TYPE,
     "bool": KEY_TYPE,
@@ -131,6 +140,11 @@ class KeyJoinError(Exception):
     run_id: int | None = None
 
 
+class RequestTaken(Exception):
+    """같은 사용자·같은 요청 번호의 실행 행이 다른 요청(다른 프로세스)에 의해 먼저 들어갔다 — 이 요청은 실행·파일을
+    만들지 않았다 (실행 행을 넣는 순간 고유 색인이 막음). 부른 쪽이 그 실행을 다시 찾아 답한다."""
+
+
 def _failed(message: str, run_id: int) -> KeyJoinError:
     err = KeyJoinError(message)
     err.run_id = run_id
@@ -154,6 +168,17 @@ class ColumnIn(BaseModel):
     out_name: str | None = None  # None = 원본 열 이름 (서버 기본)
 
 
+class RowDecisionsIn(BaseModel):
+    """소계·주석으로 추정된(key는 있는) 행의 포함/제외 — 원본 행 번호(1부터, 머리글 포함). 이 입력(파일·시트)에만
+    적용되고 파일·시트가 바뀌면 화면이 지운다; 서버는 지금 추정 행 목록에 없는 번호를 거절한다(다른 행에 적용하지
+    않음)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    include: list[Annotated[int, Field(ge=1, le=10_000_000)]] = Field(default_factory=list, max_length=ROW_REVIEW_MAX)
+    exclude: list[Annotated[int, Field(ge=1, le=10_000_000)]] = Field(default_factory=list, max_length=ROW_REVIEW_MAX)
+
+
 class InputIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -161,6 +186,7 @@ class InputIn(BaseModel):
     sheet_id: str = Field(pattern=r"^s\d{1,3}$")
     key_columns: list[Annotated[str, Field(pattern=r"^c\d{1,4}$")]] = Field(min_length=1, max_length=MAX_KEY_COLUMNS)
     columns: list[ColumnIn] = Field(default_factory=list, max_length=MAX_PICK_COLUMNS)
+    rows: RowDecisionsIn | None = None  # 추정 행의 포함/제외 결정 (없으면 모두 '확인 필요')
 
 
 class BaseRef(BaseModel):
@@ -177,6 +203,18 @@ class KeyJoinIn(BaseModel):
     scope: Scope = "base"
     base: BaseRef  # 출력 순서와 base 범위의 사용자 집합을 정하는 입력 (모든 범위에서 필수)
     key_names: list[str] | None = None  # None = 기준 입력의 key 열 이름
+
+
+def request_hash(req: KeyJoinIn) -> str:
+    """요청 내용의 정규형 해시 — 같은 요청 번호의 재전송이 '같은 요청'인지 서버가 직접 판단하는 근거 (화면이 보낸
+    expected_basis는 비교하지 않는다). 입력·시트 순서, key 열과 그 순서, 가져올 열·결과 이름·순서, 범위·기준 입력,
+    key 결과 이름, 행 결정, 정책을 넣는다. 요청 번호·expected_basis는 넣지 않는다. 파일 내용·권한·확인 상태는 basis가
+    따로 본다.
+    DB에만 저장하고 응답·요약·기록에는 내보내지 않는다."""
+    content = req.model_dump(mode="json", exclude={"expected_basis", "request_id"})
+    payload = [MODE, POLICY, REQUEST_HASH_VERSION, content]
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 class KeyJoinRunIn(KeyJoinIn):
@@ -227,6 +265,10 @@ def check_request(req: KeyJoinIn) -> None:
             raise _bad(f"입력 {n}: 같은 열을 두 번 골랐습니다. [KEYJOIN_COLUMN_DUPLICATE]")
         if set(ids) & set(ip.key_columns):
             raise _bad(f"입력 {n}: key 열은 결과에 이미 들어갑니다 — 가져올 열에서 빼세요. [KEYJOIN_KEY_IN_COLUMNS]")
+        if ip.rows is not None:
+            inc, exc = ip.rows.include, ip.rows.exclude
+            if len(set(inc)) != len(inc) or len(set(exc)) != len(exc) or set(inc) & set(exc):
+                raise _bad(f"입력 {n}: 같은 행을 포함과 제외에 두 번 적었습니다. [KEYJOIN_ROW_DECISION_INVALID]")
         for c in ip.columns:
             if c.out_name is not None and (code := _name_code(c.out_name)):
                 raise _bad(f"입력 {n} {c.column_id}: 결과 열 이름{NAME_TEXT[code]}. [{code}]")
@@ -392,6 +434,14 @@ class KeyIndex:
     long_numbers: int = 0
     formula_missing: int = 0
     rrn: bool = False  # 주민등록번호가 탐지된 시트 (미리보기 가림 규칙)
+    review: list[dict[str, Any]] = field(default_factory=list)  # 추정 행 (row, column, reason, in_key, decision)
+    review_overflow: int = 0  # ROW_REVIEW_MAX를 넘어 목록에 넣지 못한 추정 행 수
+    included_rows: int = 0  # 사용자가 포함한 추정 행 (데이터 행과 같은 검사를 거친다)
+    excluded_rows: int = 0
+    unresolved_rows: int = 0
+    excluded_first: list[int] = field(default_factory=list)
+    stale: list[int] = field(default_factory=list)  # 결정이 가리키지만 추정 행이 아닌 번호 (처음 몇 개)
+    stale_count: int = 0
 
     @property
     def unsupported(self) -> int:
@@ -413,22 +463,54 @@ def analyze_input(
     keep_all: bool = False,
     keep_keys: set[Key] | None = None,
     keep_first: int = 0,
+    decisions: tuple[set[int], set[int]] | None = None,
 ) -> KeyIndex:
-    """데이터 행만 key 인덱스로 만든다 (소계·주석은 세기만, 위 행 값을 복사하지 않음). 같은 key가 다시 나오면 인덱스는
-    바꾸지 않고 dups에 모은다. 값은 keep_all이거나 keep_keys에 있거나 앞 keep_first개 key일 때만 둔다 (미리보기 풀)."""
+    """데이터 행과 사용자가 포함한 추정 행을 key 인덱스로 만든다. 파서가 소계·주석으로 분류한 행 가운데 key 칸이
+    모두 있는 행은 '추정 행'으로 목록에 두고(자동으로 빼지 않음) 결정(decisions = 포함 행 번호 집합, 제외 행 번호
+    집합)에 따라 포함(데이터 행과 같은 검사)·제외(세기만)·미결정(차단)으로 나눈다. key 칸이 없는 소계·주석 행은
+    구조 행이라 세기만 한다. 같은 key가 다시 나오면 인덱스는 바꾸지 않고 dups에 모은다. 값은 keep_all이거나
+    keep_keys에 있거나 앞 keep_first개 key일 때만 둔다."""
     ix = KeyIndex(kinds=[dict.fromkeys(KINDS, 0) for _ in key_ids], rrn=bool(sheet.pii.counts.get("rrn")))
     source = sheet.source_columns or list(range(len(sheet.columns)))
+    include, exclude = decisions if decisions is not None else (set(), set())
+    decided: set[int] = set()
     for entry in sheet.body:
         kind = entry["kind"]
+        original, cells, row = entry["original"], entry["cells"], entry["row"]
         if kind != "data":
             if kind == "empty":
                 ix.empty_rows += 1
-            else:  # 소계로 본 칸의 열을 함께 둔다 — 선택하지 않은 열의 값으로 판정될 수도 있어 경고에 알린다
-                j = next((i for i, c in enumerate(entry["cells"]) if is_subtotal_label(c)), None)
-                ix.skipped.setdefault(kind, _Rows()).add(entry["row"], j if kind == "subtotal" else None)
-            continue
-        ix.data_rows += 1
-        original, cells, row = entry["original"], entry["cells"], entry["row"]
+                continue
+            # 소계로 본 칸의 열(판정 칸) — 선택하지 않은 열의 값으로 판정될 수도 있어 위치를 알린다
+            judge = next((i for i, c in enumerate(cells) if is_subtotal_label(c)), None) if kind == "subtotal" else None
+            has_key = all(
+                key_part(original[j] if j < len(original) else None, cells[j] if j < len(cells) else None)[0]
+                is not None
+                for j in key_ids
+            )
+            if not has_key:  # 구조 행 (key 칸이 비었거나 쓸 수 없음) — 연결 대상이 될 수 없어 세기만
+                ix.skipped.setdefault(kind, _Rows()).add(row, judge)
+                continue
+            if len(ix.review) >= ROW_REVIEW_MAX:
+                ix.review_overflow += 1
+                continue
+            decision = "include" if row in include else ("exclude" if row in exclude else None)
+            ix.review.append(
+                {"row": row, "column": judge, "reason": kind, "in_key": judge in key_ids, "decision": decision}
+            )
+            if decision is not None:
+                decided.add(row)
+            if decision == "exclude":
+                ix.excluded_rows += 1
+                if len(ix.excluded_first) < EXCLUDED_LISTED:
+                    ix.excluded_first.append(row)
+                continue
+            if decision is None:
+                ix.unresolved_rows += 1
+                continue
+            ix.included_rows += 1  # 포함 — 아래 데이터 행과 같은 key 검사를 그대로 거친다
+        else:
+            ix.data_rows += 1
         parts: list[str] = []
         codes: list[tuple[str, int]] = []
         numeric = False
@@ -458,6 +540,10 @@ def analyze_input(
         values = _row_values(entry, pick_ids, source, formulas, ix)
         if keep_all or len(ix.order) <= keep_first or (keep_keys is not None and key in keep_keys):
             ix.values[key] = values
+    stale = sorted(
+        (include | exclude) - decided
+    )  # 지금 추정 행이 아닌 번호를 가리키는 결정 — 다른 행에 적용하지 않는다
+    ix.stale, ix.stale_count = stale[:PROBLEM_ROWS], len(stale)
     return ix
 
 
@@ -546,6 +632,32 @@ class InputPlan:
             text += f" / {mask_text(self.sheet.name)} ({sheet_place(self.place)})"
         return text
 
+    def row_review(self) -> dict[str, Any] | None:
+        """추정 행의 확인 목록과 개수 (위치·근거·결정만 — 칸 값은 넣지 않는다)."""
+        ix = self.ix
+        if ix is None or self.sheet is None:
+            return None
+        items = [
+            {
+                "row": r["row"],
+                "column": self.letter(r["column"]) if r["column"] is not None else None,
+                "reason": r["reason"],
+                "in_key": r["in_key"],
+                "decision": r["decision"],
+            }
+            for r in ix.review
+        ]
+        return {
+            "total": len(ix.review) + ix.review_overflow,
+            "listed": len(items),
+            "included": ix.included_rows,
+            "excluded": ix.excluded_rows,
+            "unresolved": ix.unresolved_rows + ix.review_overflow,
+            "source_rows": ix.data_rows + len(ix.review) + ix.review_overflow,
+            "link_rows": ix.data_rows + ix.included_rows,
+            "items": items,
+        }
+
     def add(self, problem: Problem) -> Problem:
         problem.input, problem.file_id, problem.sheet_id = self.index, self.file_id, self.req.sheet_id
         self.problems.append(problem)
@@ -601,6 +713,7 @@ class InputPlan:
             "key_columns": key_columns,
             "picked": picked,
             "rows": dict(s.kinds) if s is not None else None,
+            "row_review": self.row_review(),
             "keys": keys,
             "problems": [p.out() for p in self.problems],
         }
@@ -782,7 +895,7 @@ def _budget_checks(
     problems: list[Problem] = []
     ready = [ip for ip in inputs if ip.sheet is not None]
     n, k = len(inputs), len(base.req.key_columns)
-    rows = {ip.index: ip.sheet.kinds["data"] for ip in ready}
+    rows = {ip.index: sum(ip.sheet.kinds.get(k, 0) for k in ("data", "subtotal", "note")) for ip in ready}
     rows_total = sum(rows.values())
     drive_rows = rows_total if req.scope == "all" else rows.get(base.index, 0)
     picked = sum(len(ip.pick_ids) for ip in inputs)
@@ -882,8 +995,12 @@ def _analyze(db: Session, plan: Plan, keep_values: bool) -> None:
         for ip in sorted((x for x in inputs if x.file_id == fid), key=lambda x: (x is not base, x.index)):
             sheet = result.sheets[ip.sheet_index]
             first = PREVIEW_POOL if ip is base else keep_first
-            ip.ix = analyze_input(sheet, ip.key_ids, ip.pick_ids, formulas.get(sheet.name, set()), ws_map,
-                                  keep_all=keep_values, keep_keys=pool, keep_first=first)  # fmt: skip
+            rows = ip.req.rows
+            decisions = (set(rows.include), set(rows.exclude)) if rows is not None else None
+            ip.ix = analyze_input(
+                sheet, ip.key_ids, ip.pick_ids, formulas.get(sheet.name, set()), ws_map,
+                keep_all=keep_values, keep_keys=pool, keep_first=first, decisions=decisions,
+            )  # fmt: skip
             if not keep_values:
                 pool.update(ip.ix.order[:first])
         del result
@@ -989,6 +1106,35 @@ def _input_problems(plan: Plan, ws_map: dict[Key, set[Key]]) -> None:
             )
             problem = _warn("KEYJOIN_VALUE_FILLED", text, column=ip.letter(j), rows=list(r.first), count=r.count)
             plan.problems.append(ip.add(problem))
+        if ix.unresolved_rows:
+            rows = [r["row"] for r in ix.review if r["decision"] is None][:PROBLEM_ROWS]
+            text = (
+                f"{ip.where()}: 소계·주석으로 추정되지만 key 칸이 있는 행이 {ix.unresolved_rows}행({_rows_text(rows)}) "
+                "있습니다 — 자동으로 빼지 않습니다. 연결 확인 화면의 '확인이 필요한 행'에서 행마다 포함/제외를 정한 뒤 "
+                "다시 확인하세요."
+            )
+            plan.problems.append(ip.add(_block(ROWS_UNRESOLVED, text, rows=rows, count=ix.unresolved_rows)))
+        if ix.review_overflow:
+            text = (
+                f"{ip.where()}: 소계·주석으로 추정된 행이 {len(ix.review) + ix.review_overflow:,}행으로 한 번에 확인할 "
+                "수 있는 "
+                f"{ROW_REVIEW_MAX:,}행을 넘습니다 — 원본을 나누거나 소계·주석을 정리해 다시 올리세요."
+            )
+            plan.problems.append(ip.add(_block(ROWS_TOO_MANY, text, count=len(ix.review) + ix.review_overflow)))
+        if ix.stale_count:
+            text = (
+                f"{ip.where()}: 포함/제외로 정한 행 {ix.stale_count}행({_rows_text(ix.stale)})이 지금 이 입력의 "
+                "추정 행 목록에 없습니다 — 파일·시트가 바뀌었을 수 있습니다. 결정을 지우고 다시 확인하세요 (다른 행에 "
+                "적용하지 않습니다)."
+            )
+            plan.problems.append(ip.add(_block(ROW_DECISION_STALE, text, rows=list(ix.stale), count=ix.stale_count)))
+        if ix.excluded_rows:
+            rows = ix.excluded_first[:PROBLEM_ROWS]
+            text = (
+                f"{ip.where()}: 확인하고 제외한 행 {ix.excluded_rows}행({_rows_text(rows)})은 연결하지 않습니다 — "
+                "출처·연결 요약에 행 번호를 남깁니다."
+            )
+            plan.problems.append(ip.add(_warn(ROWS_EXCLUDED, text, rows=rows, count=ix.excluded_rows)))
         if ix.skipped:
             parts = []
             column = None
@@ -1002,8 +1148,8 @@ def _input_problems(plan: Plan, ws_map: dict[Key, set[Key]]) -> None:
                     parts.append(part)
             rows = sorted(x for r in ix.skipped.values() for x in r.first)[:PROBLEM_ROWS]
             text = (
-                f"{ip.where()}: {' · '.join(parts)}은 데이터 행이 아니라 연결하지 않습니다 — 선택하지 않은 열을 포함해 "
-                "어느 칸이든 '계'·'합계'처럼 보이는 값이 있는 행도 여기에 들어가니 행 번호를 확인하세요."
+                f"{ip.where()}: {' · '.join(parts)}은 key 칸이 비어 있거나 쓸 수 없는 소계·주석 행이라 연결 대상이 "
+                "아닙니다 (자동 제외). key 칸이 있는 소계·주석 추정 행은 따로 '확인이 필요한 행'으로 묻습니다."
             )
             count = sum(r.count for r in ix.skipped.values())
             problem = _warn("KEYJOIN_NONDATA_ROWS_SKIPPED", text, column=column, rows=rows, count=count)
@@ -1152,6 +1298,7 @@ def _basis(plan: Plan) -> str:
         [plan.base.file_id, plan.base.sheet_index],
         plan.req.key_names,
         plan.header,
+        [[ip.index, sorted(ip.req.rows.include), sorted(ip.req.rows.exclude)] for ip in plan.inputs if ip.req.rows],
         [*limits, MAX_OUTPUT_TEXT_CHARS, INDEX_WEIGHT, TEXT_WEIGHT],
     ]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, default=str).encode()).hexdigest()
@@ -1237,8 +1384,8 @@ def _write_summary(ws: Any, plan: Plan, run_id: int, processed_at: str) -> None:
     line("기준 입력", f"입력 {base.index + 1} · #{base.file_id} · {sheet_place(base.place)}")
     line("key 열 이름", *(mask_text(n) for n in plan.key_names))
     row += 1
-    line("입력", "파일 #", "파일 이름", "시트 이름", "시트 순번", "key 열", "가져온 열", "데이터 행", "연결 안 한 행",
-         "key 수", "연결", "미연결", bold=True)  # fmt: skip
+    line("입력", "파일 #", "파일 이름", "시트 이름", "시트 순번", "key 열", "가져온 열", "원본 행", "연결 대상 행",
+         "확인 행(포함/제외)", "자동 제외 행", "key 수", "연결", "미연결", bold=True)  # fmt: skip
     for ip in plan.inputs:
         ix, s = ip.ix, ip.sheet
         keys = ", ".join(f"{mask_text(s.column_names[j])}({ip.letter(j)})" for j in ip.key_ids)
@@ -1246,9 +1393,20 @@ def _write_summary(ws: Any, plan: Plan, run_id: int, processed_at: str) -> None:
             f"{mask_text(s.column_names[j])} → {mask_text(ip.out_names[p])}" for p, j in enumerate(ip.pick_ids)
         )
         skipped = sum(r.count for r in ix.skipped.values())
+        review = len(ix.review) + ix.review_overflow
+        reviewed = f"{review} ({ix.included_rows}/{ix.excluded_rows})"
         line(f"입력 {ip.index + 1}", f"#{ip.file_id}", mask_text(ip.info.name), mask_text(s.name),
-             sheet_place(ip.place), keys, picked or "-", ix.data_rows, skipped, len(ix.rows), ip.linked,
-             ip.unlinked)  # fmt: skip
+             sheet_place(ip.place), keys, picked or "-", ix.data_rows + review, ix.data_rows + ix.included_rows,
+             reviewed, skipped, len(ix.rows), ip.linked, ip.unlinked)  # fmt: skip
+    for ip in plan.inputs:
+        if ip.ix.excluded_rows:  # 확인하고 제외한 행 번호 (처음 EXCLUDED_LISTED개)
+            shown = "·".join(str(r) for r in ip.ix.excluded_first)
+            more = (
+                f" 외 {ip.ix.excluded_rows - len(ip.ix.excluded_first)}행"
+                if ip.ix.excluded_rows > len(ip.ix.excluded_first)
+                else ""
+            )
+            line("제외한 행", f"입력 {ip.index + 1}", f"{shown}{more}")
     row += 1
     res = plan.result
     line("결과 행", res["rows"])
@@ -1261,6 +1419,7 @@ def _write_summary(ws: Any, plan: Plan, run_id: int, processed_at: str) -> None:
     row += 1
     for note in (
         "key 열은 글자 형식입니다 (Excel이 '숫자가 텍스트로 저장됨'을 표시할 수 있음 — 선행 0·자릿수 보존).",
+        "소계·주석으로 추정되지만 key가 있는 행은 자동으로 빼지 않고 포함/제외 확인을 거쳤습니다 (위 표의 '확인 행').",
         "미연결·원본 빈 칸은 빈 칸입니다 (0 아님). 실제 0은 0입니다. 가져온 열의 병합 칸은 앱이 읽은 대로 "
         "위(왼쪽) 칸의 값을 채웠습니다 (칸 수는 '주의' 줄).",
         "'='로 시작하는 글자와 '#N/A' 같은 오류 코드 모양의 글자는 수식·오류 칸이 아니라 글자 그대로입니다.",
@@ -1308,6 +1467,10 @@ def _done_summary(plan: Plan, run: IntegrationRun, request_id: str, processed_at
                 ],
                 "data_rows": ix.data_rows,
                 "skipped_rows": sum(r.count for r in ix.skipped.values()),
+                "review_rows": len(ix.review) + ix.review_overflow,
+                "included_rows": ix.included_rows,
+                "excluded_rows": ix.excluded_rows,
+                "excluded_first": list(ix.excluded_first[:PROBLEM_ROWS]),
                 "indexed": len(ix.rows),
                 "linked": ip.linked,
                 "unlinked": ip.unlinked,
@@ -1335,9 +1498,11 @@ def _done_summary(plan: Plan, run: IntegrationRun, request_id: str, processed_at
     return json.dumps(summary, ensure_ascii=False, default=str)
 
 
-def make(db: Session, user: CurrentUser, plan: Plan, request_id: str) -> IntegrationRun:
+def make(db: Session, user: CurrentUser, plan: Plan, request_id: str, request_key: str) -> IntegrationRun:
     """판정이 끝난(ready, keep_values=True) 구성으로 결과 파일을 만든다. 다시 파싱하지 않는다 (검증한 입력 스냅숏).
-    결과 파일을 확정하는 순서·오류 처리는 app/runlease.py (이름을 바꾼 결과 파일은 지우지 않는다)."""
+    결과 파일을 확정하는 순서·오류 처리는 app/runlease.py (이름을 바꾼 결과 파일은 지우지 않는다).
+    실행 행에 요청 번호·요청 내용 해시를 함께 넣는다 — 같은 사용자·같은 번호의 행이 이미 있으면(다른 프로세스가 먼저)
+    고유 색인이 막아 RequestTaken (실행 행·결과 파일·임시 파일을 만들지 않음)."""
     if not plan.ready or plan.out_keys is None or any(ip.ix is None for ip in plan.inputs):
         raise KeyJoinError("연결 확인이 끝나지 않은 구성입니다 — 다시 확인하세요.")
     started = datetime.now(KST)
@@ -1353,10 +1518,17 @@ def make(db: Session, user: CurrentUser, plan: Plan, request_id: str) -> Integra
         row_count=len(plan.out_keys),
         warning_count=len(plan.warnings),
         summary=start_summary,
+        request_kind=MODE,
+        request_id=request_id,
+        request_hash=request_key,
     )
     now = datetime.now(KST)
     processed_at = now.strftime("%Y-%m-%d %H:%M:%S (KST)")
-    target = runlease.begin(db, run, lambda run_id: _output_path(run_id, now))
+    try:
+        target = runlease.begin(db, run, lambda run_id: _output_path(run_id, now))
+    except IntegrityError as exc:  # 실행 행을 넣는 순간 — 아직 결과·임시 파일 없음
+        db.rollback()
+        raise RequestTaken() from exc
     tmp_path: Path | None = None
     try:
         wb = Workbook()

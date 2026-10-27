@@ -47,6 +47,7 @@ TEST_PG = os.environ.get("MOAJWO_TEST_DATABASE_URL", "").strip()
 TEST_PG_ADMIN = os.environ.get("MOAJWO_TEST_PG_ADMIN_URL", "").strip()
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 HEAD = ["시도", "시군구", "인구수"]
+CURRENT_REVISION = "0021_run_request_key"  # alembic head (tests/test_migrations.HEAD와 함께 올린다)
 MAP = {"시도": "sido", "시군구": "sigungu", "인구수": "population"}
 PASSWORD = "Rec-pass-2026!"
 
@@ -936,7 +937,7 @@ def _no_raw(res: subprocess.CompletedProcess, data: Path) -> None:
             "0020_without_columns",
             "리비전은 0020_run_worker_lease인데 담당·생존 신호 열(runs.worker·heartbeat_at)이 없습니다",
         ),
-        ("0020_partial", "리비전은 0020_run_worker_lease인데 담당·생존 신호 열(runs.worker·heartbeat_at)이 일부만"),
+        ("0020_partial", f"리비전은 {CURRENT_REVISION}인데 담당·생존 신호 열(runs.worker·heartbeat_at)이 일부만"),
         (
             "0019_with_columns",
             "리비전은 0019_analysis_runs인데 0020의 담당·생존 신호 열(heartbeat_at, worker)이 있습니다",
@@ -992,7 +993,7 @@ def test_cli_without_a_runs_table_refuses_and_changes_nothing(tmp_path: Path) ->
     for args in (("status",), ("recover",), ("resolve", "1", "--failed")):
         res = _cli(data, "-m", "app.recovery", *args)
         assert res.returncode == 1, (args, res.stdout, res.stderr[-400:])
-        assert "리비전은 0020_run_worker_lease인데 실행 기록 표(runs)가 없습니다" in json.loads(res.stdout)["error"]
+        assert f"리비전은 {CURRENT_REVISION}인데 실행 기록 표(runs)가 없습니다" in json.loads(res.stdout)["error"]
         _no_raw(res, data)
     assert _sha(data / "moajwo.db") == before
 
@@ -1018,7 +1019,7 @@ def test_cli_status_on_a_0020_database_names_the_revision(tmp_path: Path) -> Non
     res = _cli(data, "-m", "app.recovery", "status")
     assert res.returncode == 0, (res.stdout, res.stderr[-400:])
     out = json.loads(res.stdout)
-    assert out["revision"] == "0020_run_worker_lease" and out["running"] == [] and out["check"] == [], out
+    assert out["revision"] == "0021_run_request_key" and out["running"] == [] and out["check"] == [], out
     _no_raw(res, data)
 
 
@@ -1074,7 +1075,7 @@ def test_cli_reads_a_sqlite_uri_address_as_its_file(tmp_path: Path, form: str) -
 
     res = _cli(data, "-m", "app.recovery", "status", url=address(data / "moajwo.db", "mode=ro&uri=true"))
     assert res.returncode == 0, (res.stdout, res.stderr[-400:])
-    assert json.loads(res.stdout)["revision"] == "0020_run_worker_lease", res.stdout
+    assert json.loads(res.stdout)["revision"] == "0021_run_request_key", res.stdout
     _no_raw(res, data)
     other = tmp_path / "other"
     other.mkdir()

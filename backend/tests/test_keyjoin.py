@@ -137,11 +137,20 @@ def _xlsx(c: TestClient, name: str, rows: list[list[Any]], sheet: str = "자료"
 # ---------------------------------------------------------------- 요청·응답 도우미
 
 
-def _input(fid: int, key: str | list[str] = "c0", cols: tuple[str, ...] = ("c1",), sheet: str = "s0",
-           names: dict[str, str | None] | None = None) -> dict[str, Any]:  # fmt: skip
+def _input(
+    fid: int,
+    key: str | list[str] = "c0",
+    cols: tuple[str, ...] = ("c1",),
+    sheet: str = "s0",
+    names: dict[str, str | None] | None = None,
+    rows: dict[str, list[int]] | None = None,
+) -> dict[str, Any]:
     keys = [key] if isinstance(key, str) else list(key)
-    return {"file_id": fid, "sheet_id": sheet, "key_columns": keys,
-            "columns": [{"column_id": col, "out_name": (names or {}).get(col)} for col in cols]}  # fmt: skip
+    columns = [{"column_id": col, "out_name": (names or {}).get(col)} for col in cols]
+    body: dict[str, Any] = {"file_id": fid, "sheet_id": sheet, "key_columns": keys, "columns": columns}
+    if rows is not None:
+        body["rows"] = {"include": rows.get("include", []), "exclude": rows.get("exclude", [])}
+    return body
 
 
 def _body(inputs: list[dict[str, Any]], scope: str | None = "base", base: dict[str, Any] | None = None,
@@ -180,7 +189,8 @@ def _make(c: TestClient, body: dict[str, Any]) -> tuple[dict[str, Any], openpyxl
 
 def _db(sql: str, *args: Any) -> list[tuple]:
     with db_connect() as con:
-        return con.execute(sql, args).fetchall()
+        cur = con.execute(sql, args)
+        return cur.fetchall() if cur.description is not None else []  # INSERT는 돌려줄 행이 없다 (PostgreSQL은 오류)
 
 
 def _state() -> dict[str, Any]:
@@ -244,7 +254,7 @@ def abcd(kj) -> dict[str, Any]:
 def test_6_1_base_scope_matches_the_constants_cell_by_cell(kj, abcd) -> None:
     u = kj["kj-user1"]
     plan = _plan(u, abcd["body"])
-    assert plan["ready"] and plan["mode"] == "keyjoin" and plan["policy"] == "keyjoin-policy-1"
+    assert plan["ready"] and plan["mode"] == "keyjoin" and plan["policy"] == "keyjoin-policy-2"  # 2: 행 포함 정책
     assert plan["scope"] == "base" and plan["base"] == {"file_id": abcd["fids"][0], "sheet_id": "s0", "index": 0}
     assert plan["header"] == EXPECTED_HEADER
     assert plan["result"] == {"rows": 3, "key_columns": 1, "columns": 5, "union": 6, "intersection": 1, "excluded": 0}
@@ -563,7 +573,9 @@ def test_duplicate_and_empty_keys_block_the_run_without_any_record(kj) -> None:
     assert _state() == before
 
 
-def test_merged_key_cells_block_and_subtotal_note_rows_are_skipped_with_a_warning(kj) -> None:
+def test_merged_key_cells_block_and_subtotal_note_rows_need_a_decision(kj) -> None:
+    """key 칸의 병합 채움은 차단. 소계·주석으로 추정된 행은 key 칸이 있으면 '확인 필요'(차단 — 결정 뒤에 만듦), key 칸이
+    비어 있으면 구조 행이라 자동 제외하고 경고한다."""
     u = kj["kj-user1"]
     merged = _upload(u, "병합.xlsx", _xlsx_bytes({"k": [["사번", "값"], ["001", 1], [None, 2], ["003", 3]]},
                                                  {"k": ("A2:A3",)}))  # fmt: skip
@@ -572,15 +584,35 @@ def test_merged_key_cells_block_and_subtotal_note_rows_are_skipped_with_a_warnin
     filled = _first(plan, "KEYJOIN_KEY_FILLED")
     assert not plan["ready"] and filled["rows"] == [3] and "위 행의 값을 복사" in filled["text"]
     assert plan["inputs"][0]["key_columns"][0]["kinds"]["filled"] == 1
-    sub = _xlsx(u, "소계.xlsx", [["사번", "값"], ["001", 1], ["002", 2], ["합계", 3], ["※ 자료: 시험", None]])
-    run, wb, plan = _make(u, _body([_input(sub), _input(b)]))
-    skipped = _first(plan, "KEYJOIN_NONDATA_ROWS_SKIPPED", "warnings")
-    assert plan["ready"] and skipped["rows"] == [4, 5] and skipped["count"] == 2 and skipped["input"] == 0
-    assert "소계·합계 행 1행(4행)" in skipped["text"] and "주석 행 1행(5행)" in skipped["text"]
-    assert "시험" not in skipped["text"]  # 주석 행의 글자(원문)는 문구에 없다 — 행 번호만
-    assert plan["inputs"][0]["rows"] == {"data": 2, "subtotal": 1, "note": 1, "empty": 0}
-    assert _grid(wb["연결 결과"])[1:] == [["001", 1, 10], ["002", 2, None]]  # 소계 행 '합계'는 key로 연결하지 않음
-    assert run["summary"]["inputs"][0]["skipped_rows"] == 2
+    rows = [["사번", "값"], ["001", 1], ["002", 2], ["합계", 3], ["※ 자료: 시험", None], [None, "소계"]]
+    sub = _xlsx(u, "소계.xlsx", rows)
+    before = _state()
+    plan = _plan(u, _body([_input(sub), _input(b)]))
+    pending = _first(plan, "KEYJOIN_ROWS_UNRESOLVED")
+    assert not plan["ready"] and pending["rows"] == [4, 5] and pending["count"] == 2 and pending["input"] == 0
+    assert "시험" not in json.dumps(plan, ensure_ascii=False)  # 주석 행의 글자(원문)는 어디에도 없다 — 위치만
+    review = plan["inputs"][0]["row_review"]
+    assert (
+        review["total"] == 2 and review["unresolved"] == 2 and review["source_rows"] == 4 and review["link_rows"] == 2
+    )
+    assert [(r["row"], r["column"], r["reason"], r["in_key"], r["decision"]) for r in review["items"]] == [
+        (4, "A", "subtotal", True, None),
+        (5, None, "note", False, None),
+    ]
+    skipped = _first(plan, "KEYJOIN_NONDATA_ROWS_SKIPPED", "warnings")  # 6행: key 칸이 비어 있는 소계 행 — 구조 행
+    assert skipped["rows"] == [6] and skipped["column"] == "B" and "자동 제외" in skipped["text"]
+    assert plan["inputs"][0]["rows"] == {"data": 2, "subtotal": 2, "note": 1, "empty": 0}
+    assert _state() == before
+    decided = _body([_input(sub, rows={"exclude": [4, 5]}), _input(b)])
+    run, wb, plan = _make(u, decided)
+    excluded = _first(plan, "KEYJOIN_ROWS_EXCLUDED", "warnings")
+    assert plan["ready"] and excluded["rows"] == [4, 5] and excluded["count"] == 2
+    assert plan["inputs"][0]["row_review"]["excluded"] == 2 and plan["inputs"][0]["row_review"]["unresolved"] == 0
+    assert _grid(wb["연결 결과"])[1:] == [["001", 1, 10], ["002", 2, None]]
+    summary = _grid(wb["연결 요약"])
+    assert any(r[0] == "제외한 행" and r[1] == "입력 1" and r[2] == "4·5" for r in summary if r and len(r) > 2)
+    assert run["summary"]["inputs"][0]["skipped_rows"] == 1 and run["summary"]["inputs"][0]["excluded_rows"] == 2
+    assert run["summary"]["inputs"][0]["review_rows"] == 2 and run["summary"]["policy"] == "keyjoin-policy-2"
 
 
 def test_no_common_users_and_partial_presence(kj) -> None:
@@ -1018,8 +1050,9 @@ def test_error_code_text_stays_text_and_merged_value_cells_are_announced(kj) -> 
     assert plan["inputs"][0]["key_columns"][0]["kinds"]["filled"] == 0  # key 열의 병합 채움과는 별개
 
 
-def test_subtotal_warning_names_the_judging_column_even_if_unselected(kj) -> None:
-    """KEYS-1(설계대로 파서 분류를 쓰되 안내 보강): 선택하지 않은 열의 'Total'로 빠진 행은 판정 칸의 열을 알린다."""
+def test_a_total_in_an_unselected_column_asks_instead_of_dropping_the_row(kj) -> None:
+    """선택하지 않은 메모 열의 'Total' 때문에 소계로 추정된 정상 행: 자동으로 빠지지 않고(차단) 포함하면 연결, 제외하면
+    출처·요약에 남는다. 결정은 요청 내용·basis에 들어가므로 결정이 다르면 다른 basis·다른 요청이다."""
     u = kj["kj-user1"]
     a = _csv(
         u,
@@ -1027,11 +1060,66 @@ def test_subtotal_warning_names_the_judging_column_even_if_unselected(kj) -> Non
         [["사번", "부서", "구분"], ["001", "총무", "일반"], ["002", "기획", "Total"], ["003", "정보", "일반"]],
     )
     b = _csv(u, "구분소계b.csv", [["사번", "건수"], ["001", "1"], ["002", "2"], ["003", "3"]])
-    _, wb, plan = _make(u, _body([_input(a), _input(b)]))
-    skipped = _first(plan, "KEYJOIN_NONDATA_ROWS_SKIPPED", "warnings")
-    assert skipped["rows"] == [3] and skipped["column"] == "C" and "판정 칸 C열" in skipped["text"]
-    assert "선택하지 않은 열" in skipped["text"] and "Total" not in skipped["text"] and "기획" not in skipped["text"]
+    plan = _plan(u, _body([_input(a), _input(b)]))
+    pending = _first(plan, "KEYJOIN_ROWS_UNRESOLVED")
+    assert not plan["ready"] and pending["rows"] == [3] and "판정" not in pending["text"]
+    item = plan["inputs"][0]["row_review"]["items"][0]
+    assert item == {"row": 3, "column": "C", "reason": "subtotal", "in_key": False, "decision": None}
+    assert "Total" not in json.dumps(plan, ensure_ascii=False) and "기획" not in json.dumps(plan, ensure_ascii=False)
+    with_row = _body([_input(a, rows={"include": [3]}), _input(b)])
+    run, wb, plan_in = _make(u, with_row)
+    assert _grid(wb["연결 결과"])[1:] == [["001", "총무", 1], ["002", "기획", 2], ["003", "정보", 3]]
+    assert plan_in["inputs"][0]["row_review"]["included"] == 1 and plan_in["inputs"][0]["row_review"]["link_rows"] == 3
+    assert "KEYJOIN_ROWS_EXCLUDED" not in _codes(plan_in, "warnings")
+    without = _body([_input(a, rows={"exclude": [3]}), _input(b)])
+    run2, wb2, plan_out = _make(u, without)
+    assert _grid(wb2["연결 결과"])[1:] == [["001", "총무", 1], ["003", "정보", 3]]
+    assert _grid(wb2["출처"])[1:] == [[1, 2, 2], [2, 4, 4]]
+    assert plan_in["basis"] != plan_out["basis"] and run["id"] != run2["id"]
+    # 같은 요청 번호로 결정만 바꿔 보내면 다른 요청 내용 — 409 (내용 해시에 결정이 들어간다)
+    rid = uuid.uuid4().hex
+    assert _run(u, with_row, plan_in["basis"], rid).status_code == 201
+    res = _run(u, without, plan_in["basis"], rid)
+    assert res.status_code == 409 and res.json()["detail"]["code"] == "KEYJOIN_REQUEST_MISMATCH"
+
+
+def test_row_decisions_are_checked_against_the_current_rows_and_included_rows_still_follow_the_key_rules(kj) -> None:
+    """목록에 없는 행을 가리키는 결정은 거절(차단, 다른 행에 적용하지 않음). 포함한 행도 key 중복 검사를 그대로 거친다.
+    포함·제외 양쪽에 같은 행을 적으면 422. 소계 행이 많으면(2,000행 넘게) 차단한다."""
+    u = kj["kj-user1"]
+    a = _csv(
+        u,
+        "결정.csv",
+        [["사번", "부서", "구분"], ["001", "총무", "일반"], ["001", "기획", "Total"], ["003", "정보", "소계"]],
+    )
+    b = _csv(u, "결정b.csv", [["사번", "건수"], ["001", "1"], ["003", "3"]])
+    stale = _plan(u, _body([_input(a, rows={"include": [3], "exclude": [9]}), _input(b)]))
+    bad = _first(stale, "KEYJOIN_ROW_DECISION_STALE")
+    assert not stale["ready"] and bad["rows"] == [9] and bad["count"] == 1
+    assert "KEYJOIN_ROWS_UNRESOLVED" in _codes(stale)  # 4행(소계)은 아직 미결정
+    dup = _plan(u, _body([_input(a, rows={"include": [3, 4]}), _input(b)]))
+    assert "KEYJOIN_KEY_DUPLICATE" in _codes(dup) and _first(dup, "KEYJOIN_KEY_DUPLICATE")["rows"] == [2, 3]
+    both = u.post("/keyjoin/plan", json=_body([_input(a, rows={"include": [3], "exclude": [3]}), _input(b)]))
+    assert both.status_code == 422 and "KEYJOIN_ROW_DECISION_INVALID" in both.text
+    twice = u.post("/keyjoin/plan", json=_body([_input(a, rows={"include": [3, 3]}), _input(b)]))
+    assert twice.status_code == 422 and "KEYJOIN_ROW_DECISION_INVALID" in twice.text
+    run, wb, plan = _make(u, _body([_input(a, rows={"include": [4], "exclude": [3]}), _input(b)]))
     assert _grid(wb["연결 결과"])[1:] == [["001", "총무", 1], ["003", "정보", 3]]
+
+
+def test_too_many_suspected_rows_block_with_a_count(kj, monkeypatch) -> None:
+    from app import keyjoin
+
+    monkeypatch.setattr(keyjoin, "ROW_REVIEW_MAX", 3)
+    u = kj["kj-user1"]
+    rows = [["사번", "값", "구분"]] + [[f"{n:03d}", n, "Total"] for n in range(1, 6)]
+    a = _csv(u, "소계많음.csv", rows)
+    b = _csv(u, "소계많음b.csv", [["사번", "건수"], ["001", "1"]])
+    plan = _plan(u, _body([_input(a), _input(b)]))
+    many = _first(plan, "KEYJOIN_ROWS_TOO_MANY")
+    assert not plan["ready"] and many["count"] == 5 and "5행" in many["text"] and "3행" in many["text"]
+    review = plan["inputs"][0]["row_review"]
+    assert review["total"] == 5 and review["listed"] == 3 and review["unresolved"] == 5
 
 
 def test_resend_must_be_well_formed_and_a_request_being_made_is_refused_even_with_two_slots(
@@ -1110,3 +1198,127 @@ def test_pii_item_sheet_names_are_masked_and_run_makes_no_preview(kj, abcd, monk
     assert calls == ["preview"] and plan["preview"]["shown"] == 3
     assert _run(u, abcd["body"], plan["basis"]).status_code == 201
     assert calls == ["preview"]  # run은 미리보기를 만들지 않는다 (가림 충돌 경고는 두 경로 모두)
+
+
+# ---------------------------------------------------------------- 요청 번호 보완 (2026-10-27 — 0021 색인·내용 해시)
+
+RUN_ROW = (
+    "INSERT INTO runs (user_id, status, trigger, input_file_count, file_ids, row_count, change_count, warning_count,"
+    " summary, request_kind, request_id, request_hash) VALUES (?, ?, 'manual', 0, '[]', 0, 0, 0, ?, ?, ?, ?)"
+)
+
+
+def _user_id(name: str) -> int:
+    return _db("SELECT id FROM users WHERE username = ?", name)[0][0]
+
+
+def test_resend_is_found_however_many_runs_came_between(kj, abcd) -> None:
+    """같은 번호는 최근 몇 건이 아니라 이 사용자의 실행 전부(고유 색인)에서 찾는다 — 사이에 다른 실행 60건이 있어도."""
+    u = kj["kj-user1"]
+    body = abcd["body"]
+    plan = _plan(u, body)
+    rid = uuid.uuid4().hex
+    first = _run(u, body, plan["basis"], rid)
+    assert first.status_code == 201
+    uid = _user_id("kj-user1")
+    for n in range(60):  # 사이의 다른 실행 (묶기·통합 모양 — 요청 번호 없음)
+        _db(RUN_ROW, uid, "done", json.dumps({"mode": "bundle", "n": n}), None, None, None)
+    mid = _state()
+    again = _run(u, body, plan["basis"], rid)
+    assert again.status_code == 200 and again.json()["id"] == first.json()["id"]
+    assert _state() == mid
+
+
+def test_same_request_id_compares_the_request_content_not_the_basis_the_client_sent(kj, abcd) -> None:
+    """같은 번호·처음 expected_basis 그대로 열·범위·이름·기준 입력을 바꾸면 409(내용 비교). 같은 내용이면 basis가
+    달라도 그 실행(200) — 완료된 같은 요청은 원본을 다시 읽지 않는다."""
+    u = kj["kj-user1"]
+    inputs = abcd["inputs"]
+    body = _body(inputs[:2])
+    plan = _plan(u, body)
+    rid = uuid.uuid4().hex
+    first = _run(u, body, plan["basis"], rid)
+    assert first.status_code == 201
+    mid = _state()
+    a, b = inputs[0]["file_id"], inputs[1]["file_id"]
+    variants = {
+        "가져올 열": _body([_input(a, cols=("c1", "c2")), inputs[1]]),
+        "범위": _body(inputs[:2], "all"),
+        "결과 이름": _body([_input(a, names={"c1": "부서명"}), inputs[1]]),
+        "기준 입력": _body(inputs[:2], base={"file_id": b, "sheet_id": "s0"}),
+        "key 결과 이름": _body(inputs[:2], key_names=["사번2"]),
+    }
+    for label, changed in variants.items():
+        res = _run(u, changed, plan["basis"], rid)  # 처음 basis를 그대로 보냄
+        assert res.status_code == 409 and res.json()["detail"]["code"] == "KEYJOIN_REQUEST_MISMATCH", (label, res.text)
+        assert res.json()["detail"]["run_id"] == first.json()["id"]
+        assert _state() == mid, label
+    same = _run(u, body, "f" * 64, rid)  # 같은 내용 — 화면이 보낸 basis는 비교하지 않는다
+    assert same.status_code == 200 and same.json()["id"] == first.json()["id"] and _state() == mid
+
+
+def test_a_request_id_from_an_older_version_without_a_hash_is_refused(kj, abcd) -> None:
+    """이전 판(0021 전)에서 만든 실행은 해시가 없어 내용을 비교할 수 없다 — 409 LEGACY, 새 실행·파일 없음."""
+    u = kj["kj-user1"]
+    body = abcd["body"]
+    plan = _plan(u, body)
+    rid = uuid.uuid4().hex
+    _db(RUN_ROW, _user_id("kj-user1"), "done", json.dumps({"mode": "keyjoin", "request_id": rid}), "keyjoin", rid, None)
+    before = _state()
+    res = _run(u, body, plan["basis"], rid)
+    assert res.status_code == 409 and res.json()["detail"]["code"] == "KEYJOIN_REQUEST_LEGACY", res.text
+    assert _state() == before
+
+
+def test_a_resent_request_of_another_user_with_the_same_id_is_not_mixed_up(kj, abcd) -> None:
+    """요청 번호는 사용자 안에서만 고유하다 — 다른 사용자가 같은 번호로 보내면 자기 실행이 새로 만들어지고(201),
+    남의 실행이 돌아오거나(200) 남의 실행과 비교되지(409) 않는다. 남의 파일을 가리킨 요청은 파일 없음(404)이고
+    각자의 재전송은 각자의 실행을 돌려준다."""
+    u1, u2 = kj["kj-user1"], kj["kj-user2"]
+    body = abcd["body"]
+    plan = _plan(u1, body)
+    rid = uuid.uuid4().hex
+    first = _run(u1, body, plan["basis"], rid)
+    assert first.status_code == 201, first.text
+    own = _body([_input(_csv(u2, "A.csv", A_ROWS)), _input(_upload(u2, "B.xlsx", _xlsx_bytes({"교육": B_ROWS})))])
+    plan2 = _plan(u2, own)
+    second = _run(u2, own, plan2["basis"], rid)  # 같은 번호 — 다른 사용자의 자기 파일
+    assert second.status_code == 201 and second.json()["id"] != first.json()["id"], second.text
+    res = _run(u2, _body(abcd["inputs"][:2]), plan["basis"], uuid.uuid4().hex)  # 남의 파일을 가리킴
+    assert res.status_code == 404 and "run_id" not in str(res.json()["detail"]), res.text
+    assert _run(u1, body, plan["basis"], rid).json()["id"] == first.json()["id"]
+    assert _run(u2, own, plan2["basis"], rid).json()["id"] == second.json()["id"]
+    assert _db("SELECT count(*) FROM runs WHERE request_id = ?", rid) == [(2,)]  # 사용자마다 한 행
+
+
+def test_when_another_process_inserts_the_same_request_first_the_second_returns_that_run(kj, abcd, monkeypatch) -> None:
+    """실행 행을 넣는 순간 고유 색인이 막으면(다른 프로세스가 먼저) 결과 파일을 만들지 않고 그 실행을 돌려준다."""
+    from app import keyjoin, keyjoin_api
+
+    u = kj["kj-user1"]
+    body = abcd["body"]
+    plan = _plan(u, body)
+    rid = uuid.uuid4().hex
+    uid = _user_id("kj-user1")
+    real = keyjoin_api.build_plan
+    inserted: list[int] = []
+
+    def race(db: Any, user: Any, req: Any, keep_values: bool = False) -> Any:  # noqa: ANN401
+        made = real(db, user, req, keep_values=keep_values)
+        if (
+            keep_values and not inserted
+        ):  # 계획 다시 판정 뒤·실행 행을 넣기 전에 다른 프로세스가 같은 번호로 먼저 넣었다
+            _db(RUN_ROW, uid, "running", json.dumps({"mode": "keyjoin", "request_id": rid}), "keyjoin", rid,
+                keyjoin.request_hash(req))  # fmt: skip
+            inserted.append(_db("SELECT id FROM runs WHERE request_id = ?", rid)[0][0])
+        return made
+
+    monkeypatch.setattr(keyjoin_api, "build_plan", race)
+    before = _state()
+    res = _run(u, body, plan["basis"], rid)
+    assert res.status_code == 200 and res.json()["id"] == inserted[0] and res.json()["status"] == "running", res.text
+    after = _state()
+    assert (
+        after["runs"] == before["runs"] + 1 and after["files"] == before["files"]
+    )  # 넣어 둔 행 하나뿐, 결과 파일 없음
+    assert _db("SELECT count(*) FROM runs WHERE request_id = ?", rid) == [(1,)]

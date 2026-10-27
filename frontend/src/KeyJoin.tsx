@@ -14,6 +14,7 @@ import {
   type KeyJoinPlanInput,
   type KeyJoinProblem,
   type KeyJoinRequest,
+  type KeyJoinRowDecisions,
   type KeyJoinScope,
   type PreviewColumn,
   type SheetPreview,
@@ -37,6 +38,8 @@ const STALE_TEXT = '확인하는 동안 설정이 바뀌어 이전 설정의 결
 const SCOPES: KeyJoinScope[] = ['base', 'all', 'common']
 // 같은 요청 번호의 재전송(200)이 돌려준 실행이 아직 끝나지 않았을 때의 상태 글자 (내려받기는 done에만)
 const RUN_STATE: Record<string, string> = { running: '만드는 중', check: '결과 확인 필요', failed: '실패', review: '검토 중' }
+const REVIEW_PAGE = 50 // '확인이 필요한 행' 표의 한 쪽 행 수
+const REASON_TEXT = { subtotal: '소계·합계로 보이는 값', note: '주석으로 보이는 값' } as const
 const SCOPE_HELP: Record<KeyJoinScope, string> = {
   base: '기준 입력의 key 집합 (기본값) — 다른 입력에 없는 사용자는 그 입력의 열이 빈 칸',
   all: '모든 입력의 합집합 — 기준 입력 순서 뒤에 나머지 입력에서 처음 나온 순서',
@@ -53,6 +56,7 @@ type Draft = {
   scope: KeyJoinScope
   base: string | null // 기준 입력 '파일:시트' (입력에 없으면 첫 입력)
   key_names_input?: string[] // key 결과 이름 (모두 비우면 기준 입력의 key 열 이름)
+  rows?: Record<string, KeyJoinRowDecisions> // '파일:시트' → 추정 행의 포함/제외 (원본 행 번호 — 파일·시트가 바뀌면 지움)
 }
 type InputRef = { fid: number; sid: string; key: string; draft: InputDraft }
 // key: 입력('파일:시트')·파일('파일') 또는 전체(null). about: 전체 항목 중 어느 입력란의 문제인지 (그 입력란 옆에 보임)
@@ -80,6 +84,7 @@ function loadDraft(filesKey: string): Draft {
       scope: d.scope && SCOPES.includes(d.scope) ? d.scope : 'base',
       base: d.base ?? null,
       key_names_input: d.key_names_input,
+      rows: d.rows ?? {},
     }
   } catch {
     return EMPTY
@@ -205,14 +210,19 @@ function buildRequest(
     invalid.push({ key: null, about: 'key_names', text: `key 결과 이름은 ${OUT_NAME_MAX}자까지입니다.` })
   const baseKey = draft.base && refs.some((r) => r.key === draft.base) ? draft.base : (refs[0]?.key ?? null)
   const baseRef = refs.find((r) => r.key === baseKey)
-  const inputs: KeyJoinInput[] = refs.map((r) => ({
-    file_id: r.fid,
-    sheet_id: r.sid,
-    key_columns: r.draft.key_columns,
-    columns: r.draft.columns
-      .filter((c) => !r.draft.key_columns.includes(c.column_id)) // key 열은 결과에 이미 들어간다
-      .map((c) => ({ column_id: c.column_id, out_name: nameOf(c.out_name_input) })),
-  }))
+  const inputs: KeyJoinInput[] = refs.map((r) => {
+    const decided = draft.rows?.[r.key]
+    const rows = decided && (decided.include.length || decided.exclude.length) ? { include: [...decided.include].sort((a, b) => a - b), exclude: [...decided.exclude].sort((a, b) => a - b) } : undefined
+    return {
+      file_id: r.fid,
+      sheet_id: r.sid,
+      key_columns: r.draft.key_columns,
+      columns: r.draft.columns
+        .filter((c) => !r.draft.key_columns.includes(c.column_id)) // key 열은 결과에 이미 들어간다
+        .map((c) => ({ column_id: c.column_id, out_name: nameOf(c.out_name_input) })),
+      ...(rows ? { rows } : {}),
+    }
+  })
   const request: KeyJoinRequest = {
     inputs,
     scope: draft.scope,
@@ -320,7 +330,8 @@ function KeyJoin() {
       if (sid) sheets[String(fid)] = sid
       else delete sheets[String(fid)]
       const inputs = Object.fromEntries(Object.entries(d.inputs).filter(([k]) => !k.startsWith(`${fid}:`)))
-      return { ...d, sheets, inputs, base: d.base?.startsWith(`${fid}:`) ? null : d.base }
+      const rows = Object.fromEntries(Object.entries(d.rows ?? {}).filter(([k]) => !k.startsWith(`${fid}:`))) // 행 결정은 그 시트에만
+      return { ...d, sheets, inputs, rows, base: d.base?.startsWith(`${fid}:`) ? null : d.base }
     })
   }
 
@@ -364,6 +375,17 @@ function KeyJoin() {
     })
   }
 
+  /** 추정 행의 결정: 한 행(또는 여러 행)을 포함/제외/미결정으로. 결정은 요청의 일부라 바꾸면 다시 확인해야 한다 */
+  function decideRows(key: string, rows: number[], decision: 'include' | 'exclude' | null) {
+    update((d) => {
+      const cur = d.rows?.[key] ?? { include: [], exclude: [] }
+      const drop = new Set(rows)
+      const next = { include: cur.include.filter((r) => !drop.has(r)), exclude: cur.exclude.filter((r) => !drop.has(r)) }
+      if (decision) next[decision] = [...next[decision], ...rows]
+      return { ...d, rows: { ...(d.rows ?? {}), [key]: next } }
+    })
+  }
+
   function setKeyName(index: number, text: string) {
     update((d) => {
       const names = [...(d.key_names_input ?? [])]
@@ -381,7 +403,8 @@ function KeyJoin() {
     // 남은 파일의 설정은 이어 쓰고, 뺀 파일의 시트·key·열 설정은 지운다 (주소만 고치므로 초점은 옮기지 않음)
     const sheets = Object.fromEntries(Object.entries(draft.sheets).filter(([k]) => k !== String(fid)))
     const inputs = Object.fromEntries(Object.entries(draft.inputs).filter(([k]) => !k.startsWith(`${fid}:`)))
-    saveDraft(rest.join(','), { ...draft, sheets, inputs, base: draft.base?.startsWith(`${fid}:`) ? null : draft.base })
+    const rows = Object.fromEntries(Object.entries(draft.rows ?? {}).filter(([k]) => !k.startsWith(`${fid}:`)))
+    saveDraft(rest.join(','), { ...draft, sheets, inputs, rows, base: draft.base?.startsWith(`${fid}:`) ? null : draft.base })
     setMeta((m) => without(m, fid))
     setMetaError((e) => without(e, fid))
     replaceSearch(q.toString() ? `?${q.toString()}` : '')
@@ -545,9 +568,9 @@ function KeyJoin() {
   return (
     <section className="keyjoin" aria-label="공통 key로 연결하기">
       <WorkflowSteps steps={steps} label="공통 key로 연결하기 단계" />
-      <Banner tone="info" icon="info" title="같은 사용자를 key로 정확히 연결합니다 — 유사 일치·공백 제거·대소문자 통일은 하지 않습니다">
+      <Banner tone="info" icon="info" title="같은 key의 자료(사용자·기관·업무·문서 등)를 정확히 연결합니다 — 유사 일치·공백 제거·대소문자 통일은 하지 않습니다">
         <p>
-          입력(파일·시트)마다 key 열을 고르면 서버가 변환 전 값으로 정확히 같은 key만 연결해 사용자별 한 행을 만듭니다. 한 입력 안에
+          입력(파일·시트)마다 key 열을 고르면 서버가 변환 전 값으로 정확히 같은 key만 연결해 key마다 한 행을 만듭니다. 한 입력 안에
           같은 key가 두 번 있으면 만들지 않습니다 (합치거나 고르지 않음). 원본 파일·열 매핑·학습은 바꾸지 않습니다. 화면·기록에는
           가린 값만 보이고 key 원문은 남지 않습니다.
         </p>
@@ -984,7 +1007,7 @@ function KeyJoin() {
                           <td>
                             {i.rows
                               ? `${i.rows.data.toLocaleString('ko-KR')}${
-                                  i.rows.subtotal || i.rows.note ? ` (소계 ${i.rows.subtotal} · 주석 ${i.rows.note} 연결 안 함)` : ''
+                                  i.rows.subtotal || i.rows.note ? ` (소계·주석 추정 ${i.rows.subtotal + i.rows.note} — 아래에서 확인)` : ''
                                 }`
                               : '-'}
                           </td>
@@ -998,6 +1021,26 @@ function KeyJoin() {
                   </tbody>
                 </table>
               </TableRegion>
+              {view.inputs.some((i) => i.row_review && i.row_review.total > 0) && (
+                <p className="mw-muted">
+                  행 수 (입력별 원본 행 · 연결 대상 · 제외 · 미해결):{' '}
+                  {view.inputs
+                    .map((i) =>
+                      i.row_review
+                        ? `입력 ${i.index + 1} ${i.row_review.source_rows.toLocaleString('ko-KR')} · ${i.row_review.link_rows.toLocaleString('ko-KR')} · ${i.row_review.excluded} · ${i.row_review.unresolved}`
+                        : `입력 ${i.index + 1} -`,
+                    )
+                    .join(' / ')}{' '}
+                  — 결과 {view.result.rows.toLocaleString('ko-KR')}행
+                </p>
+              )}
+              {view.inputs.map((i) => {
+                const rr = i.row_review
+                if (!rr || rr.total === 0) return null
+                const ref = refs.find((r) => r.fid === i.file_id && r.sid === i.sheet_id)
+                if (!ref) return null
+                return <RowReview key={`${i.file_id}:${i.sheet_id}`} input={i} draftKey={ref.key} decided={draft.rows?.[ref.key]} onDecide={decideRows} />
+              })}
               {view.problems.length > 0 && (
                 <div className="an-problems" role="alert">
                   <strong>만들 수 없는 이유 {view.problems.length}건</strong>
@@ -1177,6 +1220,108 @@ function KeyJoin() {
             </p>
           )}
         </fieldset>
+      )}
+    </section>
+  )
+}
+
+/** '확인이 필요한 행' — 소계·주석으로 추정됐지만 key가 있는 행을 사용자가 포함/제외한다. 위치·근거만 보이고 칸 값은 없다.
+ * 화면의 결정(초안)이 서버가 돌려준 결정보다 앞선다(바꾸면 다시 확인). 많은 행은 묶음 선택(이 쪽·모두)과 쪽 보기로 */
+function RowReview({
+  input,
+  draftKey,
+  decided,
+  onDecide,
+}: {
+  input: KeyJoinPlanInput
+  draftKey: string
+  decided: KeyJoinRowDecisions | undefined
+  onDecide: (key: string, rows: number[], decision: 'include' | 'exclude' | null) => void
+}) {
+  const [page, setPage] = useState(0)
+  const rr = input.row_review
+  if (!rr) return null
+  const inc = new Set(decided?.include ?? [])
+  const exc = new Set(decided?.exclude ?? [])
+  const local = (row: number): 'include' | 'exclude' | null => (inc.has(row) ? 'include' : exc.has(row) ? 'exclude' : null)
+  const pages = Math.max(1, Math.ceil(rr.items.length / REVIEW_PAGE))
+  const at = Math.min(page, pages - 1)
+  const shown = rr.items.slice(at * REVIEW_PAGE, (at + 1) * REVIEW_PAGE)
+  const all = rr.items.map((r) => r.row)
+  const here = shown.map((r) => r.row)
+  const counts = { include: all.filter((r) => inc.has(r)).length, exclude: all.filter((r) => exc.has(r)).length }
+  const undecided = all.length - counts.include - counts.exclude + (rr.total - rr.listed)
+  const name = `rows-${draftKey.replace(':', '-')}`
+  return (
+    <section className="kj-review" aria-labelledby={`${name}-h`}>
+      <h3 id={`${name}-h`} className="bd-sub">
+        {input.label} — 확인이 필요한 행 {rr.total.toLocaleString('ko-KR')}행 (포함 {counts.include} · 제외 {counts.exclude} · 미결정 {undecided})
+      </h3>
+      <p className="mw-muted">
+        소계·주석으로 보이는 값이 있지만 key 칸이 있는 행입니다. 자동으로 빼지 않으니 행마다 포함/제외를 정하세요 (선택하지 않은 열의 값이 근거인
+        행도 있습니다 — 판정 칸은 열 문자만 보입니다). 결정을 바꾸면 다시 확인해야 합니다. 포함한 행도 key 중복·빈 값 검사를 그대로 거칩니다.
+        {rr.total > rr.listed && ` 목록에는 ${rr.listed.toLocaleString('ko-KR')}행까지만 보입니다 — 나머지는 원본을 나눠 올리세요.`}
+      </p>
+      <div className="admin-actions kj-actions">
+        <button type="button" className="mapping-confirm" onClick={() => onDecide(draftKey, here, 'include')}>
+          이 쪽 모두 포함
+        </button>
+        <button type="button" className="mapping-confirm" onClick={() => onDecide(draftKey, here, 'exclude')}>
+          이 쪽 모두 제외
+        </button>
+        <button type="button" className="mapping-confirm" onClick={() => onDecide(draftKey, all, 'include')}>
+          전체 {all.length}행 포함
+        </button>
+        <button type="button" className="mapping-confirm" onClick={() => onDecide(draftKey, all, 'exclude')}>
+          전체 {all.length}행 제외
+        </button>
+        <button type="button" className="login-link" onClick={() => onDecide(draftKey, all, null)}>
+          결정 지우기
+        </button>
+      </div>
+      <TableRegion label={`${input.label} 확인이 필요한 행 (가로 스크롤)`}>
+        <table className="upload-table kj-table" aria-label={`${input.label} 확인이 필요한 행`}>
+          <thead>
+            <tr>
+              <th scope="col">원본 행</th>
+              <th scope="col">판정 칸</th>
+              <th scope="col">근거</th>
+              <th scope="col">포함</th>
+              <th scope="col">제외</th>
+            </tr>
+          </thead>
+          <tbody>
+            {shown.map((r) => {
+              const d = local(r.row)
+              return (
+                <tr key={r.row} className={d === null ? 'needs-fix' : undefined}>
+                  <th scope="row">{r.row}행</th>
+                  <td>{r.column ? `${r.column}열${r.in_key ? ' (key 열)' : ''}` : '—'}</td>
+                  <td>{REASON_TEXT[r.reason]}</td>
+                  <td>
+                    <input type="radio" name={`${name}-${r.row}`} aria-label={`${r.row}행 포함`} checked={d === 'include'} onChange={() => onDecide(draftKey, [r.row], 'include')} />
+                  </td>
+                  <td>
+                    <input type="radio" name={`${name}-${r.row}`} aria-label={`${r.row}행 제외`} checked={d === 'exclude'} onChange={() => onDecide(draftKey, [r.row], 'exclude')} />
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </TableRegion>
+      {pages > 1 && (
+        <div className="admin-actions kj-actions" role="group" aria-label={`${input.label} 확인이 필요한 행 쪽 보기`}>
+          <button type="button" className="mapping-confirm" aria-disabled={at === 0} onClick={() => setPage(Math.max(0, at - 1))}>
+            이전 쪽
+          </button>
+          <span className="mw-muted">
+            {at + 1} / {pages} 쪽 ({REVIEW_PAGE}행씩)
+          </span>
+          <button type="button" className="mapping-confirm" aria-disabled={at >= pages - 1} onClick={() => setPage(Math.min(pages - 1, at + 1))}>
+            다음 쪽
+          </button>
+        </div>
       )}
     </section>
   )
