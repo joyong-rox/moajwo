@@ -140,14 +140,21 @@ kcsv("/files/kj_a.csv", ["사번", "부서", "비고"], [["001", "총무", "메�
 kcsv("/files/kj_b.csv", ["사용자번호", "교육 건수", "메모"], [["001", "10", "b1"], ["003", "30", "b3"], ["004", "40", "b4"]])
 kcsv("/files/kj_c.csv", ["사용자ID", "출장 건수", "기타"], [["001", "1", "c1"], ["002", "2", "c2"], ["005", "5", "c5"]])
 kcsv("/files/kj_d.csv", ["직원코드", "처리 건수", "설명"], [["001", "100", "d1"], ["003", "300", "d3"], ["006", "600", "d6"]])
-def kbase(path, rows, seed, width=1, chars=0):  # key 10자('K000000001') + 선택 열 width개 (chars > 0이면 그 길이의 글자)
+def kbase(path, rows, seed, width=1, chars=0, start=0):  # key 10자('K000000001', start부터) + 선택 열 width개 (chars > 0이면 그 길이의 글자)
     def cell(i, j):
         return (f"{seed}" + "v" * (chars - 1)) if chars else f"값{seed}-{i}-{j}"
-    kcsv(path, ["key", *[f"v{j}" for j in range(width)]], [[f"K{i:09d}", *[cell(i, j) for j in range(width)]] for i in range(rows)])
+    kcsv(path, ["key", *[f"v{j}" for j in range(width)]], [[f"K{start + i:09d}", *[cell(i, j) for j in range(width)]] for i in range(rows)])
 for n in (20000, 28000, 29000, 95000, 100000):  # K2·K3·KL1 기준 입력 (key 10자, 선택 열 1)
     kbase(f"/files/kj_base_{n}.csv", n, 0)
 for i in range(3):  # 다른 입력 3개 × 3,000행
     kbase(f"/files/kj_in_{i}.csv", 3000, i + 1)
+# K5 — 범위 비교(base·common·all이 모두 예산 안: 기준 15,000행), 겹치지 않는 key(입력 key가 기준에 없음), 20개 입력 분산(기준 5,000행 + 20 × 250행)
+kbase("/files/kj_base_15000.csv", 15000, 0)
+kbase("/files/kj_base_5000.csv", 5000, 0)
+for i in range(3):
+    kbase(f"/files/kj_off_{i}.csv", 3000, i + 1, start=100000000)
+for i in range(20):
+    kbase(f"/files/kj_split_{i}.csv", 250, i + 1, start=i * 250)
 for i in range(4):  # 긴 값: 500행 × 5열 × 2,000자 (파일 약 5MB — 올리기 한도 10MiB 아래)
     kbase(f"/files/kj_long_{i}.csv", 500, i, width=5, chars=2000)
 for rows in (500, 1000):  # 다수 열: 49열 × 4입력 (결과 열 1 + 196 ≤ 200)
@@ -179,7 +186,7 @@ for part in ${PARTS:-A B}; do
     D3L|D10L_*|D11L_*) run_part "$part" 1000000 1g "" ;;  # 로컬·폐쇄망 기본 한도(환경 변수 없음) — 로컬은 컨테이너 제한이 없어 1GiB로 잰다
     D8) run_part D8 300000 512m "$LIMITS -e MOAJWO_OUTPUT_SLOTS=2" ;;
     E*) run_part "$part" 300000 512m "$FINAL" ;;  # 최종 Render 권장값 (결과 칸 예산 30만도 같은 값)
-    K1|K2|K3) run_part "$part" 300000 512m "$FINAL" ;;  # 공통 key 연결 — 최종 Render 권장값
+    K1|K2|K3|K5) run_part "$part" 300000 512m "$FINAL" ;;  # 공통 key 연결 — 최종 Render 권장값
     KL1) run_part KL1 1000000 1g "" ;;  # 공통 key 연결 — 로컬 기본 한도 (환경 변수 없음, 1GiB)
     *) run_part "$part" 300000 ;;
   esac

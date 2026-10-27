@@ -741,6 +741,30 @@ def part_k3(c: Client) -> None:
     _small_ok(c, "K3")
 
 
+def part_k5(c: Client) -> None:
+    """범위 비교(2026-10-27 지시 8장 K5): 같은 입력(기준 15,000행 + 겹치는 입력 3 × 3,000행 — 세 범위 모두 예산 안)에서
+    base·common·all을 캐시 비움(범위마다 새로 올린 파일의 첫 요청)·적중(같은 요청 다시) 상태로 — common은 결과(3,000행)가
+    작은데 인덱스는 같다. key가 대부분 겹치지 않는 입력(기준에 없는 key 3 × 3,000행): base는 가져온 값이 빈 15,000행,
+    common은 교집합 0이라 만들지 않음(plan만), all은 합집합 18,000행. 20개 입력에 분산(기준 5,000행 + 입력 20 × 250행,
+    결과 열 1 + 20). 모두 최종 Render 권장값(512MiB)."""
+    for scope in ("base", "common", "all"):
+        fids = upload(c, ["kj_base_15000.csv", *[f"kj_in_{i}.csv" for i in range(3)]], confirm=False)
+        keyjoin(c, f"K5 {scope} 기준 15,000행 + 겹치는 입력 3 × 3,000행 (cold — 새로 올린 파일의 첫 요청)", fids, scope)
+        keyjoin(c, f"K5 {scope} 같은 요청 다시 (warm — file_info 캐시 적중, 인덱스는 다시)", fids, scope)
+        if not alive():
+            return
+    for scope in ("base", "common", "all"):
+        fids = upload(c, ["kj_base_15000.csv", *[f"kj_off_{i}.csv" for i in range(3)]], confirm=False)
+        keyjoin(c, f"K5 {scope} 기준 15,000행 + 겹치지 않는 입력 3 × 3,000행 (cold)", fids, scope)
+        keyjoin(c, f"K5 {scope} 겹치지 않는 입력 같은 요청 다시 (warm)", fids, scope)
+        if not alive():
+            return
+    fids = upload(c, ["kj_base_5000.csv", *[f"kj_split_{i}.csv" for i in range(20)]], confirm=False)
+    keyjoin(c, "K5 base 기준 5,000행 + 입력 20 × 250행 (cold)", fids)
+    keyjoin(c, "K5 base 20개 입력 같은 요청 다시 (warm)", fids)
+    _small_ok(c, "K5")
+
+
 def part_kl1(c: Client) -> None:
     """로컬 기본 한도(1GiB 컨테이너, 100만 칸): 기준 95,000행(968,104칸 — 허용) / 100,000행(1,018,104칸 — 거절)."""
     ins = upload(c, [f"kj_in_{i}.csv" for i in range(3)], confirm=False)
@@ -769,7 +793,7 @@ def main() -> None:
         {"A": part_a, "B": part_b, "C": part_c, "D1": part_d1, "D2": part_d2, "D3": part_d3, "D4": part_d4,
          "D5": part_d5, "D6": part_d6, "D7": part_d7, "D3L": part_d3l, "D8": part_d8, "D9": part_d9,
          "A3": lambda cl: part_a(cl, 15), "D12": part_d12, "E1": part_e1, "E2": part_e2, "E3A": part_e3a,
-         "E3B": part_e3b, "E3C": part_e3c, "K1": part_k1, "K2": part_k2, "K3": part_k3, "KL1": part_kl1}[PART](c)  # fmt: skip
+         "E3B": part_e3b, "E3C": part_e3c, "K1": part_k1, "K2": part_k2, "K3": part_k3, "K5": part_k5, "KL1": part_kl1}[PART](c)  # fmt: skip
     except _Done:
         pass
     except RuntimeError as exc:
