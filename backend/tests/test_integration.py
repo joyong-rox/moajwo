@@ -329,3 +329,26 @@ def test_text_cells_that_look_like_formulas_stay_text(client: TestClient) -> Non
     assert sorted(c.value for c in found) == sorted(texts)
     assert {c.data_type for c in found} == {"s"}  # 글자 칸 — 수식(f) 아님
     assert not [c for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.data_type == "f"]
+
+
+def test_error_code_looking_text_stays_text_in_integration_results(client: TestClient) -> None:
+    """원본의 글자 '#N/A'·'#REF!'·'#DIV/0!'·'@x'는 통합 결과에서도 글자 칸이다 (오류 칸 'e'·수식 'f'로 바뀌지 않음)."""
+    texts = ["#N/A", "#REF!", "#DIV/0!", "#VALUE!", "@x", "=1+1"]
+    quoted = [t.replace('"', '""') for t in texts]
+    lines = ["기관명,집행액,비고", *[f'행안부,{1000 + i},"{q}"' for i, q in enumerate(quoted)]]
+    fid = client.post("/files", files=[("files", ("errcode.csv", "\r\n".join(lines).encode("utf-8"), "text/csv"))])
+    fid = fid.json()[0]["id"]
+    review = client.post("/reviews", json={"file_ids": [fid]}).json()
+    for item in [i for i in review["items"] if i["category"] == "pending"]:
+        candidates = item["payload"].get("candidates") or []
+        choice = candidates[0].get("code") if candidates and item["kind"] != "mapping" else None
+        body = {"decision": "approved", "choice": choice} if choice else {"decision": "rejected"}
+        assert client.post(f"/reviews/{review['id']}/items/{item['id']}/decision", json=body).status_code == 200
+    assert client.post(f"/reviews/{review['id']}/complete").status_code == 200
+    run = client.post(f"/reviews/{review['id']}/integrate", json={"include_unmapped": True})
+    assert run.status_code == 201, run.text
+    wb = openpyxl.load_workbook(io.BytesIO(client.get(f"/runs/{run.json()['id']}/download").content))
+    found = [c for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.value in texts]
+    assert sorted(c.value for c in found) == sorted(texts), [c.value for c in found]
+    assert {c.data_type for c in found} == {"s"}, {c.value: c.data_type for c in found}
+    assert not [c for ws in wb.worksheets for row in ws.iter_rows() for c in row if c.data_type in ("f", "e")]

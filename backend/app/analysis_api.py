@@ -263,7 +263,7 @@ _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
 def _put(ws: Any, row: int, col: int, value: Any, bold: bool = False) -> None:
     """셀에 값을 쓴다. 글자는 수식으로 저장되지 않게 항상 글자 형식으로 둔다 ('=1+1' → 글자 그대로)."""
     cell = ws.cell(row=row, column=col, value=value)
-    if isinstance(value, str) and value.startswith(_FORMULA_START):
+    if isinstance(value, str):  # '#N/A' 같은 오류 코드 모양 글자도 글자 칸으로 (bundle._put과 같은 규칙)
         cell.data_type = "s"
     if bold:
         cell.font = Font(bold=True)

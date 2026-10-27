@@ -520,13 +520,13 @@ def _autosize(ws: Any, widths: dict[int, int]) -> None:
 
 
 def _as_text(ws: Any) -> None:
-    """결과 파일에는 수식을 쓰지 않는다. openpyxl은 '='로 시작하는 글자를 수식으로 저장하므로, 원본 값·열 이름·사유가
-    '='로 시작해도 글자 칸으로 둔다 — 결과를 Excel로 열 때 HYPERLINK 같은 수식이 실행되지 않게
-    (묶기·분석 결과와 같은 규칙). 다 쓴 시트를 한 번만 훑는다 — 행마다 ws[row]를 부르면 openpyxl이 그때마다 모든
-    칸에서 열 수를 다시 구해 행 수 × 칸 수가 된다."""
+    """결과 파일에는 수식·오류 칸을 쓰지 않는다. openpyxl은 '='로 시작하는 글자를 수식(f)으로, '#N/A' 같은 오류 코드
+    모양 글자를 오류 칸(e)으로 저장하므로, 원본 값·열 이름·사유가 그렇게 생겼어도 글자 칸으로 둔다 — 결과를 Excel로
+    열 때 HYPERLINK 같은 수식이 실행되거나 글자가 오류 값으로 바뀌지 않게 (묶기·분석 결과와 같은 규칙). 다 쓴 시트를
+    한 번만 훑는다 — 행마다 ws[row]를 부르면 openpyxl이 그때마다 모든 칸에서 열 수를 다시 구해 행 수 × 칸 수가 된다."""
     for row in ws.iter_rows():
         for cell in row:
-            if cell.data_type == "f":
+            if cell.data_type in ("f", "e"):
                 cell.data_type = "s"
 
 
