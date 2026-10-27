@@ -18,6 +18,7 @@ PR `fix/tls-trust-emudhra`(#50)의 조사표·변경·검증 기록입니다. �
 | 출처 | 내용 | 확인 수준 |
 |---|---|---|
 | Oracle CVE-2026-91403 공식 안내 `oracle.com/security-alerts/alert-cve-2026-91403.html` | 검토자(10-27 지시문)는 읽을 수 있었다고 했으나 **이 작업 환경에서는 다시 403** — 공식 원문은 인용하지 않는다. 2차 출처(CVE Watchtower, 게시 2026-10-21·수정 10-24): **Java SE 8u511·11.0.33·17.0.21·21.0.13·25.0.5·27.0.1, GraalVM for JDK 17.0.21·21.0.13, GraalVM EE 21.3.20의 JSSE 구성 요소**, CVSS 3.1 9.1(AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N), 인증 없는 네트워크 공격자. 그 요약에 eMudhra·cacerts 언급은 없음 | 2차 출처 요약 — 공식 원문 미확인 |
+| Oracle 공식 안내 — **2026-10-27 2차(검토자 전달값)** | 검토자(2차 지시문)가 공식 Security Alert 원문에 접근해 전달: CVE-2026-91403은 Oracle Java SE/GraalVM의 **JSSE**(Java의 TLS 구현)에 대한 권고이며, 영향을 받는 eMudhra 중간 CA의 불신 조치를 설명함. **이 작업 환경에서는 같은 날 다시 시도해도 403**이라 원문 인용은 전달값에 한정하고 위 403 기록은 당시 사실로 보존 | 검토자 전달(2026-10-27) — 이 환경 미접근 |
 | 구분 | **Java/JSSE 제품 권고**(Java 런타임의 TLS 구현을 쓰는 프로그램이 대상)와 **공통 CA 사고**(eMudhra 중간 인증서 키 손상 — Node·Python certifi·OS CA·Java cacerts 등 *모든* TLS 클라이언트의 신뢰 저장소가 대상)는 다르다. 이 저장소의 이미지·앱에는 Java가 없어 앞의 것은 적용 대상이 없지만, **뒤의 것은 Java 유무와 상관없이 Node 빌드·pip/certifi·OS CA 묶음에 영향이 있어 이 PR(2·3장)로 보완했다** — 'Java가 없으니 영향 없음'으로 읽지 않는다 | 판단 |
 | Java가 있는 곳 | 이미지·compose·CI 워크플로에는 없음(2장 표). GitHub 호스트 러너 이미지에는 JDK가 깔려 있으나 이 저장소의 워크플로는 Java를 실행하지 않음. ZAP·Nu HTML 검사기(둘 다 Java)는 실행하지 않았거나 로컬 진단 전용 — 다시 쓸 때는 그 JRE를 위 수정판 이상으로. 이 개발 PC에는 PATH의 `java`가 없음(10-27 확인) | 저장소·PC 확인 |
 | Render 안내 `render.com/docs/advisory-emudhra` (10-27 다시 읽음) | 변경 이력은 10-22 게시 한 건뿐 — 권장 판(Node 24.22.1·certifi 2026.10.19 등)·Docker 할 일(배포판 `ca-certificates`·언어별 CA 갱신 뒤 다시 빌드)은 같음. "재배포 후 인증서 거부를 확인하는 것을 강하게 권장", "테스트는 **실행 중인 Render 서비스의 HTTP 클라이언트**에서"(셸의 curl은 다른 CA 저장소일 수 있음) — 그래서 이 문서의 격리 러너 확인(4장)·후보 이미지의 실제 상류 확인(6장)은 실제 Render 인스턴스 확인을 대신하지 않는다 | 공식 문서 |
@@ -30,7 +31,7 @@ PR `fix/tls-trust-emudhra`(#50)의 조사표·변경·검증 기록입니다. �
 | 앱 런타임 | Render 프런트 nginx `/api/` → API (`frontend/nginx.render.conf`) | `https://moajwo-test-api.onrender.com/` | OS CA(Alpine `ca-certificates-bundle`) — **쓰지 않음**(`proxy_ssl_verify` 기본 off, 자체 서명 대역 API도 통과) | 암호화만, 상대 확인 없음 | `proxy_ssl_verify on` + 신뢰 묶음·이름·깊이·프로토콜 (3장) |
 | 앱 런타임 | 로컬 프런트 nginx → backend | `http://backend:8000` (compose 내부망) | 해당 없음 | — | 없음 (묶음 갱신만 같이) |
 | 앱 런타임 | backend `urllib` → Ollama / (소유자가 고른 경우) 외부 LLM | 기본 `http://`(Ollama) · 외부 LLM은 https | OS CA(Debian `ca-certificates`) — certifi 패키지 없음 | Debian 20250419+deb13u1 | `apt --only-upgrade ca-certificates`(이미 최신이면 그대로) |
-| 앱 런타임 | backend psycopg → 외부 PostgreSQL(제안, 아직 연결 안 함) | 문서 예시는 `sslmode=require`(암호화만) | 없음(require는 CA·이름 검증 안 함) | — | **이번 PR 밖** — 2026-10-27 지시로 기본 정책을 `sslmode=verify-full`(호스트 이름까지 검증)로 정하고 격리 시험·설정 예시는 별도 PR(`docs/pg-tls-verify-full`)에서 |
+| 앱 런타임 | backend psycopg → 외부 PostgreSQL(제안, 아직 연결 안 함) | 문서 기본안은 `sslmode=verify-full`(+ `sslrootcert=system`·`channel_binding=require`, `docs/EXTERNAL_DB.md` 3-2; 2026-10-27 2차에서 앞 표의 `require` 잔재를 정리) | 주소의 옵션 그대로 — **프로그램이 verify-full을 강제하지는 않음**(`config._database`는 문자열을 전달만 함): 기본안은 문서·승인 묶음·환경 변수 값으로 지킨다 | — | 격리 시험(유효·만료 인증서 매트릭스, 원인별 판정, 앱·dbcheck·Alembic·dbcopy 진입 경로)은 별도 PR(`docs/pg-tls-verify-full`) |
 | 빌드 | backend `pip install` | PyPI | pip 내장 certifi (기반 이미지 pip **24.0** — 옛 묶음) | 해시 검증 없음 | 의존성 전에 **pip 26.2.2**를 고정 주소+sha256으로 설치 → `--require-hashes`로 의존성 설치 (3장) |
 | 빌드 | frontend `npm ci` (`node:24-alpine`) | npm registry | Node 내장 뿌리 저장소 | 떠도는 태그(2026-10-22 실제 판 v24.22.1) | `node:24.22.1-alpine@sha256:06d7adf3…` 색인 digest 고정, 판·emSign/eMudhra 뿌리 수 기록 |
 | 빌드 | nginx 스테이지 `apk upgrade` | Alpine CDN | 이미지 `ca-certificates-bundle` + apk 서명 | brotli-libs·curl·libcurl만 | `ca-certificates ca-certificates-bundle` 추가 |
@@ -131,7 +132,13 @@ backend 잔여 HIGH·CRITICAL (고유 ID, 수정판 있는 것 0 — Debian 안�
 
 ## 6. 실제 Render 경로 (2026-10-27)
 
-### 6-1. 서비스 표 — 마지막 관측은 2026-10-25, 10-27 재확인 못 함
+### 6-1. 서비스 표 — 2026-10-25 관측(이 환경) + 2026-10-27 13:54 KST 검토자 조회 전달값
+
+2026-10-27 2차 지시문의 검토자가 Render 관리 API로 다시 조회한 값(서비스 상태·배포 기록 조회만, 설정·환경 변수·배포 변경 없음)을 `docs/EXTERNAL_DB.md`
+'Render 서비스 — 현재값' 절에 날짜·출처를 붙여 더했습니다: 세 서비스 모두 Auto-Deploy off·plan free·HTTP healthCheckPath 비어 있음, live 배포 커밋은
+`moajwo-test` 60bcae8(test/render-20261021) · `moajwo-test-web` 66405ef(main) · `moajwo-test-api` 703fdcb(main). 이 환경에서는 여전히 관리 API로 읽지
+못했으므로 아래 표의 '10-25 관측'은 그대로 두고, 전달값은 **검토자 조회 전달값**으로 구분합니다. 저장소에는 GitHub Actions 워크플로·`render.yaml`·배포 훅 호출이
+없어(main 기준 `.github/` 없음) Auto-Deploy off 외의 자동 배포 경로는 없으나, Render 쪽 배포 훅 URL의 존재 여부는 관리 화면에서 전환 직전에 확인합니다(값은 비밀값 — 기록하지 않음).
 
 관리 API로 서비스 ID·연결 분기·Dockerfile·Auto-Deploy·공개 주소·상류 API를 읽기 전용으로 다시 확인하라는 지시가 있었으나, **이 작업 환경에는 사용이 승인된 Render 접근 수단이 없어 다시 읽지 못했습니다**(키를 찾는 동작은 하지 않음). 아래는 2026-10-25 관측(승인 자료 `APPROVAL-render-switch-20261026.md` 1장)이며, 전환·배포 직전에 소유자가 대시보드나 승인된 API 키로 다시 확인해야 합니다.
 
