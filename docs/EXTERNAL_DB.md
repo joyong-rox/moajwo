@@ -50,8 +50,8 @@
 | 변수 | 값 | 설명 |
 |---|---|---|
 | `MOAJWO_DB_MODE` | `external` | 외부 DB 모드. 이 값이면 `DATABASE_URL`이 없거나 PostgreSQL이 아닐 때 **기동하지 않는다** (빈 SQLite로 대신 열지 않음) |
-| `DATABASE_URL` | `postgresql://moajwo_app:…@ep-…-pooler…/neondb?sslmode=require&channel_binding=require` | **앱: 연결 풀러 주소 + 앱 계정**(데이터 읽기·쓰기만). `postgres://`·`postgresql://`는 psycopg 3 드라이버로 바뀐다 |
-| `MOAJWO_MIGRATION_DATABASE_URL` | `postgresql://neondb_owner:…@ep-…(풀러 아님)…/neondb?sslmode=require&channel_binding=require` | **마이그레이션: 직접 연결 + 소유 계정**(스키마를 바꿀 권한). 이관 도구(`app.dbcopy`)도 같은 직접 연결·소유 계정을 쓴다. 비우면 `DATABASE_URL` |
+| `DATABASE_URL` | `postgresql://moajwo_app:…@ep-…-pooler…/neondb?sslmode=verify-full&sslrootcert=system&channel_binding=require` | **앱: 연결 풀러 주소 + 앱 계정**(데이터 읽기·쓰기만). `postgres://`·`postgresql://`는 psycopg 3 드라이버로 바뀐다 |
+| `MOAJWO_MIGRATION_DATABASE_URL` | `postgresql://neondb_owner:…@ep-…(풀러 아님)…/neondb?sslmode=verify-full&sslrootcert=system&channel_binding=require` | **마이그레이션: 직접 연결 + 소유 계정**(스키마를 바꿀 권한). 이관 도구(`app.dbcopy`)도 같은 직접 연결·소유 계정을 쓴다. 비우면 `DATABASE_URL` |
 | `MOAJWO_DB_POOL_SIZE` · `…_MAX_OVERFLOW` | 3 · 2 | 무료 인스턴스 1개 기준의 작은 풀 |
 | `MOAJWO_DB_POOL_TIMEOUT_S` | 10 | 풀에서 연결을 기다리는 최대 시간 — 넘으면 503 '바쁨' |
 | `MOAJWO_DB_POOL_RECYCLE_S` | 240 | Neon 휴면(5분)보다 짧게 연결을 새로 맺음 |
@@ -88,7 +88,8 @@ host=ep-….neon.tech
 port=5432
 dbname=neondb
 user=neondb_owner
-sslmode=require
+sslmode=verify-full
+sslrootcert=%APPDATA%\postgresql\isrgrootx1.pem
 channel_binding=require
 # 같은 DB 확인용: 연결 풀러 + 앱 계정 (앱 자체는 Render 환경 변수 DATABASE_URL을 씀)
 [moajwo-app]
@@ -96,7 +97,8 @@ host=ep-…-pooler.….neon.tech
 port=5432
 dbname=neondb
 user=moajwo_app
-sslmode=require
+sslmode=verify-full
+sslrootcert=%APPDATA%\postgresql\isrgrootx1.pem
 channel_binding=require
 ```
 
@@ -124,6 +126,41 @@ psql --no-password "service=moajwo-migrate" -c "SELECT count(*) FROM users"
     PowerShell `$env:MOAJWO_DBCOPY_TARGET = (Get-Content -Raw <접근 제한 파일>).Trim()` … `Remove-Item Env:MOAJWO_DBCOPY_TARGET` / sh `export MOAJWO_DBCOPY_TARGET="$(cat <접근 제한 파일>)"` … `unset MOAJWO_DBCOPY_TARGET`. 서비스 주소가 먼저입니다.
   - 이름 자리(`--target-env`·`app.dbcheck --app-env`·`--app-service` 등)에 주소를 넣는 실수(`--target-env "$MIGRATION_URL"`)는 받은 값을 출력·보고에 되풀이하지 않고 멈춥니다 (dbcopy는 그 인자에 비밀번호가 있었으면 경고하고 `target_secret_in_args: true`로 표시 — 시험).
 - 로컬 확인 (2026-10-25, Windows, PostgreSQL 17.11 서버, psql 17·psycopg의 libpq 18, 합성 파일): 서비스 주소로 alembic 마이그레이션·`app.dbcopy` dry-run(경고 없음)·`app.dbcheck`·pg_dump(`PGSERVICE`)·pg_restore(`--dbname=service=…`)·psql이 비밀번호 파일의 비밀번호로 접속, 빈 비밀번호 파일 → `fe_sendauth: no password supplied`, 없는 `PGSERVICEFILE` → `service file "…" not found`. icacls는 위 두 형태를 그대로(cmd는 배치 파일, PowerShell은 PowerShell 5.1) 일회용 파일에 실행해 권한 항목이 본인 하나(`<PC>\<사용자>:(F)`)가 되는 것과, PowerShell에 `%APPDATA%` 형태를 쓰면 종료 3으로 실패하는 것을 확인했습니다 (`%APPDATA%` 자리는 일회용 폴더). POSIX의 0600 검사(그룹·다른 사용자 권한이 있으면 무시)는 이 PC(Windows)에서 시험하지 않았습니다 — PostgreSQL 문서 기준입니다.
+
+### 3-2. TLS 검증 — `verify-full` 기본 (2026-10-27)
+
+`sslmode=require`는 **암호화만** 보장하고 서버가 누구인지는 확인하지 않습니다 (libpq 문서 표: 도청 보호 예, 중간자 보호 아니오.
+root 파일이 있으면 verify-ca처럼 검증하는 호환 동작이 있지만 문서가 "의존하지 말 것"이라 합니다). Neon도 "항상 verify-full"을
+권장합니다. 그래서 외부 DB 주소는 모두 `sslmode=verify-full`을 기본으로 하고, 신뢰 저장소는 아래 표대로 둡니다.
+(참조: https://www.postgresql.org/docs/17/libpq-ssl.html · https://www.postgresql.org/docs/17/libpq-connect.html ·
+https://neon.com/docs/connect/connect-securely — 2026-10-27 확인)
+
+| 어디서 | 설정 | 신뢰 저장소 | 비고 |
+|---|---|---|---|
+| Render의 backend(`DATABASE_URL`·`MOAJWO_MIGRATION_DATABASE_URL`) | `sslmode=verify-full&sslrootcert=system&channel_binding=require` | 이미지의 OS 저장소(Debian `ca-certificates` — Mozilla 묶음, ISRG Root X1 포함; PR #50이 빌드 때 보안 갱신) | `sslrootcert=system`은 libpq 16+ (psycopg-binary 3.3.6의 libpq 18). system이면 verify-full보다 약한 sslmode는 **오류**(libpq 문서) — 실수로 낮추지 못함 |
+| 사용자 PC(Windows)의 psql·pg_dump·`app.dbcopy` (3-1 서비스 파일) | `sslmode=verify-full` + `sslrootcert=<파일>` | Windows에는 드라이버가 쓸 OS root 파일이 없음(Neon 문서) → Let's Encrypt의 ISRG Root X1(`https://letsencrypt.org/certs/isrgrootx1.pem`, 2030-06-04까지)을 받아 `%APPDATA%\postgresql\isrgrootx1.pem`에 둠 | 받은 파일은 `openssl x509 -in isrgrootx1.pem -noout -subject -enddate`로 `CN = ISRG Root X1`·`notAfter=Jun  4 … 2030`을 확인. Neon이 CA를 바꾸면 이 파일도 바꿔야 함 |
+| 앱 코드 | 바꾸지 않음 — `config._database`는 주소의 연결 옵션을 그대로 전달(시험 `test_postgres_url_keeps_verify_full_and_system_root_options`) | | |
+
+**Neon 직접 연결과 연결 풀러** (둘 다 TLS 필수, 둘 다 `verify-full`):
+
+| 주소 | 쓰는 곳 | 이유 |
+|---|---|---|
+| 직접 `ep-….neon.tech` + 소유 계정 | 마이그레이션(`MOAJWO_MIGRATION_DATABASE_URL`)·`app.dbcopy`·백업·복원 | 세션 단위 잠금(advisory lock)·`SET`·`LOCK TABLE`을 쓴다 — PgBouncer 트랜잭션 모드 풀러는 이를 보장하지 않음 |
+| 풀러 `ep-…-pooler.….neon.tech` + 앱 계정 | 앱(`DATABASE_URL`) | 무료 인스턴스의 짧은 연결을 풀러가 모음. 준비된 문장은 끈다(4장) |
+
+`channel_binding=require`는 SCRAM 인증일 때 TLS 위에서 서버를 한 번 더 인증합니다(SCRAM-SHA-256-PLUS). 직접 연결에서는
+확인됐고(격리 매트릭스), **풀러 주소에서 지원되는지는 실제 Neon에서 확인해야 합니다** — 전환 때 풀러 주소로 실패하면 풀러
+주소에서만 `channel_binding=prefer`로 낮추고 그 사실을 승인 묶음(8-5 12번)에 적습니다. `verify-full`은 낮추지 않습니다.
+
+**격리 매트릭스(실제 Neon 아님):** `diagnostics/ci/pg_tls_check.sh`(워크플로 `pg-tls (diagnostic)`, `ci/pg-tls-*` 브랜치)가 격리
+러너 안의 일회용 PostgreSQL 17(자체 서명 CA, 이름 `localhost`, 암호화 연결·SCRAM만)에 psycopg로 붙어 다음을 보입니다 —
+`require`는 모르는 CA도 통과(신원 확인 없음), `verify-ca`는 이름이 달라도 통과, `verify-full`은 이름이 다르면 거절,
+`sslrootcert=system`은 사설 CA 거절(공인 CA는 OS 저장소에 있을 때 통과 — 여기서는 미검증), `system`+`require`는 오류,
+`disable`은 서버가 거절, `channel_binding=require`는 SCRAM에서 통과. 결과 표는 워크플로 요약·아티팩트 `pg-tls`에 남습니다.
+
+**전환 때 실제 확인(승인 뒤, 8-3 단계 안에서):** 사용자 PC에서 서비스 파일로 `psql "service=moajwo-migrate" -c "SELECT ssl,
+version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()"` → `ssl = t`와 TLS 판을 적고, Render의 backend는 배포 뒤
+`/health`(`database: ok`)와 로그의 접속 성공으로 확인합니다. 비밀번호·주소는 어디에도 적지 않습니다.
 
 ## 4. 연결 관리와 장애 때 동작
 
@@ -351,6 +388,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 9. 되돌리기 경계 (8-4)
 10. 전환 뒤 백업 계획 — 7장 백업 주기·보관 위치
 11. 계정 — 이관한 계정 수(A, 이관 보고)와 새로 만든·만들 계정(B, 또는 전환 뒤 새 가입)을 나눠 적음
+12. TLS 확인 — 두 주소(직접·풀러) 모두 `sslmode=verify-full`이고 3-2의 확인 명령 출력(`ssl = t`, TLS 판·암호 모음), `channel_binding`이 풀러 주소에서 통했는지(안 됐으면 `prefer`로 낮춘 사실)
 
 ## 9. 시험 (SQLite·PostgreSQL)
 
