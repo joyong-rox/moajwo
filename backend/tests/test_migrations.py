@@ -642,6 +642,43 @@ def test_0021_request_key_backfills_keyjoin_runs_and_downgrades_cleanly(tmp_path
     db.close()
 
 
+def test_0021_refuses_to_downgrade_while_a_run_of_this_version_is_running(tmp_path: Path) -> None:
+    """이 판에서 시작해 실행 중인 행(담당 있음)이 있으면 0021도 내리지 않는다 — 'downgrade 0019'가 0021에서 멈춰
+    리비전·열·색인·행이 그대로다(보호가 0020에만 있으면 0021→0020은 내려가고 0020→0019에서 거절돼 0020에 남는다 —
+    롤백 리허설 10차에서 발견). 정리한 뒤에는 내린다."""
+    db = _at_0020(tmp_path)
+    db.commit()
+    db.close()
+    _alembic(tmp_path, "upgrade", "head")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute(RUN_SQL, (1, 1, "running", "{}"))
+    db.execute("UPDATE runs SET worker = 'abcdef012345-live', heartbeat_at = '2026-10-27 09:00:00' WHERE id = 1")
+    db.commit()
+    held = db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall()
+    db.close()
+    for target in ("0019_analysis_runs", "0020_run_worker_lease"):
+        try:
+            _alembic(tmp_path, "downgrade", target)
+            raise AssertionError(f"{target}: 담당 있는 실행 중 행이 있는데 내려갔다")
+        except subprocess.CalledProcessError as exc:
+            err = exc.stderr.decode("utf-8", "replace")
+            assert "0020으로 내리지 않습니다" in err and "app.recovery recover" in err, err[-400:]
+        db = sqlite3.connect(tmp_path / "moajwo.db")
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD
+        assert REQUEST_COLUMNS <= _run_columns(db) and _request_index(db)
+        assert db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall() == held
+        db.close()
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute("UPDATE runs SET status = 'done', finished_at = '2026-10-27 09:01:00' WHERE id = 1")
+    db.commit()
+    db.close()
+    _alembic(tmp_path, "downgrade", "0020_run_worker_lease")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0020_run_worker_lease"
+    assert not REQUEST_COLUMNS & _run_columns(db) and not _request_index(db)
+    db.close()
+
+
 @pytest.mark.parametrize(
     ("case", "rows", "told"),
     [

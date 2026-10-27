@@ -118,6 +118,32 @@ def test_0020_0021_0020_0021_backfills_keyjoin_runs_and_keeps_the_rows(tmp_path:
 
 
 @needs_admin
+def test_0021_refuses_to_downgrade_while_a_run_of_this_version_is_running(tmp_path: Path) -> None:
+    """이 판에서 시작해 실행 중인 행(담당 있음)이 있으면 0021도 내리지 않는다 — 'downgrade 0019'가 0021에서 멈춰
+    리비전·열·색인·행이 그대로다(보호가 0020에만 있으면 0021→0020은 내려가고 0020→0019에서 거절돼 0020에 남는다 —
+    롤백 리허설 10차에서 발견). 정리한 뒤에는 내린다."""
+    url = pg_database("mig_0021_running")
+    try:
+        assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
+        u1 = _user(url, "mig-live")
+        sql = INSERT_RUN.format(extra=", user_id, worker, heartbeat_at", values=f", {u1}, 'abcdef012345-live', now()")
+        live = _sql(url, sql, status="running")[0][0]
+        held = _rows(url)
+        for target in ("0019_analysis_runs", PREVIOUS):
+            refused = _alembic(url, tmp_path, "downgrade", target)
+            assert refused.returncode != 0, refused.stdout[-400:]
+            assert "0020으로 내리지 않습니다" in refused.stderr and "app.recovery recover" in refused.stderr
+            assert _revision(url) == HEAD and _request_columns(url) == REQUEST_COLUMNS and _has_index(url)
+            assert _rows(url) == held
+        _sql(url, "UPDATE runs SET status = 'done', finished_at = now() WHERE id = :i", i=live)
+        settled = _rows(url)
+        assert _ok(_alembic(url, tmp_path, "downgrade", PREVIOUS))
+        assert _revision(url) == PREVIOUS and _request_columns(url) == set() and _rows(url) == settled
+    finally:
+        pg_database("mig_0021_running", drop=True)
+
+
+@needs_admin
 def test_0021_stops_before_changing_anything_when_a_user_has_the_same_request_id_twice(tmp_path: Path) -> None:
     url = pg_database("mig_0021_dup")
     try:
