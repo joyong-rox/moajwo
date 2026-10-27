@@ -18,6 +18,24 @@ set -uo pipefail
 OUT=$(mkdir -p "$1" && cd "$1" && pwd); OLD=$2; NEW=$3
 HERE=$(cd "$(dirname "$0")" && pwd)
 RES="$OUT/results.tsv"; : > "$RES"
+NEW_HEAD=$(python3 - backend/alembic/versions <<'PY'
+import re, sys
+from pathlib import Path
+revs, downs = set(), set()
+for f in Path(sys.argv[1]).glob('*.py'):
+    s = f.read_text(encoding='utf-8')
+    m = re.search(r'^revision\s*(?::\s*str\s*)?=\s*[\'"]([^\'"]+)', s, re.M)
+    d = re.search(r'^down_revision\s*(?::[^=]*)?=\s*[\'"]([^\'"]+)', s, re.M)
+    if m:
+        revs.add(m.group(1))
+    if d:
+        downs.add(d.group(1))
+heads = sorted(revs - downs)
+assert len(heads) == 1, heads
+print(heads[0])
+PY
+) || { echo "[중단] 후보 트리의 alembic head를 정하지 못함"; exit 2; }
+echo "후보 DB head: $NEW_HEAD"
 res() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" | tee -a "$RES"; }
 export PROBE_PW="Rh-$(openssl rand -hex 12)"
 pwd() { if [ "${1:-}" = "-W" ]; then builtin pwd; else builtin pwd "$@"; fi; }
@@ -177,7 +195,7 @@ TS=$(ts_of_unit); RBF="backups/rollback-$TS.compose.yml"
 NEWSTATE_B=$(img moajwo-backend:latest); NEWSTATE_F=$(img moajwo-frontend:latest)
 res unit "$(unit)" "반영 로그의 배포 단위 (0단계가 읽는 줄)"
 clean_records() { rm -f "backups/rollback-$TS.recover.json" "backups/rollback-$TS.status.json" "backups/rollback-$TS.status-before.json"; }
-NEW_STATE="rev=0020_run_worker_lease backend=$NEWSTATE_B frontend=$NEWSTATE_F"
+NEW_STATE="rev=$NEW_HEAD backend=$NEWSTATE_B frontend=$NEWSTATE_F"
 
 # ---------------------------------------------------------------- 3. 실패 경로 — 그 뒤 단계가 실행되지 않는지
 # S1 이전 포트 파일 없음 → 1단계 정지 전 확인에서 멈춤 (서비스 그대로)
@@ -279,7 +297,7 @@ check deploy3.switch_failed "exit=$D3 · units_in_log=$(grep -c '배포 단위:'
 res deploy3.state "$(state "$TS3")" "전환 실패 뒤 (마이그레이션은 됨 — 0020)"
 r=$(run_steps f1 1 7)
 check f1.unit_chosen "$(grep -h -E '^(되돌릴 배포 단위|전환에서 멈춘 반영)' "$OUT/f1-step1.log" | paste -sd' ')" \
-  "되돌릴 배포 단위: 시각 $TS3 " "전환에서 멈춘 반영 — 지금 DB 리비전 0020_run_worker_lease"
+  "되돌릴 배포 단위: 시각 $TS3 " "전환에서 멈춘 반영 — 지금 DB 리비전 $NEW_HEAD"
 expect f1.steps "done" "$r" "$(state "$TS3")" "rev=0019_analysis_runs" "backend=$(img "moajwo-backend:rollback-$TS3")" \
   "frontend=$(img "moajwo-frontend:rollback-$TS3")" "running=[backend frontend]" "recover_json=yes"
 snapshot f1
@@ -297,7 +315,7 @@ TS3B=$(sed -n 's|.*롤백 태그 .*:rollback-\([0-9-]*\)$|\1|p' "$LOG3B" | tail 
 check deploy3b.cut "exit=$D3B · hint=$(grep -c '\[중단\]' "$LOG3B") · six=$(grep -c '== 6\. ' "$LOG3B") · ts=$TS3B" "exit=1" "hint=0" "six=1"
 r=$(run_steps k1 1 7)
 check k1.unit_chosen "$(grep -h -E '^(\[주의\] 반영 로그가 전환|되돌릴 배포 단위|전환에서 멈춘 반영)' "$OUT/k1-step1.log" | paste -sd' ')" \
-  "[주의] 반영 로그가 전환" "되돌릴 배포 단위: 시각 $TS3B " "지금 DB 리비전 0020_run_worker_lease"
+  "[주의] 반영 로그가 전환" "되돌릴 배포 단위: 시각 $TS3B " "지금 DB 리비전 $NEW_HEAD"
 expect k1.steps "done" "$r" "$(state "$TS3B")" "rev=0019_analysis_runs" "backend=$(img "moajwo-backend:rollback-$TS3B")" \
   "frontend=$(img "moajwo-frontend:rollback-$TS3B")" "running=[backend frontend]" "recover_json=yes"
 snapshot k1
@@ -317,7 +335,7 @@ RUNS_AFTER_DEPLOY=$(runs_in /data/moajwo.db)
 # R: 롤백 태그를 지우면 1단계가 정지 전에 멈추고, R이 이전 커밋으로 다시 만든다 (REBUILD_FROM 없음·이미 있음은 거절)
 docker image rm "moajwo-backend:$TAG4" "moajwo-frontend:$TAG4" > "$OUT/r-untag.log" 2>&1
 r=$(run_steps r_missing 1 1)
-expect r.tag_missing "1:1" "$r" "$(state "$TS4")" "rev=0020_run_worker_lease" "running=[backend frontend]"
+expect r.tag_missing "1:1" "$r" "$(state "$TS4")" "rev=$NEW_HEAD" "running=[backend frontend]"
 check r.tag_missing_message "$(grep -h '^\[중단\]' "$OUT/r_missing-step1.log" | head -1)" "롤백 태그 $TAG4 이미지 없음"
 r=$(run_box r_nosrc R)
 check r.needs_source "$r · $(grep -h '^\[중단\]' "$OUT/r_nosrc-stepR.log" | head -1)" "R:1" "REBUILD_FROM"
@@ -375,13 +393,13 @@ TS5=$(sed -n 's|.*롤백 태그 .*:rollback-\([0-9-]*\)$|\1|p' "$LOG5" | tail -1
 how5=$( [ "$D5" -eq 124 ] && echo "up --wait가 900초 안에 끝나지 않아 끊음 (끊긴 로그)" || echo "스스로 끝남" )
 res deploy5.exit "exit=$D5 · $how5 · hint=$(grep -c '\[중단\].*4장 (백업 ' "$LOG5") · ts5=$TS5" "재시작 반복(unless-stopped) 중 전환 실패"
 BSTATE=$(docker inspect moajwo-backend-1 --format '{{.State.Status}} restarts={{.RestartCount}} policy={{.HostConfig.RestartPolicy.Name}}' 2>&1)
-check restart.loop_before "$BSTATE · $(state "$TS5")" "policy=unless-stopped" "rev=0020_run_worker_lease"
+check restart.loop_before "$BSTATE · $(state "$TS5")" "policy=unless-stopped" "rev=$NEW_HEAD"
 # 9a-1. 볼륨을 쓰는 다른 컨테이너가 재시작을 반복하는 동안 — 1단계가 정지 뒤 확인에서 멈추고 백업·정리를 하지 않아야 한다
 rm -f "backups/rollback-$TS5.recover.json" "backups/rollback-$TS5.status.json" "backups/rollback-$TS5.status-before.json"
 before=$(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l)
 docker run -d --name rb-loop --restart unless-stopped --entrypoint sh -v moajwo_moajwo-data:/data moajwo-backend:latest -c 'sleep 5; exit 1' > /dev/null
 r=$(run_steps rs 1 7); docker rm -f rb-loop > /dev/null
-expect restart.writer_left "1:1" "$r" "$(state "$TS5")" "rev=0020_run_worker_lease" "running=[]" "before_rollback_backups=$before" "recover_json=no"
+expect restart.writer_left "1:1" "$r" "$(state "$TS5")" "rev=$NEW_HEAD" "running=[]" "before_rollback_backups=$before" "recover_json=no"
 check restart.writer_message "$(grep -h '^\[중단\]' "$OUT/rs-step1.log" | head -1)" "데이터 볼륨을 쓰는 컨테이너가 남음" "rb-loop"
 # 9a-2. 되돌리기 — 1단계 뒤 backend 컨테이너는 '멈춤'(재시작 반복이 아님)이고 볼륨을 쓰는 컨테이너가 없어야 한다
 r=$(run_steps rs2 1 1)
@@ -393,38 +411,140 @@ expect restart.rollback "done" "$r" "$(state "$TS5")" "rev=0019_analysis_runs" "
 snapshot rs2
 check restart.serves "$API $FRONT" '"login": 200' '"result_same": true' '"80/tcp"'
 
-# 9b. 백업 DB ≠ 볼륨 DB — 정상 반영 뒤 1단계로 멈춘 상태에서, 호스트 프로세스(Docker 밖 — 1단계가 보지 못하는 쓰기)가 볼륨 DB에 표를
-#   만들고 계속 넣는 동안 2단계: tar 시점과 검증 시점의 표·행 수가 달라 '백업 검증 실패'로 멈추고, 정리·downgrade·.sha256이 없어야 한다
-bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-6.out" 2>&1
-rc=$?; check deploy6.exit "exit=$rc · scripts/deploy.sh $NEW 0019_analysis_runs (9b 앞 새 반영)" "exit=0"
-TS6=$(ts_of_unit)
-MP=$(docker volume inspect moajwo_moajwo-data --format '{{.Mountpoint}}')
-r=$(run_steps vm 1 1)
-check vm.stop "$r" "done"
-sudo python3 - "$MP/moajwo.db" "$OUT/vm-writer.stop" > "$OUT/vm-writer.log" 2>&1 <<'PY' &
+# 9b. 2단계(백업·검증)의 두 정지 조건을 각각 제어해 고정한다 — 둘 다 정리(recover)·downgrade 전에 멈추고 .sha256이 없어야 한다.
+#   쓰기 시점을 sleep 간격의 운에 맡기지 않는다: 호스트 감시기(/proc)가 상자의 'tar czf' 프로세스를 보고 그 생존 구간 안(가) 또는
+#   끝난 직후(나)에만 쓰고, 그 순서를 기록해 판정한다(순서가 어긋나면 시나리오 제어 실패로 no).
+cat > "$OUT/vm-watch.py" <<'PY'
 import os, sqlite3, sys, time
-db, stop = sys.argv[1], sys.argv[2]
-con = sqlite3.connect(db, isolation_level=None)
-con.execute("create table if not exists rehearsal_probe (n integer)")
-k = 0
-while not os.path.exists(stop) and k < 6000:  # 2단계가 도는 동안 0.05초마다 한 행 (최대 5분)
-    con.execute("insert into rehearsal_probe (n) values (?)", (k,))
-    k += 1
-    time.sleep(0.05)
-print("rows", k)
+mp, mode = sys.argv[1], sys.argv[2]
+def alive(p):
+    try:
+        with open(f"/proc/{p}/stat") as f:
+            return f.read().split(") ", 1)[1][0] != "Z"
+    except OSError:
+        return False
+def tar_czf():
+    found = []
+    for p in os.listdir("/proc"):
+        if not p.isdigit():
+            continue
+        try:
+            with open(f"/proc/{p}/comm") as f:
+                if f.read().strip() != "tar":
+                    continue
+            with open(f"/proc/{p}/cmdline", "rb") as f:
+                args = f.read().split(b"\0")
+        except OSError:
+            continue
+        if b"czf" in args and any(a.startswith(b"/backup/moajwo-data-before-rollback-") for a in args):
+            found.append(int(p))
+    return found
+def probe_row():
+    con = sqlite3.connect(os.path.join(mp, "moajwo.db"), isolation_level=None)
+    con.execute("create table if not exists rehearsal_probe (n integer)")
+    con.execute("insert into rehearsal_probe (n) values (1)")
+    con.close()
+deadline = time.monotonic() + 600
+pids = []
+while not pids and time.monotonic() < deadline:
+    pids = tar_czf()
+    time.sleep(0.002)
+if not pids:
+    print("tar_seen=no")
+    sys.exit(0)
+if mode == "during":
+    time.sleep(0.3)  # tar가 큰 채움 파일을 압축하는 중 — 아래에서 쓰기 앞뒤로 tar가 살아 있는지 확인한다
+    before = all(alive(p) for p in pids)
+    with open(os.path.join(mp, "rehearsal-probe-during-tar"), "w") as f:
+        f.write("x")  # 볼륨 맨 위 폴더가 바뀜
+    probe_row()  # DB 내용도 바뀜
+    after = all(alive(p) for p in pids)
+    print(f"tar_seen=yes tar_alive_before={before} tar_alive_after={after}")
+else:
+    def verify_pids():  # 상자의 검증 컨테이너 프로세스: python -c '<VERIFY_PY — tarfile로 백업을 여는 코드>'
+        found = []
+        for p in os.listdir("/proc"):
+            if not p.isdigit():
+                continue
+            try:
+                with open(f"/proc/{p}/cmdline", "rb") as f:
+                    args = f.read().split(b"\0")
+            except OSError:
+                continue
+            if len(args) > 2 and args[0].endswith(b"python") and args[1] == b"-c" and b"tarfile" in args[2]:
+                found.append(p)
+        return found
+    def uptime():
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0])
+    tick = os.sysconf("SC_CLK_TCK")
+    while any(alive(p) for p in pids):
+        time.sleep(0.001)
+    before = bool(verify_pids())
+    probe_row()
+    written = uptime()
+    seen = []
+    deadline = time.monotonic() + 180
+    while not seen and time.monotonic() < deadline:
+        seen = verify_pids()
+        time.sleep(0.002)
+    started = None
+    for p in seen:
+        try:
+            with open(f"/proc/{p}/stat") as f:
+                started = int(f.read().split(") ", 1)[1].split()[19]) / tick
+        except OSError:
+            pass
+    order = "yes" if (not before and started is not None and started > written) else "no"
+    print(f"tar_seen=yes verify_before_write={before} written_uptime={written:.2f} verify_started_uptime={started} 쓰기가 먼저={order}")
 PY
-WPID=$!
-sleep 2
-before=$(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l); sha_before=$(ls backups/*.sha256 2>/dev/null | wc -l)
-r=$(run_box vm 2)
-touch "$OUT/vm-writer.stop"; wait "$WPID" 2>/dev/null || true
-expect vm.verify_stops "2:1" "$r" "$(state "$TS6")" "rev=0020_run_worker_lease" "running=[]" "recover_json=no"
-check vm.message "$(grep -h '^\[중단\]' "$OUT/vm-step2.log" | head -1)" "백업 검증 실패" "정리·downgrade를 하지 않음"
-check vm.no_sha256 "new_backups=$(( $(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l) - before )) · new_sha256=$(( $(ls backups/*.sha256 2>/dev/null | wc -l) - sha_before )) · writer=$(tail -1 "$OUT/vm-writer.log")" "new_backups=1" "new_sha256=0"
-sudo python3 -c "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute('drop table if exists rehearsal_probe'); c.commit()" "$MP/moajwo.db"
-res vm.resume "$(resume && echo ok || echo fail)" "지금 판 재개 (리허설 표는 지움)"
-snapshot vm
-check vm.serves "$API" '"login": 200' '"result_same": true'
+
+vm_case() {  # vm_case <이름> <during|after> <deploy 번호|-> — (새 반영 →) 1단계 정지 → 감시기 → 2단계 → 판정
+  # '-'이면 새로 반영하지 않고 앞 경우가 '지금 판 재개'로 돌려놓은 같은 배포 단위를 1단계부터 다시 쓴다
+  # (deploy.sh는 반영 전 리비전이 0019일 때만 반영하므로, 재개 뒤 0020 상태에서 다시 반영하지 않는다)
+  local name=$1 mode=$2 dn=$3 ts r mp before sha_before wpid ctl
+  if [ "$dn" != - ]; then
+    bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-$dn.out" 2>&1
+    r=$?; check "$name.deploy" "exit=$r · scripts/deploy.sh $NEW 0019_analysis_runs (9b $name 앞 새 반영)" "exit=0"
+  fi
+  ts=$(ts_of_unit)
+  mp=$(docker volume inspect moajwo_moajwo-data --format '{{.Mountpoint}}')
+  r=$(run_steps "$name" 1 1)
+  check "$name.stop" "$r" "done"
+  if [ "$r" != done ]; then  # 정지하지 못했으면 2단계를 돌리지 않는다 (떠 있는 서비스로 백업 단계를 돌리면 판정이 흐려짐)
+    res "$name.skipped" "fail" "1단계가 끝나지 않아 2단계·감시기를 돌리지 않음"
+    res "$name.resume" "$(resume && echo ok || echo fail)" "지금 판 재개"
+    return
+  fi
+  [ "$mode" = during ] && sudo dd if=/dev/urandom of="$mp/rehearsal-filler.bin" bs=1M count=200 status=none   # tar가 몇 초 걸리게
+  before=$(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l); sha_before=$(ls backups/*.sha256 2>/dev/null | wc -l)
+  sudo python3 "$OUT/vm-watch.py" "$mp" "$mode" > "$OUT/$name-watch.log" 2>&1 &
+  wpid=$!
+  r=$(run_box "$name" 2)
+  wait "$wpid" 2>/dev/null || true
+  ctl=$(tail -1 "$OUT/$name-watch.log")
+  expect "$name.stops" "2:1" "$r" "$(state "$ts")" "rev=$NEW_HEAD" "running=[]" "recover_json=no"
+  if [ "$mode" = during ]; then
+    check "$name.control" "$ctl · tar 경고 $(grep -c 'file changed as we read it' "$OUT/$name-step2.log")줄" \
+      "tar_seen=yes" "tar_alive_before=True" "tar_alive_after=True"
+    check "$name.message" "$(grep -h '^\[중단\]' "$OUT/$name-step2.log" | head -1)" "백업 만들기·압축 검사 실패" "정리·downgrade를 하지 않음"
+  else
+    check "$name.control" "$ctl" "tar_seen=yes" "verify_before_write=False" "쓰기가 먼저=yes"
+    check "$name.message" "$(grep -h '^\[중단\]' "$OUT/$name-step2.log" | head -1)" "백업 검증 실패" "정리·downgrade를 하지 않음"
+  fi
+  check "$name.no_sha256" "new_backups=$(( $(ls backups/moajwo-data-before-rollback-*.tgz 2>/dev/null | wc -l) - before )) · new_sha256=$(( $(ls backups/*.sha256 2>/dev/null | wc -l) - sha_before ))" "new_backups=1" "new_sha256=0"
+  # 리허설이 만든 것만 지운다: 채움 파일·표시 파일·탐침 표, 그리고 쓰지 않는 백업(합성 자료, 검증 표시 없음)
+  sudo rm -f "$mp/rehearsal-filler.bin" "$mp/rehearsal-probe-during-tar"
+  sudo python3 -c "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute('drop table if exists rehearsal_probe'); c.commit()" "$mp/moajwo.db"
+  [ "$mode" = during ] && rm -f "$(ls -t backups/moajwo-data-before-rollback-*.tgz | head -1)"
+  res "$name.resume" "$(resume && echo ok || echo fail)" "지금 판 재개 (리허설 파일·표는 지움)"
+  snapshot "$name"
+  check "$name.serves" "$API" '"login": 200' '"result_same": true'
+}
+# 9b-1. 압축 중 원본이 바뀜 → tar 'file changed as we read it' → '[중단] 백업 만들기·압축 검사 실패' (검증 컨테이너는 뜨지 않음)
+vm_case vm_tar during 6
+# 9b-2. 압축이 끝난 뒤·검증 전에 볼륨 DB가 바뀜 → '[중단] 백업 검증 실패' (백업은 만들어졌지만 검증 표시 .sha256 없음)
+vm_case vm_verify after -
 
 cp -r backups "$OUT/backups-meta" 2>/dev/null; rm -f "$OUT"/backups-meta/*.tgz   # 압축 백업(합성 자료)은 올리지 않음
 docker compose logs --no-color > "$OUT/compose.log" 2>&1
