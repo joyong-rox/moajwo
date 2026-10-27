@@ -13,6 +13,9 @@
   key 연결 요약에 요청 번호가 없거나 모양이 다름.
 
 downgrade: 고유 색인과 세 열을 지운다. 요청 번호는 요약 JSON에도 있어 0020 판의 코드가 그대로 읽는다(이 판의 '내용 비교'만 없어짐).
+이 판에서 시작해 실행 중인 행(담당 있음)이 있으면 0020과 같은 이유로 내리지 않는다 — 그래야 'alembic downgrade 0019'가 0021에서
+멈추고 리비전이 0021 그대로 남는다(보호가 0020에만 있으면 0021→0020은 내려가고 0020→0019에서 거절돼 리비전이 0020에 남는다 —
+롤백 리허설에서 발견).
 
 Revision ID: 0021_run_request_key
 Revises: 0020_run_worker_lease
@@ -101,6 +104,20 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # 0020의 downgrade와 같은 보호: 이 판에서 시작해 실행 중인 행(담당 있음)이 있으면 아무것도 바꾸지 않는다.
+    # 'alembic downgrade 0019'는 0021 → 0020 → 0019 순서라, 여기서 멈춰야 리비전이 0021 그대로 남는다.
+    running = (
+        op.get_bind()
+        .execute(sa.text("SELECT count(*) FROM runs WHERE status = 'running' AND worker IS NOT NULL"))
+        .scalar()
+        or 0
+    )
+    if running:
+        raise RuntimeError(
+            f"이 판에서 시작한 실행 중인 결과 실행이 {running}건 있어 0020으로 내리지 않습니다 — 서버를 멈추고 백업한 뒤 "
+            "'python -m app.recovery recover'로 정리하고 'python -m app.recovery status'로 확인한 다음 다시 하세요 "
+            "(docs/DEPLOY.md 10장)."
+        )
     _short_lock_wait()
     op.drop_index("uq_runs_request", table_name="runs")
     with op.batch_alter_table("runs") as batch:
