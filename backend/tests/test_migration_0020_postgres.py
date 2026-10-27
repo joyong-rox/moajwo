@@ -28,7 +28,8 @@ from app.db import Base
 from tests.conftest import PG_ADMIN, pg_database, pg_role_with_password
 from tests.test_migrations_postgres import BACKEND, _alembic, _engine, needs_admin
 
-HEAD, PREVIOUS = "0020_run_worker_lease", "0019_analysis_runs"
+HEAD, PREVIOUS = "0020_run_worker_lease", "0019_analysis_runs"  # 이 파일은 0020의 경계를 본다 (지금 head는 0021)
+TOP = "0021_run_request_key"
 INSERT_RUN = (
     "INSERT INTO runs (status, trigger, input_file_count, file_ids, row_count, change_count, warning_count, summary"
     "{extra}) VALUES (:status, 'manual', 0, '[]', 0, 0, 0, '{{}}'{values}) RETURNING id"
@@ -97,7 +98,7 @@ def test_0019_0020_0019_0020_keeps_the_rows_and_refuses_while_a_run_of_0020_is_r
         assert _ok(_alembic(url, tmp_path, "upgrade", PREVIOUS))
         _seed(url)
         before = _snapshot(url)
-        assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
+        assert _ok(_alembic(url, tmp_path, "upgrade", HEAD))
         assert _revision(url) == HEAD and _lease_columns(url) == {"worker", "heartbeat_at"}
         assert _snapshot(url) == before  # 기존 행은 그대로 (새 열은 비어 있음)
         assert _sql(url, "SELECT count(*) FROM runs WHERE worker IS NOT NULL OR heartbeat_at IS NOT NULL") == [(0,)]
@@ -114,9 +115,9 @@ def test_0019_0020_0019_0020_keeps_the_rows_and_refuses_while_a_run_of_0020_is_r
         settled = _snapshot(url)
         assert _ok(_alembic(url, tmp_path, "downgrade", PREVIOUS))
         assert _revision(url) == PREVIOUS and _lease_columns(url) == set() and _snapshot(url) == settled
-        # 다시 올려도 행은 그대로, head는 모델과 같다
+        # 다시 올려도 행은 그대로, head(0021)는 모델과 같다
         assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
-        assert _revision(url) == HEAD and _snapshot(url) == settled and _diff(url) == []
+        assert _revision(url) == TOP and _snapshot(url) == settled and _diff(url) == []
     finally:
         pg_database("mig_0020_round", drop=True)
 
@@ -128,9 +129,9 @@ def test_0020_up_and_down_give_up_behind_an_open_transaction_on_runs(tmp_path: P
     url = pg_database("mig_0020_lock")
     try:
         assert _ok(_alembic(url, tmp_path, "upgrade", PREVIOUS))
-        for step, target, then in (("upgrade", "head", set()), ("downgrade", PREVIOUS, {"worker", "heartbeat_at"})):
+        for step, target, then in (("upgrade", HEAD, set()), ("downgrade", PREVIOUS, {"worker", "heartbeat_at"})):
             if step == "downgrade":
-                assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
+                assert _ok(_alembic(url, tmp_path, "upgrade", HEAD))
             revision = _revision(url)
             started = time.monotonic()  # 막히지 않은 alembic 명령의 기동·종료 비용 — 기다린 시간만 떼어 본다
             assert _ok(_alembic(url, tmp_path, "current"))
@@ -159,11 +160,11 @@ def test_a_failing_step_rolls_back_the_whole_0020_change(tmp_path: Path) -> None
     try:
         assert _ok(_alembic(url, tmp_path, "upgrade", PREVIOUS))
         _sql(url, "ALTER TABLE runs ADD COLUMN heartbeat_at timestamptz")
-        failed = _alembic(url, tmp_path, "upgrade", "head")
+        failed = _alembic(url, tmp_path, "upgrade", HEAD)
         assert failed.returncode != 0 and "DuplicateColumn" in failed.stderr, failed.stderr[-500:]
         assert _revision(url) == PREVIOUS and _lease_columns(url) == {"heartbeat_at"}  # worker는 되돌아감
         _sql(url, "ALTER TABLE runs DROP COLUMN heartbeat_at")
-        assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
+        assert _ok(_alembic(url, tmp_path, "upgrade", HEAD))
         _sql(url, "CREATE VIEW run_workers AS SELECT id, worker FROM runs")
         failed = _alembic(url, tmp_path, "downgrade", PREVIOUS)
         assert failed.returncode != 0 and "DependentObjectsStillExist" in failed.stderr, failed.stderr[-500:]
@@ -203,7 +204,7 @@ def test_0020_keeps_the_table_owner_and_the_app_role_grants(tmp_path: Path) -> N
         acl = "SELECT pg_get_userbyid(relowner), CAST(relacl AS TEXT) FROM pg_class WHERE relname = 'runs'"
         before = _sql(admin_url, acl)
         assert before[0][0] == owner
-        for step, target in (("upgrade", "head"), ("downgrade", PREVIOUS), ("upgrade", "head")):
+        for step, target in (("upgrade", HEAD), ("downgrade", PREVIOUS), ("upgrade", "head")):
             assert _ok(_alembic(as_role(owner), tmp_path, step, target))
             assert _sql(admin_url, acl) == before, step
         insert = INSERT_RUN.format(extra=", worker, heartbeat_at", values=", 'abcdef012345-app', now()")
@@ -238,7 +239,7 @@ def test_recover_and_status_on_postgresql_before_the_downgrade(tmp_path: Path) -
     url = pg_database("mig_0020_recover")
     statuses = "SELECT id, status FROM runs WHERE id IN (:a, :b) ORDER BY id"
     try:
-        assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
+        assert _ok(_alembic(url, tmp_path, "upgrade", HEAD))
         values = ", 'f0f0f0f0f0f0-gone1234', now() - interval '1 day'"  # 이 결과 폴더가 아닌 담당, 하루 전 신호
         rid = _sql(url, INSERT_RUN.format(extra=", worker, heartbeat_at", values=values), status="running")[0][0]
         values = ", 'f0f0f0f0f0f0-live5678', now() - interval '1 minute'"  # 같은 다른 디스크, 1분 전 신호

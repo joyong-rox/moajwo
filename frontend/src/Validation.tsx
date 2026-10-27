@@ -24,9 +24,10 @@ const STATUS_TEXT: Record<ValidationStatus, string> = {
 
 const MAX_TARGETS = 50 // 서버의 한 번에 검사하는 파일 수 제한과 같음 (validation_api.MAX_FILES)
 
-// 결과 형태: 하나의 통합표(검토 → 통합 결과) · 파일별 시트로 묶기(시트 하나씩 + 통계 요약 선택)
-export type ResultMode = 'table' | 'sheets'
+// 결과 형태: 하나의 통합표(검토 → 통합 결과) · 파일별 시트로 묶기(시트 하나씩 + 통계 요약 선택) · 공통 key로 연결하기(사용자별 한 행)
+export type ResultMode = 'table' | 'sheets' | 'keyjoin'
 const MODE_KEY = 'moajwo.home.mode' // 이 브라우저에서 마지막으로 고른 결과 형태
+const KEYJOIN_MIN_FILES = 2 // 서버의 최소 입력 수 (keyjoin MAX/MIN_INPUTS) — 한 화면은 파일마다 시트 하나를 입력으로 쓴다
 const MODES: { value: ResultMode; title: string; desc: string; example: string }[] = [
   {
     value: 'table',
@@ -40,11 +41,18 @@ const MODES: { value: ResultMode; title: string; desc: string; example: string }
     desc: '고른 시트를 결과 파일의 시트 하나씩으로 옮깁니다. 검토·열 매핑 없이도 됩니다. 통계 요약 시트는 선택입니다.',
     example: '예: a·b·c·d → 시트 a·b·c·d (요약을 켜면 + 「통계 요약」)',
   },
+  {
+    value: 'keyjoin',
+    title: '공통 key로 연결하기',
+    desc: '여러 파일의 같은 사용자를 key(사번·ID 등)로 연결해 사용자별 한 행을 만듭니다. 열 매핑·검토 없이도 됩니다.',
+    example: '예: A(사번·부서)+B(사용자번호·교육 건수)… → 시트 「연결 결과」 (+ 출처·연결 요약)',
+  },
 ]
 
 function savedMode(): ResultMode {
   try {
-    return localStorage.getItem(MODE_KEY) === 'sheets' ? 'sheets' : 'table'
+    const saved = localStorage.getItem(MODE_KEY)
+    return saved === 'sheets' || saved === 'keyjoin' ? saved : 'table'
   } catch {
     return 'table'
   }
@@ -370,6 +378,33 @@ function Validation({
                 {baseline.size > 0 && (
                   <p className="wk-why" role="note">
                     전월 자료 {baseline.size}개는 통합표 검사에만 씁니다 — 파일별 시트로 묶기에는 넣지 않습니다.
+                  </p>
+                )}
+              </div>
+            )}
+            {mode === 'keyjoin' && (
+              <div className="wk-mode-next">
+                <button
+                  type="button"
+                  className="wk-btn-primary"
+                  aria-describedby="wk-hint-keyjoin"
+                  disabled={targets.size < KEYJOIN_MIN_FILES}
+                  onClick={() => navigate(`/keyjoin?files=${[...targets].join(',')}`, { focus: { to: 'page' } })}
+                >
+                  다음: key·가져올 열 설정 ({targets.size}개 파일)
+                </button>
+                <p className="wk-val-hint" id="wk-hint-keyjoin">
+                  다음 화면에서 입력마다 key 열(단일·복합)과 가져올 열·결과 이름·포함 범위를 정하고, 연결 결과·문제를 확인한 뒤
+                  엑셀을 만듭니다. 파일 {KEYJOIN_MIN_FILES}개 이상이 필요합니다.
+                </p>
+                {targets.size > 0 && targets.size < KEYJOIN_MIN_FILES && (
+                  <p className="wk-why" role="note">
+                    <strong>누를 수 없음</strong> 연결하려면 검증 대상 파일을 {KEYJOIN_MIN_FILES}개 이상 고르세요.
+                  </p>
+                )}
+                {baseline.size > 0 && (
+                  <p className="wk-why" role="note">
+                    전월 자료 {baseline.size}개는 통합표 검사에만 씁니다 — 공통 key 연결에는 넣지 않습니다.
                   </p>
                 )}
               </div>

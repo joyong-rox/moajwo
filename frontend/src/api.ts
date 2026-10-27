@@ -571,9 +571,15 @@ export type IntegrationRun = {
     columns?: string[]
     include_unmapped?: boolean
     unmapped_columns?: string[]
-    mode?: 'sheets' // 파일별 시트로 묶기 (없으면 하나의 통합표)
+    mode?: 'sheets' | 'keyjoin' // 파일별 시트로 묶기 · 공통 key 연결 (없으면 하나의 통합표)
+    mode_label?: string
     stats_summary?: boolean
     sheet_order?: string[]
+    // 공통 key 연결: 범위·입력 수(시작 요약은 개수, 완료 요약은 입력 목록)·결과 크기·사용자 집합 크기
+    scope?: KeyJoinScope
+    inputs?: number | { index: number; file_id: number }[]
+    result?: { rows: number; columns: number; key_columns: number }
+    counts?: { union: number; intersection: number; excluded: number }
     // 통계 요약 항목 (파일별 시트 + 요약). source_columns는 이 목록이 생긴 뒤에 만든 실행에만 있다
     summary_items?: {
       field_key: string
@@ -1468,23 +1474,32 @@ export type AnalysisRowRef = {
 }
 export type AnalysisPage<T> = { total: number; offset: number; items: T[]; all?: number }
 
-/** 409(실행 막힘)·422(조건 오류) 응답의 사유 목록을 함께 전한다 */
+/** 409(실행 막힘)·422(조건 오류) 응답의 사유 목록을 함께 전한다. code·runId는 서버가 detail에 넣어 준 경우만 (공통 key 연결의 409 구분) */
 export class AnalysisProblemError extends Error {
   problems: string[]
-  constructor(message: string, problems: string[]) {
+  code: string | null
+  runId: number | null
+  constructor(message: string, problems: string[], code: string | null = null, runId: number | null = null) {
     super(message)
     this.problems = problems
+    this.code = code
+    this.runId = runId
   }
 }
 
 async function analysisJson<T>(res: Response): Promise<T> {
   if (res.status === 409) {
     const detail = await res.json().then(
-      (j: { detail?: { message?: string; problems?: string[] } | string }) => j.detail,
+      (j: { detail?: { message?: string; problems?: string[]; code?: unknown; run_id?: unknown } | string }) => j.detail,
       () => undefined,
     )
     if (detail && typeof detail === 'object') {
-      throw new AnalysisProblemError(detail.message ?? '실행할 수 없습니다.', detail.problems ?? [])
+      throw new AnalysisProblemError(
+        detail.message ?? '실행할 수 없습니다.',
+        detail.problems ?? [],
+        typeof detail.code === 'string' ? detail.code : null,
+        typeof detail.run_id === 'number' ? detail.run_id : null,
+      )
     }
     throw new AnalysisProblemError(typeof detail === 'string' ? detail : '실행할 수 없습니다.', [])
   }
@@ -1688,4 +1703,141 @@ export async function runBundle(body: BundleRequest, basis: string): Promise<Int
     body: JSON.stringify({ ...body, expected_basis: basis }),
   })
   return analysisJson(res) // 409는 사유 목록과 함께 (AnalysisProblemError)
+}
+
+// ---------------------------------------------------------------- 공통 key로 연결하기 (취합 방식 'keyjoin')
+// 모든 선택은 파일 ID·시트 ID·열 ID로만 보낸다 (가린 표시 이름은 식별자가 아님). 시트·열 목록은 fetchPreview가 준다.
+
+export type KeyJoinScope = 'base' | 'all' | 'common' // 기준 파일의 사용자만 · 모든 파일의 사용자(합집합) · 공통 사용자(교집합)
+export type KeyJoinSheetRef = { file_id: number; sheet_id: string }
+export type KeyJoinColumnIn = { column_id: string; out_name: string | null } // out_name null = 서버 기본(원본 열 이름)
+// key_columns: 순서 있음, 모든 입력이 같은 개수 (복합 key의 i번째끼리 대응). columns에 key 열은 넣지 않는다
+// rows: 소계·주석으로 추정된(key는 있는) 행의 포함/제외 — 원본 행 번호. 없으면 모두 '확인 필요'(서버가 차단)
+export type KeyJoinRowDecisions = { include: number[]; exclude: number[] }
+export type KeyJoinInput = KeyJoinSheetRef & { key_columns: string[]; columns: KeyJoinColumnIn[]; rows?: KeyJoinRowDecisions }
+// key_names null = 기준 입력의 key 열 이름. base는 inputs 중 하나 (모든 범위에서 필수 — 출력 순서의 기준)
+export type KeyJoinRequest = { inputs: KeyJoinInput[]; scope: KeyJoinScope; base: KeyJoinSheetRef; key_names: string[] | null }
+
+/** 확인 결과의 문제(block = 만들 수 없음)·참고(warn). text에는 위치(입력 번호·파일 #·시트 순번·열 문자·행 번호)·개수·코드만 있고
+ *  key 원문·가린 key·해시는 없다. 입력에 속한 문제는 inputs[i].problems에도 같은 객체로 들어 있다 */
+export type KeyJoinProblem = {
+  code: string
+  level: 'block' | 'warn'
+  input?: number | null
+  file_id?: number | null
+  sheet_id?: string | null
+  column?: string | null
+  rows?: number[] | null // 처음 5개
+  count?: number | null
+  groups?: number | null
+  text: string
+}
+// key 열 칸의 자료형 집계 (데이터 행)
+export type KeyJoinKinds = {
+  text: number
+  int: number
+  float: number
+  bool: number
+  date: number
+  empty: number
+  filled: number // 병합 채움 (위 행 값을 복사하지 않고 차단)
+  missing_mark: number
+  precision: number
+  illegal: number // 엑셀에 쓸 수 없는 글자 (차단)
+}
+export type KeyJoinPlanInput = {
+  index: number
+  file_id: number
+  file_name: string // 가림
+  sheet_id: string
+  sheet: string // 가림
+  tab: number
+  label: string // '입력 1 · #12 A.csv / A (1번째 시트)'
+  own: boolean
+  pii: 'none' | 'acknowledged' | 'needs_ack'
+  pii_summary: PiiSummary | null
+  key_columns: { column_id: string; name: string; letter: string; kinds: KeyJoinKinds | null }[]
+  picked: { column_id: string; name: string; letter: string; out_name: string; default_name: boolean }[]
+  rows: { data: number; subtotal: number; note: number; empty: number } | null
+  // 확인이 필요한 행(소계·주석 추정 + key 있음): 위치·근거·결정만 (칸 값 없음). items는 listed개까지
+  row_review: {
+    total: number
+    listed: number
+    included: number
+    excluded: number
+    unresolved: number
+    source_rows: number // 데이터 행 + 추정 행
+    link_rows: number // 데이터 행 + 포함한 행
+    items: { row: number; column: string | null; reason: 'subtotal' | 'note'; in_key: boolean; decision: 'include' | 'exclude' | null }[]
+  } | null
+  // 싼 검사(권한·pii·한도)에서 차단된 요청은 key 분석을 하지 않아 null
+  keys: {
+    indexed: number
+    duplicate_keys: number
+    duplicate_rows: number
+    empty_rows: number
+    partial_rows: number
+    unsupported_rows: number
+    linked: number
+    unlinked: number
+    whitespace_variants: number
+  } | null
+  problems: KeyJoinProblem[]
+}
+// 미리보기 행: key는 가린 정규형 (가린 표시가 같은 서로 다른 key에는 서버가 '(가림 구분 n)'을 붙임), sources는 연결된 입력의 원본 행만
+// (미연결 입력은 항목이 없다 — 화면은 input 번호로 입력 순서에 맞춰 보인다)
+export type KeyJoinPreviewRow = { key: string[]; cells: Cell[]; sources: { input: number; row: number }[] }
+export type KeyJoinPlan = {
+  mode: 'keyjoin'
+  policy: string
+  scope: KeyJoinScope
+  base: KeyJoinSheetRef & { index: number }
+  inputs: KeyJoinPlanInput[]
+  header: string[] // 최종 결과 열 이름 (가림) — key 열 + 가져올 열, 같은 이름은 서버가 '(입력 n · #fid)'로 구분
+  result: { rows: number; key_columns: number; columns: number; union: number; intersection: number; excluded: number }
+  preview: { rows: KeyJoinPreviewRow[]; shown: number; total: number; pool: number; note: string }
+  problems: KeyJoinProblem[]
+  warnings: KeyJoinProblem[]
+  limits: {
+    inputs: number
+    key_columns: number
+    columns: number
+    result_columns: number
+    rows: number
+    cells: number
+    text_chars: number
+    preview_rows: number
+    excel_rows: number
+  }
+  budget: { output_cells: number; index_cells: number; text_chars: number; cells_weighted: number }
+  basis: string
+  ready: boolean
+}
+
+/** 연결 확인 (읽기 전용 — 입력을 다시 읽고 key 인덱스를 만들지만 파일·기록·학습을 남기지 않음). 422·404·410·503은 ApiError */
+export async function planKeyJoin(body: KeyJoinRequest, signal?: AbortSignal): Promise<KeyJoinPlan> {
+  const res = await apiFetch(`${API_BASE}/keyjoin/plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+  return json(res)
+}
+
+/** 엑셀 만들기. requestId(32 hex)는 같은 요청의 재전송을 서버가 알아보는 번호 — 같은 번호·같은 basis면 새로 만들지 않고
+ *  기존 실행을 200으로 돌려준다(created=false), 새로 만들면 201(created=true). 409(KEYJOIN_BASIS_CHANGED·KEYJOIN_NOT_READY·
+ *  KEYJOIN_REQUEST_MISMATCH·KEYJOIN_REQUEST_USED·KEYJOIN_FAILED)는 code·run_id·사유 목록과 함께 AnalysisProblemError. */
+export async function runKeyJoin(
+  body: KeyJoinRequest,
+  basis: string,
+  requestId: string,
+): Promise<{ run: IntegrationRun; created: boolean }> {
+  const res = await apiFetch(`${API_BASE}/keyjoin/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, expected_basis: basis, request_id: requestId }),
+  })
+  const run = await analysisJson<IntegrationRun>(res)
+  return { run, created: res.status === 201 }
 }

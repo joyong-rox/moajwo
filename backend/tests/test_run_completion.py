@@ -1,5 +1,5 @@
-"""결과 파일 완료 경계 — 묶기·직접 통합·자동화 통합 세 흐름에 오류를 주입한다 (함수 대역: os.replace·os.chmod·
-Session.commit·Session.execute를 감싼다. 실제 프로세스 종료는 test_run_recovery.py).
+"""결과 파일 완료 경계 — 묶기·직접 통합·자동화 통합·공통 key 연결 네 흐름에 오류를 주입한다 (함수 대역: os.replace·
+os.chmod·Session.commit·Session.execute를 감싼다. 실제 프로세스 종료는 test_run_recovery.py).
 
 - 이름을 바꾼 직후(권한 바꾸기 실패) · 완료 commit 직전(commit 실패, 반영 안 됨) · commit 응답 유실(반영됨) →
   완성된 결과 파일을 지우지 않고 결과가 한 번 done이 된다 (201).
@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import os
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,7 @@ SEPT = [
 ]
 BUNDLE_HEAD = ["시도", "시군구", "인구수"]
 BUNDLE_MAP = {"시도": "sido", "시군구": "sigungu", "인구수": "population"}
-FLOWS = ("bundle", "integrate", "automation")
+FLOWS = ("bundle", "integrate", "automation", "keyjoin")
 MODES = ("chmod_after_rename", "before_commit", "lost_response", "lost_then_down")
 
 
@@ -145,6 +146,17 @@ def _prepare(c: TestClient, flow: str, tag: str) -> Callable[[], Any]:
     if flow == "integrate":
         rid = _ready_review(c, tag)
         return lambda: c.post(f"/reviews/{rid}/integrate")
+    if flow == "keyjoin":  # 공통 key 연결: 두 파일을 사번으로 (요청마다 새 request_id)
+        a = _upload(c, f"{tag}-a.xlsx", _xlsx([["사번", "부서"], ["001", "총무"], ["002", "기획"]], sheet=f"{tag}a"))
+        b = _upload(c, f"{tag}-b.xlsx", _xlsx([["사번", "건수"], ["001", 10], ["003", 30]], sheet=f"{tag}b"))
+        inputs = [
+            {"file_id": f, "sheet_id": "s0", "key_columns": ["c0"], "columns": [{"column_id": "c1"}]} for f in (a, b)
+        ]
+        body = {"inputs": inputs, "scope": "base", "base": {"file_id": a, "sheet_id": "s0"}}
+        plan = c.post("/keyjoin/plan", json=body).json()
+        assert plan["ready"], plan
+        return lambda: c.post("/keyjoin/run", json={**body, "expected_basis": plan["basis"],
+                                                     "request_id": uuid.uuid4().hex})  # fmt: skip
     first = _ready_review(c, f"{tag}-first")  # 자동화를 만들 완료 실행
     done = c.post(f"/reviews/{first}/integrate")
     assert done.status_code == 201, done.text
@@ -251,17 +263,17 @@ def test_completion_boundary_keeps_the_finished_file_and_completes_once(
     assert flows.get(f"/runs/{run_id}/download").status_code == 200
 
 
-@pytest.mark.parametrize("flow", ("bundle", "integrate"))
+@pytest.mark.parametrize("flow", ("bundle", "integrate", "keyjoin"))
 def test_same_name_result_is_never_overwritten_and_the_run_fails_cleanly(
     flows: TestClient, monkeypatch: pytest.MonkeyPatch, flow: str
 ) -> None:
-    from app import bundle, integration
+    from app import bundle, integration, keyjoin
 
     send = _prepare(flows, flow, f"same-{flow}")
     OUTPUTS.mkdir(parents=True, exist_ok=True)
     taken = OUTPUTS / f"이미있음_{flow}_9999_20260101_000000.xlsx"
     taken.write_bytes(b"existing result")
-    module = bundle if flow == "bundle" else integration
+    module = {"bundle": bundle, "integrate": integration, "keyjoin": keyjoin}[flow]
     monkeypatch.setattr(module, "_output_path", lambda run_id, now: taken)
     try:
         res = send()
@@ -270,6 +282,8 @@ def test_same_name_result_is_never_overwritten_and_the_run_fails_cleanly(
         assert row["status"] == "failed" and row["output_path"] is None and row["output_sha256"] is None
         assert row["change_count"] == 0 and row["changes"] == 0
         assert "summary_items" not in row["summary"] and "columns" not in json.loads(row["summary"])
+        if flow == "keyjoin":  # 시작 요약(방식·요청 번호·범위)만 남고 결과 내용(header·inputs 목록)은 없다
+            assert json.loads(row["summary"])["mode"] == "keyjoin" and "header" not in json.loads(row["summary"])
         assert taken.read_bytes() == b"existing result"  # 원래 있던 파일은 그대로
         assert not list(OUTPUTS.glob(f"{taken.name}.*.tmp")) and not list(OUTPUTS.glob("tmp*.xlsx.tmp"))
     finally:
@@ -277,7 +291,7 @@ def test_same_name_result_is_never_overwritten_and_the_run_fails_cleanly(
         taken.unlink()
 
 
-@pytest.mark.parametrize("flow", ("bundle", "integrate"))
+@pytest.mark.parametrize("flow", ("bundle", "integrate", "keyjoin"))
 def test_rename_failure_before_completion_records_failed_without_files(
     flows: TestClient, monkeypatch: pytest.MonkeyPatch, flow: str
 ) -> None:

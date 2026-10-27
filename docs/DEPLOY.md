@@ -104,7 +104,7 @@ docker inspect moajwo-backend-1 --format '{{.Image}}'   # 로그의 새 backend 
 - `down -v`, 자동 downgrade, 운영 데이터 삭제, '결과 확인 필요' 실행의 일괄 실패 처리는 하지 않습니다.
 - 두 가지 길: **B(기본) 자료를 지키며 되돌리기** — 반영 뒤 생긴 업로드·실행 기록을 그대로 두고 이전 코드가 읽습니다. **A 배포 전 백업으로 복원** — 반영 뒤 생긴 자료가 활성 데이터에서 빠지므로(지우지 않고 옮겨 둠) 빠질 범위를 사용자에게 알리고 **별도 승인**을 받은 뒤 씁니다.
 
-### B. 자료를 지키며 되돌리기 — 단계별 명령 (8장 통합 후보·9장 0020 롤백은 모두 이 절차)
+### B. 자료를 지키며 되돌리기 — 단계별 명령 (8장 통합 후보·9장 0020·10장 0021 롤백은 모두 이 절차)
 
 저장소 폴더에서 Git Bash로 0단계부터 차례로 붙여 넣습니다. **각 단계는 앞 단계 끝에 `[N 완료]`가 찍힌 것을 본 뒤에만** 실행합니다.
 1~7단계 상자는 `( … )` 안에서 돌아 실패해도 창이 닫히지 않고, 실패하면 `[중단] …`과 다음 행동을 알립니다 — 그때는 다음 단계(백업·정리·downgrade·이미지
@@ -674,6 +674,35 @@ docker compose exec -T backend python -m app.recovery resolve <실행 번호> --
 - 이전 이미지는 기동 때 `alembic upgrade head`가 모르는 리비전(0020)에서 멈추므로 DB를 먼저 0019로 내립니다 (자동 downgrade는 하지 않음).
 - 롤백 A(반영 직전 백업 복원)는 4장 A입니다 — 반영 뒤 생긴 실행·결과는 활성 데이터에서 빠집니다 (지우지 않고 `_pre_rollback_<시각>/`).
 - 확인한 것 (SQLite): 마이그레이션 up → down → up, 이 판의 실행 중 행이 있으면 downgrade 거절·이전 판 행은 통과 (`tests/test_migrations.py`), 별도 프로세스의 `recover`가 끝난 담당은 판정하고 신호가 끊긴 다른 디스크 실행은 '결과 확인 필요'로, 신호가 새로운 실행·이전 판 실행은 그대로 두며 남은 행 수와 종료 2를 알리고, 정리 뒤 downgrade가 됨 (`tests/test_run_recovery.py`). PostgreSQL: 0019 → 0020 → 0019 → 0020·downgrade 거절·표 잠금 대기 5초·부분 DDL 되돌림·소유자·앱 계정 권한·PostgreSQL에서의 `recover`·`status` 뒤 downgrade (`tests/test_migration_0020_postgres.py`). 실제 Docker 볼륨으로 4장 B를 그대로 리허설한 기록은 아래 '리허설 결과' 7차입니다.
+
+## 10. 0021 반영 (결과 실행의 요청 번호·내용 해시·고유 색인) — 확인 항목과 롤백
+
+공통 key 연결(#52)의 생성 요청 번호를 DB에서 관리하는 판입니다. 반영 절차는 1~3장과 같고 **반영 전 리비전 인자는 `0020_run_worker_lease`**입니다
+(`bash scripts/deploy.sh <승인한 후보 HEAD SHA> 0020_run_worker_lease`). backend가 시작하면서 `0020_run_worker_lease → 0021_run_request_key`를
+적용합니다.
+
+- 0021은 `runs`에 빈 값을 허용하는 열 세 개(`request_kind`·`request_id`·`request_hash`)와 고유 색인 `uq_runs_request(user_id, request_kind,
+  request_id)`를 더합니다. 다른 표·값은 바꾸지 않습니다.
+- **기존 행 채움**: 이 판 전에 만든 공통 key 연결 실행(요약 JSON의 `mode="keyjoin"`·`request_id`)은 `request_kind`·`request_id`만 채우고
+  해시는 비워 둡니다 — 그 번호로 다시 보내면 내용을 비교할 수 없어 409 `KEYJOIN_REQUEST_LEGACY`로 거절합니다(새 번호로 새로 만들기). 묶기·통합
+  실행은 비워 둡니다.
+- **멈추는 조건(아무것도 바꾸지 않음)**: 같은 사용자·같은 요청 번호의 key 연결 실행이 둘 이상 / `keyjoin`이 든 요약을 JSON으로 읽을 수 없음 /
+  key 연결 요약에 요청 번호가 없거나 모양이 다름. 이때 마이그레이션은 열을 만들기 전에 실행 번호만 알리고 멈춥니다(지우거나 덮지 않음 —
+  트랜잭션 DDL이라 리비전·열·행 그대로). 기동 때 `alembic upgrade head`가 멈추면 backend가 뜨지 않으므로 deploy.sh의 전환 실패 경로(4장 B로
+  되돌리기)가 됩니다. 백업한 뒤 그 실행 기록을 확인하고 정리 방법(어느 행을 남길지)을 정한 다음 다시 반영합니다 — 자동으로 고르지 않습니다.
+- 표 잠금은 5초만 기다립니다(0020과 같음). 반영 뒤 점검: `alembic current` → `0021_run_request_key (head)`, `python -m app.recovery status`가
+  `revision 0021_run_request_key`로 동작(0020과 같은 정리 동작), key 연결 화면에서 생성 → 같은 요청 번호 재전송이 200.
+- 동작 변화(`docs/KEYJOIN.md` '중복 제출'): 같은 번호는 사용자별 실행 하나 — 내용이 같으면 그 실행(200, 상태 그대로), 다르면 409, 다른
+  프로세스가 동시에 보내도 실행 행을 넣는 순간 하나만 남습니다. 결과 만들기 차례는 여전히 프로세스별 메모리 차례입니다(1 worker·1 instance).
+
+### 롤백 B — 데이터를 지키며 0020으로 되돌리기 (별도 승인 후 수동)
+
+4장 B를 0~7단계 그대로 합니다(0단계가 이 반영 로그의 `0020_run_worker_lease → 0021_run_request_key`를 읽어 downgrade 대상을 0020으로 정함).
+0021의 downgrade는 고유 색인과 세 열만 지웁니다 — 요청 번호는 요약 JSON에도 있어 0020 판 코드가 그대로 읽습니다(최근 50건 조회·내용 비교
+없음의 그 판 동작으로 돌아감). 0021은 실행 중 행을 따로 막지 않습니다 — 4장 B는 1단계에서 서비스를 멈춘 뒤에만 5단계 downgrade에 이르므로
+새 판 코드가 지워진 열에 쓰는 일은 없습니다. 그 뒤 0019까지 더 내릴 때는 9장의 0020 조건(담당이 있는 실행 중 행이 있으면 거절)이 그대로입니다.
+확인한 것: SQLite up·down·up과 채움·멈춤 조건(`tests/test_migrations.py`), PostgreSQL 같은 항목과 고유 색인·잠금 대기 5초
+(`tests/test_migration_0021_postgres.py`), 롤백 리허설은 후보 트리의 alembic head를 읽어 같은 단계 상자로 돕니다(8차 뒤 9차).
 
 ## 리허설 결과
 

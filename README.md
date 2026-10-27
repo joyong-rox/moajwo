@@ -269,6 +269,22 @@ npm run lint && npm run build
 - **표준 항목이 없는 열 포함** (선택): 「통합 결과 만들기」 위의 체크를 켜면 검토에서 '해당 없음'으로 정한 열도 원래 열 이름으로 결과에 넣습니다 (표준 항목 이름과 겹치면 `(원본 열)`을 붙임). 기본은 꺼짐(기존 동작). 자동화로 저장하면 이 선택도 저장되어 다음 실행에 그대로 적용됩니다. API: `POST /reviews/{id}/integrate` 본문 `{"include_unmapped": true}`
 - API: `GET /runs`, `GET /runs/{id}`, `GET /runs/{id}/changes`, `GET /runs/{id}/download`
 
+## 공통 key 연결 (`/keyjoin`)
+
+여러 파일(또는 한 파일의 여러 시트)의 같은 사용자를 key(사번·ID 등)로 연결해 사용자별 한 행을 만들고, 입력마다 고른 열만 결과에 넣습니다.
+열 매핑·검토 없이 쓸 수 있으며 하나의 통합표·파일별 시트 묶기와 별개입니다. 자세한 규칙은 [docs/KEYJOIN.md](docs/KEYJOIN.md).
+
+- `POST /keyjoin/plan` (읽기 전용): 입력(`file_id`·`sheet_id`·`key_columns`·`columns[{column_id, out_name}]`)·범위(`base`/`all`/`common`)·
+  기준 입력·key 결과 이름으로 결과 열 이름, 한도, key 문제(차단·경고), 연결/미연결 수, 가린 미리보기(앞 20행), `basis`, `ready`를 돌려줍니다.
+- `POST /keyjoin/run` (`expected_basis`·`request_id`): 확인한 구성 그대로일 때만 결과 엑셀을 만듭니다(201). 같은 `request_id`의 재전송은 그 실행을
+  200으로 돌려주고, 바뀐 구성·다른 설정·실패한 번호의 재사용·만들 수 없는 구성은 409(`KEYJOIN_BASIS_CHANGED`·`KEYJOIN_REQUEST_MISMATCH`·
+  `KEYJOIN_REQUEST_USED`·`KEYJOIN_NOT_READY`)로 거절하며 실행 기록·파일을 남기지 않습니다.
+- key 규칙: 변환 전 값의 정확 일치(앞자리 0·공백·대소문자 보존). 정수 칸 123은 글자 '123'과 연결되고 '00123'과는 다릅니다. 날짜·참거짓·소수·
+  16자리 이상 숫자 칸·병합 채움·빈 값·결측 표기는 차단하고 안내합니다. 한 입력 안의 중복 key는 만들지 않습니다(합치거나 고르지 않음).
+- 결과: `data/outputs/key연결_<실행번호>_<KST 시각>.xlsx` — 「연결 결과」(key 칸은 항상 글자, 미연결은 빈 칸) + 「출처」(입력별 원본 행) + 「연결 요약」.
+  실행 기록(`GET /runs`)에 `summary.mode = "keyjoin"`(key 취합)으로 남고 내려받기는 기존과 같습니다. 개인정보·권한·가림은 [docs/PRIVACY.md](docs/PRIVACY.md),
+  한도·예산은 [docs/MEMORY.md](docs/MEMORY.md)의 '공통 key 연결' 절.
+
 ## 자동화와 실행 기록 (`/automations`, `runs`)
 
 사이드바 메뉴 **홈**(대시보드 + 취합 작업) · **자동화** · **실행 기록**. 자동화는 사용자가 새 파일로 실행할 때만 동작합니다 (스케줄러·작업 큐 없음). 일반 사용자는 자기가 저장한 자동화와 자기 실행 기록만 봅니다.

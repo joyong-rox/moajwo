@@ -32,7 +32,7 @@
                                                1 = 오류
     python -m app.recovery resolve RUN_ID --failed   결과 확인 필요 → 실패 (조건부, 파일은 지우지 않고 경로만 알림)
   세 명령 모두 먼저 이 DB의 리비전(alembic_version)과 runs 표의 0020 열(담당·생존 신호)을 읽기만 하고 맞춰 본다.
-  - 0020_run_worker_lease + 열 있음: 위 동작.
+  - 0020_run_worker_lease 또는 0021_run_request_key(0020 열 그대로 + 요청 번호 열) + 담당 열 있음: 위 동작.
   - 0019_analysis_runs + 열 없음(예: 반영 전 운영 DB): status는 실행 기록의 상태별 건수만 보여 주고(종료 0),
     recover·resolve는 아무것도 바꾸지 않고 종료 1.
   - 그 밖(리비전 없음·빈 값·여러 개·이 판이 다루지 않는 리비전·리비전과 열이 맞지 않음·runs 표 없음): status를 포함해
@@ -113,14 +113,23 @@ def _kst(value: datetime | None) -> datetime:
     return (_aware(value) or datetime.now(UTC)).astimezone(KST)
 
 
+KEYJOIN_START_KEYS = ("mode", "mode_label", "policy", "request_id", "basis", "scope", "inputs", "input_count")
+
+
 def _start_summary(summary: str | None) -> str:
-    """실패로 돌릴 때 요약을 시작 때 값으로 (묶기는 방식·요약 여부, 통합은 빈 요약 — 결과 내용은 남기지 않는다)."""
+    """실패로 돌릴 때 요약을 시작 때 값으로 (묶기는 방식·요약 여부, key 연결은 방식·요청 번호·범위 — 결과 내용은 남기지
+    않는다, 통합은 빈 요약)."""
     try:
         s = json.loads(summary or "{}")
     except ValueError:
         return "{}"
     if isinstance(s, dict) and s.get("mode") == "sheets":
         return json.dumps({"mode": "sheets", "stats_summary": s.get("stats_summary")})
+    if isinstance(s, dict) and s.get("mode") == "keyjoin":
+        inputs = s.get("inputs")
+        start = {k: s.get(k) for k in KEYJOIN_START_KEYS}
+        start["inputs"] = len(inputs) if isinstance(inputs, list) else inputs  # 완료 요약의 입력 목록은 개수로
+        return json.dumps(start, ensure_ascii=False)
     return "{}"
 
 
@@ -432,7 +441,9 @@ def resolve_failed(run_id: int) -> dict[str, Any]:
     return {"id": run_id, "changed": True, "left_file": row.output_path}
 
 
-LEASE_REVISION = "0020_run_worker_lease"  # 담당·생존 신호 열이 있는 판 — status·recover·resolve
+LEASE_REVISION = "0020_run_worker_lease"  # 담당·생존 신호 열이 생긴 판 — status·recover·resolve
+# 담당·생존 신호 열이 있는 판들 (0021은 요청 번호 열만 더함 — 정리 동작은 같다)
+LEASE_REVISIONS = (LEASE_REVISION, "0021_run_request_key")
 LEGACY_REVISION = "0019_analysis_runs"  # 그 바로 앞 판 — status는 상태별 건수만, 바꾸는 명령은 거절
 LEASE_COLUMNS = frozenset({"worker", "heartbeat_at"})
 
@@ -486,29 +497,30 @@ def schema_problem(info: dict[str, Any]) -> tuple[str | None, str | None]:
     if len(revisions) > 1:
         return None, f"리비전이 {len(revisions)}개입니다 ({', '.join(revisions)})"
     revision = revisions[0]
-    if revision not in (LEASE_REVISION, LEGACY_REVISION):
-        supported = f"{LEGACY_REVISION}·{LEASE_REVISION}"
+    if revision not in (*LEASE_REVISIONS, LEGACY_REVISION):
+        supported = "·".join((LEGACY_REVISION, *LEASE_REVISIONS))
         return None, f"이 판의 복구 명령이 다루지 않는 리비전({revision})입니다 (다루는 리비전: {supported})"
     if not info["runs_table"]:
         return None, f"리비전은 {revision}인데 실행 기록 표(runs)가 없습니다"
-    if revision == LEASE_REVISION and have != LEASE_COLUMNS:
+    if revision in LEASE_REVISIONS and have != LEASE_COLUMNS:
         found = "일부만 있습니다" if have else "없습니다"
-        return None, f"리비전은 {LEASE_REVISION}인데 담당·생존 신호 열(runs.worker·heartbeat_at)이 {found}"
+        return None, f"리비전은 {revision}인데 담당·생존 신호 열(runs.worker·heartbeat_at)이 {found}"
     if revision == LEGACY_REVISION and have:
         return None, f"리비전은 {LEGACY_REVISION}인데 0020의 담당·생존 신호 열({', '.join(sorted(have))})이 있습니다"
-    return ("lease" if revision == LEASE_REVISION else "legacy"), None
+    return ("lease" if revision in LEASE_REVISIONS else "legacy"), None
 
 
 def legacy_status(revision: str) -> dict[str, Any]:
     """0019 DB: 실행 기록의 상태별 건수만 (읽기만 — 담당·생존 신호가 없어 정리 대상인지 판단하지 않는다)."""
     with app_db.engine.connect() as c:
         rows = c.execute(text("SELECT status, count(*) FROM runs GROUP BY status ORDER BY status")).all()
+    lease = "·".join(LEASE_REVISIONS)
     return {
         "revision": revision,
         "lease_columns": False,
         "runs_by_status": {status: count for status, count in rows},
         "note": f"{LEGACY_REVISION} DB입니다 — 담당·생존 신호 열이 없어 실행 기록의 상태별 건수만 보여 줍니다 "
-        f"(읽기만 함). recover·resolve는 {LEASE_REVISION} DB에서만 씁니다.",
+        f"(읽기만 함). recover·resolve는 {lease} DB에서만 씁니다.",
     }
 
 

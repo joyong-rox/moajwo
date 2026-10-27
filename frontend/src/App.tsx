@@ -24,6 +24,7 @@ import MoajwoAdmin from './MoajwoAdmin'
 import Promotions from './Promotions'
 import ReviewPanel from './ReviewPanel'
 import HomeSteps from './HomeSteps'
+import KeyJoin from './KeyJoin'
 import { afterRouteChange, cancelFocusWaits, focusPageStart } from './pageFocus'
 import { navigate, replaceSearch, usePath, useSearch } from './router'
 import { ADMIN_BASE, findRoute, isActiveMenu, ROUTES } from './routes'
@@ -184,7 +185,7 @@ function Workspace() {
                 <div>
                   <h1 className="page-title">홈</h1>
                   <p className="wk-home-lead">
-                    파일을 올리고 고른 뒤, 결과 형태(하나의 통합표 · 파일별 시트)를 골라 이어서 진행하세요.
+                    파일을 올리고 고른 뒤, 결과 형태(하나의 통합표 · 파일별 시트 · 공통 key 연결)를 골라 이어서 진행하세요.
                   </p>
                 </div>
                 <ServerStatus state={state} />
@@ -243,6 +244,7 @@ function Workspace() {
               {allowed && path === '/mapping' && <MappingWorkspace />}
               {allowed && path === '/mapping/common' && <MappingCommon />}
               {allowed && path === '/bundle' && <Bundle />}
+              {allowed && path === '/keyjoin' && <KeyJoin />}
               {allowed && path === '/analysis' && <Analysis />}
               {allowed && path === '/dictionary' && <Dictionary />}
               {allowed && path === '/promotions' && <Promotions />}
