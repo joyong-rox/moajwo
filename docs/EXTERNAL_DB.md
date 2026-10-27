@@ -132,6 +132,9 @@ psql --no-password "service=moajwo-migrate" -c "SELECT count(*) FROM users"
 `sslmode=require`는 **암호화만** 보장하고 서버가 누구인지는 확인하지 않습니다 (libpq 문서 표: 도청 보호 예, 중간자 보호 아니오.
 root 파일이 있으면 verify-ca처럼 검증하는 호환 동작이 있지만 문서가 "의존하지 말 것"이라 합니다). Neon도 "항상 verify-full"을
 권장합니다. 그래서 외부 DB 주소는 모두 `sslmode=verify-full`을 기본으로 하고, 신뢰 저장소는 아래 표대로 둡니다.
+**문서의 기본안과 프로그램이 강제하는 것은 다릅니다**: 앱·Alembic·`app.dbcopy`·`app.dbcheck`는 주소의 연결 옵션을 그대로 전달할 뿐
+(`config._database`·`make_url().set(drivername=…)`), 어떤 주소에서도 `verify-full`을 강제하거나 `require`를 거절하지 않습니다. 기본안은
+이 문서·승인 묶음(8-5 12번)·Render 환경 변수 값으로 지키고, 전환 때 `pg_stat_ssl`로 확인합니다.
 (참조: https://www.postgresql.org/docs/17/libpq-ssl.html · https://www.postgresql.org/docs/17/libpq-connect.html ·
 https://neon.com/docs/connect/connect-securely — 2026-10-27 확인)
 
@@ -148,9 +151,22 @@ https://neon.com/docs/connect/connect-securely — 2026-10-27 확인)
 | 직접 `ep-….neon.tech` + 소유 계정 | 마이그레이션(`MOAJWO_MIGRATION_DATABASE_URL`)·`app.dbcopy`·백업·복원 | 세션 단위 잠금(advisory lock)·`SET`·`LOCK TABLE`을 쓴다 — PgBouncer 트랜잭션 모드 풀러는 이를 보장하지 않음 |
 | 풀러 `ep-…-pooler.….neon.tech` + 앱 계정 | 앱(`DATABASE_URL`) | 무료 인스턴스의 짧은 연결을 풀러가 모음. 준비된 문장은 끈다(4장) |
 
-`channel_binding=require`는 SCRAM 인증일 때 TLS 위에서 서버를 한 번 더 인증합니다(SCRAM-SHA-256-PLUS). 직접 연결에서는
-확인됐고(격리 매트릭스), **풀러 주소에서 지원되는지는 실제 Neon에서 확인해야 합니다** — 전환 때 풀러 주소로 실패하면 풀러
-주소에서만 `channel_binding=prefer`로 낮추고 그 사실을 승인 묶음(8-5 12번)에 적습니다. `verify-full`은 낮추지 않습니다.
+`channel_binding=require`는 SCRAM 인증일 때 TLS 위에서 서버를 한 번 더 인증합니다(SCRAM-SHA-256-PLUS) — 서버 인증서·이름 검증과는
+별개의 보완이며, 그것을 이유로 `verify-full`을 낮추는 근거가 아닙니다. 직접 연결에서는 확인됐고(격리 매트릭스), **풀러 주소에서
+지원되는지는 실제 Neon에서 확인해야 합니다**. 기본은 두 주소 모두 `channel_binding=require`입니다.
+
+**전환 때 연결이 실패하면 — 먼저 원인을 구분하고, 자동으로 낮추지 않습니다** (2026-10-27 2차):
+
+| 오류 문구(libpq) | 원인 | 조치 |
+|---|---|---|
+| `certificate verify failed` · `unable to get local issuer` | 신뢰 저장소에 서명 CA 없음 | 신뢰 저장소(이미지 `ca-certificates`·받은 root 파일)를 확인. `verify-ca`·`require`로 낮추지 않음 |
+| `does not match host name` | 주소의 호스트 이름이 인증서와 다름(IP·풀러/직접 주소 혼동 등) | Neon 콘솔의 정확한 호스트 이름으로 |
+| `certificate has expired` | 서버 인증서 만료(또는 시스템 시각 오류) | Neon 상태·PC 시각 확인. 낮추지 않음 |
+| `password authentication failed` · `role … does not exist` | 인증(계정·비밀번호·DB 이름) | 비밀정보 설정 경로의 값 확인 — TLS와 무관 |
+| `connection refused` · `timeout` · 이름 풀이 실패 | 네트워크·휴면(깨우기 약 1분)·방화벽 | 다시 시도·네트워크 확인 — TLS와 무관 |
+| 채널 바인딩 관련 문구(`channel binding`) | 그 끝점이 SCRAM-SHA-256-PLUS를 지원하지 않음 | **실제로 그 조합(끝점·계정)에서 미지원이 확인된 경우에만**, 근거(오류 문구·날짜)와 대안(직접 연결은 `require` 유지)을 적어 승인 묶음에 **별도 예외**로 올린 뒤 그 끝점에서만 `prefer`로 둠. `verify-full`은 그대로 |
+
+자동 재시도나 스크립트가 보안 설정을 낮추는 일은 없습니다(앱·도구에 그런 재시도 없음).
 
 **격리 매트릭스(실제 Neon 아님):** `diagnostics/ci/pg_tls_check.sh`(워크플로 `pg-tls (diagnostic)`, `ci/pg-tls-*` 브랜치)가 격리
 러너 안의 일회용 PostgreSQL 17(자체 서명 CA, 이름 `localhost`, 암호화 연결·SCRAM만)에 psycopg로 붙어 다음을 보입니다 —
@@ -158,6 +174,14 @@ https://neon.com/docs/connect/connect-securely — 2026-10-27 확인)
 `sslrootcert=system`은 사설 CA 거절(공인 CA는 OS 저장소에 있을 때 통과 — 여기서는 미검증), `system`+`require`는 오류,
 `disable`은 서버가 거절, `channel_binding=require`는 SCRAM에서 통과. 결과 표는 워크플로 요약·아티팩트 `pg-tls`에 남습니다.
 실행 기록: run 40446062371(`a5e3cff`, PostgreSQL 17.11·psycopg 3.3.6·libpq 18.0.6·OpenSSL 3.0.13) — 11가지 모두 기대와 같음, `verify-full`+host 불일치는 "server certificate for \"localhost\" … does not match host name"로, `system`+`require`는 "weak sslmode \"require\" may not be used with sslrootcert=system"으로 거절됐습니다 (사본 `backups/review-20261027/pg-tls/ci-a5e3cff/`).
+**2026-10-27 2차 — 판정 방식 보완**: 위 11/11은 '실패면 거절 기대 충족'이던 당시 판정의 결과로 보존합니다(측정 도구 오류·비밀번호 오류·
+연결 거부도 거절로 셀 수 있었음 — 수정 전 재현 `backups/review-20261027b/pg-tls/before-fix-judge/`). 이제 `pg_tls_judge.py`가 결과를
+정상 연결(서버가 TLS 사용 확인) / 예상한 TLS 거절(원인 일치: CA 불신·호스트 이름·만료·약한 설정·비암호 거절) / 원인 불일치·거절돼야 하는데
+연결됨(검증 실패) / 예상 밖 실패·측정 오류(측정 불완전)로 나눠 세고(방어 시험 `test_pg_tls_judge.py`), 매트릭스에 **만료 서버 인증서 판**
+(시험 CA가 과거 유효 기간으로 서명 — 시스템 시각 변경 없음: `verify-full`·`verify-ca`·root 파일 있는 `require`는 만료 거절, root 파일 없는
+`require`는 **만료돼도 연결**)과 **실제 진입 경로**(`pg_tls_paths.py`: 앱 `/health`·`app.dbcheck`·Alembic·`app.dbcopy` — 정상 1건·호스트 이름
+불일치 거절 1건씩, 거절 때 성공 응답·빈 SQLite 대체·스키마 변경·업무 자료 변경·비밀값 노출 없음)를 더했습니다. 새 판정의 결과: run
+【새 판정 run — CI 뒤 갱신】. 실제 Neon 풀러까지 확인한 것은 아닙니다.
 
 **전환 때 실제 확인(승인 뒤, 8-3 단계 안에서):** 사용자 PC에서 서비스 파일로 `psql "service=moajwo-migrate" -c "SELECT ssl,
 version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()"` → `ssl = t`와 TLS 판을 적고, Render의 backend는 배포 뒤
@@ -287,6 +311,16 @@ python -m app.dbcopy --source sqlite:///<원천 파일> --target-env <주소가 
 - 보고·오류에는 건수·해시·표·열 이름·정수 행 번호·오류 종류(SQLSTATE·제약 이름)만 남습니다 (원천 값·문자열 기본 키 원문 없음).
 - 이관 중에는 대상 DB를 쓰는 앱을 외부에 열지 않습니다 (전환 전이라 Render 앱은 아직 SQLite를 씀). 잠금은 이 경우에도 앱의 쓰기·읽기를 섞이지 않게 막는 마지막 방어입니다.
 
+**이관 운영 절차 (2026-10-27 2차 지시 4-3)** — 도구의 DB 잠금·교착 보완(#57: 확인 단계 잠금 없음·`alembic_version` 먼저 잠금·잠금 안 재확인)은
+그대로 두고, 운영 절차는 그 위에 더합니다(절차가 DB 수준 방어를 대신하지 않음):
+
+- 같은 원천·대상에 대한 적용(`--apply`)은 **한 번에 하나**만 실행합니다. 확인(dry-run)은 여럿 돌려도 쓰지 않습니다.
+- 실행마다 기록: 보고 파일(`--report`)의 `run_id`, 원천 파일 이름·sha256(`source.sha256_before/after`), 대상 식별(`app.dbcheck`의 DB 이름·OID —
+  주소·비밀번호 없이), 단계(`stage`), 종료 결과(`db_applied`·`result`·`error`). 비밀값은 어디에도 적지 않습니다.
+- `db_applied: unknown`(커밋 결과를 모름)이면 **곧바로 다시 실행하지 않고** 보고의 `after_commit`·새 연결 확인과 대상 건수·이관 표시를 먼저
+  봅니다(8-2의 '커밋 불확실' 처리). 이미 적용돼 있으면 다시 적용하지 않습니다(이관 표시로 거절됨).
+- 주소는 **직접 연결**(`ep-….neon.tech`, 소유 계정)만 — 이관·마이그레이션을 트랜잭션 풀러 주소로 실행하지 않습니다(세션 잠금·`SET`·`LOCK TABLE`).
+
 ### 8-3. 전환 순서 — 준비 → 승인 묶음 한 번 → 전환 (이 PR은 실제 Render 연결을 바꾸지 않음)
 
 준비 단계는 지금 Render 서비스(SQLite)를 건드리지 않습니다. 소유자는 준비 결과로 만든 승인 묶음(8-5)을 검토하고 **한 번** 승인합니다. 승인 전에는 Render 환경 변수를 배포와 함께 저장하거나, 배포하거나, 연결 브랜치에 병합하지 않습니다. 아래는 절차이며, 이 저장소 작업에서 실행한 단계가 아닙니다 (Neon·Render 접근 없음).
@@ -342,6 +376,24 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 | `moajwo-test-web` | 프런트 (같은 API로 프록시) | `main` | Off | `frontend/Dockerfile.render` / `frontend` | 비어 있음 | free |
 | `moajwo-test-api` | API — 계정 DB(SQLite)의 원천 후보 | `main` | Off | `backend/Dockerfile` / `backend` | 비어 있음 | free |
 
+**2026-10-27 13:54 KST 검토자 조회 전달값** (2차 지시문의 검토자가 관리 API로 서비스 상태·배포 기록만 조회 — 설정·환경 변수·배포 변경 없음.
+이 환경에서는 다시 읽지 못해 전달값으로 구분):
+
+| 서비스 | 연결 브랜치 | live 배포 커밋 | Auto-Deploy | plan / Dockerfile | HTTP healthCheckPath |
+|---|---|---|---|---|---|
+| `moajwo-test` | `test/render-20261021` | `60bcae82dfa27fbedb39d7b3171fce7c1ccbaead` | off | free / `frontend/Dockerfile.render-test` | 비어 있음 |
+| `moajwo-test-web` | `main` | `66405ef5222ee92d8a0f16f7dafb4d6ec13a741a` | off | free / `frontend/Dockerfile.render` | 비어 있음 |
+| `moajwo-test-api` | `main` | `703fdcbda6ec3600fbdab8c0ab01b9398562bc07` | off | free / `backend/Dockerfile` | 비어 있음 |
+
+세 서비스는 not_suspended이고 최근 배포는 live입니다 — 실제 로그인·DB 상태·개인정보 보존을 검사한 것이 아닙니다. **지금 off라는 사실은 병합
+직전 재확인의 대체물이 아닙니다.** 저장소 쪽 다른 자동 배포 경로: main에는 GitHub Actions 워크플로(`.github/`)·`render.yaml`·배포 훅 호출이
+없습니다(진단 워크플로는 `ci/**` 분기에만 있고 배포하지 않음). Render 쪽 배포 훅 URL이 만들어져 있는지는 관리 화면에서 전환 직전에 확인합니다
+(훅 값은 비밀값 — 기록하지 않음). 사용자 접속 주소는 `moajwo-test`(프런트, `/api/`를 `https://moajwo-test-api.onrender.com/`으로 프록시)이고,
+`moajwo-test-web`은 같은 API를 쓰는 다른 프런트입니다 — 계정 DB의 원천은 `moajwo-test-api` 하나입니다.
+
+- **제안하는 readiness 경로(전환 때 설정, 지금은 바꾸지 않음):** API `moajwo-test-api`는 **`/health`**(이 저장소의 실제 경로 — DB에 `SELECT 1`,
+  실패면 503), 프런트는 **`/api/health`**(nginx가 API로 프록시 — 프런트 자체에는 전용 health location이 없고 `/`는 정적 index라 API 상태를 담지
+  않음). Render는 5초 안의 2xx·3xx를 성공으로 보므로 무료 인스턴스가 깨는 동안의 실패는 정상 범위로 둡니다.
 - **Auto-Deploy Off:** Render 문서는 Off를 자동 배포를 하지 않는 설정으로 설명합니다 (https://render.com/docs/deploys). 그래서 이 조회 기준으로는 main 병합만으로 재배포되지 않습니다. 다만 수동 배포·배포 훅 등 다른 트리거가 없다고 단정하지 않고, 병합 직전에 다시 확인합니다. Off는 수동 배포나 환경 변수 적용의 승인이 아닙니다.
 - **지금 `moajwo-test`의 이미지:** `test/render-20261021`(60bcae8 — 앱 코드는 main 703fdcb)의 `frontend/Dockerfile.render-test`입니다. nginx 1.29(root, 포트 80)에 로컬용 `nginx.conf`를 빌드 때 고쳐 `/api/`를 `https://moajwo-test-api.onrender.com/`으로 보냅니다 (Host 헤더·SNI). 보안 응답 헤더는 없습니다. 이 파일은 통합 후보(#42) 트리에 **없습니다** — 후보 코드를 이 서비스에 배포하려면 연결 브랜치·Dockerfile 경로·빌드 문맥을 함께 바꿉니다. 파일 경로를 그대로 둔 채 후보 SHA로 배포하지 않습니다.
 - **health 경로가 비어 있으면** Render는 포트에 TCP로 붙어 보기만 합니다. 포트 연결은 업무 준비(DB 연결)와 같지 않습니다. 이 저장소의 `/health`는 DB에 `SELECT 1`을 보내 실패하면 503을 돌려줍니다.
@@ -389,7 +441,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 9. 되돌리기 경계 (8-4)
 10. 전환 뒤 백업 계획 — 7장 백업 주기·보관 위치
 11. 계정 — 이관한 계정 수(A, 이관 보고)와 새로 만든·만들 계정(B, 또는 전환 뒤 새 가입)을 나눠 적음
-12. TLS 확인 — 두 주소(직접·풀러) 모두 `sslmode=verify-full`이고 3-2의 확인 명령 출력(`ssl = t`, TLS 판·암호 모음), `channel_binding`이 풀러 주소에서 통했는지(안 됐으면 `prefer`로 낮춘 사실)
+12. TLS 확인 — 두 주소(직접·풀러) 모두 `sslmode=verify-full`이고 3-2의 확인 명령 출력(`ssl = t`, TLS 판·암호 모음), `channel_binding=require`가 두 주소에서 통했는지. 통하지 않은 끝점이 있으면 3-2 표의 원인 구분 결과(오류 문구·날짜)와 함께 **별도 예외 항목**으로 — `verify-full`을 낮추는 예외는 없음
 
 ## 9. 시험 (SQLite·PostgreSQL)
 
