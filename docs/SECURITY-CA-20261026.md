@@ -143,14 +143,14 @@ backend 잔여 HIGH·CRITICAL (고유 ID, 수정판 있는 것 0 — Debian 안�
 
 Render의 기존 SQLite 원천 보존 여부가 정해지기 전에는 API를 재시작·재배포하지 않습니다(A: 검증된 백업 이관 / B: 새 계정 시작 — 별도 승인).
 
-### 6-2. 후보 이미지가 실제 상류와 통신 (격리 러너 __REAL_RUN__)
+### 6-2. 후보 이미지가 실제 상류와 통신 (격리 러너 run 40439111560, 분기 `ci/image-check-real-tls-ce2aeaa`, 2026-10-27)
 
 후보 frontend-render 이미지를 **그대로**(설정·신뢰 묶음을 덮지 않고) 써서 실제 공개 API와 통신했습니다. 업무 변경이 없는 health 경로 GET만 했고 쿠키·업로드·계정·설정 변경은 하지 않았습니다.
 
 | 확인 | 결과 |
 |---|---|
-| TLS 핸드셰이크만(HTTP 요청 없음) — 러너 openssl + 이미지의 OS CA 묶음, 이름 검증 | __REAL_CHAIN__ |
-| 앞단 nginx(이미지 그대로, `proxy_ssl_verify on`) → 실제 API `GET /api/health` | __REAL_HEALTH__ |
+| TLS 핸드셰이크만(HTTP 요청 없음) — 러너 openssl + 이미지의 OS CA 묶음, 이름 검증 | **통과** — `Verify return code: 0 (ok)`. 서버가 보낸 인증서 3개: `CN=onrender.com` ← `Google Trust Services WE1` ← `GTS Root R4`(발급자 GlobalSign Root CA), 깊이 2 → `proxy_ssl_verify_depth 3` 안. 이미지 OS CA 묶음 118개(emSign은 G1만) |
+| 앞단 nginx(이미지 그대로, `proxy_ssl_verify on`) → 실제 API `GET /api/health` | **200** · 첫 시도 · 본문 `{"status":"ok","database":"ok"}` · nginx 오류 기록 없음 (검증 통과·이름 일치). 같은 run의 4-1 대역 매트릭스·4-2 공개 시험 호스트 결과는 10-26과 같음(거절 4종 502·복구 404, eMudhra 호스트 nginx 502(20)·python CERTIFICATE_VERIFY_FAILED). 빌드 기록의 Python은 3.11.18(기반 이미지 `python:3.11-slim`이 10-26 3.11.17에서 올라감 — 고정하지 않은 기반 태그의 변화, 2장 '빌드' 행) |
 
 이것은 "후보 이미지가 실제 상류의 정상 체인·호스트 이름을 검증하고 통신한다"는 확인입니다. **실제 Render 인스턴스가 새 CA·설정을 쓴다는 확인이 아니며**, 실제 인스턴스에서 손상 체인을 거절하는지(Render 안내가 권하는 '실행 중인 서비스의 HTTP 클라이언트'로 시험 호스트 요청)는 승인된 배포 뒤 항목으로 남깁니다. DNS 실패·시간 초과·HTTP 오류는 인증서 거절로 세지 않습니다.
 
