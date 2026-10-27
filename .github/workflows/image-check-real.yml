@@ -1,0 +1,34 @@
+# 진단 전용: 후보의 배포 이미지(backend·로컬 nginx·Render nginx) 빌드·실행·Trivy와, 최종 Render 권장값에서 남은 메모리 경계(E1~E3C)를
+# 격리 러너(GitHub 호스트, 공개 저장소라 무료)에서 잰다. 'ci/image-check-*' 브랜치를 올릴 때만 돈다 — main·PR에는 영향이 없다.
+# 운영·Render·Neon 서비스로 요청하지 않는다. 결과는 아티팩트(30일).
+name: image-check-real (diagnostic)
+
+on:
+  push:
+    branches: ["ci/image-check-real-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      PYTHONIOENCODING: utf-8
+      REAL_UPSTREAM: "1"   # 실제 공개 API(health)와의 TLS·통신 확인 — 이 워크플로에서만
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: build, run and scan the images
+        run: |
+          git rev-parse HEAD^ | sed 's/^/candidate /' | tee candidate.txt
+          bash diagnostics/ci/image_check.sh out
+      - name: final Render values — distinct long Korean, one result + big upload, a request waiting for the parse slot
+        if: always()
+        run: PARTS="E1 E2 E3A E3B E3C" bash diagnostics/ci/output_memory.sh out/outmem
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: image-check-real
+          path: out
+          retention-days: 30
