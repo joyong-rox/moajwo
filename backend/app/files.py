@@ -31,7 +31,7 @@ from app.name_limits import (
     sheet_place,
 )
 from app.parsing import MAX_CELL_CHARS, SUPPORTED_EXTENSIONS, FileResult, ParseBusy, ParseError, parse_file
-from app.pii import mask_text
+from app.pii import mask_text, shown_pii_items
 from app.promotion import load_standard, record_approval
 from app.storage import UploadTooLarge, safe_original_name, store_original
 from app.timefmt import utc_to_kst
@@ -62,7 +62,7 @@ class SheetOut(BaseModel):
 
 
 class UploadResultOut(BaseModel):
-    original_name: str
+    original_name: str  # 가린 표시 이름 (원문은 보내지 않는다 — 식별은 id)
     id: int | None = None
     size_bytes: int | None = None
     encoding: str | None = None
@@ -113,21 +113,21 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
     name = safe_original_name(upload.filename)
     ext = PurePath(name).suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
-        return UploadResultOut(original_name=name, error="xlsx, xls, csv 파일만 올릴 수 있습니다.")
+        return UploadResultOut(original_name=mask_text(name), error="xlsx, xls, csv 파일만 올릴 수 있습니다.")
     if NUL in name:  # 파일 이름은 그대로 저장한다 — NUL은 PostgreSQL이 받지 않으므로 두 DB에서 같게 저장 전에 거절
         error = f"파일 이름에 NUL(0x00) 문자가 있어 올리지 않았습니다 — 이름을 바꿔 다시 올리세요. [{HAS_NUL}]"
-        return UploadResultOut(original_name=name.replace(NUL, ""), error=error)
+        return UploadResultOut(original_name=mask_text(name.replace(NUL, "")), error=error)
     if len(name) > FILE_NAME_MAX:  # 자르지 않는다 — 두 DB에서 같게 저장 전에 거절 (이름 원문은 문구에 넣지 않음)
         error = (
             f"파일 이름이 {len(name):,}자로 저장 한도 {FILE_NAME_MAX}자를 넘어 올리지 않았습니다 — 이름을 줄여 다시 "
             f"올리세요. [{TOO_LONG}]"
         )
-        return UploadResultOut(original_name=name, error=error)
+        return UploadResultOut(original_name=mask_text(name), error=error)
 
     try:
         stored = store_original(upload.file, ext)
     except UploadTooLarge:
-        return UploadResultOut(original_name=name, error=f"파일이 너무 큽니다 (최대 {MAX_UPLOAD_MIB}MiB).")
+        return UploadResultOut(original_name=mask_text(name), error=f"파일이 너무 큽니다 (최대 {MAX_UPLOAD_MIB}MiB).")
 
     record = SourceFile(
         original_name=name,
@@ -139,7 +139,7 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
     session.add(record)
     session.commit()
 
-    result = UploadResultOut(original_name=name, id=record.id, size_bytes=stored.size_bytes)
+    result = UploadResultOut(original_name=mask_text(name), id=record.id, size_bytes=stored.size_bytes)
     try:
         parsed = parse_file(stored.path, name)
     except ParseBusy as exc:
@@ -150,7 +150,7 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
         stored.path.chmod(0o600)  # 원본은 읽기 전용으로 저장된다 (Windows는 읽기 전용 파일을 지우지 못함)
         stored.path.unlink(missing_ok=True)
         logger.warning("upload parse busy: ext=%s", ext)
-        return UploadResultOut(original_name=name, error=str(exc))
+        return UploadResultOut(original_name=mask_text(name), error=str(exc))
     except ParseError as exc:
         logger.warning("parse failed: id=%s ext=%s reason=%s", record.id, ext, exc)
         result.error = str(exc)
@@ -164,17 +164,17 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
     if report.found:
         # 원문은 기록하지 않는다 (건수만)
         logger.info("pii patterns found: id=%s counts=%s", record.id, report.counts)
-        result.pii = {**summary, "acknowledged": False}
+        result.pii = {"counts": summary["counts"], "items": shown_pii_items(summary["items"]), "acknowledged": False}
 
     result.encoding = parsed.encoding
-    result.skipped_sheets = parsed.skipped_sheets
+    result.skipped_sheets = [mask_text(n) for n in parsed.skipped_sheets]
     result.sheet_count = len(parsed.sheets)
     result.data_rows = parsed.data_rows
     # body(전체 행)는 크므로 응답 모델에 필요한 필드만 읽는다.
-    # 열 이름에 든 개인정보는 화면으로 보내기 전에 가린다 (미리보기 셀은 파서가 이미 마스킹)
+    # 시트·열 이름에 든 개인정보는 화면으로 보내기 전에 가린다 (미리보기 셀은 파서가 이미 마스킹)
     result.sheets = [
         SheetOut.model_validate(s, from_attributes=True).model_copy(
-            update={"columns": [mask_text(c) for c in s.columns]}
+            update={"name": mask_text(s.name), "columns": [mask_text(c) for c in s.columns]}
         )
         for s in parsed.sheets
     ]

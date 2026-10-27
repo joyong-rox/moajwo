@@ -17,7 +17,7 @@ from app.glossary_api import get_glossary
 from app.mapping import get_engine
 from app.models import SourceFile, ValidationRun
 from app.name_limits import StoredText
-from app.pii import has_pii, mask_nested, mask_rrn_number, mask_text
+from app.pii import has_pii, mask_nested, mask_rrn_number, mask_text, shown_pii_items
 from app.promotion import load_standard
 from app.quantity import confirmed_quantity_indexes, quantity_sheet
 from app.timefmt import utc_to_kst
@@ -51,8 +51,8 @@ class PiiOut(BaseModel):
 
 class FileListItem(BaseModel):
     id: int
-    original_name: str
-    display_name: str  # 화면 표시용 (개인정보를 가린 파일 이름). 식별은 id, original_name은 기존 화면 호환용
+    original_name: str  # 호환 필드 — display_name과 같은 가린 이름 (원문은 보내지 않는다. 식별은 id)
+    display_name: str  # 화면 표시용 (개인정보를 가린 파일 이름)
     uploaded_at: datetime
     pii: PiiOut | None
 
@@ -63,7 +63,12 @@ def pii_out(record: SourceFile) -> PiiOut | None:
     summary = json.loads(record.pii_summary)
     if not any(summary.get("counts", {}).values()):
         return None
-    return PiiOut(counts=summary["counts"], items=summary["items"], acknowledged=record.pii_acknowledged_at is not None)
+    # 탐지 위치의 시트 이름·위치 설명은 내보낼 때 가린다 (저장값은 원문 — 지금 규칙으로 가려 과거 저장값도 같은 모양)
+    return PiiOut(
+        counts=summary["counts"],
+        items=shown_pii_items(summary.get("items")),
+        acknowledged=record.pii_acknowledged_at is not None,
+    )
 
 
 @router.get("/files", response_model=list[FileListItem])
@@ -79,7 +84,7 @@ def list_files(
     return [
         FileListItem(
             id=r.id,
-            original_name=r.original_name,
+            original_name=mask_text(r.original_name),
             display_name=mask_text(r.original_name),
             uploaded_at=utc_to_kst(r.uploaded_at),  # DB 기본값(UTC) → KST
             pii=pii_out(r),

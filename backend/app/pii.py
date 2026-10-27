@@ -96,6 +96,21 @@ def mask_text(text: str) -> str:
     return _EMAIL.sub(lambda m: f"{m.group(1)[0]}***@{m.group(2)}", text)
 
 
+def shown_pii_items(items: object) -> list[dict[str, object]]:
+    """저장된 탐지 위치(pii_summary.items)를 화면·API로 내보낼 때의 모양 — 글자 값(시트 이름·위치 설명 등)은 모두
+    mask_text로 가리고 종류·행·열 문자·가린 값·숫자는 그대로 둔다. 넘겨받은 값은 바꾸지 않고 새 목록을 돌려준다.
+    mask_text는 가린 값에 다시 적용해도 같으므로(멱등) 이미 가린 항목을 또 거쳐도 표시가 같다. 목록이 아니면
+    빈 목록(과거 저장값의 모양이 달라도 원문을 내보내지 않는다)."""
+    if not isinstance(items, list):
+        return []
+    shown: list[dict[str, object]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        shown.append({k: (mask_text(v) if isinstance(v, str) else v) for k, v in item.items()})
+    return shown
+
+
 def mask_cell(cell: object) -> object:
     """화면·API·LLM으로 내보낼 셀 값. 개인정보 패턴이 있으면 마스킹한다."""
     if isinstance(cell, str):
