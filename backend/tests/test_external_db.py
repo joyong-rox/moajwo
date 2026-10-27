@@ -60,6 +60,20 @@ def test_postgres_url_keeps_password_and_tls_options() -> None:
     assert _database(raw.replace("postgres://", "postgresql://"), "external")[1] == url
 
 
+def test_postgres_url_keeps_verify_full_and_system_root_options() -> None:
+    """권장 TLS 옵션(sslmode=verify-full·sslrootcert=system·channel_binding=require — docs/EXTERNAL_DB.md 3-2)도 그대로
+    전달한다 (앱은 연결 옵션을 바꾸지 않는다)."""
+    raw = "postgresql://app:pw@ep-x.example.neon.tech/neondb?sslmode=verify-full&sslrootcert=system"
+    raw += "&channel_binding=require"
+    mode, url = _database(raw, "external")
+    assert mode == "external"
+    assert dict(make_url(url).query) == {
+        "sslmode": "verify-full",
+        "sslrootcert": "system",
+        "channel_binding": "require",
+    }
+
+
 @pytest.fixture
 def unreachable(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """앱의 DB 세션이 닿지 않는 PostgreSQL을 가리키게 한다 (거절되는 로컬 포트 — 외부로 요청하지 않음)."""
