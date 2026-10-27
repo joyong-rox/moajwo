@@ -148,12 +148,12 @@ for n in (20000, 28000, 29000, 95000, 100000):  # K2·K3·KL1 기준 입력 (key
     kbase(f"/files/kj_base_{n}.csv", n, 0)
 for i in range(3):  # 다른 입력 3개 × 3,000행
     kbase(f"/files/kj_in_{i}.csv", 3000, i + 1)
-# K5 — 범위 비교(base·common·all이 모두 예산 안: 기준 15,000행), 겹치지 않는 key(입력 key가 기준에 없음), 20개 입력 분산(기준 5,000행 + 20 × 250행)
+# K5 — 범위 비교(base·common·all이 모두 예산 안: 기준 15,000행), 겹치지 않는 key(입력 key가 기준에 없음), 20개 입력 분산(기준 5,000행 + 19 × 250행 = MAX_INPUTS)
 kbase("/files/kj_base_15000.csv", 15000, 0)
 kbase("/files/kj_base_5000.csv", 5000, 0)
 for i in range(3):
     kbase(f"/files/kj_off_{i}.csv", 3000, i + 1, start=100000000)
-for i in range(20):
+for i in range(19):  # 기준 포함 20개 입력 = MAX_INPUTS (21개는 요청 검증 422 — run 40446578692에서 확인)
     kbase(f"/files/kj_split_{i}.csv", 250, i + 1, start=i * 250)
 for i in range(4):  # 긴 값: 500행 × 5열 × 2,000자 (파일 약 5MB — 올리기 한도 10MiB 아래)
     kbase(f"/files/kj_long_{i}.csv", 500, i, width=5, chars=2000)
