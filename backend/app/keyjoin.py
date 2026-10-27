@@ -1,5 +1,6 @@
-"""공통 key 연결 (취합 방식 '공통 key 연결', MODE "keyjoin"): 여러 파일의 같은 사용자를 key(사번·ID 등)로 연결해
-사용자별 한 행을 만들고, 입력마다 고른 열만 결과에 넣는다. 하나의 통합표(integration.py)·파일별 시트(bundle.py)와
+"""공통 key 연결 (취합 방식 '공통 key 연결', MODE "keyjoin"): 여러 파일의 같은 대상(사람·기관·업무·문서)의 자료를
+공통 key(사번·기관코드·업무번호 등)로 연결해 key마다 한 행을 만들고, 입력마다 고른 열만 결과에 넣는다.
+하나의 통합표(integration.py)·파일별 시트(bundle.py)와
 따로 동작하며 검토·열 매핑·학습을 요구하지도 바꾸지도 않는다.
 
 - key는 파서가 바꾸기 전 값(body[*]["original"])으로 만든 정규형 문자열의 **튜플**을 정확히 비교한다. 글자 key는 앞자리
@@ -8,7 +9,8 @@
   다른 기능의 숫자 해석(cells·text_columns)은 건드리지 않는다.
 - 한 입력(파일·시트) 안에서 key가 겹치면 만들지 않는다 (합치거나 고르지 않음). 입력 사이의 같은 key는 정상 연결이다.
 - 소계·주석으로 추정되지만 key 칸이 있는 행은 자동으로 빼지 않는다 — 사용자가 행마다 포함/제외를 정해야 만든다 (정책 2).
-- 범위: 기준 입력의 사용자만(base, 기본) · 모든 입력의 사용자(all) · 모든 입력에 있는 사용자(common).
+- 범위: 기준 파일의 key만(base, 기본) · 모든 파일의 key(all) · 모든 파일에 공통인 key만(common). 화면·요약·기록의 문구는
+  '사용자'가 아니라 key·자료다(대상이 사람이 아닐 수 있음 — 로그인 사용자·소유자 의미의 '사용자'는 그대로).
 - 결과: 시트 「연결 결과」(key + 고른 열, 미연결은 빈 칸 — 0 아님), 「출처」(결과 행마다 입력별 원본 행), 「연결 요약」.
   선택하지 않은 열은 어디에도 넣지 않는다. key 칸은 항상 글자 칸이다.
 - 응답·실행 기록·서버 기록·오류 문구에 key 원문·가린 key·해시를 넣지 않는다 — 위치(입력 번호·파일 번호·시트 순번·
@@ -93,7 +95,7 @@ SUMMARY_LINES = 40  # 연결 요약 시트의 고정 줄 수 추정 (칸 예산)
 SUMMARY_PER_INPUT = 16  # 연결 요약 시트에서 입력 하나가 차지하는 칸 수 추정
 RESULT_SHEET, SOURCE_SHEET, SUMMARY_SHEET = "연결 결과", "출처", "연결 요약"
 Scope = Literal["base", "all", "common"]
-SCOPE_LABEL = {"base": "기준 파일의 사용자만", "all": "모든 파일의 사용자", "common": "모든 파일의 공통 사용자"}
+SCOPE_LABEL = {"base": "기준 파일의 key만", "all": "모든 파일의 key", "common": "모든 파일에 공통인 key만"}
 # key 칸의 종류 (key_part): 받는 것은 text·int, 나머지는 차단 사유
 KINDS = ("text", "int", "float", "bool", "date", "empty", "filled", "missing_mark", "precision", "illegal")
 KEY_EMPTY, KEY_MISSING, KEY_PARTIAL = "KEYJOIN_KEY_EMPTY", "KEYJOIN_KEY_MISSING_MARK", "KEYJOIN_KEY_PARTIAL"
@@ -201,7 +203,7 @@ class KeyJoinIn(BaseModel):
 
     inputs: list[InputIn] = Field(max_length=MAX_INPUTS)
     scope: Scope = "base"
-    base: BaseRef  # 출력 순서와 base 범위의 사용자 집합을 정하는 입력 (모든 범위에서 필수)
+    base: BaseRef  # 출력 순서와 base 범위의 key 집합을 정하는 입력 (모든 범위에서 필수)
     key_names: list[str] | None = None  # None = 기준 입력의 key 열 이름
 
 
@@ -1170,9 +1172,7 @@ def _input_problems(plan: Plan, ws_map: dict[Key, set[Key]]) -> None:
             plan.problems.append(ip.add(_warn("KEYJOIN_UNLINKED", text, count=ip.unlinked)))
     variants = sum(1 for s, v in ws_map.items() if len(v) + any(s in ip.ix.rows for ip in plan.inputs) >= 2)
     if variants:
-        text = (
-            f"앞뒤 공백만 다른 key가 {variants}묶음 있습니다 — 서로 다른 사용자로 둡니다 (공백을 지워 연결하지 않음)."
-        )
+        text = f"앞뒤 공백만 다른 key가 {variants}묶음 있습니다 — 서로 다른 key로 둡니다 (공백을 지워 연결하지 않음)."
         plan.problems.append(_warn("KEYJOIN_WHITESPACE_VARIANTS", text, count=variants))
 
 
@@ -1180,12 +1180,12 @@ def _link_problems(plan: Plan, excluded: int) -> None:
     inputs = plan.inputs
     if plan.req.scope == "common" and not plan.out_keys:
         text = (
-            "모든 파일에 함께 있는 사용자가 없습니다 (교집합 0) — 만들 결과가 없어 생성하지 않습니다. "
+            "모든 파일에 공통인 key가 없습니다 (공통 key 0개) — 만들 결과가 없어 생성하지 않습니다. "
             "범위를 바꾸거나 key 열을 확인하세요."
         )
         plan.problems.append(_block("KEYJOIN_NO_COMMON", text))
     if excluded:
-        text = f"모든 파일의 공통 사용자만 넣습니다 — 어느 한 입력에만 있는 사용자 {excluded:,}명은 결과에서 빠집니다."
+        text = f"모든 파일에 공통인 key만 넣습니다 — 선택한 범위에 없어 제외된 key {excluded:,}개는 결과에서 빠집니다."
         plan.problems.append(_warn("KEYJOIN_EXCLUDED", text, count=excluded))
     int_union: set[Key] = set()
     for ip in inputs:
@@ -1381,7 +1381,7 @@ def _write_summary(ws: Any, plan: Plan, run_id: int, processed_at: str) -> None:
     line("정책", POLICY)
     line("확인 기준(basis)", plan.basis)
     line("범위", SCOPE_LABEL[plan.req.scope])
-    line("기준 입력", f"입력 {base.index + 1} · #{base.file_id} · {sheet_place(base.place)}")
+    line("기준 파일·시트", f"입력 {base.index + 1} · #{base.file_id} · {sheet_place(base.place)}")
     line("key 열 이름", *(mask_text(n) for n in plan.key_names))
     row += 1
     line("입력", "파일 #", "파일 이름", "시트 이름", "시트 순번", "key 열", "가져온 열", "원본 행", "연결 대상 행",
@@ -1411,9 +1411,9 @@ def _write_summary(ws: Any, plan: Plan, run_id: int, processed_at: str) -> None:
     res = plan.result
     line("결과 행", res["rows"])
     line("결과 열", f"{res['columns']}개 (key {res['key_columns']} + 가져온 열 {res['columns'] - res['key_columns']})")
-    line("모든 입력의 사용자(합집합)", res["union"])
-    line("모든 입력에 있는 사용자(교집합)", res["intersection"])
-    line("범위에서 빠진 사용자", res["excluded"])
+    line("전체 key", res["union"])
+    line("공통 key", res["intersection"])
+    line("선택한 범위에 없어 제외된 key", res["excluded"])
     for w in plan.warnings:
         line("주의", w.text)
     row += 1

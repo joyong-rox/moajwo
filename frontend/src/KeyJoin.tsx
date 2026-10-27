@@ -41,9 +41,9 @@ const RUN_STATE: Record<string, string> = { running: '만드는 중', check: '�
 const REVIEW_PAGE = 50 // '확인이 필요한 행' 표의 한 쪽 행 수
 const REASON_TEXT = { subtotal: '소계·합계로 보이는 값', note: '주석으로 보이는 값' } as const
 const SCOPE_HELP: Record<KeyJoinScope, string> = {
-  base: '기준 입력의 key 집합 (기본값) — 다른 입력에 없는 사용자는 그 입력의 열이 빈 칸',
-  all: '모든 입력의 합집합 — 기준 입력 순서 뒤에 나머지 입력에서 처음 나온 순서',
-  common: '모든 입력에 있는 사용자만 (교집합) — 빠지는 사용자 수는 확인 뒤에 보입니다',
+  base: '기준 파일·시트의 key (기본값) — 다른 파일에 없는 key는 그 파일의 열이 빈 칸',
+  all: '모든 파일의 key 합집합 — 기준 파일·시트의 순서 뒤에 나머지에서 처음 나온 순서',
+  common: '모든 파일에 다 있는 key만 — 선택한 범위에 없어 제외된 key 수는 확인 뒤에 보입니다',
 }
 
 // 입력란은 사용자가 친 글자 그대로(…_input) 두고, 서버에는 보낼 수 있는 값만 보낸다 (buildRequest)
@@ -568,9 +568,10 @@ function KeyJoin() {
   return (
     <section className="keyjoin" aria-label="공통 key로 연결하기">
       <WorkflowSteps steps={steps} label="공통 key로 연결하기 단계" />
-      <Banner tone="info" icon="info" title="같은 key의 자료(사용자·기관·업무·문서 등)를 정확히 연결합니다 — 유사 일치·공백 제거·대소문자 통일은 하지 않습니다">
+      <Banner tone="info" icon="info" title="공통 key로 같은 대상의 자료를 연결하고, 파일별로 고른 열을 모읍니다 — 유사 일치·공백 제거·대소문자 통일은 하지 않습니다">
         <p>
-          입력(파일·시트)마다 key 열을 고르면 서버가 변환 전 값으로 정확히 같은 key만 연결해 key마다 한 행을 만듭니다. 한 입력 안에
+          key는 같은 대상을 구분하는 값입니다. 사번·기관코드·업무번호 등을 사용할 수 있습니다. 입력(파일·시트)마다 key 열을 고르면 서버가
+          변환 전 값으로 정확히 같은 key만 연결해 key마다 한 행을 만듭니다. 한 입력 안에
           같은 key가 두 번 있으면 만들지 않습니다 (합치거나 고르지 않음). 원본 파일·열 매핑·학습은 바꾸지 않습니다. 화면·기록에는
           가린 값만 보이고 key 원문은 남지 않습니다.
         </p>
@@ -898,7 +899,7 @@ function KeyJoin() {
 
       {files.length > 0 && (
         <fieldset className="an-step bd-step">
-          <legend>4. 포함할 사용자 범위</legend>
+          <legend>4. 포함할 key 범위</legend>
           <div className="kj-scope">
             {SCOPES.map((s) => (
               <label key={s}>
@@ -910,10 +911,10 @@ function KeyJoin() {
             ))}
           </div>
           <label className="kj-row">
-            기준 입력 (파일·시트)
+            기준 파일·시트
             <select
               className="kj-select"
-              aria-label="기준 입력 (파일·시트)"
+              aria-label="기준 파일·시트"
               value={baseKey ?? ''}
               onChange={(e) => update((d) => ({ ...d, base: e.target.value || null }))}
             >
@@ -925,12 +926,12 @@ function KeyJoin() {
               ))}
             </select>
           </label>
-          <p className="mw-muted">기준 입력의 행 순서가 결과 순서입니다. 결과 key 칸은 글자 형식이고, 미연결은 빈 칸(0 아님)입니다.</p>
+          <p className="mw-muted">기준 파일·시트의 행 순서가 결과 순서입니다. 결과 key 칸은 글자 형식이고, 미연결은 빈 칸(0 아님)입니다.</p>
           {view && (
             <p className="mw-muted">
-              확인 결과{fresh ? '' : ' (직전 확인 기준)'}: 합집합 {view.result.union.toLocaleString('ko-KR')}명 · 공통{' '}
-              {view.result.intersection.toLocaleString('ko-KR')}명
-              {view.scope === 'common' && ` · 빠지는 사용자 ${view.result.excluded.toLocaleString('ko-KR')}명`}
+              확인 결과{fresh ? '' : ' (직전 확인 기준)'}: 결과 {view.result.rows.toLocaleString('ko-KR')}행 · 전체 key{' '}
+              {view.result.union.toLocaleString('ko-KR')}개 · 공통 key {view.result.intersection.toLocaleString('ko-KR')}개
+              {view.scope === 'common' && ` · 선택한 범위에 없어 제외된 key ${view.result.excluded.toLocaleString('ko-KR')}개`}
             </p>
           )}
         </fieldset>
