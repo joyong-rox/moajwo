@@ -40,6 +40,8 @@ from app.name_limits import (
     COLUMN_MAX,
     SHEET_MAX,
     NameNotStorable,
+    OptionalStoredText,
+    StoredText,
     column_place,
     hint,
     name_problem,
@@ -682,9 +684,10 @@ class BatchItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     file_id: int
-    sheet_id: str = Field(max_length=8)
-    column_id: str = Field(max_length=16)
-    field_key: str | None  # None = '해당 없음'
+    # 못 찾은 시트·열 번호는 안내에 그대로 되돌려 보내므로 NUL은 요청에서 막는다 (loc으로 알림)
+    sheet_id: StoredText = Field(max_length=8)
+    column_id: StoredText = Field(max_length=16)
+    field_key: OptionalStoredText  # None = '해당 없음'
 
 
 class BatchPreviewIn(BaseModel):
@@ -860,7 +863,7 @@ def batch_preview(
 
 class ApplyItem(BatchItem):
     expected_confirmed: bool  # 확인 화면에서 본 현재 상태 (확정 여부)
-    expected_field_key: str | None  # 확인 화면에서 본 현재 확정값
+    expected_field_key: OptionalStoredText  # 확인 화면에서 본 현재 확정값
     overwrite: bool = False  # 기존 사용자 확정을 바꾸는 것을 명시적으로 선택했는지
 
 

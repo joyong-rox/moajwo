@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,7 @@ from app.db import get_session
 from app.files import get_file_for
 from app.integration import include_unmapped_default
 from app.models import Automation, IntegrationRun, ReviewItem, ReviewSession, SourceFile, User
+from app.name_limits import OptionalStoredText
 from app.pii import mask_nested, mask_rrn_number, mask_text
 from app.review import (
     INTERNAL_PARAMS,
@@ -384,7 +385,8 @@ def get_review(review_id: int, db: Annotated[Session, Depends(get_session)], use
 
 class DecisionIn(BaseModel):
     decision: Literal["approved", "rejected"]
-    choice: str | None = None  # 승인 시 연결할 표준 항목 key 또는 7자리 코드
+    # 승인 시 연결할 표준 항목 key 또는 7자리 코드 — review_items.choice String(64), 후보에 있을 때만 저장
+    choice: OptionalStoredText = Field(default=None, max_length=64)
 
 
 @router.post("/{review_id}/items/{item_id}/decision", response_model=ReviewOut)

@@ -91,7 +91,10 @@ NUL_REFUSED = "저장할 글자에 NUL(0x00) 문자가 있어 처리하지 못�
 
 
 def _nul_refused(exc: BaseException) -> bool:
-    """PostgreSQL 드라이버(psycopg)가 NUL이 든 글자를 보내지 않고 낸 오류 — SQLSTATE가 없는 DataError."""
+    """PostgreSQL 드라이버(psycopg)가 NUL이 든 글자를 보내지 않고 낸 오류 — SQLSTATE가 없는 DataError
+    (psycopg 3.3.6: 'PostgreSQL text fields cannot contain NUL (0x00) bytes' — tests/test_nul_inputs.py가 확인).
+    바이너리 형식 매개변수의 서버 오류(22021)는 SQLSTATE가 있어 여기 들지 않는다 (SQLAlchemy psycopg 방언은 텍스트
+    형식으로 보낸다)."""
     orig = getattr(exc, "orig", None)
     return isinstance(exc, DataError) and getattr(orig, "sqlstate", None) is None and "NUL (0x00)" in str(orig)
 
@@ -110,9 +113,11 @@ async def database_failure(request: Request, exc: SQLAlchemyError) -> JSONRespon
 
     - 쓰기 요청은 반영 여부를 확인하라고 안내한다. 서버도 화면도 자동으로 다시 보내지 않는다.
     - 데이터·코드·스키마 오류는 연결 장애로 감추지 않는다 — 그대로 500.
-    - 단, PostgreSQL이 NUL(0x00)이 든 글자를 받지 않은 경우는 입력 오류(422)로 알린다 — 앱이 쓰기 전에 거절하는
-      경로(파일에서 온 이름·값, app/name_limits.py)에 없는 입력의 안전망이다. SQLite는 그 글자를 저장하므로 이 경로들은
-      두 DB 차이가 남는다.
+    - 단, PostgreSQL 드라이버가 NUL(0x00)이 든 글자를 보내지 않은 경우(SQLSTATE 없는 DataError)는 입력 오류(422)로
+      알린다 — 마지막 방어선이다. 직접 입력한 요청 글자는 요청 검증(app/name_limits.py의 StoredText — 두 DB 같은 422
+      목록형)이, 파일에서 온 이름·값은 name_limits·review._check_item_values가 쓰기 전에 거절하므로, 여기에 닿는 것은
+      예상하지 못한 경로(JSON 열에서 되살아난 값, 새 필드)뿐이어야 한다. 어느 필드인지(loc)는 알 수 없어 문자열
+      detail로 알린다.
     - 주소·비밀번호·SQL·매개변수는 응답·기록에 넣지 않는다 (오류 종류·SQLSTATE만).
     """
     kind = db_failure(exc)

@@ -3,7 +3,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
@@ -228,12 +228,16 @@ class ChangePage(BaseModel):
     items: list[ChangeOut]
 
 
+# 변경 기록 종류 — integration.KIND_LABEL의 키와 같은 값 (tests/test_nul_inputs.py가 대조). 다른 글자는 422
+ChangeKind = Literal["ffill", "number", "trim", "entity", "column", "other"]
+
+
 @router.get("/runs/{run_id}/changes", response_model=ChangePage)
 def list_changes(
     run_id: int,
     db: Annotated[Session, Depends(get_session)],
     user: CurrentUserDep,
-    kind: str | None = None,
+    kind: ChangeKind | None = None,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> ChangePage:

@@ -23,6 +23,8 @@ from app.name_limits import (
     NUL,
     TOO_LONG,
     NameNotStorable,
+    OptionalStoredText,
+    StoredText,
     column_place,
     refusal,
     sheet_column_problem,
@@ -342,11 +344,12 @@ def load_parsed(session: Session, file_id: int) -> tuple[SourceFile, FileResult]
 
 
 class DecisionIn(BaseModel):
-    sheet: str = ""  # 원래 시트 이름 (호환용). 화면·응답의 시트 이름은 개인정보를 가리므로 sheet_id를 권장
-    sheet_id: str | None = None  # 매핑 응답의 sheet_id (s0, s1 …)
-    column_id: str | None = None  # 매핑 응답의 column_id (권장)
-    column: str | None = None  # 예전 방식: 원래 열 이름 (호환용, 개인정보가 없는 이름일 때)
-    field_key: str | None  # None = 해당 없음
+    # 요청 글자는 저장하지 않지만 '없는 열·항목' 안내에 되돌려 보내므로 NUL은 요청에서 막는다 (loc으로 알림)
+    sheet: StoredText = ""  # 원래 시트 이름 (호환용). 화면·응답의 시트 이름은 개인정보를 가리므로 sheet_id를 권장
+    sheet_id: OptionalStoredText = None  # 매핑 응답의 sheet_id (s0, s1 …)
+    column_id: OptionalStoredText = None  # 매핑 응답의 column_id (권장)
+    column: OptionalStoredText = None  # 예전 방식: 원래 열 이름 (호환용, 개인정보가 없는 이름일 때)
+    field_key: OptionalStoredText  # None = 해당 없음
 
 
 class DecisionsIn(BaseModel):

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -40,6 +40,7 @@ from app.auth import (
 )
 from app.db import get_session
 from app.models import AccountEvent, AppSetting, IntegrationRun, ReviewSession, SourceFile, User, ValidationRun
+from app.name_limits import OptionalStoredText, StoredText, no_nul
 from app.timefmt import utc_to_kst
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -47,6 +48,8 @@ users_router = APIRouter(prefix="/users", tags=["users"])
 # 최초 소유자 설정이 끝났다는 표시 (app_settings 기본 키 → 동시 요청 중 하나만 성공).
 # 마이그레이션 0015가 계정이 있는 기존 설치에도 넣어 설정 화면이 다시 열리지 않게 한다.
 SETUP_KEY = "owner_setup"
+# 계정 상태 필터 — auth.STATUSES와 같은 값 (tests/test_nul_inputs.py가 대조). 다른 글자는 422(literal_error)
+AccountStatus = Literal["pending", "active", "rejected", "suspended"]
 
 
 class MeOut(BaseModel):
@@ -102,7 +105,7 @@ def _conflict(exc: IntegrityError | OperationalError) -> bool:
 
 class SetupIn(BaseModel):
     username: str = Field(max_length=32)
-    display_name: str = Field(min_length=1, max_length=64)
+    display_name: StoredText = Field(min_length=1, max_length=64)
     password: str = Field(max_length=128)
 
 
@@ -154,7 +157,7 @@ class SignupIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     username: str = Field(max_length=32)
-    display_name: str = Field(min_length=1, max_length=64)
+    display_name: StoredText = Field(min_length=1, max_length=64)
     password: str = Field(max_length=128)
     password_confirm: str = Field(max_length=128)
 
@@ -213,7 +216,7 @@ def signup(body: SignupIn, db: Annotated[Session, Depends(get_session)]) -> Sign
 
 
 class LoginIn(BaseModel):
-    username: str = Field(max_length=64)
+    username: StoredText = Field(max_length=64)  # 저장하지 않지만 SELECT 매개변수 — NUL은 두 DB 같은 422로
     password: str = Field(max_length=256)
 
 
@@ -382,10 +385,11 @@ def last_activity(db: Session) -> dict[int, datetime]:
 def list_users(
     _: OwnerDep,
     db: Annotated[Session, Depends(get_session)],
-    q: Annotated[str | None, Query(max_length=64)] = None,
-    status_filter: Annotated[str | None, Query(alias="status", max_length=16)] = None,
+    q: Annotated[str | None, Query(max_length=64), AfterValidator(no_nul)] = None,
+    status_filter: Annotated[AccountStatus | None, Query(alias="status")] = None,
 ) -> list[UserOut]:
-    """아이디·표시 이름 검색(q, 부분 일치), 상태 필터(status). 승인 대기 → 최근 가입 순."""
+    """아이디·표시 이름 검색(q, 부분 일치), 상태 필터(status). 승인 대기 → 최근 가입 순.
+    검색어의 NUL·모르는 상태는 422 — LIKE·= 매개변수를 PostgreSQL 드라이버가 거절하므로 두 DB 같게 요청에서 막는다."""
     stmt = select(User)
     if q and q.strip():
         like = f"%{q.strip().lower()}%"
@@ -403,7 +407,7 @@ class UserIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     username: str = Field(max_length=32)
-    display_name: str = Field(min_length=1, max_length=64)
+    display_name: StoredText = Field(min_length=1, max_length=64)
     role: Literal["user"] = "user"
     status: Literal["active", "pending"]
     password: str = Field(max_length=128)
@@ -447,7 +451,7 @@ class UserPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    display_name: str = Field(min_length=1, max_length=64)
+    display_name: StoredText = Field(min_length=1, max_length=64)
 
 
 def _target(db: Session, user_id: int) -> User:
@@ -478,7 +482,7 @@ ACTION_LABEL = {"approve": "가입 승인", "reject": "가입 반려", "suspend"
 class StatusChangeIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    reason: str | None = Field(default=None, max_length=500)
+    reason: OptionalStoredText = Field(default=None, max_length=500)  # users.status_reason·account_events.reason
 
 
 def _deny(db: Session, actor: CurrentUser, user: User, action: str, message: str) -> HTTPException:

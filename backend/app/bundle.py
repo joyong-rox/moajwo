@@ -48,6 +48,7 @@ from app.formulas import TOTAL_FORMULAS, check_totals, unique_columns
 from app.integration import KST, OUTPUT_DIR
 from app.mapping_review import file_view, sheet_id
 from app.models import IntegrationRun, SourceFile
+from app.name_limits import OptionalStoredText, StoredText
 from app.parsing import SheetResult
 from app.pii import mask_text
 from app.validation_api import pii_out
@@ -94,20 +95,20 @@ class LinkIn(SheetRef):
     """통계 요약 항목에서 시트 하나를 어떻게 쓸지 (확정 매핑으로 고른 열·단위·기간을 사용자가 보충하거나 뺌)."""
 
     column_id: str | None = Field(default=None, pattern=r"^c\d{1,4}$")  # 같은 항목·구분의 열이 여러 개일 때만
-    unit: str | None = Field(default=None, min_length=1, max_length=20)
+    unit: OptionalStoredText = Field(default=None, min_length=1, max_length=20)
     period: str | None = Field(default=None, pattern=r"^(19|20)\d{2}(-(0[1-9]|1[0-2]))?$")
     rows_are_records: bool = False
     exclude: bool = False  # 이 항목 계산에서 뺌 (사유와 함께 요약 시트에 남음)
-    exclude_reason: str | None = Field(default=None, max_length=100)
+    exclude_reason: OptionalStoredText = Field(default=None, max_length=100)  # 요약 JSON·요약 시트에 남음
 
 
 class ItemIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    field_key: str = Field(max_length=64)  # 사용자가 확정한 표준 항목 (열 위치·이름이 아니라 확정한 뜻으로 연결)
+    field_key: StoredText = Field(max_length=64)  # 사용자가 확정한 표준 항목 (열 위치·이름이 아니라 확정한 뜻으로 연결)
     aggregates: list[Aggregate] = Field(min_length=1, max_length=5)
-    variant: str | None = Field(default=None, max_length=200)
-    unit: str | None = Field(default=None, max_length=20)
+    variant: OptionalStoredText = Field(default=None, max_length=200)
+    unit: OptionalStoredText = Field(default=None, max_length=20)
     region_level: Literal["lower", "upper"] | None = None
     links: list[LinkIn] = Field(default_factory=list, max_length=MAX_SHEETS)
 
