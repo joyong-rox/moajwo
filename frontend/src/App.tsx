@@ -24,6 +24,7 @@ import MoajwoAdmin from './MoajwoAdmin'
 import Promotions from './Promotions'
 import ReviewPanel from './ReviewPanel'
 import HomeSteps from './HomeSteps'
+import KeyJoin from './KeyJoin'
 import { afterRouteChange, cancelFocusWaits, focusPageStart } from './pageFocus'
 import { navigate, replaceSearch, usePath, useSearch } from './router'
 import { ADMIN_BASE, findRoute, isActiveMenu, ROUTES } from './routes'
@@ -34,7 +35,10 @@ import Upload from './Upload'
 import Validation, { type ResultMode } from './Validation'
 import { Banner, Icon, type IconName } from './Workflow'
 
-type Gate = { kind: 'loading' } | { kind: 'signed-out'; setupRequired: boolean } | { kind: 'signed-in'; me: Me }
+type Gate =
+  | { kind: 'loading' }
+  | { kind: 'signed-out'; setupRequired: boolean; unavailable?: string }
+  | { kind: 'signed-in'; me: Me }
 
 async function resolveGate(): Promise<Gate> {
   try {
@@ -42,8 +46,9 @@ async function resolveGate(): Promise<Gate> {
     const { setup_required, user } = await authStatus()
     if (user) return { kind: 'signed-in', me: user }
     return { kind: 'signed-out', setupRequired: setup_required }
-  } catch {
-    return { kind: 'signed-out', setupRequired: false }
+  } catch (err) {
+    // 상태를 확인하지 못했을 때(서버·DB 연결 실패 등) 최초 설정 화면을 열지 않는다 — 로그인 화면에 이유만 보인다
+    return { kind: 'signed-out', setupRequired: false, unavailable: err instanceof Error ? err.message : String(err) }
   }
 }
 
@@ -67,7 +72,13 @@ function App() {
 
   if (gate.kind === 'loading') return <p className="login-loading">확인 중…</p>
   if (gate.kind === 'signed-out') {
-    return <Login setupRequired={gate.setupRequired} onSignedIn={(me) => setGate({ kind: 'signed-in', me })} />
+    return (
+      <Login
+        setupRequired={gate.setupRequired}
+        unavailable={gate.unavailable}
+        onSignedIn={(me) => setGate({ kind: 'signed-in', me })}
+      />
+    )
   }
   const signOut = () => {
     void logout().finally(() => {
@@ -174,7 +185,7 @@ function Workspace() {
                 <div>
                   <h1 className="page-title">홈</h1>
                   <p className="wk-home-lead">
-                    파일을 올리고 고른 뒤, 결과 형태(하나의 통합표 · 파일별 시트)를 골라 이어서 진행하세요.
+                    파일을 올리고 고른 뒤, 결과 형태(하나의 통합표 · 파일별 시트 · 공통 key 연결)를 골라 이어서 진행하세요.
                   </p>
                 </div>
                 <ServerStatus state={state} />
@@ -233,6 +244,7 @@ function Workspace() {
               {allowed && path === '/mapping' && <MappingWorkspace />}
               {allowed && path === '/mapping/common' && <MappingCommon />}
               {allowed && path === '/bundle' && <Bundle />}
+              {allowed && path === '/keyjoin' && <KeyJoin />}
               {allowed && path === '/analysis' && <Analysis />}
               {allowed && path === '/dictionary' && <Dictionary />}
               {allowed && path === '/promotions' && <Promotions />}

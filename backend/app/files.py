@@ -12,15 +12,28 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
-from app.config import DATA_DIR
+from app.config import DATA_DIR, MAX_FILE_CELLS, MAX_UPLOAD_MIB, MAX_XLSX_UNCOMPRESSED_MIB, PARSE_SLOTS
 from app.db import get_session
 from app.decisions import DecisionInput, load_decisions, load_learned, load_org_codes, save_decisions
 from app.mapping import get_engine
 from app.models import MappingAnalysis, SourceFile
-from app.parsing import SUPPORTED_EXTENSIONS, FileResult, ParseError, parse_file
-from app.pii import mask_text
+from app.name_limits import (
+    FILE_NAME_MAX,
+    HAS_NUL,
+    NUL,
+    TOO_LONG,
+    NameNotStorable,
+    OptionalStoredText,
+    StoredText,
+    column_place,
+    refusal,
+    sheet_column_problem,
+    sheet_place,
+)
+from app.parsing import MAX_CELL_CHARS, SUPPORTED_EXTENSIONS, FileResult, ParseBusy, ParseError, parse_file
+from app.pii import mask_text, shown_pii_items
 from app.promotion import load_standard, record_approval
-from app.storage import MAX_UPLOAD_BYTES, UploadTooLarge, safe_original_name, store_original
+from app.storage import UploadTooLarge, safe_original_name, store_original
 from app.timefmt import utc_to_kst
 
 logger = logging.getLogger(__name__)
@@ -29,6 +42,10 @@ router = APIRouter(prefix="/files", tags=["files"])
 mapping_router = APIRouter(prefix="/mapping", tags=["mapping"])
 
 MAX_FILES_PER_REQUEST = 20
+ORIGINAL_GONE = (
+    "원본 파일이 서버에 없습니다 — 서버 재배포·재시작으로 지워졌을 수 있습니다. 같은 원본을 다시 올리면 새 파일로 "
+    "이어서 쓸 수 있습니다 (계정·검토·실행 기록은 그대로)."
+)
 
 
 class SheetOut(BaseModel):
@@ -45,7 +62,7 @@ class SheetOut(BaseModel):
 
 
 class UploadResultOut(BaseModel):
-    original_name: str
+    original_name: str  # 가린 표시 이름 (원문은 보내지 않는다 — 식별은 id)
     id: int | None = None
     size_bytes: int | None = None
     encoding: str | None = None
@@ -55,6 +72,29 @@ class UploadResultOut(BaseModel):
     pii: dict[str, Any] | None = None  # 개인정보 탐지 요약 (마스킹 값과 위치만)
     skipped_sheets: list[str] = []  # 통계표 설명 시트(메타정보·설명·안내)는 읽지 않음
     error: str | None = None
+
+
+class LimitsOut(BaseModel):
+    """파일 읽기 한도 (환경마다 다름 — docs/MEMORY.md). 화면이 안내 문구에 그대로 쓴다. 크기 단위는 MiB."""
+
+    max_upload_mib: int
+    max_xlsx_uncompressed_mib: int
+    max_file_cells: int
+    max_cell_chars: int
+    parse_slots: int
+    max_files_per_request: int
+
+
+@router.get("/limits", response_model=LimitsOut)
+def file_limits() -> LimitsOut:
+    return LimitsOut(
+        max_upload_mib=MAX_UPLOAD_MIB,
+        max_xlsx_uncompressed_mib=MAX_XLSX_UNCOMPRESSED_MIB,
+        max_file_cells=MAX_FILE_CELLS,
+        max_cell_chars=MAX_CELL_CHARS,
+        parse_slots=PARSE_SLOTS,
+        max_files_per_request=MAX_FILES_PER_REQUEST,
+    )
 
 
 @router.post("", response_model=list[UploadResultOut])
@@ -73,13 +113,21 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
     name = safe_original_name(upload.filename)
     ext = PurePath(name).suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
-        return UploadResultOut(original_name=name, error="xlsx, xls, csv 파일만 올릴 수 있습니다.")
+        return UploadResultOut(original_name=mask_text(name), error="xlsx, xls, csv 파일만 올릴 수 있습니다.")
+    if NUL in name:  # 파일 이름은 그대로 저장한다 — NUL은 PostgreSQL이 받지 않으므로 두 DB에서 같게 저장 전에 거절
+        error = f"파일 이름에 NUL(0x00) 문자가 있어 올리지 않았습니다 — 이름을 바꿔 다시 올리세요. [{HAS_NUL}]"
+        return UploadResultOut(original_name=mask_text(name.replace(NUL, "")), error=error)
+    if len(name) > FILE_NAME_MAX:  # 자르지 않는다 — 두 DB에서 같게 저장 전에 거절 (이름 원문은 문구에 넣지 않음)
+        error = (
+            f"파일 이름이 {len(name):,}자로 저장 한도 {FILE_NAME_MAX}자를 넘어 올리지 않았습니다 — 이름을 줄여 다시 "
+            f"올리세요. [{TOO_LONG}]"
+        )
+        return UploadResultOut(original_name=mask_text(name), error=error)
 
     try:
         stored = store_original(upload.file, ext)
     except UploadTooLarge:
-        limit_mb = MAX_UPLOAD_BYTES // 1024 // 1024
-        return UploadResultOut(original_name=name, error=f"파일이 너무 큽니다 (최대 {limit_mb}MB).")
+        return UploadResultOut(original_name=mask_text(name), error=f"파일이 너무 큽니다 (최대 {MAX_UPLOAD_MIB}MiB).")
 
     record = SourceFile(
         original_name=name,
@@ -91,9 +139,18 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
     session.add(record)
     session.commit()
 
-    result = UploadResultOut(original_name=name, id=record.id, size_bytes=stored.size_bytes)
+    result = UploadResultOut(original_name=mask_text(name), id=record.id, size_bytes=stored.size_bytes)
     try:
         parsed = parse_file(stored.path, name)
+    except ParseBusy as exc:
+        # 읽기 차례를 얻지 못함 — 입력 오류가 아니므로 '읽지 못한 파일'로 남기지 않고 기록·원본을 지운다
+        # (다시 올리면 됨. 업로드 때 읽어야 개인정보 탐지 결과가 남으므로 읽지 않은 파일을 두지 않는다)
+        session.delete(record)
+        session.commit()
+        stored.path.chmod(0o600)  # 원본은 읽기 전용으로 저장된다 (Windows는 읽기 전용 파일을 지우지 못함)
+        stored.path.unlink(missing_ok=True)
+        logger.warning("upload parse busy: ext=%s", ext)
+        return UploadResultOut(original_name=mask_text(name), error=str(exc))
     except ParseError as exc:
         logger.warning("parse failed: id=%s ext=%s reason=%s", record.id, ext, exc)
         result.error = str(exc)
@@ -107,17 +164,17 @@ def _handle_one(upload: UploadFile, session: Session, user_id: int) -> UploadRes
     if report.found:
         # 원문은 기록하지 않는다 (건수만)
         logger.info("pii patterns found: id=%s counts=%s", record.id, report.counts)
-        result.pii = {**summary, "acknowledged": False}
+        result.pii = {"counts": summary["counts"], "items": shown_pii_items(summary["items"]), "acknowledged": False}
 
     result.encoding = parsed.encoding
-    result.skipped_sheets = parsed.skipped_sheets
+    result.skipped_sheets = [mask_text(n) for n in parsed.skipped_sheets]
     result.sheet_count = len(parsed.sheets)
     result.data_rows = parsed.data_rows
     # body(전체 행)는 크므로 응답 모델에 필요한 필드만 읽는다.
-    # 열 이름에 든 개인정보는 화면으로 보내기 전에 가린다 (미리보기 셀은 파서가 이미 마스킹)
+    # 시트·열 이름에 든 개인정보는 화면으로 보내기 전에 가린다 (미리보기 셀은 파서가 이미 마스킹)
     result.sheets = [
         SheetOut.model_validate(s, from_attributes=True).model_copy(
-            update={"columns": [mask_text(c) for c in s.columns]}
+            update={"name": mask_text(s.name), "columns": [mask_text(c) for c in s.columns]}
         )
         for s in parsed.sheets
     ]
@@ -272,20 +329,27 @@ def load_parsed(session: Session, file_id: int) -> tuple[SourceFile, FileResult]
     if record is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "파일을 찾을 수 없습니다.")
     path = (DATA_DIR / record.stored_path).resolve()
-    if not path.is_relative_to(DATA_DIR.resolve()) or not path.is_file():
+    if not path.is_relative_to(DATA_DIR.resolve()):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "원본 파일이 없습니다.")
+    if not path.is_file():
+        # 기록은 있는데 파일이 없다 — 외부 DB를 쓰는 서버(Render 등)는 재배포·재시작 때 파일이 지워질 수 있다.
+        # 다른 파일로 대신 잇지 않고, 기록·계정은 지우지 않는다 (docs/EXTERNAL_DB.md '파일 보존')
+        raise HTTPException(status.HTTP_410_GONE, ORIGINAL_GONE)
     try:
         return record, parse_file(path, record.original_name)
+    except ParseBusy as exc:  # 입력 오류가 아니다 — 잠시 뒤 같은 요청을 다시 보내면 된다
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc), headers={"Retry-After": "10"}) from exc
     except ParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
 
 
 class DecisionIn(BaseModel):
-    sheet: str = ""  # 원래 시트 이름 (호환용). 화면·응답의 시트 이름은 개인정보를 가리므로 sheet_id를 권장
-    sheet_id: str | None = None  # 매핑 응답의 sheet_id (s0, s1 …)
-    column_id: str | None = None  # 매핑 응답의 column_id (권장)
-    column: str | None = None  # 예전 방식: 원래 열 이름 (호환용, 개인정보가 없는 이름일 때)
-    field_key: str | None  # None = 해당 없음
+    # 요청 글자는 저장하지 않지만 '없는 열·항목' 안내에 되돌려 보내므로 NUL은 요청에서 막는다 (loc으로 알림)
+    sheet: StoredText = ""  # 원래 시트 이름 (호환용). 화면·응답의 시트 이름은 개인정보를 가리므로 sheet_id를 권장
+    sheet_id: OptionalStoredText = None  # 매핑 응답의 sheet_id (s0, s1 …)
+    column_id: OptionalStoredText = None  # 매핑 응답의 column_id (권장)
+    column: OptionalStoredText = None  # 예전 방식: 원래 열 이름 (호환용, 개인정보가 없는 이름일 때)
+    field_key: OptionalStoredText  # None = 해당 없음
 
 
 class DecisionsIn(BaseModel):
@@ -322,8 +386,20 @@ def save_mapping_decisions(
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 열입니다: {where} / {shown}")
         if d.field_key is not None and d.field_key not in valid_keys:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, f"없는 표준 항목입니다: {d.field_key}")
+        # 열 번호로 찾은 실제 이름까지 — 한도 초과·NUL은 쓰기 전에 두 DB에서 같게 거절 (app/name_limits.py)
+        problem = sheet_column_problem(sheet, raw)
+        if problem is not None:
+            found = next(s for s in parsed.sheets if s.name == sheet)
+            place = f"{sheet_place(found)} · {column_place(found, names.index(raw))}"
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, refusal("확정하지 않았습니다", [(place, problem)])
+            )
         inputs.append(DecisionInput(sheet, raw, d.field_key))
-    result = save_decisions(session, engine, file_id, inputs, user_id=user.id)
+    try:
+        result = save_decisions(session, engine, file_id, inputs, user_id=user.id)
+    except NameNotStorable as exc:  # 위에서 먼저 거절하므로 닿지 않는다 — 닿아도 500이 아니라 같은 422로
+        session.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     for d in inputs:
         if d.field_key is not None:
             record_approval(session, engine, user.id, d.column, d.field_key)

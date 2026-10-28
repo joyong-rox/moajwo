@@ -22,6 +22,9 @@ import { REVIEW_STAGES } from './progressStages'
 import { Banner, NavLink, StatusCards, WorkflowSteps, type Step } from './Workflow'
 
 const RECHECK_LABEL = '다시 검사 — 결정 이어받기'
+// 검토 전체에 대한 요청(완료·다시 검사·형식 기억하기)이 진행 중 — 항목 번호와 겹치지 않는 값.
+// 요청이 끝날 때까지 버튼을 막아, 빠르게 두 번 눌러도 요청이 두 번 가지 않게 한다.
+const PANEL_BUSY = -1
 
 const KIND_LABEL: Record<string, string> = {
   mapping: '열 매핑',
@@ -39,6 +42,8 @@ const KIND_LABEL: Record<string, string> = {
   unit_estimate: '단위 추정',
   header_missing: '헤더 확인 필요',
   quantity_not_number: '수량으로 계산하지 못한 값',
+  formula_mismatch: '합계 산식 확인 필요',
+  sum_incomplete: '합계 검사 불완전',
 }
 
 const GROUPS: { category: ReviewCategory; title: string; hint: string }[] = [
@@ -113,7 +118,7 @@ function ReviewPanel({
     setLoading(true)
     setMessage(null)
     const changed = Object.fromEntries(Object.entries(replace).filter(([from, to]) => Number(from) !== to))
-    const ok = await run(null, () => recheckReview(current.id, changed))
+    const ok = await run(PANEL_BUSY, () => recheckReview(current.id, changed))
     if (ok) setReplace({})
     setLoading(false)
     listFiles()
@@ -154,12 +159,21 @@ function ReviewPanel({
   }
 
   const complete = (current: Review) =>
-    void run(null, async () => {
+    void run(PANEL_BUSY, async () => {
       const done = await completeReview(current.id)
       const learned = done.learned
-      const skipped = learned?.names_skipped
-        ? ` 기관·지역 이름 ${learned.names_skipped}개는 공용 용어사전이라 관리자만 등록할 수 있어 기억하지 않았습니다.`
-        : ''
+      // 기억하지 않은 기관·지역 이름은 이유별로 알린다 (권한 · 개인정보 형식 · 저장 한도)
+      const skipped = [
+        learned?.names_skipped
+          ? ` 기관·지역 이름 ${learned.names_skipped}개는 공용 용어사전이라 관리자만 등록할 수 있어 기억하지 않았습니다.`
+          : '',
+        learned?.names_pii
+          ? ` 기관·지역 이름 ${learned.names_pii}개는 개인정보 형식이 있어 공용 용어사전에 기억하지 않았습니다.`
+          : '',
+        learned?.names_not_storable
+          ? ` 기관·지역 이름 ${learned.names_not_storable}개는 저장 한도(255자)를 넘거나 저장할 수 없는 문자가 있어 기억하지 않았습니다.`
+          : '',
+      ].join('')
       setMessage(
         (learned && (learned.columns || learned.names)
           ? `검토 완료 — 열 이름 ${learned.columns}개, 기관·지역 이름 ${learned.names}개를 기억했습니다.`
@@ -259,7 +273,7 @@ function ReviewPanel({
                   const previous = review
                   // 바로 체크 표시를 바꾸고 저장한다. 저장에 실패하면 원래대로 되돌린다.
                   setReview({ ...review, remember_format: e.target.checked })
-                  void run(null, () => setRememberFormat(review.id, e.target.checked)).then((saved) => {
+                  void run(PANEL_BUSY, () => setRememberFormat(review.id, e.target.checked)).then((saved) => {
                     if (!saved) setReview(previous)
                   })
                 }}

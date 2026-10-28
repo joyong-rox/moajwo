@@ -197,6 +197,7 @@ function Overview() {
               완료 {data.runs.done} · 실패 {data.runs.failed} · 검토 대기{" "}
               {data.runs.review}
               {data.runs.running > 0 ? ` · 실행 중 ${data.runs.running}` : ""}
+              {data.runs.check > 0 ? ` · 결과 확인 필요 ${data.runs.check}` : ""}
             </Card>
           </dl>
           <details className="admin-help">

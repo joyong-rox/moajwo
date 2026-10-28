@@ -3,7 +3,16 @@ import Mapping from './Mapping'
 import PiiNotice from './PiiNotice'
 import { ProgressPanel, SkeletonRows } from './Progress'
 import { UPLOAD_STAGES } from './progressStages'
-import { ACCEPTED_EXTENSIONS, uploadFiles, type Cell, type RowKind, type SheetSummary, type UploadResult } from './api'
+import {
+  ACCEPTED_EXTENSIONS,
+  fetchFileLimits,
+  uploadFiles,
+  type Cell,
+  type FileLimits,
+  type RowKind,
+  type SheetSummary,
+  type UploadResult,
+} from './api'
 import { navigate } from './router'
 import { Banner, Icon, NavLink } from './Workflow'
 
@@ -38,8 +47,16 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
   const announceTimer = useRef<number | undefined>(undefined)
   const titleId = useId()
   const hintId = useId()
+  const busyId = useId()
+  // 서버의 읽기 한도 (환경마다 다름). 못 불러오면 크기 안내만 빼고 보인다 — 실제 거절은 서버가 사유와 함께 알린다
+  const [limits, setLimits] = useState<FileLimits | null>(null)
 
   useEffect(() => () => window.clearTimeout(announceTimer.current), [])
+  useEffect(() => {
+    fetchFileLimits()
+      .then(setLimits)
+      .catch(() => undefined)
+  }, [])
 
   function announce(message: string) {
     window.clearTimeout(announceTimer.current)
@@ -71,8 +88,11 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
       const uploaded = await uploadFiles(accepted, setSent)
       setResults((prev) => [...uploaded, ...prev])
       // 누적 목록이 아니라 이번 요청의 결과만 센다. 일부 실패도 일반 상태로 전한다 (즉시 대응이 필요한 전체 실패만 alert).
+      // 실패 사유도 같이 읽는다 — 카드에만 보이면 화면 읽기 사용자는 건수만 듣는다 (서버 문구 그대로, 같은 사유는 한 번)
       const failedNow = uploaded.filter((r) => r.error).length
-      announce(`업로드를 마쳤습니다: 이번 요청 ${uploaded.length}개 중 성공 ${uploaded.length - failedNow}개, 실패 ${failedNow}개.`)
+      const reasons = [...new Set(uploaded.flatMap((r) => (r.error ? [r.error] : [])))]
+      const why = reasons.length ? ` 실패 사유: ${reasons.slice(0, 3).join(' / ')}${reasons.length > 3 ? ` 외 ${reasons.length - 3}가지` : ''}` : ''
+      announce(`업로드를 마쳤습니다: 이번 요청 ${uploaded.length}개 중 성공 ${uploaded.length - failedNow}개, 실패 ${failedNow}개.${why}`)
       onUploaded?.()
     } catch (err) {
       announce('') // 요청 전체 실패는 아래 오류 알림(alert)이 전한다 — 같은 내용을 두 번 읽지 않게 상태는 비운다
@@ -90,9 +110,13 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
     void handleFiles(e.dataTransfer.files)
   }
 
-  // 업로드 중에는 파일 선택 창을 열지 않는다 (열어도 고른 파일은 처리되지 않음)
+  // 업로드 중에는 파일 선택 창을 열지 않는다 (열어도 고른 파일은 처리되지 않음) — 누르면 이유를 알린다
   function openPicker() {
-    if (!busy) inputRef.current?.click()
+    if (busy) {
+      announce('업로드·분석이 끝난 뒤 파일을 고를 수 있습니다.')
+      return
+    }
+    inputRef.current?.click()
   }
 
   const okIds = results.filter((r) => r.id !== null && !r.error).map((r) => r.id as number)
@@ -126,16 +150,22 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
           <p className="upload-drop-title" id={titleId}>
             {busy ? '업로드·분석 중…' : '파일을 여기에 끌어다 놓으세요'}
           </p>
-          <p className="upload-drop-hint" id={hintId}>
-            또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능 · 파일당 최대 50MB
-          </p>
+          {/* 업로드 중에는 '눌러서 선택' 안내가 맞지 않고, 흐리게 그린 영역에서 글자 대비도 모자라 숨긴다 (이유는 영역 아래) */}
+          {!busy && (
+            <p className="upload-drop-hint" id={hintId}>
+              또는 눌러서 선택 · xlsx, xls, csv · 여러 개 가능
+              {limits &&
+                ` · 파일당 최대 ${limits.max_upload_mib}MiB (xlsx는 풀었을 때 ${limits.max_xlsx_uncompressed_mib}MiB, ` +
+                  `${limits.max_file_cells.toLocaleString('ko-KR')}칸까지)`}
+            </p>
+          )}
         </div>
         {/* 업로드 중에도 그대로 두고 aria-disabled로만 막는다 — disabled로 바꾸면 누른 직후 키보드 초점이 사라진다 */}
         <button
           type="button"
           className="wk-drop-button"
           aria-disabled={busy || undefined}
-          aria-describedby={busy ? titleId : `${titleId} ${hintId}`}
+          aria-describedby={busy ? `${titleId} ${busyId}` : `${titleId} ${hintId}`}
           onClick={(e) => {
             e.stopPropagation() // 둘레 영역의 클릭으로 한 번 더 열지 않게
             openPicker()
@@ -152,6 +182,13 @@ function Upload({ onUploaded, onPiiChanged }: { onUploaded?: () => void; onPiiCh
           onChange={(e) => void handleFiles(e.target.files)}
         />
       </div>
+      {/* 업로드 중 '파일 선택'이 열리지 않는 이유 — 흐리게 그린 영역 밖, 버튼 바로 아래에 두고 버튼 설명으로 잇는다 */}
+      {busy && (
+        <p className="wk-why" id={busyId}>
+          <strong>지금은 고를 수 없음</strong> 업로드·분석이 끝나면 다시 고를 수 있습니다. 지금 고른 파일은 처리되지
+          않습니다.
+        </p>
+      )}
 
       {busy && (
         <>

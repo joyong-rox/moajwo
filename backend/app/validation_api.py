@@ -16,7 +16,8 @@ from app.files import get_file_for, load_parsed
 from app.glossary_api import get_glossary
 from app.mapping import get_engine
 from app.models import SourceFile, ValidationRun
-from app.pii import has_pii, mask_nested, mask_rrn_number, mask_text
+from app.name_limits import StoredText
+from app.pii import has_pii, mask_nested, mask_rrn_number, mask_text, shown_pii_items
 from app.promotion import load_standard
 from app.quantity import confirmed_quantity_indexes, quantity_sheet
 from app.timefmt import utc_to_kst
@@ -50,8 +51,8 @@ class PiiOut(BaseModel):
 
 class FileListItem(BaseModel):
     id: int
-    original_name: str
-    display_name: str  # 화면 표시용 (개인정보를 가린 파일 이름). 식별은 id, original_name은 기존 화면 호환용
+    original_name: str  # 호환 필드 — display_name과 같은 가린 이름 (원문은 보내지 않는다. 식별은 id)
+    display_name: str  # 화면 표시용 (개인정보를 가린 파일 이름)
     uploaded_at: datetime
     pii: PiiOut | None
 
@@ -62,7 +63,12 @@ def pii_out(record: SourceFile) -> PiiOut | None:
     summary = json.loads(record.pii_summary)
     if not any(summary.get("counts", {}).values()):
         return None
-    return PiiOut(counts=summary["counts"], items=summary["items"], acknowledged=record.pii_acknowledged_at is not None)
+    # 탐지 위치의 시트 이름·위치 설명은 내보낼 때 가린다 (저장값은 원문 — 지금 규칙으로 가려 과거 저장값도 같은 모양)
+    return PiiOut(
+        counts=summary["counts"],
+        items=shown_pii_items(summary.get("items")),
+        acknowledged=record.pii_acknowledged_at is not None,
+    )
 
 
 @router.get("/files", response_model=list[FileListItem])
@@ -78,7 +84,7 @@ def list_files(
     return [
         FileListItem(
             id=r.id,
-            original_name=r.original_name,
+            original_name=mask_text(r.original_name),
             display_name=mask_text(r.original_name),
             uploaded_at=utc_to_kst(r.uploaded_at),  # DB 기본값(UTC) → KST
             pii=pii_out(r),
@@ -108,7 +114,9 @@ class ValidationIn(BaseModel):
     file_ids: list[int] = Field(min_length=1, max_length=MAX_FILES)
     baseline_file_ids: list[int] = Field(default_factory=list, max_length=MAX_FILES)
     expected_period: str | None = Field(default=None, pattern=r"^(19|20)\d{2}(-(0[1-9]|1[0-2]))?$")
-    required_entities: list[str] = Field(default_factory=list, max_length=500)
+    # 항목은 검토 조건(params JSON)·검토 항목 사유에 저장된다 — NUL은 항목 위치(loc)로 /validation·/reviews가 같게
+    # 422 (항목별 길이 한도는 두지 않음)
+    required_entities: list[StoredText] = Field(default_factory=list, max_length=500)
     entity_field: str | None = None
     change_threshold: float = Field(default=0.5, gt=0, le=10)
 
@@ -258,8 +266,11 @@ def run_validation(
     return _validation_out(run)
 
 
-def save_run(session: Session, params_json: str, result: ValidationResult, user_id: int | None = None) -> ValidationRun:
-    """검증 결과를 등급별로 분리한 그대로 기록한다 (검증 API와 검토 패널이 함께 사용)."""
+def save_run(
+    session: Session, params_json: str, result: ValidationResult, user_id: int | None = None, commit: bool = True
+) -> ValidationRun:
+    """검증 결과를 등급별로 분리한 그대로 기록한다 (검증 API와 검토 패널이 함께 사용).
+    commit=False면 번호만 받고(flush) 커밋은 호출한 쪽이 한다 — 검토 생성이 검토·항목과 한 트랜잭션으로 기록할 때."""
     payload = {
         "blocks": [_issue_out(i, BLOCK_LABEL).model_dump(mode="json") for i in result.blocks],
         "warnings": [_issue_out(i, WARNING_LABEL).model_dump(mode="json") for i in result.warnings],
@@ -271,7 +282,10 @@ def save_run(session: Session, params_json: str, result: ValidationResult, user_
         status=result.status, params=params_json, result=json.dumps(payload, ensure_ascii=False), created_by=user_id
     )
     session.add(run)
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     logger.info(
         "validation run=%s status=%s blocks=%d warnings=%d",
         run.id,

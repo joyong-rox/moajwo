@@ -19,10 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
-import stat
-import tempfile
 import threading
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
@@ -33,31 +30,35 @@ from typing import Any, Literal
 import openpyxl
 from fastapi import HTTPException
 from openpyxl import Workbook
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app import analysis
+from app import analysis, runlease
 from app.analysis import AGG_LABEL, MEASURE_FIELDS, NO_VALUE, AnalysisIn, Evaluation, TargetIn, label_of
-from app.analysis_api import LEVEL_TEXT, level_conflict_text
+from app.analysis_api import LEVEL_TEXT, level_conflict_text, source_columns_text
 from app.auth import CurrentUser
-from app.config import DATA_DIR
+from app.config import DATA_DIR, MAX_OUTPUT_CELLS, MAX_OUTPUT_TEXT_CHARS
 from app.decisions import load_decisions
+from app.failures import failure_reason, log_failure
 from app.files import get_file_for, load_parsed
+from app.formulas import TOTAL_FORMULAS, check_totals, unique_columns
 from app.integration import KST, OUTPUT_DIR
-from app.mapping_review import sheet_id
+from app.mapping_review import file_view, sheet_id
 from app.models import IntegrationRun, SourceFile
-from app.parsing import FileResult
+from app.name_limits import OptionalStoredText, StoredText
+from app.parsing import SheetResult
 from app.pii import mask_text
 from app.validation_api import pii_out
+from app.xmltext import ILLEGAL_RE
 
 logger = logging.getLogger(__name__)
 
-POLICY = "bundle-policy-1"  # 시트 구성·이름·쓰기 규칙이 바뀌면 올린다 (basis·실행 기록에 남음)
+POLICY = "bundle-policy-2"  # 시트 구성·이름·쓰기 규칙이 바뀌면 올린다 (basis·실행 기록에 남음) — 2: 글자는 모두 글자 칸
 MODE = "sheets"
+BUNDLE_FAILED = "BUNDLE_FAILED"  # 결과를 만드는 중 예기치 않은 실패 (예외 종류만 알림)
 MAX_FILES = 50  # 한 번에 고를 수 있는 파일 (홈 검사 대상 한도와 같음)
 MAX_SHEETS = 50  # 결과에 넣는 원본 시트
 MAX_ROWS = 300_000  # 결과에 넣는 행 합계 (데이터 분석 한도와 같음)
@@ -68,7 +69,7 @@ NAME_MAX = 31  # 엑셀 시트 이름 길이 한도
 EXCEL_DIGITS = 15  # 엑셀 숫자 칸이 정확히 담는 자릿수
 FORBIDDEN = re.compile(r"[\[\]:*?/\\]")
 RESERVED = (SUMMARY_SHEET, "처리 요약", "History")  # 요약 시트·통합표 시트 이름, 엑셀 예약 이름
-FORMULA_START = ("=", "+", "-", "@", "\t", "\r")  # analysis_api와 같은 규칙: 이 글자로 시작하면 글자 형식으로 쓴다
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")  # 수식으로 읽힐 수 있는 첫 글자 (기록용 — 이제 글자는 모두 글자 칸)
 KIND_TEXT = {"data": "데이터", "subtotal": "소계·합계", "note": "주석"}
 LEAD = ["원본 행", "행 종류"]
 HEAD_FILL = PatternFill("solid", fgColor="EEF1F6")
@@ -94,20 +95,20 @@ class LinkIn(SheetRef):
     """통계 요약 항목에서 시트 하나를 어떻게 쓸지 (확정 매핑으로 고른 열·단위·기간을 사용자가 보충하거나 뺌)."""
 
     column_id: str | None = Field(default=None, pattern=r"^c\d{1,4}$")  # 같은 항목·구분의 열이 여러 개일 때만
-    unit: str | None = Field(default=None, min_length=1, max_length=20)
+    unit: OptionalStoredText = Field(default=None, min_length=1, max_length=20)
     period: str | None = Field(default=None, pattern=r"^(19|20)\d{2}(-(0[1-9]|1[0-2]))?$")
     rows_are_records: bool = False
     exclude: bool = False  # 이 항목 계산에서 뺌 (사유와 함께 요약 시트에 남음)
-    exclude_reason: str | None = Field(default=None, max_length=100)
+    exclude_reason: OptionalStoredText = Field(default=None, max_length=100)  # 요약 JSON·요약 시트에 남음
 
 
 class ItemIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    field_key: str = Field(max_length=64)  # 사용자가 확정한 표준 항목 (열 위치·이름이 아니라 확정한 뜻으로 연결)
+    field_key: StoredText = Field(max_length=64)  # 사용자가 확정한 표준 항목 (열 위치·이름이 아니라 확정한 뜻으로 연결)
     aggregates: list[Aggregate] = Field(min_length=1, max_length=5)
-    variant: str | None = Field(default=None, max_length=200)
-    unit: str | None = Field(default=None, max_length=20)
+    variant: OptionalStoredText = Field(default=None, max_length=200)
+    unit: OptionalStoredText = Field(default=None, max_length=20)
     region_level: Literal["lower", "upper"] | None = None
     links: list[LinkIn] = Field(default_factory=list, max_length=MAX_SHEETS)
 
@@ -145,6 +146,14 @@ class SheetInfo:
     formula_missing: int  # 수식인데 저장된 결과값이 없는 칸
     formula_cached: int  # 저장된 결과값을 쓰는 수식 칸
     long_numbers: int  # 엑셀 숫자 칸이 정확히 담지 못하는 15자리 넘는 정수
+    text_chars: int = (
+        0  # 결과에 넣는 열 이름과 행(데이터·소계·주석) 칸의 글자 수 합 — 결과 글자 예산 (MAX_OUTPUT_TEXT_CHARS)
+    )
+    # 공통 key 연결(app/keyjoin.py)이 파싱 없이 열을 고르고 예산을 셈하는 데 쓴다 — 묶기의 응답·basis에는 넣지 않는다
+    column_chars: list[int] = field(default_factory=list)  # 열별, 데이터 행의 글자 칸 글자 수 합
+    column_names: list[str] = field(default_factory=list)  # 원래 열 이름 (서버 안에서만)
+    source_columns: list[int] = field(default_factory=list)  # 열별 원본 시트의 열 번호 (0부터 — 열 문자 표시용)
+    tab: int = 0  # 원본 통합 문서의 시트 순번 (0부터, 건너뛴 설명 시트 포함 — 'N번째 시트')
 
 
 @dataclass
@@ -210,6 +219,8 @@ def file_info(db: Session, record: SourceFile) -> FileInfo:
         cells = formulas.get(s.name, set())
         kinds = {"data": s.data_rows, "subtotal": s.subtotal_rows, "note": s.note_rows, "empty": s.empty_rows}
         missing = cached = long_numbers = 0
+        text_chars = sum(len(n) for n in s.columns if isinstance(n, str))  # 결과 1행(열 이름)도 결과 글자
+        column_chars = [0] * len(s.columns)
         for entry in s.body:
             if entry["kind"] == "empty":
                 continue
@@ -218,6 +229,10 @@ def file_info(db: Session, record: SourceFile) -> FileInfo:
                 missing += state == "missing"
                 cached += state == "cached"
                 long_numbers += _long(value)
+                if isinstance(value, str):
+                    text_chars += len(value)
+                    if entry["kind"] == "data" and j < len(column_chars):
+                        column_chars[j] += len(value)
         sheets.append(
             SheetInfo(
                 i,
@@ -229,6 +244,11 @@ def file_info(db: Session, record: SourceFile) -> FileInfo:
                 missing,
                 cached,
                 long_numbers,
+                text_chars,
+                column_chars=column_chars,
+                column_names=list(s.columns),
+                source_columns=list(s.source_columns or range(len(s.columns))),
+                tab=s.tab,
             )  # fmt: skip
         )
     info = FileInfo(record.id, record.sha256, record.original_name, Path(record.original_name).suffix.lower(), sheets,
@@ -359,6 +379,8 @@ class Plan:
                 "files": MAX_FILES,
                 "sheets": MAX_SHEETS,
                 "rows": MAX_ROWS,
+                "cells": MAX_OUTPUT_CELLS,
+                "text_chars": MAX_OUTPUT_TEXT_CHARS,
                 "excel_rows": EXCEL_MAX_ROWS,
                 "items": MAX_ITEMS,
                 "summary_sheets": analysis.MAX_TARGETS,
@@ -477,6 +499,21 @@ def build_plan(db: Session, user: CurrentUser, req: BundleIn) -> Plan:
         )
     if total > MAX_ROWS:
         problems.append(f"넣을 행이 {total:,}행으로 한 번에 넣을 수 있는 {MAX_ROWS:,}행을 넘습니다 — 나눠 만드세요.")
+    # 결과는 메모리에 다 만든 뒤 저장한다 — 메모리 예산을 넘는 크기는 실행 기록을 만들기 전에 거절 (docs/MEMORY.md)
+    cells = sum(o.rows * (o.sheet.columns + 2) for o in out_sheets)  # 결과 시트마다 '원본 행'·'행 종류' 두 열이 더 붙음
+    chars = sum(o.sheet.text_chars for o in out_sheets)  # 칸 수가 적어도 긴 글자 칸은 메모리를 많이 쓴다
+    oversized = total > MAX_ROWS or cells > MAX_OUTPUT_CELLS or chars > MAX_OUTPUT_TEXT_CHARS
+    oversized = oversized or any(o.rows + 1 > EXCEL_MAX_ROWS for o in out_sheets)
+    if cells > MAX_OUTPUT_CELLS:
+        problems.append(
+            f"결과에 넣을 칸이 {cells:,}개로 이 서버에서 한 번에 만들 수 있는 {MAX_OUTPUT_CELLS:,}칸을 넘습니다 — "
+            "파일·시트를 나눠 만드세요."
+        )
+    if chars > MAX_OUTPUT_TEXT_CHARS:
+        problems.append(
+            f"결과에 넣을 글자가 {chars:,}자로 이 서버에서 한 번에 만들 수 있는 {MAX_OUTPUT_TEXT_CHARS:,}자를 "
+            "넘습니다 — 긴 글자 열을 줄이거나 파일·시트를 나눠 만드세요."
+        )
     for o in out_sheets:
         if o.rows + 1 > EXCEL_MAX_ROWS:
             problems.append(f"'{o.name}': {o.rows:,}행은 엑셀 한 시트에 넣을 수 있는 행 수를 넘습니다.")
@@ -502,11 +539,65 @@ def build_plan(db: Session, user: CurrentUser, req: BundleIn) -> Plan:
                 "같은 시트가 두 번 들어갑니다."
             )
     decisions = {fid: load_decisions(db, fid) for fid in per_file}
+    warnings.extend(_formula_notes(db, records, out_sheets, decisions))
     fields = _fields(out_sheets, decisions)
-    items = None if req.summary is None else _summary(db, user, req.summary, out_sheets, problems)
+    items = None if req.summary is None else _summary(db, user, req.summary, out_sheets, problems, oversized)
+    if req.summary is not None:
+        warnings.extend(double_count_notes(req.summary))
     plan = Plan(req, files_out, out_sheets, items, fields, problems, warnings)
     plan.basis = _basis(plan, records)
     return plan
+
+
+def _formula_notes(
+    db: Session,
+    records: dict[int, SourceFile],
+    sheets: list[OutSheet],
+    decisions: dict[int, dict[str, dict[str, str | None]]],
+) -> list[str]:
+    """파일별 시트에 넣는 합계 항목 열이 산식(구성 항목의 합)과 다른지 본다 (app.formulas, 확정한 매핑만).
+    원본 값을 그대로 옮기는 시트라 막지 않고 알린다 — 같은 뜻으로 더하는 통계 요약은 분석 엔진이 막는다."""
+    notes = []
+    for o in sheets:
+        confirmed = decisions.get(o.file.file_id, {}).get(o.sheet.name, {})
+        if not any(key in TOTAL_FORMULAS for key in confirmed.values()):
+            continue
+        sv = file_view(db, records[o.file.file_id]).sheets[o.sheet.index]
+        columns = unique_columns((confirmed.get(name), j) for j, name in enumerate(sv.columns))
+        rows = [(row_no, cells) for row_no, kind, cells in sv.rows if kind == "data"]
+        for check in check_totals(rows, columns):
+            if not check.differ:
+                continue
+            parts = " + ".join(label_of(p) for p in TOTAL_FORMULAS[check.total])
+            text = (
+                f"'{o.name}' 시트의 '{mask_text(sv.columns[check.column])}' 열({label_of(check.total)})이 {parts}의 "
+                f"합과 비교한 {check.checked}행 중 {len(check.differ)}행에서 다릅니다"
+            )
+            if check.alternative:
+                alt, matched = check.alternative
+                text += f" ({' + '.join(label_of(p) for p in TOTAL_FORMULAS[alt])}(으)로는 {matched}행이 맞음)"
+            notes.append(
+                f"{text} — 파일별 시트에는 원본 값 그대로 넣습니다. 통계 요약에서는 이 열을 같은 항목으로 더하지 "
+                "않습니다 (다시 확정하거나 요약에서 빼야 함)."
+            )
+    return notes
+
+
+def double_count_notes(summary: SummaryIn) -> list[str]:
+    """요약에 합계 항목과 그 구성 항목(또는 그 안에 든 다른 합계)을 함께 고르면, 항목끼리 더할 때 같은 수량을 두 번
+    센다는 것을 알린다. 계산은 항목마다 따로 하므로 막지 않는다 (app.formulas.TOTAL_FORMULAS)."""
+    chosen = [i.field_key for i in summary.items]
+    notes = []
+    for total, parts in TOTAL_FORMULAS.items():
+        inner = [k for k, ps in TOTAL_FORMULAS.items() if k != total and set(ps) < set(parts)]
+        both = [k for k in chosen if k in parts or k in inner]
+        if total in chosen and both:
+            names = ", ".join(f"'{label_of(k)}'" for k in both)
+            notes.append(
+                f"'{label_of(total)}'은(는) {' + '.join(label_of(p) for p in parts)}의 합계입니다 — "
+                f"요약의 '{label_of(total)}'과(와) {names}을(를) 서로 더하면 같은 수량을 두 번 셉니다."
+            )
+    return notes
 
 
 def _fields(sheets: list[OutSheet], decisions: dict[int, dict[str, dict[str, str | None]]]) -> list[dict[str, Any]]:
@@ -536,18 +627,37 @@ def _coverage(included: int, total: int, sheets: list[OutSheet]) -> str:
     return f"{total}개 {unit} 중 {included}개 포함"
 
 
-def _summary(
-    db: Session, user: CurrentUser, summary: SummaryIn, sheets: list[OutSheet], problems: list[str]
-) -> list[ItemPlan]:
-    """통계 요약 항목마다 데이터 분석 엔진으로 판정한다 (계산은 실행 때 compute로)."""
-    plans = []
-    seen: set[tuple[str, str | None]] = set()
-    placed = {(o.file.file_id, sheet_id(o.sheet.index)) for o in sheets}
+def _check_items(summary: SummaryIn, placed: set[tuple[int, str]]) -> None:
+    """요청 형식 검사 (422) — 무거운 평가를 하나라도 하기 전에 모든 항목을 본다."""
     for item in summary.items:
         if item.field_key not in MEASURE_FIELDS:
             raise _bad(f"통계 요약에 쓸 수 없는 항목입니다: {mask_text(item.field_key)} (확정한 수량 항목만)")
         if len(set(item.aggregates)) != len(item.aggregates):
             raise _bad("같은 계산 방식을 두 번 골랐습니다.")
+        label = label_of(item.field_key)
+        links = {(lk.file_id, lk.sheet_id) for lk in item.links}
+        if len(links) != len(item.links):
+            raise _bad(f"'{label}': 같은 시트의 연결을 두 번 보냈습니다.")
+        if stray := [k for k in links if k not in placed]:
+            raise _bad(f"'{label}': 결과에 넣지 않은 시트의 연결입니다 ({', '.join(f'#{f} {s}' for f, s in stray)}).")
+
+
+def _summary(
+    db: Session,
+    user: CurrentUser,
+    summary: SummaryIn,
+    sheets: list[OutSheet],
+    problems: list[str],
+    oversized: bool = False,
+) -> list[ItemPlan]:
+    """통계 요약 항목마다 데이터 분석 엔진으로 판정한다 (계산은 실행 때 compute로).
+    결과가 이미 크기 한도를 넘으면 요약은 평가하지 않는다 — 어차피 만들 수 없고, 항목마다 대상 행 전부를 읽는 평가가
+    메모리를 크게 쓴다 (512MiB에서 한도 넘는 4파일 × 요약 6항목 평가가 메모리 부족으로 죽었다 — docs/MEMORY.md)."""
+    plans = []
+    seen: set[tuple[str, str | None]] = set()
+    placed = {(o.file.file_id, sheet_id(o.sheet.index)) for o in sheets}
+    _check_items(summary, placed)
+    for item in summary.items:
         label = label_of(item.field_key)
         choices = shown_choices(item)
         item_problems: list[str] = []
@@ -555,17 +665,17 @@ def _summary(
             item_problems.append(f"'{label}' 항목을 두 번 골랐습니다 — 하나로 합쳐 계산 방식을 고르세요.")
         seen.add((item.field_key, choices["variant"]))
         links = {(lk.file_id, lk.sheet_id): lk for lk in item.links}
-        if len(links) != len(item.links):
-            raise _bad(f"'{label}': 같은 시트의 연결을 두 번 보냈습니다.")
-        if stray := [k for k in links if k not in placed]:
-            raise _bad(f"'{label}': 결과에 넣지 않은 시트의 연결입니다 ({', '.join(f'#{f} {s}' for f, s in stray)}).")
         dropped = {k for k, lk in links.items() if lk.exclude}
         used = [o for o in sheets if (o.file.file_id, sheet_id(o.sheet.index)) not in dropped]
         ev: Evaluation | None = None
-        if len(used) > analysis.MAX_TARGETS:
+        if oversized:
+            item_problems.append(
+                f"'{label}': 결과가 크기 한도를 넘어 통계 요약은 판정하지 않았습니다 — 먼저 파일·시트를 줄이세요."
+            )
+        elif len(used) > analysis.MAX_TARGETS:
             item_problems.append(
                 f"'{label}': 계산할 시트가 {len(used)}개로 "
-                f"통계 요약 한도({analysis.MAX_TARGETS}개, 데이터 분석과 같음)를 "
+                f"통계 요약 한도({analysis.MAX_TARGETS}개, 데이터 통계 분석과 같음)를 "
                 "넘습니다 — 일부를 이 항목에서 빼거나 나눠 만드세요."
             )
         elif used:
@@ -641,6 +751,8 @@ def _summary(
                     "units": pv["units"] if pv else [],
                     "periods": pv["periods"] if pv else [],
                     "stock": pv["stock"] if pv else False,
+                    # 계산할 원본 열 (표준 항목 이름만으로는 어느 지표인지 알 수 없어 함께 보여 준다)
+                    "source_columns": pv["source_columns"] if pv else [],
                     "links": rows,
                     "coverage": {
                         "included": included,
@@ -680,23 +792,24 @@ def _basis(plan: Plan, records: dict[int, SourceFile]) -> str:
 
 
 def _put(ws: Any, row: int, col: int, value: Any) -> Any:
-    """칸에 값을 쓴다. 글자는 수식으로 저장되지 않게 항상 글자 형식으로 둔다 ('=1+1' → 글자 그대로)."""
+    """칸에 값을 쓴다. 글자는 항상 글자 칸으로 둔다 — openpyxl은 '='로 시작하는 글자를 수식으로, '#N/A'·'#REF!' 같은
+    오류 코드 모양 글자를 오류 칸('e')으로 저장하므로, 입력이 글자였으면 결과도 글자("s")다. 숫자·날짜·참거짓·빈 칸은
+    그대로다 (값을 글자로 바꾸지 않는다)."""
     cell = ws.cell(row=row, column=col, value=value)
-    if isinstance(value, str) and value.startswith(FORMULA_START):
+    if isinstance(value, str):
         cell.data_type = "s"
     return cell
 
 
 def _clean(value: Any, stats: Counter[str]) -> Any:
-    """엑셀(XML)에 넣을 수 없는 제어 문자는 빼고 몇 개인지 센다 (그 밖의 값은 그대로)."""
-    if isinstance(value, str) and ILLEGAL_CHARACTERS_RE.search(value):
-        stats["control_chars"] += len(ILLEGAL_CHARACTERS_RE.findall(value))
-        return ILLEGAL_CHARACTERS_RE.sub("", value)
+    """엑셀(XML)에 넣을 수 없는 글자(제어 문자·U+FFFE·U+FFFF 등)는 빼고 몇 개인지 센다 (그 밖의 값은 그대로)."""
+    if isinstance(value, str) and ILLEGAL_RE.search(value):
+        stats["control_chars"] += len(ILLEGAL_RE.findall(value))
+        return ILLEGAL_RE.sub("", value)
     return value
 
 
-def _write_sheet(ws: Any, o: OutSheet, parsed: FileResult, formulas: dict[str, set[tuple[int, int]]]) -> dict[str, Any]:
-    sheet = parsed.sheets[o.sheet.index]
+def _write_sheet(ws: Any, o: OutSheet, sheet: SheetResult, formulas: dict[str, set[tuple[int, int]]]) -> dict[str, Any]:
     cells = formulas.get(sheet.name, set())
     stats: Counter[str] = Counter()
     header = [*LEAD, *sheet.columns]
@@ -704,8 +817,8 @@ def _write_sheet(ws: Any, o: OutSheet, parsed: FileResult, formulas: dict[str, s
         c = _put(ws, 1, j, _clean(name, stats))
         c.font, c.fill = Font(bold=True), HEAD_FILL
     ws.freeze_panes = "A2"
-    ws["A1"].comment = Comment(
-        f"원본: #{o.file.file_id} {mask_text(o.file.name)} / {mask_text(sheet.name)}\n"
+    ws["A1"].comment = Comment(  # 메모도 XML이다 — 파일·시트 이름의 쓸 수 없는 글자는 뺀다
+        f"원본: #{o.file.file_id} {_clean(mask_text(o.file.name), stats)} / {_clean(mask_text(sheet.name), stats)}\n"
         "앱이 읽은 값·열만 옮겼습니다 (서식·병합·차트·그림·수식은 옮기지 않음). "
         "병합 칸은 앱이 읽은 대로 값을 채웠습니다.",
         "Moajwo",
@@ -743,16 +856,20 @@ def _write_sheet(ws: Any, o: OutSheet, parsed: FileResult, formulas: dict[str, s
 def _plain(v: Any) -> Any:
     if v is None:
         return NO_VALUE
-    return int(v) if isinstance(v, float) and v.is_integer() and abs(v) < 2**53 else v
+    # 16자리 이상 정수는 글자로 (Excel 숫자 칸은 15자리까지만 정확 — analysis.excel_number)
+    return analysis.excel_number(int(v) if isinstance(v, float) and v.is_integer() and abs(v) < 2**53 else v)
 
 
-def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], processed_at: str) -> list[dict[str, Any]]:
+def _write_summary(
+    ws: Any, items: list[tuple[ItemPlan, dict[str, Any], dict[str, Any]]], processed_at: str, notes: list[str]
+) -> list[dict[str, Any]]:
     row = 1
+    stats: Counter[str] = Counter()  # 열 이름·구분 값 등 원본에서 온 글자에 든 쓸 수 없는 글자 (자료 시트와 같은 규칙)
 
     def line(*values: Any, bold: bool = False, size: int | None = None) -> None:
         nonlocal row
         for j, v in enumerate(values, start=1):
-            c = _put(ws, row, j, v)
+            c = _put(ws, row, j, _clean(v, stats))
             if bold or size:
                 c.font = Font(bold=bold, size=size or 11)
         row += 1
@@ -763,19 +880,24 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
         "원본·매핑이 바뀌어도 이 시트는 자동으로 다시 계산되지 않습니다."
     )
     line(
-        f"계산: Moajwo 데이터 분석과 같은 엔진·규칙({analysis.POLICY}). 평균 = 유효한 숫자의 합 ÷ 유효한 숫자 개수 "
-        "(파일별 평균을 다시 평균하지 않음). 빈칸·비공개·숫자가 아닌 값은 0으로 바꾸지 않고 뺍니다."
+        f"계산: Moajwo 데이터 통계 분석과 같은 엔진·규칙({analysis.POLICY}). "
+        "평균 = 유효한 숫자의 합 ÷ 유효한 숫자 개수 (파일별 평균을 다시 평균하지 않음). "
+        "빈칸·비공개·숫자가 아닌 값은 0으로 바꾸지 않고 뺍니다."
     )
     line(
         "숫자는 계산해 넣은 값입니다 (엑셀 수식 아님). "
-        "계산은 배정밀도 실수로 해 매우 큰 값의 합계는 끝자리가 다를 수 있습니다."
+        "합계는 정확한 수로 계산합니다 (0.1 + 0.2 = 0.3, 큰 정수도 끝자리까지). "
+        "16자리 이상 정수는 Excel 숫자 칸이 담지 못해 자릿수를 지키려고 글자 칸으로 적습니다."
     )
+    for note in notes:  # 항목끼리의 관계 (합계와 그 구성 항목을 함께 고름 등)
+        line("주의", note)
     saved = []
-    for plan, res in items:
+    for plan, res, cond in items:
         o = plan.out
         row += 1
         line(f"항목: {o['field_label']}", bold=True, size=12)
-        cond = analysis.conditions(plan.ev) if plan.ev else {}
+        # 표준 항목 이름('건수')만으로는 어느 지표를 계산했는지 알 수 없어 원본 열 이름을 바로 아래에 적는다
+        line("원본 열 (계산한 지표)", source_columns_text(o["source_columns"]))
         line("단위", cond.get("unit") or "-")
         line("기간", ", ".join(cond.get("periods") or []) or "-")
         if cond.get("base_dates"):
@@ -802,6 +924,8 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
         if res.get("level_mismatch"):
             state += f" · 집계 수준 {level_text} (하위 지역 합계가 상위 지역 값과 다른 곳 {res['level_mismatch']}곳)"
         line("상태", state)
+        for w in cond.get("warnings") or []:  # 산식 확인·가림 구분 번호 등 계산 엔진의 주의 (화면과 같은 문장)
+            line("주의", w)
         line("계산한 행", f"{res['rows_included']:,}행 포함 · {res['rows_excluded']:,}행 제외")
         labels = o["reason_labels"]
         for k, n in sorted(res["reason_counts"].items()):
@@ -814,7 +938,8 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
             values = [_plain(g[a]) for a in o["aggregates"]]
             line(*keys, *values)
             groups.append({"keys": keys, **{a: g[a] for a in o["aggregates"]}, "partial": g["partial"]})
-        line("자료", "파일", "시트", "열", "표준 항목", "단위 (근거)", "기간 (근거)", "포함", "사유", bold=True)
+        line("자료", "파일", "시트", "열", "표준 항목", "단위 (근거)", "기간 (근거)", "포함", "사유", "산식 확인",
+             bold=True)  # fmt: skip
         for lk in o["links"]:
             unit = f"{lk.get('unit') or '-'} ({lk.get('unit_source') or '-'})" if lk.get("unit") else "-"
             period = (
@@ -824,12 +949,14 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
             )
             included = {"ok": "포함", "user_excluded": "뺌 (사용자)", "excluded": "뺌"}.get(lk["status"], lk["status"])
             reason = lk.get("exclude_reason") or "; ".join(lk.get("reasons") or [])
+            formula = (lk.get("formula") or {}).get("text") or "-"  # 합계 항목일 때 (확인 · 검증 불가)
             line(lk["output_sheet"], f"#{lk['file_id']} {lk['file_name']}", lk["sheet"], lk.get("column") or "-",
-                 lk.get("field_label") or o["field_label"], unit, period, included, reason)  # fmt: skip
+                 lk.get("field_label") or o["field_label"], unit, period, included, reason, formula)  # fmt: skip
         saved.append(
             {
                 "field_key": o["field_key"],
                 "field_label": o["field_label"],
+                "source_columns": o["source_columns"],
                 "unit": cond.get("unit"),
                 "periods": cond.get("periods"),
                 "aggregates": o["aggregates"],
@@ -860,6 +987,9 @@ def _write_summary(ws: Any, items: list[tuple[ItemPlan, dict[str, Any]]], proces
     ws.column_dimensions["A"].width = 18
     for col in "BCDEFGHI":
         ws.column_dimensions[col].width = 16
+    if stats["control_chars"]:
+        n = stats["control_chars"]
+        line("주의", f"엑셀에 쓸 수 없는 글자 {n}개를 이 시트에서 뺐습니다 (자료 시트의 수는 각 시트 기록에)")
     return saved
 
 
@@ -870,41 +1000,48 @@ def _output_path(run_id: int, now: datetime) -> Path:
 
 def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
     """판정이 끝난(ready) 구성으로 결과 파일을 만든다.
-    요약을 켰으면 먼저 계산하고, 계산할 수 없으면 아무것도 만들지 않는다."""
+    요약을 켰으면 먼저 계산하고, 계산할 수 없으면 아무것도 만들지 않는다.
+    결과 파일을 확정하는 순서·오류 처리는 app/runlease.py (이름을 바꾼 결과 파일은 지우지 않는다)."""
     started = datetime.now(KST)
-    results: list[tuple[ItemPlan, dict[str, Any]]] = []
+    results: list[tuple[ItemPlan, dict[str, Any], dict[str, Any]]] = []
     for item in plan.items or []:
         assert item.ev is not None
         try:
-            results.append((item, analysis.compute(item.ev)))
+            results.append((item, analysis.compute(item.ev), analysis.conditions(item.ev)))
+            item.ev = None  # 계산이 끝난 평가(대상 행 전부)는 결과를 만드는 동안 쥐지 않는다
         except HTTPException as exc:
             raise BundleError(
                 f"통계 요약 '{item.out['field_label']}'을(를) 계산할 수 없어 결과 파일을 만들지 않았습니다: "
                 f"{_detail(exc)} — "
                 "요약 설정을 고치거나 '통계 요약 시트 추가'를 끄고 다시 만드세요."
             ) from exc
+    # 원본 기록을 먼저 읽어 잡아 둔다 — 결과를 만드는 동안 DB 질의·열린 트랜잭션이 없게 (외부 DB는 쉬는 트랜잭션을
+    # 60초 뒤 끊는다 — docs/EXTERNAL_DB.md 5장). 잡아 둔 객체는 commit 뒤에도 만료되지 않아 load_parsed가 질의 없이 쓴다
+    _held = [db.get(SourceFile, fid) for fid in dict.fromkeys(o.file.file_id for o in plan.sheets)]
+    start_summary = json.dumps({"mode": MODE, "stats_summary": plan.items is not None})
     run = IntegrationRun(
         trigger="manual",
         user_id=user.id,
-        status="running",
         started_at=started,
         file_ids=json.dumps(plan.req.file_ids),
         input_file_count=len(plan.req.file_ids),
         row_count=sum(o.rows for o in plan.sheets),
         warning_count=len(plan.warnings),
-        summary=json.dumps({"mode": MODE, "stats_summary": plan.items is not None}),
+        summary=start_summary,
     )
-    db.add(run)
-    db.commit()
     now = datetime.now(KST)
     processed_at = now.strftime("%Y-%m-%d %H:%M:%S (KST)")
-    target = _output_path(run.id, now)
+    target = runlease.begin(db, run, lambda run_id: _output_path(run_id, now))
     tmp_path: Path | None = None
-    moved = False  # 이번 실행이 만든 결과 파일만 지운다
     try:
         wb = Workbook()
         wb.remove(wb.active)
-        parsed: dict[int, tuple[SourceFile, FileResult, dict[str, set[tuple[int, int]]]]] = {}
+        chosen: dict[int, set[int]] = {}
+        for o in plan.sheets:
+            chosen.setdefault(o.file.file_id, set()).add(o.sheet.index)
+        # 파일마다 고른 시트만 쥔다 — 고르지 않은 시트(결과 글자 예산에 세지 않음)의 읽은 값은 다음 파일을 읽기
+        # 전에 놓는다
+        parsed: dict[int, tuple[dict[int, SheetResult], dict[str, set[tuple[int, int]]]]] = {}
         sheets_out = []
         for o in plan.sheets:
             fid = o.file.file_id
@@ -912,22 +1049,19 @@ def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
                 record, result = load_parsed(db, fid)
                 if record.sha256 != o.file.sha256:
                     raise BundleError("결과 구성 확인 뒤 파일 내용이 바뀌었습니다 — 다시 확인하세요.")
-                parsed[fid] = (record, result, formula_cells(_file_path(record)))
-            _, result, formulas = parsed[fid]
-            sheets_out.append(_write_sheet(wb.create_sheet(o.name), o, result, formulas))
-        summary_items = _write_summary(wb.create_sheet(SUMMARY_SHEET), results, processed_at) if plan.items else []
-        with tempfile.NamedTemporaryFile(dir=OUTPUT_DIR, suffix=".xlsx.tmp", delete=False) as tmp:
-            tmp_path = Path(tmp.name)
+                parsed[fid] = ({i: result.sheets[i] for i in chosen[fid]}, formula_cells(_file_path(record)))
+                del result
+            kept, formulas = parsed[fid]
+            sheets_out.append(_write_sheet(wb.create_sheet(o.name), o, kept[o.sheet.index], formulas))
+        summary_items = (
+            _write_summary(wb.create_sheet(SUMMARY_SHEET), results, processed_at, double_count_notes(plan.req.summary))
+            if plan.items and plan.req.summary
+            else []
+        )
+        tmp_path = runlease.new_temp(target)
         wb.save(tmp_path)
-        if target.exists():
-            raise BundleError(f"같은 이름의 결과 파일이 이미 있습니다: {target.name}")
-        os.replace(tmp_path, target)
-        tmp_path, moved = None, True
-        os.chmod(target, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
-        run.status = "done"
-        run.output_path = target.relative_to(DATA_DIR).as_posix()
-        run.output_sha256 = hashlib.sha256(target.read_bytes()).hexdigest()
-        run.summary = json.dumps(
+        del wb, parsed  # 해시·확정 동안 결과 통째와 원본 읽은 값을 쥐지 않는다
+        summary = json.dumps(
             {
                 "mode": MODE,
                 "mode_label": "파일별 시트",
@@ -947,22 +1081,28 @@ def make(db: Session, user: CurrentUser, plan: Plan) -> IntegrationRun:
             ensure_ascii=False,
             default=str,
         )
-        run.finished_at = datetime.now(KST)
-        db.commit()
+        runlease.prepare(db, run, tmp_path, summary)
+        runlease.finish(db, run, tmp_path, target)
+    except runlease.RunDone:  # 정리가 이 실행을 이미 완료로 확정했다 (결과 파일 해시 일치)
+        db.refresh(run)
+    except runlease.RunSettled as exc:  # 다른 곳이 실패로 정했다 — 그 이유로 알린다
+        raise BundleError(str(exc)) from exc
+    except runlease.RunUncertain:  # 결과 파일은 있고 완료 기록만 확인하지 못함 — 지우지 않고 503으로 알린다
+        raise
     except Exception as exc:
-        db.rollback()
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
-        if moved and target.exists():
-            os.chmod(target, stat.S_IWUSR | stat.S_IRUSR)
-            target.unlink(missing_ok=True)
-        failed = db.get(IntegrationRun, run.id)
-        if failed is not None:
-            failed.status = "failed"
-            failed.error = str(exc)[:1000]
-            failed.finished_at = datetime.now(KST)
-            db.commit()
-        logger.exception("bundle run %s failed", run.id)
-        raise BundleError(f"결과 파일을 만들지 못했습니다: {exc}") from exc
+        # 응답·실행 기록·서버 기록 모두 원문 없이 — 예외 종류와 실행 번호만 (app/failures.py)
+        log_failure(logger, "bundle", run.id, exc)
+        # HTTPException은 원본 읽기(load_parsed)가 앱 문구로 낸 것 — 읽기 차례 없음(다시 시도)·원본 없음·읽기 실패
+        reason = failure_reason(exc, (BundleError, runlease.RunError, HTTPException))
+        try:
+            runlease.fail(db, run, tmp_path, f"{reason} [{BUNDLE_FAILED}]", start_summary)
+        except runlease.RunDone:
+            db.refresh(run)
+            return run
+        except runlease.RunSettled as settled:
+            raise BundleError(str(settled)) from exc
+        raise BundleError(f"결과 파일을 만들지 못했습니다 — {reason} (실행 #{run.id}). [{BUNDLE_FAILED}]") from exc
+    finally:
+        runlease.untrack(run.id)
     logger.info("bundle run=%s sheets=%d rows=%d summary=%s", run.id, len(plan.sheets), run.row_count, bool(plan.items))
     return run

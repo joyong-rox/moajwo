@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -14,10 +14,12 @@ from app.db import get_session
 from app.files import get_file_for
 from app.integration import include_unmapped_default
 from app.models import Automation, IntegrationRun, ReviewItem, ReviewSession, SourceFile, User
+from app.name_limits import OptionalStoredText
 from app.pii import mask_nested, mask_rrn_number, mask_text
 from app.review import (
     INTERNAL_PARAMS,
     ReviewError,
+    ReviewNameError,
     ReviewPermissionError,
     can_change_file,
     changes,
@@ -204,7 +206,11 @@ def create_review(body: ValidationIn, db: Annotated[Session, Depends(get_session
         )
     for fid in [*body.file_ids, *body.baseline_file_ids]:
         get_file_for(db, user, fid)
-    session = create_session(db, body.model_dump(), user_id=user.id)
+    try:
+        session = create_session(db, body.model_dump(), user_id=user.id)
+    except ReviewNameError as exc:  # 시트·열 이름이 저장 한도를 넘음 — 아무것도 기록하지 않았다
+        db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     return review_out(db, session, user=user)
 
 
@@ -227,6 +233,7 @@ class ReviewListItem(BaseModel):
     latest_id: int  # 대체된 검토면 다시 검사로 이어진 최신 검토, 아니면 자기 자신
     run_count: int  # 이 검토로 만든 실행 기록 (실패·대기 포함)
     last_run_id: int | None  # 결과 파일이 있는 가장 최근 실행
+    pending_count: int  # 아직 결과가 정해지지 않은 실행 (실행 중·결과 확인 필요) — '결과 파일 없음'과 구분
     can_edit: bool  # 만든 사람만 승인·완료·통합 (최고 관리자도 남의 검토는 조회만)
 
 
@@ -290,6 +297,10 @@ def _list_item(db: Session, session: ReviewSession, user: CurrentUser, needs_rec
         latest_id=_latest(db, session) if session.status == "superseded" else session.id,
         run_count=db.scalar(select(func.count()).select_from(runs.subquery())) or 0,
         last_run_id=db.scalar(runs.where(IntegrationRun.status == "done").order_by(IntegrationRun.id.desc()).limit(1)),
+        pending_count=db.scalar(
+            select(func.count()).select_from(runs.where(IntegrationRun.status.in_(("running", "check"))).subquery())
+        )
+        or 0,
         can_edit=session.created_by == user.id or (session.created_by is None and user.is_manager),
     )
 
@@ -374,7 +385,8 @@ def get_review(review_id: int, db: Annotated[Session, Depends(get_session)], use
 
 class DecisionIn(BaseModel):
     decision: Literal["approved", "rejected"]
-    choice: str | None = None  # 승인 시 연결할 표준 항목 key 또는 7자리 코드
+    # 승인 시 연결할 표준 항목 key 또는 7자리 코드 — review_items.choice String(64), 후보에 있을 때만 저장
+    choice: OptionalStoredText = Field(default=None, max_length=64)
 
 
 @router.post("/{review_id}/items/{item_id}/decision", response_model=ReviewOut)
@@ -442,6 +454,9 @@ def recheck_review(
     except ReviewPermissionError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    except ReviewNameError as exc:  # 바꾼 파일의 시트·열 이름이 저장 한도를 넘음 (이전 검토는 그대로)
+        db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     except ReviewError as exc:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc

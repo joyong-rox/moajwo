@@ -1,13 +1,15 @@
 """용어사전 API: 항목(7자리 코드)·별칭 관리, 일괄 업로드, 이름 해석."""
 
+import hashlib
 import tempfile
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path, PurePath
 from typing import Annotated, Literal
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, model_validator
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -17,6 +19,7 @@ from app.db import get_session
 from app.glossary import AliasEntry, EntityRef, Entry, Glossary, normalize_name, period_end
 from app.glossary_import import CODE_PATTERN, export_csv, import_file, template_csv
 from app.models import GlossaryAlias, GlossaryEntry
+from app.name_limits import GLOSSARY_NAME_MAX, NUL, VALUE_HAS_NUL, name_problem, no_nul
 from app.parsing import SUPPORTED_EXTENSIONS
 from app.pii import has_pii
 
@@ -31,13 +34,41 @@ def _entry(e: GlossaryEntry) -> Entry:
     return Entry(e.code, e.name, e.type_label or "", e.sido_code, e.sigungu_code, e.valid_from, e.valid_to, previous)
 
 
+def _rows(session: Session) -> tuple[list[Entry], list[tuple[str, AliasEntry]]]:
+    aliases = [
+        (a.normalized, AliasEntry(a.target_code, a.valid_from, a.valid_to, base=a.source == "base"))
+        for a in session.scalars(select(GlossaryAlias))
+    ]
+    return [_entry(e) for e in session.scalars(select(GlossaryEntry))], aliases
+
+
+def _build(entries: list[Entry], aliases: list[tuple[str, AliasEntry]]) -> Glossary:
+    grouped: dict[str, list[AliasEntry]] = {}
+    for normalized, alias in aliases:
+        grouped.setdefault(normalized, []).append(alias)
+    return Glossary(entries, grouped)
+
+
 def get_glossary(session: Session) -> Glossary:
-    aliases: dict[str, list[AliasEntry]] = {}
-    for a in session.scalars(select(GlossaryAlias)):
-        aliases.setdefault(a.normalized, []).append(
-            AliasEntry(a.target_code, a.valid_from, a.valid_to, base=a.source == "base")
-        )
-    return Glossary([_entry(e) for e in session.scalars(select(GlossaryEntry))], aliases)
+    return _build(*_rows(session))
+
+
+def glossary_state(session: Session) -> tuple[str, Callable[[], Glossary]]:
+    """지금 용어사전의 지문과, 필요할 때만 만드는 용어사전 — 같은 행에서 만든다 (지문과 해석이 다른 때를 보지 않게).
+
+    지문은 해석에 쓰는 값(항목의 코드·이름·유형·시도·시군구 코드·유효기간·이전 코드, 별칭의 이름·대상·유효기간·기본
+    여부)으로 만든다. 지문이 검사 때와 같으면 이름을 다시 해석하지 않아도 된다 (check_basis.entity_changes).
+    """
+    entries, aliases = _rows(session)
+    text = "\n".join([*sorted(map(repr, entries)), "|", *sorted(map(repr, aliases))])
+    built: list[Glossary] = []
+
+    def glossary() -> Glossary:
+        if not built:
+            built.append(_build(entries, aliases))
+        return built[0]
+
+    return hashlib.sha256(text.encode()).hexdigest(), glossary
 
 
 # ---------------------------------------------------------------- 현황
@@ -112,7 +143,7 @@ def _aliases_by_code(session: Session, include_base: bool = True) -> dict[str, l
 @router.get("/entries", response_model=list[EntryOut])
 def list_entries(
     session: Annotated[Session, Depends(get_session)],
-    q: Annotated[str | None, Query(max_length=100)] = None,
+    q: Annotated[str | None, Query(max_length=100), AfterValidator(no_nul)] = None,  # LIKE 매개변수 — NUL은 422
     scope: Literal["all", "org", "region"] = "all",
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ) -> list[EntryOut]:
@@ -311,6 +342,20 @@ def create_alias(body: AliasIn, session: Annotated[Session, Depends(get_session)
             "개인정보 형식(이메일·휴대전화·주민등록번호)이 든 이름은 별칭으로 등록할 수 없습니다.",
         )
     normalized = normalize_name(body.alias)
+    # 저장 규칙 (두 DB에서 같게 — app/name_limits.py): NUL, 그리고 이름은 한도 안이어도 정규화(NFKC)로 키가 길어질 수
+    # 있다 (별칭과 키를 모두 저장한다)
+    problem = name_problem("별칭", body.alias, GLOSSARY_NAME_MAX) or name_problem(
+        "별칭을 정규화한 이름", normalized, GLOSSARY_NAME_MAX
+    )
+    if problem is not None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"{problem.text} — 등록하지 않았습니다. [{problem.code}]"
+        )
+    if body.note and NUL in body.note:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"메모에 NUL(0x00) 문자가 있습니다 — 등록하지 않았습니다. [{VALUE_HAS_NUL}]",
+        )
     # 유니크 제약은 유효기간이 비어 있으면(NULL) 중복을 막지 못하므로, 기간이 겹치는 같은 별칭을 직접 확인한다.
     for other in session.scalars(
         select(GlossaryAlias).where(

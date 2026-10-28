@@ -177,21 +177,65 @@ export function uploadFiles(files: File[], onProgress?: (fraction: number) => vo
   })
 }
 
+/** 서버 오류 응답 — 상태 코드와 구분 값(code·run_id)을 함께 전해, 화면이 확정 실패와 '결과를 아직 모름'을 나눈다. */
+export class ApiError extends Error {
+  status: number
+  code: string | null
+  runId: number | null
+  constructor(message: string, status: number, code: string | null = null, runId: number | null = null) {
+    super(message)
+    this.status = status
+    this.code = code
+    this.runId = runId
+  }
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const detail = await res.json().then(
-      (j: { detail?: unknown }) => j.detail,
+      (j: { detail?: unknown } | null) => j?.detail,
       () => null,
     )
+    if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+      const d = detail as { message?: unknown; code?: unknown; run_id?: unknown }
+      throw new ApiError(
+        typeof d.message === 'string' ? d.message : `HTTP ${res.status}`,
+        res.status,
+        typeof d.code === 'string' ? d.code : null,
+        typeof d.run_id === 'number' ? d.run_id : null,
+      )
+    }
     const message =
       typeof detail === 'string'
         ? detail
         : Array.isArray(detail)
           ? detail.map((d: { msg?: string }) => d.msg ?? '').join(', ')
           : `HTTP ${res.status}`
-    throw new Error(message)
+    throw new ApiError(message, res.status)
   }
   return (await res.json()) as T
+}
+
+/** 결과가 정해지지 않은 응답에 쓰는 안내 — '실패'라고 쓰지 않고, 다시 만들기 전에 실행 기록에서 확인하게 한다. */
+export const OUTCOME_UNKNOWN =
+  '결과를 아직 확인하지 못했습니다 — 실행 기록에서 이 실행의 상태를 확인하세요 (서버가 결과 파일과 기록을 맞춰 보고 확정합니다).'
+
+/** 결과를 만드는 요청(통합·묶기·자동화)의 오류 문구. 확정 실패만 failPrefix('… 실패: ')를 붙인다.
+ *  결과를 모르는 응답(503·502·504·응답 없음)은 서버 안내 또는 OUTCOME_UNKNOWN, 차례 없음(output_busy)은 서버 안내 그대로
+ *  (시작하지 않았으므로 다시 눌러도 됨). */
+export function outcomeText(err: unknown, failPrefix: string): string {
+  if (err instanceof ApiError && (err.code === 'output_busy' || err.code === 'run_uncertain')) return err.message
+  if (outcomeUnknown(err)) return OUTCOME_UNKNOWN
+  return `${failPrefix}${err instanceof Error ? err.message : String(err)}`
+}
+
+/** 결과가 정해지지 않은 응답인가 (확정 실패도, 시작하지 않음도 아님) — 실행 목록을 다시 읽어 상태를 보여 줄 때 */
+export function outcomeUnknown(err: unknown): boolean {
+  if (err instanceof ApiError) {
+    if (err.code === 'run_uncertain') return true
+    return err.code !== 'output_busy' && (err.status === 502 || err.status === 503 || err.status === 504)
+  }
+  return err instanceof TypeError // 응답을 받지 못함 (연결 끊김 — 서버는 계속 만들 수 있다)
 }
 
 export type StoredFile = {
@@ -204,6 +248,20 @@ export type StoredFile = {
 
 export async function listFiles(): Promise<StoredFile[]> {
   return json(await apiFetch(`${API_BASE}/files`))
+}
+
+// 파일 읽기 한도 — 환경마다 다르다 (서버 설정, docs/MEMORY.md). 크기 단위는 MiB.
+export type FileLimits = {
+  max_upload_mib: number
+  max_xlsx_uncompressed_mib: number
+  max_file_cells: number
+  max_cell_chars: number
+  parse_slots: number
+  max_files_per_request: number
+}
+
+export async function fetchFileLimits(): Promise<FileLimits> {
+  return json(await apiFetch(`${API_BASE}/files/limits`))
 }
 
 export async function acknowledgePii(fileId: number): Promise<PiiSummary> {
@@ -397,7 +455,14 @@ export type Review = {
   files: { id: number; name: string; excluded: boolean }[]
   items: ReviewItem[]
   validation_run_id: number | null
-  learned: { columns: number; names: number; names_skipped?: number } | null
+  // names_skipped: 사전 관리 권한 없음 · names_pii: 개인정보 형식 · names_not_storable: 저장 한도 초과·NUL
+  learned: {
+    columns: number
+    names: number
+    names_skipped?: number
+    names_pii?: number
+    names_not_storable?: number
+  } | null
   parent_id: number | null
   child_id: number | null
   latest_id?: number | null // 대체된 검토면 다시 검사로 이어진 최신 검토
@@ -482,7 +547,7 @@ export async function recheckReview(reviewId: number, replace: Record<number, nu
 export type IntegrationRun = {
   id: number
   review_session_id: number | null
-  status: 'done' | 'failed' | 'running' | 'review'
+  status: 'done' | 'failed' | 'running' | 'review' | 'check' // check = 결과 확인 필요 (멈춘 실행의 결과를 확정하지 못함)
   status_label: string
   trigger: 'manual' | 'automation'
   automation_id: number | null
@@ -506,15 +571,112 @@ export type IntegrationRun = {
     columns?: string[]
     include_unmapped?: boolean
     unmapped_columns?: string[]
-    mode?: 'sheets' // 파일별 시트로 묶기 (없으면 하나의 통합표)
+    mode?: 'sheets' | 'keyjoin' // 파일별 시트로 묶기 · 공통 key 연결 (없으면 하나의 통합표)
+    mode_label?: string
     stats_summary?: boolean
     sheet_order?: string[]
+    // 공통 key 연결: 범위·입력 수(시작 요약은 개수, 완료 요약은 입력 목록)·결과 크기·사용자 집합 크기
+    scope?: KeyJoinScope
+    inputs?: number | { index: number; file_id: number }[]
+    result?: { rows: number; columns: number; key_columns: number }
+    counts?: { union: number; intersection: number; excluded: number }
+    // 통계 요약 항목 (파일별 시트 + 요약). source_columns는 이 목록이 생긴 뒤에 만든 실행에만 있다
+    summary_items?: {
+      field_key: string
+      field_label: string
+      source_columns?: SourceColumn[]
+      unit: string | null
+      periods: string[] | null
+      coverage: { included: number; total: number; text: string }
+    }[]
   }
   error: string | null
   created_at: string
 }
 
 export const runDownloadUrl = (runId: number) => `${API_BASE}/runs/${runId}/download`
+
+const XLSX_TYPE = 'spreadsheetml'
+
+/** 실행 결과 내려받기 결과. 실패하면 화면에 보일 이유 (status 0 = 서버에 닿지 못함·취소함) */
+export type DownloadOutcome = { ok: true } | { ok: false; status: number; message: string }
+
+const DOWNLOAD_CANCELLED: DownloadOutcome = { ok: false, status: 0, message: '내려받기를 취소했습니다.' }
+
+/** 서버의 410·401·403·404·409·5xx를 구분해 사용자가 할 수 있는 일을 알린다 (서버 문구가 있으면 그것을 쓴다). */
+function downloadProblem(status: number, detail: string | null): string {
+  if (status === 410) {
+    return (
+      '기록은 남아 있으나 결과 파일을 찾을 수 없습니다 — 서버 재배포·재시작으로 지워졌을 수 있습니다. ' +
+      '실행 기록·변경 내역은 그대로입니다. 새 결과가 필요하면 원본을 다시 올려 다시 실행하세요.'
+    )
+  }
+  if (status === 401) return '로그인이 끝났습니다 — 다시 로그인한 뒤 내려받으세요.'
+  if (status === 403) return '이 결과를 내려받을 권한이 없습니다.'
+  if (status === 404) return '결과를 찾을 수 없습니다 — 지워졌거나 볼 수 없는 실행입니다.'
+  if (status === 409) return detail ?? '아직 결과 파일이 없는 실행입니다.'
+  if (status >= 500) return detail ?? '서버 오류로 내려받지 못했습니다 — 잠시 뒤 다시 시도하세요.'
+  return detail ?? `내려받지 못했습니다 (HTTP ${status}).`
+}
+
+/** Content-Disposition의 파일 이름 (filename*=UTF-8''… 우선) */
+function attachmentName(header: string | null): string | null {
+  if (!header) return null
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header)
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded[1])
+    } catch {
+      // 잘못 인코딩된 이름은 아래의 일반 이름을 쓴다
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header)
+  return plain ? plain[1] : null
+}
+
+function saveBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  a.hidden = true
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
+/** 결과 파일을 앱 안에서 받아 저장한다. 성공한 Excel 응답을 끝까지 받았을 때만 저장하고, 오류 응답(JSON)·도중에 끊긴
+ *  본문·취소(signal — 링크가 화면에서 내려감·로그아웃)는 파일로 저장하지 않는다. 다시 받기는 사용자가 누를 때만 한다.
+ *  화면은 그대로 두므로 목록·검색 조건·키보드 초점이 남는다. 401이면 apiFetch가 로그인 화면으로 돌아가게 알린다. */
+export async function downloadRunResult(runId: number, signal?: AbortSignal): Promise<DownloadOutcome> {
+  let res: Response
+  try {
+    res = await apiFetch(runDownloadUrl(runId), { signal })
+  } catch {
+    if (signal?.aborted) return DOWNLOAD_CANCELLED
+    return { ok: false, status: 0, message: '서버에 연결하지 못했습니다 — 연결을 확인한 뒤 다시 내려받으세요.' }
+  }
+  if (res.ok && (res.headers.get('content-type') ?? '').includes(XLSX_TYPE)) {
+    let blob: Blob
+    try {
+      blob = await res.blob() // 헤더 뒤 본문이 끊기면(연결 끊김·길이 불일치) 여기서 실패한다 — 받은 일부는 저장하지 않는다
+    } catch {
+      if (signal?.aborted) return DOWNLOAD_CANCELLED
+      return { ok: false, status: res.status, message: '파일을 받는 도중 연결이 끊겨 저장하지 않았습니다 — 다시 내려받으세요.' }
+    }
+    // 본문을 다 받은 뒤의 취소는 blob()을 실패시키지 않는다 — 그 사이 화면이 내려갔으면 저장하지 않는다
+    if (signal?.aborted) return DOWNLOAD_CANCELLED
+    saveBlob(blob, attachmentName(res.headers.get('content-disposition')) ?? `결과-${runId}.xlsx`)
+    return { ok: true }
+  }
+  if (res.ok) return { ok: false, status: res.status, message: '결과 파일 형식이 아닌 응답이라 저장하지 않았습니다.' }
+  const detail = await res.json().then(
+    (j: { detail?: unknown } | null) => (typeof j?.detail === 'string' ? j.detail : null),
+    () => null,
+  )
+  return { ok: false, status: res.status, message: downloadProblem(res.status, detail) }
+}
 
 /** includeUnmapped: 표준 항목이 없는('해당 없음') 열도 원래 이름으로 결과에 넣을지 */
 export async function integrateReview(reviewId: number, includeUnmapped?: boolean): Promise<IntegrationRun> {
@@ -551,6 +713,7 @@ export type ReviewListItem = {
   latest_id: number
   run_count: number
   last_run_id: number | null
+  pending_count: number // 아직 결과가 정해지지 않은 실행 (실행 중·결과 확인 필요)
   can_edit: boolean
 }
 
@@ -762,7 +925,7 @@ export type AdminOverview = {
   users: { status: AccountStatus; label: string; count: number }[]
   owners: number
   uploads: PeriodCount
-  runs: PeriodCount & { done: number; failed: number; review: number; running: number }
+  runs: PeriodCount & { done: number; failed: number; review: number; running: number; check: number }
 }
 
 export async function fetchAdminOverview(start: string, end: string): Promise<AdminOverview> {
@@ -1126,6 +1289,16 @@ export type AnalysisTargetIn = {
   unit?: string | null
   period?: string | null
   rows_are_records?: boolean // 같은 대상의 행이 반복될 때 '서로 다른 기록'이라고 확인함
+  exclude?: boolean // 사용자가 계산에서 뺌 — 결과의 '제외'에 남는다
+}
+// 합계 항목(발신건수합계 등)의 산식 확인: 확인됨 · 검증 불가(막지 않음) · 불일치(다시 확정하거나 빼야 계산)
+export type AnalysisFormula = {
+  state: 'verified' | 'unverifiable' | 'mismatch'
+  text: string
+  rows: number
+  checked: number
+  differ: number
+  alternative: string | null
 }
 export type AnalysisBin = {
   label?: string | null
@@ -1181,6 +1354,7 @@ export type AnalysisTarget = {
   data_rows: number
   rows_are_records: boolean
   repeated: AnalysisRepeated | null
+  formula?: AnalysisFormula | null // 합계 항목일 때만 (이 규칙 전에 저장한 결과에는 없음)
 }
 export type AnalysisOverlap = {
   a: { file_id: number; file_name: string; sheet: string | null }
@@ -1195,6 +1369,10 @@ export type AnalysisOverlap = {
     b: { row: number; value: number | string | null }
   }[]
 }
+/** 계산한 원본 열 (가린 이름). 표준 항목 이름('건수')만으로는 어느 지표('발신Mail건수')를 계산했는지 알 수 없어 함께 보인다.
+ * 가린 뒤 같아진 서로 다른 이름에는 서버가 '(가림 구분 n)'을 붙여 보낸다. */
+export type SourceColumn = { column: string; sheets: number; files: number[] }
+
 export type AnalysisPreview = {
   field_key: string
   field_label: string
@@ -1203,6 +1381,7 @@ export type AnalysisPreview = {
   variants: string[]
   unit: string | null
   units: string[]
+  source_columns: SourceColumn[]
   targets: AnalysisTarget[]
   problems: string[]
   warnings: string[]
@@ -1264,6 +1443,7 @@ export type AnalysisRunDetail = {
     level_conflicts?: AnalysisPreview['region_levels']['conflicts']
     base_dates?: Record<string, string>
     records?: string[]
+    source_columns: SourceColumn[] // 서버가 채움 (이 목록이 생기기 전 결과는 저장된 입력의 열로)
   }
   inputs: (AnalysisTarget & { sha256: string })[]
   result: {
@@ -1294,23 +1474,32 @@ export type AnalysisRowRef = {
 }
 export type AnalysisPage<T> = { total: number; offset: number; items: T[]; all?: number }
 
-/** 409(실행 막힘)·422(조건 오류) 응답의 사유 목록을 함께 전한다 */
+/** 409(실행 막힘)·422(조건 오류) 응답의 사유 목록을 함께 전한다. code·runId는 서버가 detail에 넣어 준 경우만 (공통 key 연결의 409 구분) */
 export class AnalysisProblemError extends Error {
   problems: string[]
-  constructor(message: string, problems: string[]) {
+  code: string | null
+  runId: number | null
+  constructor(message: string, problems: string[], code: string | null = null, runId: number | null = null) {
     super(message)
     this.problems = problems
+    this.code = code
+    this.runId = runId
   }
 }
 
 async function analysisJson<T>(res: Response): Promise<T> {
   if (res.status === 409) {
     const detail = await res.json().then(
-      (j: { detail?: { message?: string; problems?: string[] } | string }) => j.detail,
+      (j: { detail?: { message?: string; problems?: string[]; code?: unknown; run_id?: unknown } | string }) => j.detail,
       () => undefined,
     )
     if (detail && typeof detail === 'object') {
-      throw new AnalysisProblemError(detail.message ?? '실행할 수 없습니다.', detail.problems ?? [])
+      throw new AnalysisProblemError(
+        detail.message ?? '실행할 수 없습니다.',
+        detail.problems ?? [],
+        typeof detail.code === 'string' ? detail.code : null,
+        typeof detail.run_id === 'number' ? detail.run_id : null,
+      )
     }
     throw new AnalysisProblemError(typeof detail === 'string' ? detail : '실행할 수 없습니다.', [])
   }
@@ -1369,6 +1558,7 @@ export type AnalysisRunSummary = {
   groups: number
   rows_included: number
   files: number
+  source_columns?: string[] // 이 목록이 생긴 뒤에 만든 결과에만 있음
 }
 
 export async function fetchAnalysisRuns(): Promise<AnalysisRunSummary[]> {
@@ -1445,6 +1635,7 @@ export type BundlePlanLink = BundleSheetRef & {
   period?: string | null
   period_source?: string | null
   period_columns?: string[]
+  formula?: AnalysisFormula | null // 합계 항목일 때 산식 확인 (분석 엔진과 같음)
   rows_are_records?: boolean
   // 같은 시트에서 같은 대상의 행이 반복된 정도 (있으면 '서로 다른 기록'인지 사용자가 확인해야 함)
   repeated?: { keys: number; rows: number; same_value: number; different_value: number } | null
@@ -1470,6 +1661,7 @@ export type BundlePlanItem = {
   region_levels: { choice: 'lower' | 'upper' | null; mismatch: number; conflicts: BundleLevelConflict[] } | null
   unit: string | null
   periods: string[]
+  source_columns: SourceColumn[] // 지금 계산에 들어가는 시트의 원본 열
   links: BundlePlanLink[]
   coverage: { included: number; total: number; text: string }
   rows: { candidate: number; excluded: Record<string, number> } | null
@@ -1511,4 +1703,141 @@ export async function runBundle(body: BundleRequest, basis: string): Promise<Int
     body: JSON.stringify({ ...body, expected_basis: basis }),
   })
   return analysisJson(res) // 409는 사유 목록과 함께 (AnalysisProblemError)
+}
+
+// ---------------------------------------------------------------- 공통 key로 연결하기 (취합 방식 'keyjoin')
+// 모든 선택은 파일 ID·시트 ID·열 ID로만 보낸다 (가린 표시 이름은 식별자가 아님). 시트·열 목록은 fetchPreview가 준다.
+
+export type KeyJoinScope = 'base' | 'all' | 'common' // 기준 파일의 key만 · 모든 파일의 key(합집합) · 모든 파일에 공통인 key만(교집합)
+export type KeyJoinSheetRef = { file_id: number; sheet_id: string }
+export type KeyJoinColumnIn = { column_id: string; out_name: string | null } // out_name null = 서버 기본(원본 열 이름)
+// key_columns: 순서 있음, 모든 입력이 같은 개수 (복합 key의 i번째끼리 대응). columns에 key 열은 넣지 않는다
+// rows: 소계·주석으로 추정된(key는 있는) 행의 포함/제외 — 원본 행 번호. 없으면 모두 '확인 필요'(서버가 차단)
+export type KeyJoinRowDecisions = { include: number[]; exclude: number[] }
+export type KeyJoinInput = KeyJoinSheetRef & { key_columns: string[]; columns: KeyJoinColumnIn[]; rows?: KeyJoinRowDecisions }
+// key_names null = 기준 입력의 key 열 이름. base는 inputs 중 하나 (모든 범위에서 필수 — 출력 순서의 기준)
+export type KeyJoinRequest = { inputs: KeyJoinInput[]; scope: KeyJoinScope; base: KeyJoinSheetRef; key_names: string[] | null }
+
+/** 확인 결과의 문제(block = 만들 수 없음)·참고(warn). text에는 위치(입력 번호·파일 #·시트 순번·열 문자·행 번호)·개수·코드만 있고
+ *  key 원문·가린 key·해시는 없다. 입력에 속한 문제는 inputs[i].problems에도 같은 객체로 들어 있다 */
+export type KeyJoinProblem = {
+  code: string
+  level: 'block' | 'warn'
+  input?: number | null
+  file_id?: number | null
+  sheet_id?: string | null
+  column?: string | null
+  rows?: number[] | null // 처음 5개
+  count?: number | null
+  groups?: number | null
+  text: string
+}
+// key 열 칸의 자료형 집계 (데이터 행)
+export type KeyJoinKinds = {
+  text: number
+  int: number
+  float: number
+  bool: number
+  date: number
+  empty: number
+  filled: number // 병합 채움 (위 행 값을 복사하지 않고 차단)
+  missing_mark: number
+  precision: number
+  illegal: number // 엑셀에 쓸 수 없는 글자 (차단)
+}
+export type KeyJoinPlanInput = {
+  index: number
+  file_id: number
+  file_name: string // 가림
+  sheet_id: string
+  sheet: string // 가림
+  tab: number
+  label: string // '입력 1 · #12 A.csv / A (1번째 시트)'
+  own: boolean
+  pii: 'none' | 'acknowledged' | 'needs_ack'
+  pii_summary: PiiSummary | null
+  key_columns: { column_id: string; name: string; letter: string; kinds: KeyJoinKinds | null }[]
+  picked: { column_id: string; name: string; letter: string; out_name: string; default_name: boolean }[]
+  rows: { data: number; subtotal: number; note: number; empty: number } | null
+  // 확인이 필요한 행(소계·주석 추정 + key 있음): 위치·근거·결정만 (칸 값 없음). items는 listed개까지
+  row_review: {
+    total: number
+    listed: number
+    included: number
+    excluded: number
+    unresolved: number
+    source_rows: number // 데이터 행 + 추정 행
+    link_rows: number // 데이터 행 + 포함한 행
+    items: { row: number; column: string | null; reason: 'subtotal' | 'note'; in_key: boolean; decision: 'include' | 'exclude' | null }[]
+  } | null
+  // 싼 검사(권한·pii·한도)에서 차단된 요청은 key 분석을 하지 않아 null
+  keys: {
+    indexed: number
+    duplicate_keys: number
+    duplicate_rows: number
+    empty_rows: number
+    partial_rows: number
+    unsupported_rows: number
+    linked: number
+    unlinked: number
+    whitespace_variants: number
+  } | null
+  problems: KeyJoinProblem[]
+}
+// 미리보기 행: key는 가린 정규형 (가린 표시가 같은 서로 다른 key에는 서버가 '(가림 구분 n)'을 붙임), sources는 연결된 입력의 원본 행만
+// (미연결 입력은 항목이 없다 — 화면은 input 번호로 입력 순서에 맞춰 보인다)
+export type KeyJoinPreviewRow = { key: string[]; cells: Cell[]; sources: { input: number; row: number }[] }
+export type KeyJoinPlan = {
+  mode: 'keyjoin'
+  policy: string
+  scope: KeyJoinScope
+  base: KeyJoinSheetRef & { index: number }
+  inputs: KeyJoinPlanInput[]
+  header: string[] // 최종 결과 열 이름 (가림) — key 열 + 가져올 열, 같은 이름은 서버가 '(입력 n · #fid)'로 구분
+  result: { rows: number; key_columns: number; columns: number; union: number; intersection: number; excluded: number }
+  preview: { rows: KeyJoinPreviewRow[]; shown: number; total: number; pool: number; note: string }
+  problems: KeyJoinProblem[]
+  warnings: KeyJoinProblem[]
+  limits: {
+    inputs: number
+    key_columns: number
+    columns: number
+    result_columns: number
+    rows: number
+    cells: number
+    text_chars: number
+    preview_rows: number
+    excel_rows: number
+  }
+  budget: { output_cells: number; index_cells: number; text_chars: number; cells_weighted: number }
+  basis: string
+  ready: boolean
+}
+
+/** 연결 확인 (읽기 전용 — 입력을 다시 읽고 key 인덱스를 만들지만 파일·기록·학습을 남기지 않음). 422·404·410·503은 ApiError */
+export async function planKeyJoin(body: KeyJoinRequest, signal?: AbortSignal): Promise<KeyJoinPlan> {
+  const res = await apiFetch(`${API_BASE}/keyjoin/plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  })
+  return json(res)
+}
+
+/** 엑셀 만들기. requestId(32 hex)는 같은 요청의 재전송을 서버가 알아보는 번호 — 같은 번호·같은 basis면 새로 만들지 않고
+ *  기존 실행을 200으로 돌려준다(created=false), 새로 만들면 201(created=true). 409(KEYJOIN_BASIS_CHANGED·KEYJOIN_NOT_READY·
+ *  KEYJOIN_REQUEST_MISMATCH·KEYJOIN_REQUEST_USED·KEYJOIN_FAILED)는 code·run_id·사유 목록과 함께 AnalysisProblemError. */
+export async function runKeyJoin(
+  body: KeyJoinRequest,
+  basis: string,
+  requestId: string,
+): Promise<{ run: IntegrationRun; created: boolean }> {
+  const res = await apiFetch(`${API_BASE}/keyjoin/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, expected_basis: basis, request_id: requestId }),
+  })
+  const run = await analysisJson<IntegrationRun>(res)
+  return { run, created: res.status === 201 }
 }

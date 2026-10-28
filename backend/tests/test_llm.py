@@ -1,14 +1,13 @@
 """LLM 제공자 설정: 기본 로컬, 소유자만 변경, API 키 비노출, 제공자별 요청 형식. 실제 외부 호출은 하지 않는다."""
 
 import json
-import sqlite3
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import llm
-from app.config import DATA_DIR
+from tests.conftest import db_connect
 
 SCHEMA = {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}
 SECRET = "sk-test-0123456789abcdef"
@@ -23,7 +22,7 @@ def client():
     with TestClient(app) as c:
         yield c
     # 다른 테스트에 영향이 없도록 로컬 기본값으로 되돌린다
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         con.execute("delete from app_settings where key = 'llm_provider'")
     llm.set_current(None)
 
@@ -172,3 +171,12 @@ def test_engine_uses_selected_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         llm.set_current(None)
     assert calls == ["anthropic", "ollama"]
+
+
+def test_model_reason_loses_control_characters_it_cannot_store() -> None:
+    # 모델이 만든 근거 문장의 제어 문자(NUL 등)는 지운다 — 원본 파일에 없는 글자 때문에 검토가 거절되지 않게
+    # (검증 지적 R48-IV-5)
+    from app.mapping import clean_reason
+
+    assert clean_reason("인구\x00 수를 뜻함\x01") == "인구 수를 뜻함"
+    assert clean_reason("줄\n바꿈\t유지") == "줄\n바꿈\t유지"

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.config import DATA_DIR
 from app.db import Base, engine
 from app.main import app
+from tests.conftest import db_dump
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -40,11 +41,12 @@ def test_upload_multiple(client: TestClient) -> None:
 
 def test_original_saved_read_only_with_new_name(client: TestClient) -> None:
     data = (FIXTURES / "members.xls").read_bytes()
+    before = set((DATA_DIR / "uploads").glob("*.xls"))  # 같은 세션의 다른 시험이 올린 xls는 보지 않는다
     res = client.post("/files", files=[("files", ("../../evil.xls", data, "application/vnd.ms-excel"))])
     body = res.json()[0]
     assert body["original_name"] == "evil.xls"
 
-    stored = list((DATA_DIR / "uploads").glob("*.xls"))
+    stored = [p for p in (DATA_DIR / "uploads").glob("*.xls") if p not in before]
     assert stored, "원본이 uploads 아래에 저장되어야 한다"
     for path in stored:
         assert path.read_bytes() == data
@@ -169,11 +171,39 @@ def test_corrupt_file_reports_error(client: TestClient) -> None:
     assert body["error"] and body["id"] is not None
 
 
+def test_xlsx_that_expands_beyond_the_limit_is_not_read(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """S-03: 업로드 한도는 압축된 크기라, 압축을 풀면 수백 배가 되는 xlsx를 막지 못했다 (읽을 때 메모리 약 9.5배).
+    압축을 푼 크기로 막고, 읽기 전에(메모리를 쓰기 전에) 거른다. 시험은 한도만 낮춰 작은 파일로 본다."""
+    import io
+
+    import openpyxl
+
+    from app import parsing
+
+    wb = openpyxl.Workbook()
+    for i in range(3000):
+        wb.active.append(["서울특별시", i, "가나다라마바사"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx = buf.getvalue()
+    xml = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    monkeypatch.setattr(parsing, "MAX_XLSX_UNCOMPRESSED_BYTES", 100_000)
+    opened: list[int] = []
+    real_load = parsing.openpyxl.load_workbook
+    monkeypatch.setattr(parsing.openpyxl, "load_workbook", lambda *a, **k: opened.append(1) or real_load(*a, **k))
+    body = client.post("/files", files=[("files", ("큰표.xlsx", xlsx, xml))]).json()[0]
+    assert body["id"] is not None and "압축을 풀면" in body["error"] and "한도 0MB" not in body["error"], body
+    assert opened == []  # 읽기 전에 거른다
+
+    monkeypatch.setattr(parsing, "MAX_XLSX_UNCOMPRESSED_BYTES", 100 * 1024 * 1024)
+    body = client.post("/files", files=[("files", ("보통표.xlsx", xlsx, xml))]).json()[0]
+    assert body["error"] is None and body["data_rows"] == 2999 and opened == [1]
+
+
 def test_validation_flow_blocks_and_pii(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    import sqlite3
 
     from app import files, validation_api
-    from app.config import DATA_DIR
     from app.mapping import MappingEngine, load_dictionary
 
     engine = MappingEngine(load_dictionary(), None, None)
@@ -229,9 +259,7 @@ def test_validation_flow_blocks_and_pii(client: TestClient, monkeypatch: pytest.
     assert listed[up2["id"]]["pii"]["acknowledged"] is True
 
     # 원문 개인정보는 DB 어디에도 저장되지 않는다
-    con = sqlite3.connect(DATA_DIR / "moajwo.db")
-    dump = "\n".join(con.iterdump())
-    con.close()
+    dump = db_dump()  # 모든 표·모든 행 (SQLite·PostgreSQL)
     assert "010-1234-5678" not in dump and "kim@example.go.kr" not in dump
 
     # 입력 검증

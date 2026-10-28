@@ -12,8 +12,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
 import re
+import secrets
+import sys
 import threading
 import unicodedata
 from collections import OrderedDict
@@ -31,6 +36,18 @@ from app.decisions import DecisionInput, load_decisions, save_decisions
 from app.files import column_id, get_file_for, load_parsed
 from app.mapping import TOTAL_WORDS, get_engine, split_column_name
 from app.models import MappingAnalysis, SourceFile
+from app.name_limits import (
+    COLUMN_MAX,
+    SHEET_MAX,
+    NameNotStorable,
+    OptionalStoredText,
+    StoredText,
+    column_place,
+    hint,
+    name_problem,
+    sheet_column_problem,
+    sheet_place,
+)
 from app.pii import column_letter, mask_cell, mask_rrn_number, mask_text
 from app.promotion import record_approval
 from app.quantity import QUANTITY_FIELDS
@@ -57,12 +74,16 @@ def sheet_id(index: int) -> str:
 # ---------------------------------------------------------------- 미리보기용 보기 (마스킹한 파싱 결과, 작은 캐시)
 #
 # 미리보기 쪽 넘김·작업 화면 매핑·공통 검토·일괄 확정 확인은 열 이름과 정리된 행만 필요하다. 큰 파일(10만 행 CSV)을
-# 요청마다 다시 파싱하면 쪽마다 10초 가까이 걸리므로, 파일 id·내용 해시(sha256)를 키로 최근 몇 개 파일만 메모리에 둔다.
-# 원본 파일은 바뀌지 않으므로(읽기 전용, 해시 고정) 오래된 값이 나오지 않는다. 다른 기능의 파싱은 그대로다.
-# 이 제한은 '보관하는 항목'의 상한이다. 큰 파일을 처음 여는 요청은 파싱하는 동안 원본 크기에 비례한 메모리를 따로 쓴다.
-
-VIEW_CACHE_FILES = 2
-VIEW_CACHE_MAX_CELLS = 3_000_000  # 이보다 큰 파일은 보관하지 않는다 (메모리 보호)
+# 요청마다 다시 파싱하면 쪽마다 10초 가까이 걸리므로, 파일 id·내용 해시(sha256)를 키로 최근 파일을 메모리에 둔다.
+# 원본 파일은 바뀌지 않으므로(읽기 전용, 해시 고정) 오래된 값이 나오지 않는다. 보관 값은 가린 값이고 권한은 꺼내기 전에
+# 따로 확인한다 (get_file_for). 매핑·확정은 보관하지 않아 바뀌어도 다시 만들 필요가 없다. 다른 기능의 파싱은 그대로다.
+# 상한은 '보관한 값의 추정 크기 합계'와 파일 수다 — 작은 파일은 여러 개(홈의 상태 확인은 10개씩), 큰 파일은 적게
+# (P-01: 2개만 두던 때는 홈에서 다른 화면에 갔다 오면 8개를 다시 읽었다). 칸 수만 세면 긴 글자가 빠지므로 칸마다
+# sys.getsizeof로 센다 (같은 객체를 여러 번 셀 수 있어 실제보다 크게 잡힌다). 이 예산은 보관분만이다 — 파일을 처음
+# 읽는 동안의 메모리는 app.parsing의 읽기 한도·동시 읽기 수가 따로 막는다 (docs/MEMORY.md, 환경별 값).
+VIEW_CACHE_FILES = int(os.environ.get("MOAJWO_VIEW_CACHE_FILES") or 20)  # 보관하는 파일 수 상한
+# 보관 추정 크기 합계 상한 (MiB, 2^20 바이트). 이보다 큰 파일 하나는 보관하지 않는다. 0이면 보관하지 않는다
+VIEW_CACHE_MAX_BYTES = int(os.environ.get("MOAJWO_VIEW_CACHE_MIB") or 128) * 2**20
 
 
 @dataclass
@@ -77,7 +98,11 @@ class SheetView:
     data_rows: int
     title_texts: list[str]
     note_texts: list[str]
+    tab: int = 0  # 원본 통합 문서의 시트 순번 (0부터, 건너뛴 설명 시트 포함 — 'N번째 시트'로 알릴 때)
     samples: list[list[Any]] = field(default_factory=list)  # 열별 값 예시 (파서가 가린 값)
+    # 가림으로 글자가 바뀐 칸만: rows의 순번 → {열 번호: 원문 구분 표지}. 가린 표시가 같아도 원문이 다른 값을
+    # 서버 안에서 구별하는 데만 쓴다 (분석의 같은 대상·그룹 비교). 원문·원문 해시는 두지 않는다 — raw_mark 참고
+    marks: dict[int, dict[int, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -85,7 +110,20 @@ class FileView:
     sheets: list[SheetView]
 
 
+# 원문 구분 표지의 키: 프로세스가 시작할 때 만들고 저장·출력하지 않는다. 같은 프로세스 안에서만 같은 원문 → 같은 표지라,
+# 표지는 한 요청 안의 비교에만 쓰고 응답·저장값·확인 기준(fingerprint)에는 넣지 않는다.
+_MARK_KEY = secrets.token_bytes(32)
+
+
+def raw_mark(value: Any) -> str:
+    """원문을 구별하는 표지 (HMAC — 키가 없으면 원문을 되짚을 수 없음). 공백·전각 차이는 같은 값으로 본다
+    (분석의 기존 비교 규칙 compact와 같음)."""
+    text = "".join(unicodedata.normalize("NFKC", str(value)).split())
+    return hmac.new(_MARK_KEY, text.encode("utf-8"), hashlib.sha256).hexdigest()[:24]
+
+
 _VIEWS: OrderedDict[tuple[int, str], FileView] = OrderedDict()
+_VIEW_BYTES: dict[tuple[int, str], int] = {}  # 보관한 파일의 추정 크기 (합계 상한 계산용)
 _VIEWS_LOCK = threading.Lock()
 _BUILDING: dict[tuple[int, str], threading.Lock] = {}  # 같은 파일을 동시에 두 번 파싱하지 않게 (먼저 온 요청을 기다림)
 
@@ -112,15 +150,23 @@ def file_view(db: Session, record: SourceFile) -> FileView:
 def _build_view(db: Session, record: SourceFile, key: tuple[int, str]) -> FileView:
     _, parsed = load_parsed(db, record.id)
     sheets: list[SheetView] = []
-    cells = 0
+    size = 0
     for s in parsed.sheets:
         # 주민등록번호가 탐지된 시트는 13자리 숫자 형태도 가린다 (금액 전체를 가리지 않도록 그 시트에만)
         mask = mask_rrn_number if s.pii.counts.get("rrn") else mask_cell
-        rows = [(r["row"], r["kind"], [mask(c) for c in r["cells"]]) for r in s.body]
-        cells += len(rows) * max(1, len(s.columns))
+        rows = []
+        marks: dict[int, dict[int, str]] = {}
+        for i, r in enumerate(s.body):
+            shown = [mask(c) for c in r["cells"]]
+            changed = {j: raw_mark(c) for j, (c, m) in enumerate(zip(r["cells"], shown, strict=True)) if m != c}
+            if changed:
+                marks[i] = changed
+            rows.append((r["row"], r["kind"], shown))
+        size += _rows_bytes(rows)
         sheets.append(
             SheetView(
                 name=s.name,
+                tab=s.tab,
                 columns=list(s.columns),
                 source_columns=list(s.source_columns or range(len(s.columns))),
                 header_row=s.header_row,
@@ -131,15 +177,28 @@ def _build_view(db: Session, record: SourceFile, key: tuple[int, str]) -> FileVi
                 title_texts=list(s.title_texts),
                 note_texts=list(s.note_texts),
                 samples=[[mask(c) for c in col[:SAMPLES_SHOWN]] for col in s.samples],
+                marks=marks,
             )
         )
     view = FileView(sheets=sheets)
-    if cells <= VIEW_CACHE_MAX_CELLS:
+    if size <= VIEW_CACHE_MAX_BYTES and VIEW_CACHE_FILES > 0:
         with _VIEWS_LOCK:
             _VIEWS[key] = view
-            while len(_VIEWS) > VIEW_CACHE_FILES:
-                _VIEWS.popitem(last=False)
+            _VIEW_BYTES[key] = size
+            # 오래된 것부터 뺀다 — 방금 넣은 것은 남는다 (그 하나는 위에서 상한 안임을 확인)
+            while len(_VIEWS) > VIEW_CACHE_FILES or sum(_VIEW_BYTES.values()) > VIEW_CACHE_MAX_BYTES:
+                old, _ = _VIEWS.popitem(last=False)
+                _VIEW_BYTES.pop(old, None)
     return view
+
+
+def _rows_bytes(rows: list[tuple[int, str, list[Any]]]) -> int:
+    """보관할 행의 추정 크기: 행 튜플·칸 목록·칸 값 (글자 길이가 반영된다). 열 이름·예시 칸은 작아 넣지 않는다."""
+    total = 0
+    for row in rows:
+        cells = row[2]
+        total += sys.getsizeof(row) + sys.getsizeof(cells) + sum(sys.getsizeof(c) for c in cells)
+    return total
 
 
 def _sheet(view: FileView, sid: str | None) -> tuple[int, SheetView] | None:
@@ -625,9 +684,10 @@ class BatchItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     file_id: int
-    sheet_id: str = Field(max_length=8)
-    column_id: str = Field(max_length=16)
-    field_key: str | None  # None = '해당 없음'
+    # 못 찾은 시트·열 번호는 안내에 그대로 되돌려 보내므로 NUL은 요청에서 막는다 (loc으로 알림)
+    sheet_id: StoredText = Field(max_length=8)
+    column_id: StoredText = Field(max_length=16)
+    field_key: OptionalStoredText  # None = '해당 없음'
 
 
 class BatchPreviewIn(BaseModel):
@@ -675,6 +735,7 @@ class _Target:
     sheet_label: str
     column_label: str
     problem: str | None  # 열·시트·표준 항목이 없음 등 (권한은 따로)
+    where: str | None = None  # 이름을 저장할 수 없는 대상의 위치 (파일 번호·시트 순번·열 위치 — 이름 없이)
 
 
 def _resolve(db: Session, user: CurrentUser, items: list[BatchItem], own: bool) -> list[_Target]:
@@ -694,11 +755,23 @@ def _resolve(db: Session, user: CurrentUser, items: list[BatchItem], own: bool) 
         sheet = found[1] if found else None
         index = int(item.column_id[1:]) if re.fullmatch(r"c\d+", item.column_id) else -1
         raw = sheet.columns[index] if sheet is not None and 0 <= index < len(sheet.columns) else None
-        problem = None
+        problem = where = None
         if raw is None:
             problem = "파일에 없는 시트·열"
+        elif (bad := sheet_column_problem(sheet.name, raw)) is not None:  # 저장 규칙 — 쓰기 전에 두 DB에서 같게
+            problem = f"{bad.text} — 확정할 수 없습니다. {hint([bad])}"
+            where = f"파일 #{record.id} · {sheet_place(sheet)} · {column_place(sheet, index)}"
         elif item.field_key is not None and item.field_key not in labels:
             problem = "없는 표준 항목"
+        # 위치 표시: 저장할 수 없는 이름(길이·NUL)은 원문(가린 이름) 대신 순번·원본 열 위치로 (되돌려 보내지 않음)
+        sheet_label = item.sheet_id
+        if sheet is not None:
+            sheet_ok = name_problem("시트 이름", sheet.name, SHEET_MAX) is None
+            sheet_label = mask_text(sheet.name) if sheet_ok else sheet_place(sheet)
+        column_label = item.column_id
+        if raw is not None:
+            column_ok = name_problem("열 이름", raw, COLUMN_MAX) is None
+            column_label = mask_text(raw) if column_ok else column_place(sheet, index)
         out.append(
             _Target(
                 item=item,
@@ -706,9 +779,10 @@ def _resolve(db: Session, user: CurrentUser, items: list[BatchItem], own: bool) 
                 sheet_name=sheet.name if sheet else None,
                 raw=raw,
                 file_name=mask_text(record.original_name),
-                sheet_label=mask_text(sheet.name) if sheet else item.sheet_id,
-                column_label=mask_text(raw) if raw is not None else item.column_id,
+                sheet_label=sheet_label,
+                column_label=column_label,
                 problem=problem,
+                where=where,
             )
         )
     return out
@@ -789,7 +863,7 @@ def batch_preview(
 
 class ApplyItem(BatchItem):
     expected_confirmed: bool  # 확인 화면에서 본 현재 상태 (확정 여부)
-    expected_field_key: str | None  # 확인 화면에서 본 현재 확정값
+    expected_field_key: OptionalStoredText  # 확인 화면에서 본 현재 확정값
     overwrite: bool = False  # 기존 사용자 확정을 바꾸는 것을 명시적으로 선택했는지
 
 
@@ -804,6 +878,11 @@ class ApplyOut(BaseModel):
     unchanged: int
     learned: int
     files: int
+
+
+def _where(t: _Target) -> str:
+    """문제 목록의 대상 표시: 이름을 저장할 수 없는 대상은 위치만, 그 밖은 화면과 같은 (가린) 파일·시트·열."""
+    return t.where or f"{t.file_name} / {t.sheet_label} / {t.column_label}"
 
 
 def _conflict(problems: list[str]) -> HTTPException:
@@ -821,7 +900,7 @@ def batch_apply(body: ApplyIn, db: Annotated[Session, Depends(get_session)], use
     """
     items: list[ApplyItem] = list(body.items)
     targets = _resolve(db, user, list(items), own=True)  # 파싱은 여기 (잠금 밖)
-    problems = [f"{t.file_name} / {t.sheet_label} / {t.column_label}: {t.problem}" for t in targets if t.problem]
+    problems = [f"{_where(t)}: {t.problem}" for t in targets if t.problem]
     if problems:
         raise _conflict(problems)
     db.rollback()  # 읽기만 한 트랜잭션을 닫고, 아래에서 쓰기 잠금부터 잡는다
@@ -841,7 +920,7 @@ def batch_apply(body: ApplyIn, db: Annotated[Session, Depends(get_session)], use
         decisions = _state(db, targets)
         plan = [_plan_entry(t, decisions[t.item.file_id], labels, user) for t in targets]
         for item, t, entry in zip(items, targets, plan, strict=True):
-            where = f"{t.file_name} / {t.sheet_label} / {t.column_label}"
+            where = _where(t)
             if entry.current_confirmed != item.expected_confirmed or entry.current_field_key != item.expected_field_key:
                 if entry.action != "unchanged":  # 같은 값으로 이미 확정된 경우(중복 요청)는 충돌로 보지 않음
                     problems.append(
@@ -873,6 +952,9 @@ def batch_apply(body: ApplyIn, db: Annotated[Session, Depends(get_session)], use
         db.commit()
     except HTTPException:
         raise
+    except NameNotStorable as exc:  # 위 대상 확인이 먼저 거절하므로 닿지 않는다 — 닿아도 500이 아니라 같은 409로
+        db.rollback()
+        raise _conflict([str(exc)]) from exc
     except Exception:
         db.rollback()
         raise

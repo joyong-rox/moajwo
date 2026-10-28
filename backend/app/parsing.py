@@ -8,6 +8,10 @@ from __future__ import annotations
 import csv
 import io
 import re
+import threading
+import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
@@ -17,6 +21,7 @@ import chardet
 import openpyxl
 import xlrd
 
+from app.config import MAX_FILE_CELLS, MAX_FILE_TEXT_CHARS, MAX_XLSX_UNCOMPRESSED_MIB, PARSE_SLOTS, PARSE_WAIT_S
 from app.pii import PiiReport, mask_cell, scan_grid
 
 SUPPORTED_EXTENSIONS = (".xlsx", ".xls", ".csv")
@@ -41,6 +46,10 @@ class ParseError(Exception):
     pass
 
 
+class ParseBusy(ParseError):
+    """다른 파일을 읽는 중이라 기다린 시간 안에 읽기를 시작하지 못함 — 입력 오류가 아니므로 잠시 뒤 다시 시도한다."""
+
+
 @dataclass
 class SheetResult:
     name: str
@@ -63,6 +72,8 @@ class SheetResult:
     # 열별 원본 시트의 열 번호(0부터). 병합 복제 열을 버리면 원본 위치와 달라지므로
     # 미리보기의 열 위치(A, B…) 표시에 쓴다
     source_columns: list[int] = field(default_factory=list)
+    # 원본 통합 문서에서의 시트 순번(0부터) — 건너뛴 설명 시트도 센다. 이름 대신 위치로 알릴 때 ('N번째 시트')
+    tab: int = 0
 
 
 @dataclass
@@ -170,7 +181,73 @@ def normalize_cell(value: Any) -> Cell:
 Filled = dict[str, set[tuple[int, int]]]  # 시트 → 병합 채움으로 값이 들어간 칸 (0-based 행, 열)
 
 
-def _read_xlsx(path: Path) -> tuple[dict[str, list[list[Any]]], Filled]:
+# xlsx는 압축 파일이라 업로드 한도(압축된 크기)로는 읽을 때의 메모리를 막지 못한다 — 압축을 풀면 수백 배가 될 수
+# 있다. 그래서 풀었을 때의 크기, 읽은 칸 수, 동시에 읽는 파일 수를 따로 막는다 (값은 app.config, 환경별 근거는
+# docs/MEMORY.md). 한도를 넘으면 메모리를 쓰기 전에 입력으로 거절한다 — 프로세스가 메모리 부족으로 죽는 것은 거절이
+# 아니다.
+MAX_XLSX_UNCOMPRESSED_BYTES = MAX_XLSX_UNCOMPRESSED_MIB * 2**20
+MAX_CELL_CHARS = 32_767  # 한 칸의 글자 수 — Excel 한 칸 한도와 같다 (xlsx·xls는 넘을 수 없고 CSV만 막는다)
+_PARSE_SLOTS = threading.BoundedSemaphore(PARSE_SLOTS)
+
+
+@contextmanager
+def parse_slot() -> Iterator[None]:
+    """파일 읽기 차례 — 같은 파일이든 다른 파일이든 동시에 PARSE_SLOTS개까지만 읽는다 (읽는 동안 메모리를 크게 씀)."""
+    if not _PARSE_SLOTS.acquire(timeout=PARSE_WAIT_S):
+        raise ParseBusy(
+            f"다른 파일을 읽는 중이라 {PARSE_WAIT_S}초 안에 읽기를 시작하지 못했습니다 — 잠시 뒤 다시 시도하세요 "
+            f"(동시에 읽는 파일 수 한도 {PARSE_SLOTS}개)."
+        )
+    try:
+        yield
+    finally:
+        _PARSE_SLOTS.release()
+
+
+_MERGE_REF = re.compile(rb'<mergeCell\s+ref="([A-Z]{1,3})(\d+):([A-Z]{1,3})(\d+)"')
+
+
+def _column_number(letters: bytes) -> int:
+    n = 0
+    for ch in letters:
+        n = n * 26 + ch - 64
+    return n
+
+
+def _check_xlsx_size(path: Path) -> None:
+    """압축을 푼 크기(중앙 디렉터리의 크기 합)가 한도를 넘으면 읽기 전에 멈춘다. 병합 범위의 넓이 합도 칸 수 한도로
+    먼저 본다 — openpyxl은 병합 범위의 칸마다 객체를 만들어, 몇 KB짜리 파일의 큰 병합 하나가 읽는 동안 수백 MiB가 된다
+    (칸 수는 읽은 뒤에야 세므로 그 전에 막는다).
+
+    zipfile은 적힌 크기보다 많이 풀지 않는다 (넘으면 CRC 오류) — 적힌 크기 합이 실제로 풀리는 양의 상한이다.
+    """
+    try:
+        with zipfile.ZipFile(path) as archive:
+            infos = archive.infolist()
+            total = sum(info.file_size for info in infos)
+            if total > MAX_XLSX_UNCOMPRESSED_BYTES:
+                raise ParseError(
+                    f"압축을 풀면 {total / 2**20:,.1f}MiB라 읽지 않았습니다 "
+                    f"(한도 {MAX_XLSX_UNCOMPRESSED_BYTES / 2**20:,.1f}MiB). "
+                    "시트를 나누거나 필요한 범위만 저장해 다시 올리세요."
+                )
+            merged = 0
+            for info in infos:  # 시트 하나씩 (풀었을 때 크기는 위 한도 안)
+                if info.filename.startswith("xl/worksheets/") and info.filename.endswith(".xml"):
+                    for m in _MERGE_REF.finditer(archive.read(info)):
+                        rows = int(m[4]) - int(m[2]) + 1
+                        cols = _column_number(m[3]) - _column_number(m[1]) + 1
+                        merged += max(rows, 0) * max(cols, 0)
+    except zipfile.BadZipFile:
+        return  # 손상 파일은 아래 openpyxl이 알린다 (기존 안내)
+    if merged > MAX_FILE_CELLS:
+        raise ParseError(_too_many_cells(f"병합 범위만 {merged:,}칸"))
+
+
+def _read_xlsx(path: Path) -> tuple[dict[str, list[list[Any]]], Filled, dict[str, int]]:
+    """(시트별 칸, 병합으로 채운 칸, 탭 순번). 탭 순번은 통합 문서의 모든 탭(차트 시트 포함)에서 센다 — 읽는 것은
+    워크시트뿐이라 그 순서로 세면 앞에 차트 시트가 있을 때 'N번째 시트'가 어긋난다."""
+    _check_xlsx_size(path)
     # read_only 모드에서는 병합 셀 정보를 얻을 수 없어 일반 모드로 연다 (파일은 읽기만 함).
     wb = openpyxl.load_workbook(path, data_only=True)
     try:
@@ -183,7 +260,7 @@ def _read_xlsx(path: Path) -> tuple[dict[str, list[list[Any]]], Filled]:
                 top_left = grid[rng.min_row - 1][rng.min_col - 1] if rng.min_row - 1 < len(grid) else None
                 _fill_range(grid, rng.min_row - 1, rng.max_row, rng.min_col - 1, rng.max_col, top_left, cells)
             sheets[ws.title] = grid
-        return sheets, filled
+        return sheets, filled, {name: i for i, name in enumerate(wb.sheetnames)}
     finally:
         wb.close()
 
@@ -266,8 +343,27 @@ def _read_csv(path: Path, sheet_name: str) -> tuple[dict[str, list[list[Any]]], 
     except csv.Error:
         delimiter = ","
     reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter, quotechar='"', doublequote=True)
-    rows = [list(r) for r in reader]
+    rows = []
+    cells = 0
+    for row in reader:  # 읽는 중에 한도를 본다 — 넘는 파일을 끝까지 목록으로 만들지 않는다
+        cells += len(row)
+        if cells > MAX_FILE_CELLS:
+            raise ParseError(_too_many_cells(f"{len(rows) + 1:,}행까지 {cells:,}칸"))
+        if any(len(c) > MAX_CELL_CHARS for c in row):
+            raise ParseError(
+                f"{len(rows) + 1:,}행에 {MAX_CELL_CHARS:,}자가 넘는 칸이 있어 읽지 않았습니다 "
+                "(Excel 한 칸 한도와 같음). "
+                "구분자·따옴표가 맞는지 확인하세요."
+            )
+        rows.append(row)
     return {sheet_name: rows}, encoding
+
+
+def _too_many_cells(found: str) -> str:
+    return (
+        f"칸이 너무 많아 읽지 않았습니다 ({found}, 한도 {MAX_FILE_CELLS:,}칸 — 빈 칸 포함). "
+        "시트를 나누거나 필요한 범위만 저장해 다시 올리세요."
+    )
 
 
 # ---------------------------------------------------------------- 분석
@@ -669,13 +765,20 @@ _INFO_SHEET = re.compile(r"(메타|설명|안내)")
 
 
 def parse_file(path: Path, original_name: str | None = None) -> FileResult:
-    """original_name: 사용자가 올린 파일명. CSV는 시트가 없어 이 이름(확장자 제외)을 시트명으로 쓴다."""
+    """original_name: 사용자가 올린 파일명. CSV는 시트가 없어 이 이름(확장자 제외)을 시트명으로 쓴다.
+    읽기 차례(parse_slot)를 얻지 못하면 ParseBusy (입력 오류가 아님)."""
+    with parse_slot():
+        return _parse_file(path, original_name)
+
+
+def _parse_file(path: Path, original_name: str | None) -> FileResult:
     ext = path.suffix.lower()
     encoding = None
     filled: Filled = {}
+    tabs: dict[str, int] = {}  # xlsx: 원본 탭 순번 (그 밖은 읽은 순서)
     try:
         if ext == ".xlsx":
-            sheets, filled = _read_xlsx(path)
+            sheets, filled, tabs = _read_xlsx(path)
         elif ext == ".xls":
             sheets, filled = _read_xls(path)
         elif ext == ".csv":
@@ -686,9 +789,25 @@ def parse_file(path: Path, original_name: str | None = None) -> FileResult:
         raise
     except Exception as exc:  # 손상/암호화 파일 등 라이브러리별 예외를 사용자 메시지로 통일
         raise ParseError(f"파일을 읽을 수 없습니다 ({type(exc).__name__}).") from exc
+    total = sum(len(row) for grid in sheets.values() for row in grid)
+    # xlsx·xls는 읽은 뒤에 센다 (읽는 메모리는 압축 해제·업로드 한도가 막음) — 행을 정리·분석하기 전에 멈춘다
+    if total > MAX_FILE_CELLS:
+        raise ParseError(_too_many_cells(f"{len(sheets)}개 시트 {total:,}칸"))
+    # 정리(앞뒤 공백 제거)할 때 칸마다 글자 사본이 생긴다 — 같은 긴 글자를 여러 칸이 가리키는 파일(공유 문자열·병합)은
+    # 읽은 크기보다 훨씬 커지므로, 정리하기 전에 칸마다의 글자 길이 합을 본다
+    chars = sum(len(v) for grid in sheets.values() for row in grid for v in row if isinstance(v, str))
+    if chars > MAX_FILE_TEXT_CHARS:
+        raise ParseError(
+            f"글자가 너무 많아 읽지 않았습니다 (모든 칸의 글자 {chars:,}자, 한도 {MAX_FILE_TEXT_CHARS:,}자). "
+            "긴 글자가 반복되는 열·병합을 줄이거나 시트를 나눠 다시 올리세요."
+        )
     names = list(sheets)
     skipped = [n for n in names if _INFO_SHEET.search(n)]
     if len(skipped) == len(names):  # 시트가 설명 시트뿐이면 그대로 읽는다
         skipped = []
-    sheet_results = [analyze_sheet(n, g, filled.get(n)) for n, g in sheets.items() if n not in skipped]
+    sheet_results = []
+    for tab, (n, g) in enumerate(sheets.items()):
+        if n not in skipped:
+            sheet_results.append(analyze_sheet(n, g, filled.get(n)))
+            sheet_results[-1].tab = tabs.get(n, tab)
     return FileResult(sheets=sheet_results, encoding=encoding, skipped_sheets=skipped)

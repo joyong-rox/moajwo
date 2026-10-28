@@ -17,7 +17,16 @@ from sqlalchemy.orm import Session
 from app.integration import KST, IntegrationError, integrate
 from app.mapping import get_engine
 from app.models import Automation, IntegrationRun, ReviewSession, SourceFile
-from app.review import column_rule_key, complete, create_session, recheck_reasons, session_items, summarize
+from app.output_slot import output_slot
+from app.review import (
+    ReviewNameError,
+    column_rule_key,
+    complete,
+    create_session,
+    recheck_reasons,
+    session_items,
+    summarize,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +121,21 @@ def run_automation(
     user_id: int | None = None,
 ) -> tuple[IntegrationRun, ReviewSession]:
     """새 파일에 자동화 규칙을 적용한다. 확인할 항목이 없으면 바로 통합 결과까지 만들고(완료),
-    새 열 등 확인할 항목이 남으면 실행 기록을 '검토'로 남긴다 (검토 패널에서 이어서 처리)."""
+    새 열 등 확인할 항목이 남으면 실행 기록을 '검토'로 남긴다 (검토 패널에서 이어서 처리).
+    결과 만들기 차례(app/output_slot.py)를 먼저 쥔다 — 차례가 없으면 검토·실행 기록을 만들기 전에 OutputBusy."""
+    with output_slot():
+        return _run_automation(db, automation, file_ids, expected_period, baseline_file_ids, use_llm, user_id)
+
+
+def _run_automation(
+    db: Session,
+    automation: Automation,
+    file_ids: list[int],
+    expected_period: str | None,
+    baseline_file_ids: list[int] | None,
+    use_llm: bool,
+    user_id: int | None,
+) -> tuple[IntegrationRun, ReviewSession]:
     file_ids = list(dict.fromkeys(file_ids))
     baseline = list(dict.fromkeys(baseline_file_ids or []))
     if not file_ids:
@@ -132,7 +155,10 @@ def run_automation(
         "entity_field": validation.get("entity_field"),
         "change_threshold": validation.get("change_threshold") or 0.5,
     }
-    session = create_session(db, params, use_llm=use_llm, automation=automation, user_id=user_id)
+    try:
+        session = create_session(db, params, use_llm=use_llm, automation=automation, user_id=user_id)
+    except ReviewNameError as exc:  # 시트·열 이름이 저장 한도를 넘음 — 규칙 기록·검토·실행 기록을 만들기 전
+        raise AutomationError(str(exc)) from exc
     run = IntegrationRun(
         review_session_id=session.id,
         automation_id=automation.id,
@@ -153,14 +179,16 @@ def run_automation(
         run = integrate(db, session)
     except IntegrationError as exc:
         db.rollback()
-        failed = db.get(IntegrationRun, run.id)
-        if failed is not None and failed.status != "failed":
-            failed.status = "failed"
-            failed.error = str(exc)[:1000]
-            failed.finished_at = datetime.now(KST)
-            db.commit()
-        if failed is not None:
-            run = failed
+        # 결과를 만들기 시작하기 전에 멈춘 경우(검사 기준이 바뀜·칸 한도 등)만 '검토 대기' 행을 실패로 둔다 —
+        # 이미 시작한 실행은 integrate가 조건부로 정했다 (완료·실패·결과 확인 필요를 덮지 않는다)
+        db.execute(
+            update(IntegrationRun)
+            .where(IntegrationRun.id == run.id, IntegrationRun.status == "review")
+            .values(status="failed", error=str(exc)[:1000], finished_at=datetime.now(KST))
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        db.refresh(run)
     return run, session
 
 

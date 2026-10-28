@@ -33,6 +33,7 @@ from app.analysis import (
     compute,
     conditions,
     evaluate,
+    excel_number,
     inputs,
     label_of,
     preview_out,
@@ -40,8 +41,10 @@ from app.analysis import (
 from app.auth import CurrentUserDep, ensure_view
 from app.db import get_session
 from app.models import AnalysisRun, MappingDecision, SourceFile, User
+from app.output_slot import output_slot
 from app.pii import mask_text
 from app.timefmt import utc_to_kst
+from app.xmltext import ILLEGAL_RE, printable
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 PAGE_MAX = 200
@@ -111,15 +114,22 @@ def analysis_sources(
 
 @router.post("/preview")
 def analysis_preview(body: AnalysisIn, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> dict:
-    """대상·단위·기간·제외 사유·중복 의심을 확인한다 (계산·저장 없음)."""
-    ev = evaluate(db, user, body)
-    db.rollback()
-    return preview_out(ev)
+    """대상·단위·기간·제외 사유·중복 의심을 확인한다 (계산·저장 없음). 평가가 메모리를 크게 써서 결과 만들기 차례를
+    쥔다 (없으면 OutputBusy — app/output_slot.py)."""
+    with output_slot():
+        ev = evaluate(db, user, body)
+        db.rollback()
+        return preview_out(ev)
 
 
 @router.post("/run", status_code=status.HTTP_201_CREATED)
 def analysis_run(body: RunIn, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> dict:
-    """확인한 상태 그대로일 때만 계산하고 결과를 저장한다."""
+    """확인한 상태 그대로일 때만 계산하고 결과를 저장한다 (결과 만들기 차례를 쥔 채)."""
+    with output_slot():
+        return _analysis_run(body, db, user)
+
+
+def _analysis_run(body: RunIn, db: Session, user: CurrentUserDep) -> dict:
     ev = evaluate(db, user, body)
     db.rollback()  # 읽기만 한 트랜잭션을 닫는다 (계산 중 잠금을 잡지 않음)
     if ev.fingerprint != body.expected_fingerprint:
@@ -139,6 +149,7 @@ def analysis_run(body: RunIn, db: Annotated[Session, Depends(get_session)], user
         "rows_included": result["rows_included"],
         "files": len({t.file_id for t in ev.ok}),
         "group_labels": result["group_labels"],
+        "source_columns": [c["column"] for c in cond["source_columns"]],  # 목록에서도 계산한 원본 지표를 보이게
     }
     run = AnalysisRun(
         created_by=user.id,
@@ -190,6 +201,7 @@ def analysis_runs(db: Annotated[Session, Depends(get_session)], user: CurrentUse
 def analysis_detail(run_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> dict:
     run = _get(db, user, run_id)
     res = json.loads(run.result)
+    cond, inp = json.loads(run.conditions), json.loads(run.inputs)
     owner = db.get(User, run.created_by) if run.created_by else None
     meta = {k: v for k, v in res.items() if k not in ("groups", "detail", "excluded")}
     return {
@@ -197,8 +209,9 @@ def analysis_detail(run_id: int, db: Annotated[Session, Depends(get_session)], u
         "created_at": utc_to_kst(run.created_at),  # DB 기본값(UTC) → KST
         "created_by": mask_text(owner.display_name) if owner else None,
         "read_only": run.created_by != user.id,
-        "conditions": shown(json.loads(run.conditions)),
-        "inputs": shown(json.loads(run.inputs)),
+        # 원본 열은 저장값을 바꾸지 않고 보여 줄 때 채운다 (목록이 생기기 전 결과는 저장된 입력으로)
+        "conditions": shown({**cond, "source_columns": source_list(cond, inp)}),
+        "inputs": shown(inp),
         "result": shown({**meta, "groups_total": len(res["groups"])}),
     }
 
@@ -250,10 +263,26 @@ _FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
 def _put(ws: Any, row: int, col: int, value: Any, bold: bool = False) -> None:
     """셀에 값을 쓴다. 글자는 수식으로 저장되지 않게 항상 글자 형식으로 둔다 ('=1+1' → 글자 그대로)."""
     cell = ws.cell(row=row, column=col, value=value)
-    if isinstance(value, str) and value.startswith(_FORMULA_START):
+    if isinstance(value, str):  # '#N/A' 같은 오류 코드 모양 글자도 글자 칸으로 (bundle._put과 같은 규칙)
         cell.data_type = "s"
     if bold:
         cell.font = Font(bold=True)
+
+
+def _printable_tree(value: Any) -> tuple[Any, int]:
+    """저장된 결과(JSON)의 글자 가운데 엑셀에 쓸 수 없는 글자(제어 문자·U+FFFE·U+FFFF)를 '�'로 바꾼 사본과 바꾼 글자
+    수 — 열 이름·구분 값처럼 파일에서 온 글자가 있다. 저장된 결과(화면)는 그대로 두고 내려받는 파일에서만 바꾼다
+    (openpyxl은 칸에 넣는 순간 검사하므로 쓰기 전에 바꿔야 한다 — 예전: 내려받기가 500)."""
+    if isinstance(value, str):
+        n = len(ILLEGAL_RE.findall(value))
+        return (printable(value) if n else value), n
+    if isinstance(value, list):
+        items = [_printable_tree(v) for v in value]
+        return [v for v, _ in items], sum(n for _, n in items)
+    if isinstance(value, dict):
+        items = {k: _printable_tree(v) for k, v in value.items()}
+        return {k: v for k, (v, _) in items.items()}, sum(n for _, n in items.values())
+    return value, 0
 
 
 def _rows(ws: Any, start: int, rows: list[list[Any]], header: bool = False) -> int:
@@ -264,7 +293,7 @@ def _rows(ws: Any, start: int, rows: list[list[Any]], header: bool = False) -> i
 
 
 def _value(v: Any) -> Any:
-    return NO_VALUE if v is None else v
+    return NO_VALUE if v is None else excel_number(v)  # 16자리 이상 정수는 글자로 (자릿수 보존)
 
 
 def _numtext(v: float | None) -> str:
@@ -296,6 +325,36 @@ def level_conflict_text(x: dict[str, Any]) -> str:
     )
 
 
+def source_list(cond: dict[str, Any], inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """계산한 원본 열 (analysis.source_columns). 이 목록이 생기기 전에 만든 결과는 저장된 입력(사용한 시트의 열)으로
+    만든다 — 그 결과에는 가린 뒤 같아진 서로 다른 열 이름을 나눌 근거가 없어 가린 이름 그대로 센다."""
+    if "source_columns" in cond:
+        return cond["source_columns"]
+    rows: dict[str, dict[str, Any]] = {}
+    for t in inputs:
+        if t["status"] == "ok" and t.get("column"):
+            row = rows.setdefault(t["column"], {"column": t["column"], "sheets": 0, "files": []})
+            row["sheets"] += 1
+            if t["file_id"] not in row["files"]:
+                row["files"].append(t["file_id"])
+    return list(rows.values())
+
+
+def source_text(cond: dict[str, Any], inputs: list[dict[str, Any]]) -> str:
+    return source_columns_text(source_list(cond, inputs))
+
+
+def source_columns_text(cols: list[dict[str, Any]]) -> str:
+    """원본 열 목록을 Excel 한 칸에 적는 글 (데이터 통계 분석 결과 '조건' 시트·묶기 '통계 요약' 시트가 같이 쓴다)."""
+    text = " · ".join(f"{c['column']} (시트 {c['sheets']}개)" for c in cols) or "-"
+    if len(cols) > 1:
+        text += (
+            " — 이름이 서로 다른 열을 같은 표준 항목으로 확정했습니다."
+            " 같은 지표인지 아래 자료 표의 파일·시트·열로 확인하세요"
+        )
+    return text
+
+
 def _state_text(res: dict[str, Any]) -> str:
     if res["partial"]:
         return "부분 집계 (자료 문제로 뺀 값이 있음)"
@@ -305,7 +364,10 @@ def _state_text(res: dict[str, Any]) -> str:
 
 
 def workbook_bytes(run: AnalysisRun) -> bytes:
-    cond, inp, res = (shown(json.loads(x)) for x in (run.conditions, run.inputs, run.result))
+    (cond, n1), (inp, n2), (res, n3) = (
+        _printable_tree(shown(json.loads(x))) for x in (run.conditions, run.inputs, run.result)
+    )
+    replaced = n1 + n2 + n3
     wb = Workbook()
     ws = wb.active
     ws.title = "결과"
@@ -332,7 +394,8 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
         ["항목", "값"],
         ["분석 번호", run.id],
         ["생성 시각 (KST)", utc_to_kst(run.created_at).strftime("%Y-%m-%d %H:%M:%S") if run.created_at else ""],
-        ["분석 항목", cond["field_label"]],
+        ["분석 항목 (표준 항목)", cond["field_label"]],
+        ["원본 열 (계산한 지표)", source_text(cond, inp)],
         ["열 이름의 구분", cond["variant"] or "구분 없음"],
         ["단위", cond["unit"] or "확인 안 됨"],
         ["결과 상태", _state_text(res)],
@@ -392,6 +455,7 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
             "사유",
             "sha256",
             "그 시트의 확정 매핑",
+            "산식 확인 (합계 항목)",  # 기존 열 위치를 바꾸지 않게 끝에 둔다
         ]
     ]
     for t in inp:
@@ -416,6 +480,7 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
                 "; ".join(t["reasons"]),
                 t["sha256"],
                 mapping,
+                (t.get("formula") or {}).get("text") or "-",  # 이 규칙 전 결과에는 없음
             ]
         )
     _rows(wc, end + 1, files, header=True)
@@ -442,10 +507,15 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
     wd = wb.create_sheet("근거 행")
     detail = [["파일 번호", "파일", "시트", "원본 행", "기간", *res["group_labels"], cond["field_label"]]]
     for r in res["detail"]:
-        detail.append([r["file_id"], r["file_name"], r["sheet"], r["row"], r["period"], *r["keys"], r["value"]])
+        detail.append(
+            [r["file_id"], r["file_name"], r["sheet"], r["row"], r["period"], *r["keys"], excel_number(r["value"])]
+        )
     if res["detail_total"] > len(res["detail"]):
         detail.append([f"처음 {len(res['detail'])}행만 적음 (계산은 전체 {res['detail_total']}행으로 함)"])
     _rows(wd, 1, detail, header=True)
+    if replaced:
+        note = f"{replaced}개를 '\ufffd'로 바꿔 적었습니다 (화면의 결과 값은 그대로)"
+        _rows(wc, wc.max_row + 1, [["엑셀에 쓸 수 없는 글자", note]])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -455,8 +525,10 @@ def workbook_bytes(run: AnalysisRun) -> bytes:
 def analysis_download(run_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> Response:
     run = _get(db, user, run_id)
     name = f"분석결과_{run.id:04d}_{label_of(run.field_key)}.xlsx"
+    with output_slot():  # 결과 Excel을 메모리에서 통째로 만든다 — 결과 만들기 차례를 쥔 채 (app/output_slot.py)
+        body = workbook_bytes(run)
     return Response(
-        workbook_bytes(run),
+        body,
         media_type=XLSX,
         headers={
             "Content-Disposition": (

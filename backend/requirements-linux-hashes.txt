@@ -1,0 +1,29 @@
+# backend/requirements.txt 와 같은 고정 목록에 linux x86_64 / CPython 3.11 휠의 sha256을 붙인 것 (pip --require-hashes 용).
+# 만드는 법: 진단 워크플로 hashes.yml (pip 26.2.2로 pip download → sha256). 다른 플랫폼(Windows 개발)은 requirements.txt를 그대로 쓴다.
+# 생성: 진단 분기 ci/hashes-b9e9d08 run 40282942270 (2026-10-26, pip 26.2.2 · pip 내장 certifi 2026.10.19), requirements.txt는 185f0ba와 같음.
+alembic==1.20.0 --hash=sha256:77eb101048d95f982c0353e9233404889dcd7a6fc244c107836c0e2fc9cf7d9d  # alembic-1.20.0-py3-none-any.whl
+annotated-doc==0.0.5 --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101  # annotated_doc-0.0.5-py3-none-any.whl
+annotated-types==0.8.0 --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0  # annotated_types-0.8.0-py3-none-any.whl
+anyio==4.15.1 --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101  # anyio-4.15.1-py3-none-any.whl
+chardet==7.6.0 --hash=sha256:aa03322e07ac08d520ec50bb50c73143d0892d1adc067d4c5e58f4ef4b2363a8  # chardet-7.6.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+click==8.5.0 --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360  # click-8.5.0-py3-none-any.whl
+et_xmlfile==2.0.0 --hash=sha256:7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa  # et_xmlfile-2.0.0-py3-none-any.whl
+fastapi==0.142.2 --hash=sha256:bd5f4d81f1e93a88bcd77caf4dfe3c2dbffc3805407a0007e9a114c18b3a670b  # fastapi-0.142.2-py3-none-any.whl
+h11==0.16.0 --hash=sha256:63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86  # h11-0.16.0-py3-none-any.whl
+idna==3.20 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c  # idna-3.20-py3-none-any.whl
+mako==1.4.3 --hash=sha256:723296007c870bfd6b3f0c3230dba7198096e5269297ebf5e4eff9e7ffa39d4f  # mako-1.4.3-py3-none-any.whl
+markupsafe==3.0.4 --hash=sha256:6da83a088f8ef93b2d483a8232a4dbf4d69d3d8496b568a03c56becac43e1808  # markupsafe-3.0.4-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+openpyxl==3.1.5 --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2  # openpyxl-3.1.5-py2.py3-none-any.whl
+opentelemetry-api==1.45.0 --hash=sha256:80e068aba7cd56c8b58512d6a36f8d25cb1dfaa0c0a4cc1c938ccf9f362d9cb3  # opentelemetry_api-1.45.0-py3-none-any.whl
+psycopg==3.3.6 --hash=sha256:a1db9f7148b06a28606767efaca51fa6f9398c5c0a3810519be69d7000bdb631  # psycopg-3.3.6-py3-none-any.whl
+psycopg-binary==3.3.6 --hash=sha256:a2e44a342d2aee40508e28a563d8961c39d9bbd8cae36d8578f0a3c6658aab0f  # psycopg_binary-3.3.6-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+pydantic==2.13.5 --hash=sha256:346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73  # pydantic-2.13.5-py3-none-any.whl
+pydantic_core==2.46.5 --hash=sha256:49776eab08766a08dfff7012f8b422dcd7e25e43b316eedf0477c24fcfa84b7c  # pydantic_core-2.46.5-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+python-multipart==0.0.32 --hash=sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23  # python_multipart-0.0.32-py3-none-any.whl
+rapidfuzz==3.14.6 --hash=sha256:3d5d90bae3c6fb7ea34da968c9f23070e8440edb827a28b242580e0108110b14  # rapidfuzz-3.14.6-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+sqlalchemy==2.1.3 --hash=sha256:3f51b2aa08f0476970b05a8ffa1fb0b22387111e81fc89ff1787d98a83435e34  # sqlalchemy-2.1.3-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+starlette==1.7.0 --hash=sha256:67f8e99895493dd2911a03f11314af6ceebeae4e704bb9f43dfc6a9db151c93e  # starlette-1.7.0-py3-none-any.whl
+typing-inspection==0.4.4 --hash=sha256:65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147  # typing_inspection-0.4.4-py3-none-any.whl
+typing_extensions==4.16.0 --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8  # typing_extensions-4.16.0-py3-none-any.whl
+uvicorn==0.54.0 --hash=sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf  # uvicorn-0.54.0-py3-none-any.whl
+xlrd==2.0.2 --hash=sha256:ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9  # xlrd-2.0.2-py2.py3-none-any.whl

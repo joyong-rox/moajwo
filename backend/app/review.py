@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.auth import MANAGERS
@@ -22,23 +23,40 @@ from app.check_basis import (
     INTERNAL_PARAMS,
     LEGACY_REASON,
     Decisions,
+    approved_links,
     basis_changes,
     build_basis,
     column_facts,
     confirmed_entry,
     effect_free,
+    entity_basis,
+    entity_changes,
 )
 from app.decisions import DecisionInput, learn_column, load_decisions, load_learned, load_org_codes, save_decisions
 from app.files import load_parsed
 from app.glossary import normalize_name
-from app.glossary_api import get_glossary
+from app.glossary_api import glossary_state
 from app.mapping import ColumnMapping, MappingEngine, get_engine, normalize, split_column_name
 from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile, User
+from app.name_limits import (
+    GLOSSARY_NAME_MAX,
+    NUL,
+    VALUE_HAS_NUL,
+    NameNotStorable,
+    Problem,
+    cell_place,
+    check_files,
+    fit_names,
+    name_problem,
+    sheet_column_problem,
+    sheet_place,
+)
 from app.parsing import FileResult, SheetResult
-from app.pii import PII_LABEL, has_pii
+from app.pii import PII_LABEL, has_pii, mask_cell
 from app.promotion import load_standard, record_approval
 from app.quantity import confirmed_quantity_indexes, quantity_sheet
 from app.validation import (
+    ENTITY_FIELDS,
     EntityResolver,
     FileInput,
     MappedColumn,
@@ -62,6 +80,11 @@ class ReviewError(Exception):
 
 class ReviewPermissionError(ReviewError):
     """검토는 볼 수 있지만 원본 파일(매핑 확정·개인정보 확인)을 바꿀 권한이 없음 → 403."""
+
+
+class ReviewNameError(ReviewError):
+    """저장할 수 없는 이름·값(한도 초과·NUL)이 있어 검토를 만들지 않음 → 422 (아무것도 기록하지 않음 —
+    app/name_limits.py)."""
 
 
 def can_change_file(db: Session, file_id: int | None, user_id: int | None) -> bool:
@@ -197,18 +220,16 @@ class AutomationRules:
         )
 
 
-def _apply_column_rules(db: Session, engine: MappingEngine, file_id: int, rules: AutomationRules) -> None:
-    """자동화의 열 규칙을 이 파일의 매핑 확정으로 기록한다 (이 파일에서 사용자가 이미 확정한 열은 그대로 둔다)."""
-    _, parsed = load_parsed(db, file_id)
+def _column_rule_inputs(db: Session, file_id: int, rules: AutomationRules, parsed: FileResult) -> list[DecisionInput]:
+    """자동화의 열 규칙으로 이 파일에 기록할 매핑 확정 (이 파일에서 사용자가 이미 확정한 열은 그대로 둔다).
+    기록은 검토를 만드는 쪽이 모든 검사를 마친 뒤 검토와 함께 한다 — 여기서는 쓰지 않는다."""
     existing = load_decisions(db, file_id)
-    inputs = [
+    return [
         DecisionInput(sheet.name, column, rules.columns[column_rule_key(column)])
         for sheet in parsed.sheets
         for column in sheet.columns
         if column_rule_key(column) in rules.columns and column not in existing.get(sheet.name, {})
     ]
-    if inputs:
-        save_decisions(db, engine, file_id, inputs, learn=False)
 
 
 # ---------------------------------------------------------------- 세션 만들기
@@ -229,9 +250,14 @@ def _load(
     learned: dict[str, str],
     use_llm: bool,
     standard: dict[str, str] | None = None,
+    loaded: tuple[SourceFile, FileResult] | None = None,
+    ruled: list[DecisionInput] | None = None,
 ) -> _Loaded:
-    record, parsed = load_parsed(db, file_id)
+    """loaded: 이미 읽은 (기록, 파일) — 없으면 읽는다. ruled: 아직 기록하지 않은 자동화 규칙 확정 (확정으로 본다)."""
+    record, parsed = loaded if loaded is not None else load_parsed(db, file_id)
     decisions = load_decisions(db, file_id)
+    for d in ruled or []:
+        decisions.setdefault(d.sheet, {})[d.column] = d.field_key
     org_codes = load_org_codes(db)
     mappings = {
         sheet.name: engine.map_columns(
@@ -287,23 +313,37 @@ def create_session(
     """
     params = {k: v for k, v in params.items() if k not in INTERNAL_PARAMS}  # 다시 검사면 새로 계산한다
     engine = get_engine()
+    target_ids = list(dict.fromkeys(params["file_ids"]))
+    baseline_ids = list(dict.fromkeys(params.get("baseline_file_ids", [])))
+    # 파일은 한 번만 읽는다. 기록은 모든 검사를 마친 뒤 한 트랜잭션으로 한다 (자동화 규칙 확정 → 검증 기록 → 검토 →
+    # 항목) — 저장할 수 없는 이름·값이 있으면 아무것도 쓰지 않고 거절한다 (app/name_limits.py)
+    files_read = {fid: load_parsed(db, fid) for fid in dict.fromkeys([*target_ids, *baseline_ids])}
+    # 대상 파일의 시트·열 이름은 검토 항목·확정·변경 기록에 그대로 저장된다 (자르지 않음 — 확정 키로 다시 쓰임).
+    # 전월 비교 자료는 값 비교에만 쓰고 이름을 저장하지 않으므로 보지 않는다 (검사 기준은 Text 열)
+    try:
+        check_files([(fid, files_read[fid][1].sheets) for fid in target_ids], "검토를 만들지 않았습니다")
+    except NameNotStorable as exc:
+        raise ReviewNameError(str(exc)) from exc
     rules = AutomationRules.of(automation) if automation is not None else None
+    ruled: dict[int, list[DecisionInput]] = {}
     if rules is not None:
-        for fid in dict.fromkeys(params["file_ids"]):
+        for fid in target_ids:
             if can_change_file(db, fid, user_id):  # 남의 파일에는 규칙을 기록하지 않는다 (검토에서 확인 필요로 보임)
-                _apply_column_rules(db, engine, fid, rules)
+                ruled[fid] = _column_rule_inputs(db, fid, rules, files_read[fid][1])
     learned, standard = load_learned(db, user_id), load_standard(db)
-    targets = [_load(db, fid, engine, learned, use_llm, standard) for fid in dict.fromkeys(params["file_ids"])]
-    baseline = [
-        _load(db, fid, engine, learned, False, standard) for fid in dict.fromkeys(params.get("baseline_file_ids", []))
+    targets = [
+        _load(db, fid, engine, learned, use_llm, standard, files_read[fid], ruled.get(fid)) for fid in target_ids
     ]
+    baseline = [_load(db, fid, engine, learned, False, standard, files_read[fid]) for fid in baseline_ids]
+    del files_read
     vparams = ValidationParams(
         expected_period=params.get("expected_period"),
         required_entities=params.get("required_entities", []),
         entity_field=params.get("entity_field"),
         change_threshold=params.get("change_threshold", 0.5),
     )
-    glossary = get_glossary(db)
+    digest, load_glossary = glossary_state(db)
+    glossary = load_glossary()
     files = [_file_input(t) for t in targets]
     result = validate(files, vparams, [_file_input(b) for b in baseline], glossary=glossary)
     # 이름 해석 기준 기간 (기준 기간이 없으면 자료에서 추정). 통합도 같은 기준으로 이름을 바꾸도록 남긴다
@@ -311,11 +351,27 @@ def create_session(
     params = {k: v for k, v in params.items() if k != "name_period"}  # 다시 검사면 이전 추정값은 버린다
     if inferred:
         params["name_period"] = name_period
-    run = save_run(db, json.dumps(params, ensure_ascii=False), result, user_id)
+    labels = {f.key: f.label for f in engine.fields}
+    items = _validation_items(result) + _pii_items(targets)
+    for loaded in targets:
+        items += _mapping_items(loaded, rules)
+        items += _correction_items(loaded)
+    items += _entity_items(result, files, EntityResolver(glossary, name_period), labels, rules)
+    _check_item_values(items, targets, rules.name if rules is not None else None)
+    # 여기부터 기록 — 한 트랜잭션 (중간에 실패하면 호출한 쪽이 모두 되돌린다)
+    for fid, inputs in ruled.items():
+        # 규칙은 확정이 없던 열에만 — 검사하는 동안 누가 확정한 열은 덮지 않는다 (검사 기준과 달라 '다시 검사'로 드러남)
+        now = load_decisions(db, fid)
+        fresh = [d for d in inputs if d.column not in now.get(d.sheet, {})]
+        if fresh:
+            save_decisions(db, engine, fid, fresh, learn=False, commit=False)
+    run = save_run(db, json.dumps(params, ensure_ascii=False), result, user_id, commit=False)
     # 검사 기준: 이 검사에 적용한 매핑 (검토 대상 + 전월 비교 자료) — 완료·통합 전에 지금 매핑과 비교한다
     basis = build_basis(
         [(t.record.id, t.mappings) for t in [*targets, *baseline]], [b.record.id for b in baseline], learned, standard
     )
+    if result.resolver is not None:  # 이 검사가 해석한 기관·지역 이름 — 완료·통합 전에 지금 용어사전과 비교한다
+        basis["entities"] = entity_basis(result.resolver, digest)
 
     session = ReviewSession(
         status="in_review",
@@ -329,17 +385,189 @@ def create_session(
     )
     db.add(session)
     db.flush()
-    items = _validation_items(result) + _pii_items(targets)
-    for loaded in targets:
-        items += _mapping_items(loaded, rules)
-        items += _correction_items(loaded)
-    labels = {f.key: f.label for f in engine.fields}
-    items += _entity_items(result, files, EntityResolver(glossary, name_period), labels, rules)
     for item in items:
         item.session_id = session.id
         db.add(item)
     db.commit()
     return session
+
+
+def _check_item_values(items: list[ReviewItem], targets: list[_Loaded], automation_name: str | None = None) -> None:
+    """검토 항목에 저장할 글자(칸 값·이전/이후 값·사유)에 NUL이 있으면 아무것도 쓰기 전에 거절한다 — PostgreSQL은 NUL이
+    든 글자를 받지 않고(500) SQLite는 저장한다. 값은 지우거나 바꾸지 않는다 (같은 값을 다시 찾는 키로도 쓰임).
+    이름(파일·시트·열)은 check_files가 먼저 본다. 문구에는 위치만 (값 원문 없음). NUL이 어디서 왔는지에 따라 알린다:
+    - 칸 값(이전·이후 값)이면 그 칸. 여러 파일을 묶은 기관·지역 이름 확인 항목은 파일 번호가 없어 그 값이 든 칸을 찾는다
+      (시도와 합친 시군구 이름이면 NUL이 든 쪽). 찾지 못한 값이 남으면 '검토 항목'도 알린다
+    - 사유에 옮겨 적힌 칸 값(검증 경고의 못 읽은 값·합계 행 이름·기관 이름, 제목 행 등)이면 그 칸 (못 찾으면 행까지)
+    - 검토 조건(필수 기관·기준 기간)이나 자동화 이름(규칙 항목의 사유 "자동화 '<이름>'")이면 그 조건·설정. 자동화로
+      실행할 때는 저장된 설정이라 고칠 수 없으므로 자동화를 다시 저장하라고 알린다
+    칸 찾기는 항목 수 × 칸 수가 되지 않게 한다 (_cells_holding·_cells_quoted)."""
+    sheets = {(t.record.id, s.name): s for t in targets for s in t.parsed.sheets}
+    marker = f"자동화 '{automation_name}'" if automation_name and NUL in automation_name else None
+
+    def in_before(item: ReviewItem) -> bool:
+        return bool(item.before and NUL in item.before)
+
+    cells: list[str] = []
+    wanted: set[str] = set()  # 파일 번호 없는 항목의 NUL 값
+    quoted: dict[tuple[int, str], list[tuple[int | None, str]]] = {}  # 시트 → (항목의 행, 사유) — 사유에만 NUL
+    condition = period = setting = False
+    for item in items:
+        reason = item.reason or ""
+        if marker and marker in reason:  # 규칙 항목이 사유 앞에 적는 자동화 이름 — 칸 글자와 섞이지 않게 그 꼴만 뺀다
+            setting = True
+            reason = reason.replace(marker, "")  # 남은 글자에 NUL이 또 있으면 그것은 따로 알린다
+        in_value = any(v and NUL in v for v in (item.before, item.after))
+        if not in_value and NUL not in reason:
+            continue
+        sheet = sheets.get((item.file_id, item.sheet or "")) if item.file_id is not None else None
+        if item.kind == "required_entity_missing":
+            condition = True
+        elif item.kind == "period_mismatch" and item.after and NUL in item.after and not in_before(item):
+            period = True  # 이후 값의 기준 기간은 검토 조건이다 — 파일의 연·월 칸이 아님 (제목 행의 글자는 사유로 찾음)
+        elif item.file_id is None:
+            if item.before and NUL in item.before:
+                wanted.add(item.before)
+            else:
+                cells.append("검토 항목")
+        elif in_value or sheet is None:
+            parts = [f"파일 #{item.file_id}"]
+            if sheet is not None:
+                column = sheet.columns.index(item.column) if item.column in sheet.columns else None
+                parts += [sheet_place(sheet), cell_place(sheet, item.row, column)]
+            cells.append(" · ".join(p for p in parts if p))
+        else:
+            quoted.setdefault((item.file_id, item.sheet or ""), []).append((item.row, reason))
+    if wanted:
+        found, missing = _cells_holding(targets, wanted)
+        cells += found + (["검토 항목"] if missing else [])
+    for (fid, name), held in quoted.items():
+        cells += _cells_quoted(fid, sheets[(fid, name)], held)
+    if cells or condition or period or setting:
+        places, fixes = [], []
+        resave = (  # 자동화의 조건·이름은 고치는 API가 없다 — 지우고 처음 저장한 실행 기록에서 다시 저장해야 한다
+            "자동화의 조건·이름은 바꿀 수 없으니 그 자동화를 지운 뒤, 처음 저장한 실행 기록에서 NUL 없는 값으로"
+            " 다시 저장해 실행하세요"
+            if automation_name is not None
+            else None
+        )
+        if condition:
+            places.append("검토 조건 '필수 기관'")
+            fixes.append(resave or "필수 기관 조건에서 NUL 문자를 지운 뒤 검토를 다시 만드세요")
+        if period:
+            places.append("검토 조건 '기준 기간'")
+            fixes.append(resave or "기준 기간에서 NUL 문자를 지운 뒤 검토를 다시 만드세요")
+        if setting:
+            places.append("자동화 이름 (원본 칸이 아니라 규칙 항목의 사유에 들어가는 설정)")
+            fixes.append(resave or "자동화 이름에서 NUL 문자를 지운 뒤 다시 실행하세요")
+        if cells:
+            places += cells
+            fixes.append("원본 파일에서 그 칸의 NUL 문자를 지운 뒤 다시 올리세요")
+        unique = list(dict.fromkeys(places))
+        shown = " / ".join(unique[:3]) + (f" 외 {len(unique) - 3}곳" if len(unique) > 3 else "")
+        raise ReviewNameError(
+            f"검토를 만들지 않았습니다 — 저장할 값에 NUL(0x00) 문자가 있습니다: {shown}. "
+            f"{' · '.join(dict.fromkeys(fixes))}. [{VALUE_HAS_NUL}]"
+        )
+
+
+def _cells_holding(targets: list[_Loaded], values: set[str]) -> tuple[list[str], bool]:
+    """그 값들이 든 칸의 위치와, 칸을 찾지 못한 값이 남았는지 (거절 문구용 — 값은 쓰지 않음).
+    확인 항목의 값은 row_entity_names가 만든 그대로다: 기관·지역 칸 글자, 시군구는 같은 행의 시도와 합친
+    '<시도> <시군구>'.
+    그래서 행마다 그 꼴을 다시 만들어 값 집합에 있는지만 본다 (행마다 집합 조회 — 값을 쪼개거나 값마다 칸을 훑지 않음).
+    검사에 쓴(확정·자동) 기관·지역 열을 먼저 보고, 거기서 못 찾은 값만 모든 칸에서 글자 그대로 한 번 더 찾는다."""
+    places: list[str] = []
+    left = set(values)
+    for t in targets:
+        for s in t.parsed.sheets:
+            mapped = t.mappings.get(s.name, [])
+            entity = [(j, m.field_key) for j, m in enumerate(mapped)
+                      if m.field_key in ENTITY_FIELDS and m.status in ("confirmed", "auto")]  # fmt: skip
+            sido_cols = [j for j, key in entity if key == "sido"]
+            if not entity:
+                continue
+            where = f"파일 #{t.record.id} · {sheet_place(s)}"
+            for entry in s.body:
+                cells = entry["cells"]
+                sido_j = next((j for j in sido_cols if j < len(cells) and isinstance(cells[j], str)), None)
+                sido = cells[sido_j] if sido_j is not None else None
+                for j, key in entity:
+                    cell = cells[j] if j < len(cells) else None
+                    if not isinstance(cell, str):
+                        continue
+                    if cell in values:
+                        left.discard(cell)
+                        if NUL in cell:
+                            places.append(f"{where} · {cell_place(s, entry['row'], j)}")
+                    elif key == "sigungu" and sido and f"{sido} {cell}" in values:
+                        left.discard(f"{sido} {cell}")
+                        for k, text in ((sido_j, sido), (j, cell)):  # NUL이 든 쪽(시도 칸·시군구 칸)을 알린다
+                            if NUL in text:
+                                places.append(f"{where} · {cell_place(s, entry['row'], k)}")
+    if left:
+        rest = set(left)
+        for t in targets:
+            for s in t.parsed.sheets:
+                where = f"파일 #{t.record.id} · {sheet_place(s)}"
+                for entry in s.body:
+                    for j, cell in enumerate(entry["cells"]):
+                        if isinstance(cell, str) and cell in rest:
+                            left.discard(cell)
+                            places.append(f"{where} · {cell_place(s, entry['row'], j)}")
+    return places, bool(left)
+
+
+# 검증 문구가 다른 행의 칸 값을 옮겨 적는 꼴 "N행 '값'" — '하위 3행 합계' 같은 행 수는 행 번호가 아니다
+_ROW_REF = re.compile(r"(\d+)행 '")
+_QUOTED = re.compile(r"'([^']*)'")
+_TITLE_HEAD = 30  # 기간 근거는 제목의 앞 30자만 옮겨 적는다 (validation.collect_period)
+
+
+def _cells_quoted(fid: int, sheet: SheetResult, held: list[tuple[int | None, str]]) -> list[str]:
+    """사유에 옮겨 적힌 칸 가운데 NUL이 든 칸의 위치. 항목의 행은 사유에서 글자 그대로 찾고(기관 이름은 따옴표 없이
+    적힘), 사유에 "N행 '값'"으로 적힌 다른 행은 따옴표 안 글자 집합으로 찾는다 — 사유가 길어도 행·칸마다 사유를 다시
+    훑지 않는다. 개인정보 형식은 사유에 가려 적히므로 가린 글자로도 맞춘다. 머리글 위 제목 행은 앞 30자만 옮겨
+    적히므로 그 머리로 맞춘다. 찾지 못한 항목은 그 항목의 행까지만."""
+    base = f"파일 #{fid} · {sheet_place(sheet)}"
+    rows = {entry["row"]: entry for entry in sheet.body}
+    places: list[str] = []
+    for row, reason in held:
+        hit = False
+        quoted = set(_QUOTED.findall(reason))
+        own = rows.get(row) if row is not None else None
+        for j, cell in enumerate(own["cells"] if own else []):
+            if _nul_text(cell) and (cell in reason or _masked(cell) in reason):
+                places.append(f"{base} · {cell_place(sheet, row, j)}")
+                hit = True
+        for r in sorted({int(n) for n in _ROW_REF.findall(reason)} - {row}):
+            entry = rows.get(r)
+            for j, cell in enumerate(entry["cells"] if entry else []):
+                if _nul_text(cell) and (cell in quoted or _masked(cell) in quoted):
+                    places.append(f"{base} · {cell_place(sheet, r, j)}")
+                    hit = True
+        if not hit and any(_title_quoted(t, reason, quoted) for t in sheet.title_texts):
+            places.append(f"{base} · 머리글 위 제목·단위 행")
+            hit = True
+        if not hit:
+            places.append(f"{base}{f' · {row}행' if row else ''} (검토 항목의 사유에 옮겨 적힌 칸)")
+    return places
+
+
+def _title_quoted(title: str, reason: str, quoted: set[str]) -> bool:
+    """머리글 위 제목 행의 글자가 사유에 옮겨 적혔는지 — 기간 근거는 앞 30자만 따옴표 안에 적는다."""
+    head = title[:_TITLE_HEAD]
+    return (NUL in title and title in reason) or (NUL in head and head in quoted)
+
+
+def _nul_text(cell: object) -> bool:
+    """NUL이 든 칸 글자인지 (NUL·공백만 있는 칸은 뺌 — 저장하지 않아 검토를 막지 않는 칸)."""
+    return isinstance(cell, str) and NUL in cell and bool(cell.strip(NUL + " "))
+
+
+def _masked(cell: str) -> str:
+    masked = mask_cell(cell)
+    return masked if isinstance(masked, str) else cell
 
 
 def _item(category: str, kind: str, reason: str, *, source: str = "rule", **fields: Any) -> ReviewItem:
@@ -538,7 +766,7 @@ def _entity_items(
         first = e.candidates[0] if e.candidates else None
         ruled = _entity_rule_item(e.value, e.candidates, rules)
         if ruled is not None:
-            ruled.file_name = ", ".join(e.files)
+            ruled.file_name = fit_names(e.files)  # 여러 파일 이름은 표시 전용 — 저장 한도 안으로 '외 n개' 요약
             ruled.column = labels.get(e.field, e.field)
             ruled.payload = json.dumps(
                 {"status": e.status, "candidates": e.candidates, "field": e.field, "count": e.count},
@@ -552,7 +780,7 @@ def _entity_items(
                 "pending",
                 "entity",
                 entity_reason(e.status, e.value, e.note, e.candidates),
-                file_name=", ".join(e.files),
+                file_name=fit_names(e.files),
                 column=labels.get(e.field, e.field),
                 before=e.value,
                 after=f"{first['name']} ({first['code']})" if first else "(후보 없음)",
@@ -640,8 +868,9 @@ class Summary:
 def recheck_reasons(db: Session, session: ReviewSession) -> list[str]:
     """이 검토의 검사 결과로 완료·통합할 수 없는 이유 — 검사 기준(검사에 적용한 매핑)과 지금이 다른 점.
 
-    파일은 읽지 않고 모델도 부르지 않는다 (확정값·학습 별칭·전사 표준 사전만 조회 — check_basis.basis_changes).
-    개인정보 때문에 제외한 파일은 통합하지 않으므로 보지 않고, 전월 비교 자료는 검사에 썼으므로 본다.
+    파일은 읽지 않고 모델도 부르지 않는다 (확정값·학습 별칭·전사 표준 사전·용어사전만 조회 — check_basis의
+    basis_changes·entity_changes). 개인정보 때문에 제외한 파일은 통합하지 않으므로 보지 않고, 전월 비교 자료는 검사에
+    썼으므로 본다. 용어사전은 검사가 해석한 이름별로 기록해 두어 제외한 파일의 이름도 함께 본다.
     기준을 기록하기 전 버전의 검토는 같은지 확인할 수 없으므로 다시 검사가 필요하다.
     """
     if session.status == "superseded":
@@ -652,7 +881,16 @@ def recheck_reasons(db: Session, session: ReviewSession) -> list[str]:
     excluded = set(json.loads(session.excluded_file_ids))
     fids = [f for f in json.loads(session.file_ids) if f not in excluded] + list(basis.get("baseline", []))
     decisions: dict[int, Decisions] = {f: load_decisions(db, f) for f in fids}
-    return basis_changes(db, basis, decisions, load_learned(db, session.created_by), load_standard(db))
+    changed = basis_changes(db, basis, decisions, load_learned(db, session.created_by), load_standard(db))
+    if "glossary_state" not in db.info:  # 목록·건수는 검토마다 부르므로 한 요청에서 용어사전을 한 번만 읽는다
+        db.info["glossary_state"] = glossary_state(db)
+    digest, load_glossary = db.info["glossary_state"]
+
+    def approved() -> list[tuple[str, str, str | None]]:  # 용어사전 지문이 검사 때와 다를 때만 읽는다
+        entity = ReviewItem.session_id == session.id, ReviewItem.kind == "entity"
+        return approved_links(db.scalars(select(ReviewItem).where(*entity)))
+
+    return changed + entity_changes(basis.get("entities"), digest, load_glossary, approved)
 
 
 def summarize(session: ReviewSession, items: list[ReviewItem], recheck: list[str] | None = None) -> Summary:
@@ -679,7 +917,7 @@ def summarize(session: ReviewSession, items: list[ReviewItem], recheck: list[str
         target = "통합" if session.status == "ready" else "완료·통합"
         text = (
             f"다시 검사 필요 — 이 검사 결과로 {target}할 수 없습니다 ({shown}). "
-            "다시 검사하면 지금 열 매핑으로 검사합니다."
+            "다시 검사하면 지금 열 매핑·용어사전으로 검사합니다."
         )
     elif session.status == "ready":
         text = f"검토 완료 — 통합 준비가 끝났습니다 (자동 보정 {auto}건 적용 예정)."
@@ -744,7 +982,10 @@ def _decide_mapping(
     else:
         key = None  # 거부 = 이 열은 매핑하지 않음('해당 없음')으로 확정
     assert item.file_id is not None and item.sheet is not None and item.column is not None
-    save_decisions(db, engine, item.file_id, [DecisionInput(item.sheet, item.column, key)], learn=False)
+    try:  # 이름 규칙 전에 SQLite에서 만든 검토면 저장할 수 없는 이름 항목이 있을 수 있다 — 저장하지 않고 알린다
+        save_decisions(db, engine, item.file_id, [DecisionInput(item.sheet, item.column, key)], learn=False)
+    except NameNotStorable as exc:
+        raise ReviewError(str(exc)) from exc
     if key is not None:
         record_approval(db, engine, session.created_by, item.column, key)  # 전사 표준 사전 승격 집계
     item.choice = key
@@ -784,7 +1025,23 @@ def complete(db: Session, session: ReviewSession, learn_names: bool = True) -> d
     summary = summarize(session, items, recheck_reasons(db, session))
     if not summary.can_complete:
         raise ReviewError(summary.summary)
-    learned = {"columns": 0, "names": 0, "names_skipped": 0}
+    # 같은 검토를 두 번 완료하지 않는다: 아직 '검토 중'일 때만 바꾸는 조건부 갱신으로 먼저 차지한다.
+    # 화면에서 빠르게 두 번 눌러 거의 동시에 온 두 번째 요청(앞 요청이 끝나기 전에 '검토 중'을 읽음)은 0행이 되어
+    # 거절된다 — 아래 학습도 한 번만 한다.
+    completed_at = datetime.now(UTC)
+    claimed = db.execute(
+        update(ReviewSession)
+        .where(ReviewSession.id == session.id, ReviewSession.status == "in_review")
+        .values(status="ready", completed_at=completed_at)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if claimed != 1:
+        db.rollback()
+        raise ReviewError("이미 검토가 끝난 세션입니다.")
+    session.status, session.completed_at = "ready", completed_at  # 위 갱신과 같은 값을 이 객체에도
+    # 기관명을 학습하지 않은 수는 이유별로 — names_skipped: 사전 관리 권한 없음 · names_pii: 개인정보 형식 ·
+    # names_not_storable: 저장 한도를 넘거나 NUL이 든 이름 (화면이 이유별 문구를 보여 준다)
+    learned = {"columns": 0, "names": 0, "names_skipped": 0, "names_pii": 0, "names_not_storable": 0}
     if session.remember_format:
         engine = get_engine()
         for item in items:
@@ -797,12 +1054,18 @@ def complete(db: Session, session: ReviewSession, learn_names: bool = True) -> d
                     learned["columns"] += 1
             elif item.kind == "entity" and item.category == "pending" and item.choice and item.before:
                 if has_pii(item.before):  # 개인정보 형식이 든 이름은 모두가 쓰는 용어사전 별칭으로 학습하지 않는다
-                    learned["names_skipped"] += 1
+                    learned["names_pii"] += 1
                     continue
                 if not learn_names:
                     learned["names_skipped"] += 1
                     continue
                 normalized = normalize_name(item.before)
+                # 저장할 수 없는 이름(셀 값 — 한도 초과·정규화로 길어짐·NUL)은 별칭으로 학습하지 않는다
+                if name_problem("이름", item.before, GLOSSARY_NAME_MAX) or name_problem(
+                    "정규화한 이름", normalized, GLOSSARY_NAME_MAX
+                ):
+                    learned["names_not_storable"] += 1
+                    continue
                 exists = db.scalar(
                     select(GlossaryAlias.id).where(
                         GlossaryAlias.normalized == normalized, GlossaryAlias.target_code == item.choice
@@ -816,8 +1079,6 @@ def complete(db: Session, session: ReviewSession, learn_names: bool = True) -> d
                     )
                     db.flush()
                     learned["names"] += 1
-    session.status = "ready"
-    session.completed_at = datetime.now(UTC)
     db.commit()
     return learned
 
@@ -858,8 +1119,7 @@ def recheck(db: Session, old: ReviewSession, replace: dict[int, int] | None = No
         if db.get(SourceFile, new_id) is None:
             raise ReviewError(f"파일을 찾을 수 없습니다: {new_id}")
         _ensure_can_change(db, new_id, old.created_by)  # 이전 확정을 복사해 넣는 것도 그 파일을 바꾸는 일이다
-    for new_id in replace.values():
-        _copy_mapping_decisions(db, [k for k, v in replace.items() if v == new_id][0], new_id)
+    _copy_mapping_decisions(db, replace)
 
     params["file_ids"] = new_ids
     params["replaced_files"] = {str(k): v for k, v in replace.items()}
@@ -888,19 +1148,38 @@ def recheck(db: Session, old: ReviewSession, replace: dict[int, int] | None = No
     return session
 
 
-def _copy_mapping_decisions(db: Session, old_file: int, new_file: int) -> None:
-    """원본을 고친 파일은 형식이 같으므로 이전 파일의 열 매핑 확정을 이어받는다 (새 파일에 없는 것만)."""
-    existing = {
-        (d.sheet_name, d.column_name)
-        for d in db.scalars(select(MappingDecision).where(MappingDecision.source_file_id == new_file))
-    }
-    for d in db.scalars(select(MappingDecision).where(MappingDecision.source_file_id == old_file)):
-        if (d.sheet_name, d.column_name) not in existing:
-            db.add(
+def _copy_mapping_decisions(db: Session, replace: dict[int, int]) -> None:
+    """원본을 고친 파일은 형식이 같으므로 이전 파일의 열 매핑 확정을 이어받는다 (새 파일에 없는 것만).
+
+    옮길 확정의 이름을 저장할 수 없으면(이름 규칙 전에 SQLite에 쌓인 한도 초과·NUL 이름) 하나도 옮기지 않고 거절한다
+    — 이전 검토는 대체되지 않고 확정도 그대로다. 그 이름을 자르거나 건너뛰어 다른 확정으로 바꾸지 않는다."""
+    copies: list[MappingDecision] = []
+    refused: list[tuple[int, Problem]] = []
+    for old_file, new_file in replace.items():
+        existing = {
+            (d.sheet_name, d.column_name)
+            for d in db.scalars(select(MappingDecision).where(MappingDecision.source_file_id == new_file))
+        }
+        for d in db.scalars(select(MappingDecision).where(MappingDecision.source_file_id == old_file)):
+            if (d.sheet_name, d.column_name) in existing:
+                continue
+            if (problem := sheet_column_problem(d.sheet_name, d.column_name)) is not None:
+                refused.append((old_file, problem))
+                continue
+            copies.append(
                 MappingDecision(
                     source_file_id=new_file, sheet_name=d.sheet_name, column_name=d.column_name, field_key=d.field_key
                 )
             )
+    if refused:
+        files = ", ".join(f"#{f}" for f in dict.fromkeys(f for f, _ in refused))
+        more = f" 외 {len(refused) - 1}개" if len(refused) > 1 else ""
+        raise ReviewNameError(
+            f"다시 검사하지 않았습니다 — 바꾸기 전 파일 {files}의 열 매핑 확정 중 이름을 저장할 수 없는 것이 있어 새 "
+            f"파일로 이어받을 수 없습니다 ({refused[0][1].text}{more}). 바꾼 파일로 검토를 새로 만드세요. "
+            f"[{', '.join(dict.fromkeys(p.code for _, p in refused))}]"
+        )
+    db.add_all(copies)
     db.flush()
 
 

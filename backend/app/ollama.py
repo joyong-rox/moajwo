@@ -21,7 +21,11 @@ class OllamaError(Exception):
 
 def _check_local(base_url: str) -> None:
     # 폐쇄망 원칙: 설정 실수로 외부 엔드포인트를 부르지 않도록 로컬/사설 호스트만 허용한다.
-    host = urlparse(base_url).hostname or ""
+    # http·https만 — urlopen은 file: 주소면 로컬 파일을 연다 (호스트가 localhost여도)
+    parsed = urlparse(base_url)
+    if parsed.scheme not in ("http", "https"):
+        raise OllamaError(f"Ollama 주소는 http·https만 쓸 수 있습니다: {parsed.scheme or '(없음)'}")
+    host = parsed.hostname or ""
     if host in _LOCAL_HOSTS or host.endswith(".local"):
         return
     try:

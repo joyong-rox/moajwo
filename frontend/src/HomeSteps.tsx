@@ -46,7 +46,7 @@ function HomeSteps({ refreshKey, selected, mode = 'table' }: { refreshKey: numbe
   const items = result?.stamp === stamp ? result.items : []
   const have = items.length
   useEffect(() => {
-    if (!key || have >= target || mode === 'sheets') return // 파일별 시트로 묶기는 열 매핑을 요구하지 않는다
+    if (!key || have >= target || mode !== 'table') return // 파일별 시트로 묶기·공통 key 연결은 열 매핑을 요구하지 않는다
     const ids = key.split(',').map(Number).slice(have, Math.min(target, have + MAPPING_BATCH))
     const controller = new AbortController()
     const timer = window.setTimeout(
@@ -108,6 +108,20 @@ function HomeSteps({ refreshKey, selected, mode = 'table' }: { refreshKey: numbe
     { key: 'review', state: 'todo', detail: "아래 '사전 검토 열기'" },
     { key: 'result', state: 'todo', detail: '실행 기록·검토 목록', href: '/runs' },
   ]
+  if (mode === 'keyjoin') {
+    // 공통 key로 연결하기: 파일 선택 → 취합 방식 → key 열·가져올 열·범위 → 연결 결과·문제 미리보기 → 엑셀 만들기 (설정부터는 다음 화면)
+    return (
+      <WorkflowSteps
+        steps={[
+          steps[0],
+          { key: 'mode', state: 'done', detail: '공통 key 연결' },
+          { key: 'settings', state: 'todo', detail: '다음 화면 — key 열·가져올 열·범위' },
+          { key: 'compose', state: 'todo', detail: '연결 결과·문제 미리보기' },
+          { key: 'make', state: 'todo', detail: '실행 기록', href: '/runs' },
+        ]}
+      />
+    )
+  }
   if (mode === 'sheets') {
     // 파일별 시트로 묶기: 파일 선택 → 취합 방식 → 필요한 설정 → 결과 구성 확인 → 엑셀 만들기 (설정부터는 다음 화면)
     return (

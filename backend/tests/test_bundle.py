@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import re
-import sqlite3
 import zipfile
 from typing import Any
 
@@ -15,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import DATA_DIR
+from tests.conftest import db_connect
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_auth import _client, app_real_login  # noqa: F401
 
@@ -91,7 +91,7 @@ def _make(c: TestClient, body: dict[str, Any]) -> tuple[dict[str, Any], openpyxl
 
 
 def _db(sql: str, *args: Any) -> list[tuple]:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         return con.execute(sql, args).fetchall()
 
 
@@ -447,6 +447,30 @@ def test_limits_warn_and_never_truncate(bd, monkeypatch) -> None:
     assert res.status_code == 409
 
 
+def test_file_info_extension_for_keyjoin_keeps_the_bundle_plan_and_basis_unchanged(bd) -> None:
+    """공통 key 연결용으로 SheetInfo에 열 이름·열 문자·시트 순번·열별 글자 수를 더했다 — 묶기의 계획 응답 모양·basis는
+    그대로다 (새 필드는 응답에 나가지 않고, 같은 구성은 같은 basis)."""
+    from app import bundle
+    from app.db import SessionLocal
+    from app.models import SourceFile
+
+    u = bd["bd-user1"]
+    fids = _four(u, "snap", confirm=False)
+    plan1, plan2 = _plan(u, {"file_ids": fids}), _plan(u, {"file_ids": fids})
+    assert plan1 == plan2 and len(plan1["basis"]) == 64
+    assert set(plan1["sheets"][0]) == {"file_id", "file_name", "sheet_id", "sheet", "name", "renamed", "rows", "kinds",
+                                       "empty_rows", "title_rows", "two_level_header", "columns", "formula_missing",
+                                       "formula_cached", "formula_checked", "long_numbers"}  # fmt: skip
+    assert set(plan1["files"][0]["sheets"][0]) == {"sheet_id", "sheet", "rows", "columns"}
+    assert plan1["sheets"][0]["columns"] == 3  # 열 수는 예전처럼 개수 (이름 목록이 아님)
+    with SessionLocal() as db:
+        info = bundle.file_info(db, db.get(SourceFile, fids[0]))
+    (s,) = info.sheets
+    assert (s.column_names, s.source_columns, s.tab) == (HEAD, [0, 1, 2], 0)
+    assert s.column_chars == [len("서울특별시") * 2, len("종로구") + len("용산구"), 0]  # 데이터 행의 글자 칸만
+    assert s.text_chars == sum(len(h) for h in HEAD) + s.column_chars[0] + s.column_chars[1]
+
+
 def test_runs_list_shows_bundle_mode_and_existing_requests_keep_old_behaviour(bd) -> None:
     u = bd["bd-user1"]
     fids = _four(u, "list", confirm=False)
@@ -655,3 +679,101 @@ def test_summary_condition_choice_flags_keep_null_and_empty_variant_apart(bd) ->
     plan = _plan(u, {"file_ids": [fid], "summary": {"items": [item]}})
     assert plan["summary"]["items"][0]["choices"]["variant"] is None
     assert plan["summary"]["items"][0]["choices"]["variant_chosen"] is False
+
+
+# ---------------------------------------------------------------- 오류 코드 모양 글자 (2026-10-27)
+
+ERROR_LIKE = ["#N/A", "#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#NUM!", "#NULL!"]
+
+
+def _xlsx_text(sheets: dict[str, list[list[Any]]]) -> bytes:
+    """모든 글자를 글자 칸(data_type 's')으로 저장한 xlsx — 사용자가 텍스트로 넣은 '#N/A'·'=1+1' 모양 (openpyxl 기본은
+    '#N/A'를 오류 칸, '=…'를 수식으로 저장한다 — 그쪽은 아래 '진짜 오류 칸' 시험과 기존 수식 규칙)."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for name, rows in sheets.items():
+        ws = wb.create_sheet(name)
+        for r in rows:
+            ws.append(r)
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str):
+                    cell.data_type = "s"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _xls_bytes(rows: list[list[Any]]) -> bytes:
+    xlwt = pytest.importorskip("xlwt")
+    wb = xlwt.Workbook(encoding="utf-8")
+    ws = wb.add_sheet("현황")
+    for r, row in enumerate(rows):
+        for j, v in enumerate(row):
+            if v is not None:
+                ws.write(r, j, v)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _cells(ws: Any, column: int) -> list[tuple[Any, str]]:
+    return [(c.value, c.data_type) for c in ws.iter_cols(min_col=column, max_col=column, min_row=2) for c in [c]]
+
+
+@pytest.mark.parametrize("form", ["csv", "xlsx", "xls"])
+def test_error_code_looking_text_stays_text_in_bundle_results(bd, form: str) -> None:
+    """입력의 글자 '#N/A'·'#REF!'·'#DIV/0!'·'=1+1'·'@x'는 결과에서도 글자 칸('s')이다 — openpyxl이 오류 코드 모양 글자를
+    오류 칸('e')으로, '='로 시작하는 글자를 수식으로 바꾸지 않게. 숫자·빈 칸·선행 0은 그대로."""
+    u = bd["bd-user1"]
+    head = ["시도", "코드", "상태", "인구수"]
+    rows = [[f"시도{i}", f"00{i}", v, 10 + i] for i, v in enumerate([*ERROR_LIKE, "=1+1", "@x", "N/A"], start=1)]
+    rows.append(["시도0", "000", None, 0])
+    if form == "csv":
+        body = "\n".join(",".join("" if v is None else str(v) for v in r) for r in [head, *rows]) + "\n"
+        res = u.post("/files", files=[("files", ("오류코드.csv", body.encode("utf-8-sig"), "text/csv"))])
+    elif form == "xlsx":
+        res = u.post("/files", files=[("files", ("오류코드.xlsx", _xlsx_text({"현황": [head, *rows]}), XLSX))])
+    else:
+        res = u.post(
+            "/files", files=[("files", ("오류코드.xls", _xls_bytes([head, *rows]), "application/vnd.ms-excel"))]
+        )
+    assert res.status_code == 200 and res.json()[0].get("id"), res.text
+    fid = res.json()[0]["id"]
+    run, wb, plan = _make(u, {"file_ids": [fid]})
+    ws = wb[wb.sheetnames[0]]
+    header = [c.value for c in ws[1]]
+    col = header.index("상태") + 1
+    got = [(c.value, c.data_type) for c in ws.iter_rows(min_row=2, min_col=col, max_col=col) for c in c]
+    texts = [(v, "s") for v in [*ERROR_LIKE, "=1+1", "@x", "N/A"]]
+    assert got[: len(texts)] == texts, (form, got)
+    assert got[len(texts)] == (None, "n") or got[len(texts)][0] is None, (form, got[len(texts)])
+    code = header.index("코드") + 1
+    codes = [(c.value, c.data_type) for c in ws.iter_rows(min_row=2, min_col=code, max_col=code) for c in c]
+    assert codes[0] == ("001", "s") and codes[-1] == ("000", "s"), codes  # 선행 0은 글자 그대로
+    assert not [c for w in wb.worksheets for r in w.iter_rows() for c in r if c.data_type in ("e", "f")]
+    assert run["summary"]["policy"] == "bundle-policy-2"
+
+
+def test_a_real_xlsx_error_cell_is_read_as_its_text_and_written_as_text(bd) -> None:
+    """xlsx의 진짜 오류 칸(수식 결과가 #N/A)은 파서가 값 글자('#N/A')로 읽는다(xls의 오류 칸은 빈 칸 — 기존 규칙
+    그대로). 결과에서는 그 글자가 글자 칸으로 들어간다 — 오류 칸으로 되살리지 않는다."""
+    u = bd["bd-user1"]
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "현황"
+    ws.append(["시도", "코드", "상태", "인구수"])
+    ws.append(["시도1", "001", "#N/A", 11])  # openpyxl은 이 글자를 오류 칸(data_type 'e')으로 저장한다 — 진짜 오류 칸
+    assert ws["C2"].data_type == "e"
+    buf = io.BytesIO()
+    wb.save(buf)
+    res = u.post("/files", files=[("files", ("진짜오류.xlsx", buf.getvalue(), XLSX))])
+    assert res.status_code == 200, res.text
+    fid = res.json()[0]["id"]
+    preview = u.get(f"/files/{fid}/preview").json()
+    assert any("#N/A" in str(v) for row in preview["rows"] for v in row["cells"]), preview["rows"][:3]
+    _, out, _ = _make(u, {"file_ids": [fid]})
+    ws = out[out.sheetnames[0]]
+    header = [c.value for c in ws[1]]
+    cell = ws.cell(row=2, column=header.index("상태") + 1)
+    assert (cell.value, cell.data_type) == ("#N/A", "s")

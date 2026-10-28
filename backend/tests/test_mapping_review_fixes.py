@@ -4,7 +4,6 @@
 """
 
 import io
-import sqlite3
 import threading
 from typing import Any
 
@@ -12,7 +11,7 @@ import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import DATA_DIR
+from tests.conftest import db_connect
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_auth import _client, app_real_login  # noqa: F401
 
@@ -49,7 +48,7 @@ def _analyze(c: TestClient, fid: int) -> dict[str, Any]:
 
 
 def _db(sql: str, *args: Any) -> list[tuple]:
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         return con.execute(sql, args).fetchall()
 
 
@@ -167,7 +166,7 @@ def test_pii_in_title_sheet_and_file_name_not_in_review_or_batch(fx, caplog) -> 
         assert res.status_code == 200 and not any(r in res.text for r in RAW), path
     listed = next(f for f in u.get("/files").json() if f["id"] == a)
     assert EMAIL not in listed["display_name"] and listed["display_name"].endswith(".xlsx")  # 화면 표시용은 가림
-    assert listed["original_name"] == f"개인정보 {EMAIL}.xlsx"  # 원래 이름은 바꾸지 않음 (기존 화면·식별 호환)
+    assert listed["original_name"] == listed["display_name"]  # 호환 필드도 가린 이름 (2026-10-27) — 식별은 id
     sheet_id = u.get(f"/files/{a}/preview").json()["sheet_id"]
     assert u.get(f"/files/{a}/preview", params={"sheet_id": sheet_id}).status_code == 200  # 식별은 sheet_id로
     assert not any(r in caplog.text for r in RAW)

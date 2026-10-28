@@ -1,5 +1,4 @@
 import io
-import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
@@ -8,6 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import DATA_DIR
+from app.timefmt import KST
+from tests.conftest import db_connect
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -54,7 +55,7 @@ def client():
     for module in (files, validation_api, review, integration, automation):
         patch.setattr(module, "get_engine", lambda: mapping_engine)
     Base.metadata.create_all(engine)
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         before_codes = {r[0] for r in con.execute("select code from glossary_entries")}
         before_aliases = {r[0] for r in con.execute("select id from glossary_aliases")}
     with TestClient(app) as c:
@@ -71,7 +72,7 @@ def client():
         yield c
     patch.undo()
     # 같은 테스트 DB를 쓰는 다른 모듈(용어사전 테스트)에 영향이 없도록 이 모듈이 넣은 용어만 지운다
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         for (alias_id,) in con.execute("select id from glossary_aliases").fetchall():
             if alias_id not in before_aliases:
                 con.execute("delete from glossary_aliases where id = ?", (alias_id,))
@@ -194,7 +195,7 @@ def test_automation_run_without_new_columns_completes(client: TestClient) -> Non
 
 def test_automation_rejects_bad_requests(client: TestClient) -> None:
     review = client.post("/reviews", json={"file_ids": [_upload(client, "9월c.xlsx", SEPT)]}).json()
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         con.execute(
             "insert into runs (review_session_id, trigger, status, input_file_count, file_ids, row_count, "
             "change_count, warning_count, summary) values (?, 'manual', 'failed', 1, '[]', 0, 0, 0, '{}')",
@@ -210,6 +211,28 @@ def test_automation_rejects_bad_requests(client: TestClient) -> None:
     res = client.post(f"/automations/{automation['id']}/run", json={"file_ids": [999999]})
     assert res.status_code == 422
     assert client.post(f"/automations/{automation['id']}/run", json={"file_ids": []}).status_code == 422
+
+
+def test_automation_run_refuses_a_malformed_period_before_writing(client: TestClient) -> None:
+    # 기준 기간은 검증 API와 같은 형식(2026 · 2026-09)만 받는다 — 화면의 자유 입력칸에 '2026-13' 같은 값을 넣으면
+    # 기간 계산에서 500이 났다. 거절은 아무것도 쓰기 전에 한다
+    _, run = _manual_run(client, _upload(client, "9월p.xlsx", SEPT))
+    automation = client.post(f"/runs/{run['id']}/automation", json={"name": "기간 검사"}).json()
+    fid = _upload(client, "10월p.xlsx", SEPT)
+
+    def counts() -> tuple[int, int]:  # 이 자동화의 실행 수·실행 기록 수 (DB 종류와 무관하게 API로 센다)
+        listed = {a["id"]: a for a in client.get("/automations").json()}
+        return listed[automation["id"]]["run_count"], len(client.get("/runs", params={"limit": 200}).json())
+
+    before = counts()
+    for period in ("2026-13", "2026-00", "2026년9월", "2026-9", "26-09", "2026-1\x000", " 2026-09"):
+        res = client.post(f"/automations/{automation['id']}/run", json={"file_ids": [fid], "expected_period": period})
+        assert res.status_code == 422, (repr(period), res.text)
+        assert res.json()["detail"][0]["loc"] == ["body", "expected_period"], res.text
+    assert counts() == before
+    for period in ("2026-10", "2026", None):
+        res = client.post(f"/automations/{automation['id']}/run", json={"file_ids": [fid], "expected_period": period})
+        assert res.status_code == 201, (period, res.text)
 
 
 def test_automation_keeps_include_unmapped_choice(client: TestClient) -> None:
@@ -233,23 +256,35 @@ def test_automation_keeps_include_unmapped_choice(client: TestClient) -> None:
         assert set(unmapped) <= set(out["summary"]["columns"])
 
 
+def _kst_wall(value: str | datetime) -> str:
+    """datetime.now(KST)로 저장한 시각의 벽시계 — SQLite는 시간대 없는 글자, PostgreSQL은 시간대가 붙은 값."""
+    if isinstance(value, str):
+        return value.replace(" ", "T")[:19]
+    return value.astimezone(KST).replace(tzinfo=None).isoformat()[:19]
+
+
+def _utc_instant(value: str | datetime) -> datetime:
+    """DB 기본값(UTC)으로 저장한 시각의 순간 — SQLite는 시간대 없는 UTC 글자."""
+    return datetime.fromisoformat(value).replace(tzinfo=UTC) if isinstance(value, str) else value
+
+
 def test_screen_times_carry_kst_offset(client: TestClient) -> None:
     """화면에 보내는 시각에는 +09:00을 붙인다. 저장 기준이 달라도 같은 순간을 같은 한국 시간으로 보여 주게."""
     fid = _upload(client, "시각.xlsx", SEPT)
     _, run = _manual_run(client, fid)
     automation = client.post(f"/runs/{run['id']}/automation", json={"name": "시각 확인"}).json()
-    with sqlite3.connect(DATA_DIR / "moajwo.db") as con:
+    with db_connect() as con:
         started, created = con.execute("select started_at, created_at from runs where id = ?", (run["id"],)).fetchone()
         uploaded = con.execute("select uploaded_at from source_files where id = ?", (fid,)).fetchone()[0]
         updated = con.execute("select updated_at from automations where id = ?", (automation["id"],)).fetchone()[0]
     listed = next(r for r in client.get("/runs").json() if r["id"] == run["id"])
     # datetime.now(KST)로 저장한 실행 시작 시각: 그 벽시계 그대로 +09:00 (9시간을 더하지 않음)
-    assert listed["started_at"].endswith("+09:00") and listed["started_at"][:19] == started.replace(" ", "T")[:19]
+    assert listed["started_at"].endswith("+09:00") and listed["started_at"][:19] == _kst_wall(started)
     # DB 기본값(UTC)으로 저장한 시각: 같은 순간을 KST로
     assert listed["created_at"].endswith("+09:00")
-    assert datetime.fromisoformat(listed["created_at"]) == datetime.fromisoformat(created).replace(tzinfo=UTC)
+    assert datetime.fromisoformat(listed["created_at"]) == _utc_instant(created)
     up = next(f for f in client.get("/files").json() if f["id"] == fid)["uploaded_at"]
-    assert up.endswith("+09:00") and datetime.fromisoformat(up) == datetime.fromisoformat(uploaded).replace(tzinfo=UTC)
+    assert up.endswith("+09:00") and datetime.fromisoformat(up) == _utc_instant(uploaded)
     got = client.get(f"/automations/{automation['id']}").json()
-    assert got["updated_at"].endswith("+09:00") and got["updated_at"][:19] == updated.replace(" ", "T")[:19]
+    assert got["updated_at"].endswith("+09:00") and got["updated_at"][:19] == _kst_wall(updated)
     assert got["created_at"].endswith("+09:00")

@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import BinaryIO
 
-from app.config import DATA_DIR
+from app.config import DATA_DIR, MAX_UPLOAD_MIB
 
 UPLOAD_DIR = DATA_DIR / "uploads"
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MIB * 2**20
 _CHUNK = 1024 * 1024
 
 
@@ -28,9 +28,10 @@ class StoredFile:
 
 
 def safe_original_name(filename: str | None) -> str:
-    # 브라우저가 경로를 붙여 보내는 경우(C:\fakepath\a.xlsx 등) 파일명만 남긴다.
+    # 브라우저가 경로를 붙여 보내는 경우(C:\fakepath\a.xlsx 등) 파일명만 남긴다. 길이는 자르지 않는다 — 저장 한도는
+    # 올리는 쪽이 보고 거절한다 (잘린 이름은 확장자까지 바뀔 수 있음)
     name = PurePath((filename or "").replace("\\", "/")).name.strip()
-    return name[:255] or "unnamed"
+    return name or "unnamed"
 
 
 def store_original(src: BinaryIO, extension: str) -> StoredFile:

@@ -163,6 +163,13 @@ def test_local_hosts_pass_check(url: str) -> None:
     ollama._check_local(url)
 
 
+@pytest.mark.parametrize("url", ["file://localhost/etc/passwd", "ftp://127.0.0.1:11434", "localhost:11434"])
+def test_local_ollama_needs_http(url: str) -> None:
+    """호스트가 로컬이어도 http·https가 아니면 막는다 (urlopen은 file: 주소로 로컬 파일을 연다 — Bandit B310)."""
+    with pytest.raises(ollama.OllamaError):
+        ollama._check_local(url)
+
+
 def test_clean_reason_drops_foreign_script() -> None:
     from app.mapping import clean_reason
 

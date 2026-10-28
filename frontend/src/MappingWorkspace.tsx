@@ -426,12 +426,21 @@ function MappingWorkspace() {
             선택 취소
           </button>
         )}
-        {/* 사용자가 확정한 수량 항목만. 선택값만 넘기고 계산·저장은 분석 화면에서 따로 한다 */}
-        {selectedCol.status === 'confirmed' && selectedCol.field_key && ANALYSIS_FIELDS.has(selectedCol.field_key) && (
-          <NavLink className="mapping-confirm mw-link" href={`/analysis?field=${selectedCol.field_key}&files=${fileId}`}>
-            이 항목으로 분석
-          </NavLink>
-        )}
+        {/* 사용자가 확정한 수량 항목만. 선택값만 넘기고 계산·저장은 데이터 통계 분석 화면에서 따로 한다.
+            조회 전용 파일은 서버가 새 통계 결과를 만들지 않으므로(403) 이동 대신 사유를 보인다 */}
+        {selectedCol.status === 'confirmed' &&
+          selectedCol.field_key &&
+          ANALYSIS_FIELDS.has(selectedCol.field_key) &&
+          (mapping?.can_change === false ? (
+            <p className="wk-why" role="note">
+              <strong>데이터 통계 분석 불가</strong> 조회 전용 파일입니다 — 통계 결과는 파일을 올린 사용자만 만들 수
+              있습니다.
+            </p>
+          ) : (
+            <NavLink className="mapping-confirm mw-link" href={`/analysis?field=${selectedCol.field_key}&files=${fileId}`}>
+              이 항목으로 데이터 통계 분석
+            </NavLink>
+          ))}
       </div>
     </aside>
   )
@@ -459,13 +468,14 @@ function MappingWorkspace() {
                     type="button"
                     className="wk-rowpick"
                     aria-pressed={active}
-                    aria-label={`${pc.letter}열 ${pc.name} 선택`}
                     disabled={!aligned}
                     onClick={() => pickColumn(pc.column_id)}
                   >
+                    {/* 이름은 보이는 글자에서 만든다 (WCAG 2.5.3 — 음성 입력은 보이는 글자로 부른다). 뒤에 용도만 덧붙인다 */}
                     <span className="mw-letter">{pc.letter}</span>
                     <span className="wk-colname">{pc.name}</span>
                     {m?.qualifier && <span className="upload-tag">{m.qualifier}</span>}
+                    <span className="sr-only"> 열 선택</span>
                   </button>
                 </th>
                 <td className="wk-samples">{m ? m.samples.slice(0, 3).map(formatCell).join(' · ') || '—' : '—'}</td>
@@ -497,13 +507,13 @@ function MappingWorkspace() {
                     type="button"
                     className="mw-colhead"
                     aria-pressed={active}
-                    aria-label={`${pc.letter}열 ${pc.name} 선택`}
                     disabled={!aligned}
                     onClick={() => pickColumn(pc.column_id)}
                   >
                     <span className="mw-letter">{pc.letter}</span>
                     <span className="mw-colname">{pc.name}</span>
                     {m && <StatusChip status={m.status} text={fieldText(m)} />}
+                    <span className="sr-only"> 열 선택</span>
                   </button>
                 </th>
               )
@@ -672,6 +682,10 @@ function MappingWorkspace() {
       {mapping && !mapping.can_change && (
         <Banner tone="muted" icon="lock" title="조회 전용" live="status">
           <p>다른 사용자의 파일입니다. 파일을 올린 사용자만 확정할 수 있습니다.</p>
+          <p>
+            &lsquo;열 매핑 분석&rsquo;은 누를 수 있지만 내 분석 기록으로만 저장되고, 이 파일의 확정과 올린 사용자의 분석은
+            바뀌지 않습니다. 데이터 통계 분석은 올린 사용자만 할 수 있습니다.
+          </p>
         </Banner>
       )}
       {(mapping?.analyzed || view) && (

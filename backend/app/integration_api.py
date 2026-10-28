@@ -3,7 +3,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import recovery
 from app.auth import CurrentUser, CurrentUserDep, ensure_own, ensure_view
 from app.config import DATA_DIR
 from app.db import get_session
@@ -24,7 +25,15 @@ router = APIRouter(tags=["integration"])
 XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-STATUS_LABEL = {"done": "완료", "review": "검토", "failed": "실패", "running": "실행 중"}
+STATUS_LABEL = {"done": "완료", "review": "검토", "failed": "실패", "running": "실행 중", "check": "결과 확인 필요"}
+# 결과 파일 이름·경로를 보이는 상태 — 실행 중인 행의 경로는 아직 만들기 전의 계획이라 보이지 않는다
+SHOW_FILE = ("done", "check")
+DOWNLOAD_BLOCKED = {
+    "running": "아직 결과 파일을 만드는 중입니다 — 잠시 뒤 실행 기록을 새로 고친 뒤 내려받으세요.",
+    "check": "결과를 확정하지 못한 실행이라 내려받을 수 없습니다 — 관리자가 결과를 확인해야 합니다.",
+    "failed": "실패한 실행이라 결과 파일이 없습니다.",
+    "review": "검토가 끝나지 않은 실행이라 결과 파일이 없습니다.",
+}
 
 
 def _masked_summary(summary: dict[str, Any]) -> dict[str, Any]:
@@ -89,8 +98,8 @@ def run_out(run: IntegrationRun, automation_name: str | None = None, user_name: 
         user_id=run.user_id,
         user_name=user_name,
         input_file_count=run.input_file_count,
-        file_name=Path(run.output_path).name if run.output_path else None,
-        output_path=f"data/{run.output_path}" if run.output_path else None,
+        file_name=Path(run.output_path).name if run.output_path and run.status in SHOW_FILE else None,
+        output_path=f"data/{run.output_path}" if run.output_path and run.status in SHOW_FILE else None,
         row_count=run.row_count,
         change_count=run.change_count,
         warning_count=run.warning_count,
@@ -180,7 +189,9 @@ def list_runs(
         stmt = stmt.where(IntegrationRun.review_session_id == review_id)
     if automation_id is not None:
         stmt = stmt.where(IntegrationRun.automation_id == automation_id)
-    return runs_out(db, list(db.scalars(stmt)))
+    runs = list(db.scalars(stmt))
+    recovery.notice(runs)  # 담당이 끝난 실행이 보이면 정리를 예약만 한다 (이 요청은 아무것도 바꾸지 않음)
+    return runs_out(db, runs)
 
 
 def _get(db: Session, run_id: int, user: CurrentUser) -> IntegrationRun:
@@ -217,12 +228,16 @@ class ChangePage(BaseModel):
     items: list[ChangeOut]
 
 
+# 변경 기록 종류 — integration.KIND_LABEL의 키와 같은 값 (tests/test_nul_inputs.py가 대조). 다른 글자는 422
+ChangeKind = Literal["ffill", "number", "trim", "entity", "column", "other"]
+
+
 @router.get("/runs/{run_id}/changes", response_model=ChangePage)
 def list_changes(
     run_id: int,
     db: Annotated[Session, Depends(get_session)],
     user: CurrentUserDep,
-    kind: str | None = None,
+    kind: ChangeKind | None = None,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=1000)] = 100,
 ) -> ChangePage:
@@ -240,8 +255,14 @@ def list_changes(
 def download_run(run_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> FileResponse:
     run = _get(db, run_id, user)
     if run.status != "done" or not run.output_path:
-        raise HTTPException(status.HTTP_409_CONFLICT, "결과 파일이 없습니다.")
+        raise HTTPException(status.HTTP_409_CONFLICT, DOWNLOAD_BLOCKED.get(run.status, "결과 파일이 없습니다."))
     path = (DATA_DIR / run.output_path).resolve()
-    if not path.is_relative_to((DATA_DIR / "outputs").resolve()) or not path.is_file():
+    if not path.is_relative_to((DATA_DIR / "outputs").resolve()):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "결과 파일을 찾을 수 없습니다.")
+    if not path.is_file():  # 기록은 있는데 파일이 없다 (외부 DB 서버의 재배포·재시작 등 — 원본 쪽과 같은 이유)
+        raise HTTPException(
+            status.HTTP_410_GONE,
+            "결과 파일이 서버에 없습니다 — 서버 재배포·재시작으로 지워졌을 수 있습니다. "
+            "실행 기록·변경 내역은 그대로이며, 원본을 다시 올려 다시 실행하면 새 결과 파일을 만듭니다.",
+        )
     return FileResponse(path, media_type=XLSX_MEDIA, filename=path.name)

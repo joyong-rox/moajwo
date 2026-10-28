@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# 결과 파일 생성 메모리 (격리 러너 전용). image_check.sh가 만든 moajwo-backend:check 이미지를 쓴다.
+# 합성 xlsx는 측정 대상이 아닌 일회용 컨테이너에서 만들고, 측정은 512MiB 컨테이너(Render 권장 읽기 한도)에서 한다.
+#  A: 결과 칸 예산을 끈 컨테이너 — 메모리 부족 종료 재현, 다시 띄워 정리 확인
+#  B: Render 권장 예산(MOAJWO_MAX_OUTPUT_CELLS=300000) — 한도 아래·경계·위, 통계 요약, 동시 요청, 통합
+#  C: 통계 요약 묶기·한도 가까운 통합  ·  D1~D7: 동시 생성·긴 글자·넓은 표·큰 통계 요약·분석 Excel·큰 병합 (사례마다 새 컨테이너)
+#  D3L: 로컬 기본 한도(1GiB 컨테이너)에서 공유 긴 글자  ·  D8: 결과 만들기 차례 2개(MOAJWO_OUTPUT_SLOTS=2) + 동시 큰 xlsx 올리기
+#  E1·E2·E3A~C: 최종 Render 권장값(docs/MEMORY.md 그대로 — 결과 글자 3,200만)에서 남은 경계 — E1 칸마다 다른 긴 한글 여러
+#  파일의 허용·초과·다음 정상 요청 · E2 결과 한 건(통합, 예산 바로 아래) + 큰 xlsx 올리기 · E3 읽기 차례를 기다리는 요청
+#  K1~K3: 공통 key 연결(/keyjoin) — 최종 Render 권장값에서 cold/warm, 큰 key 인덱스·긴 값·다수 열의 예산 바로 아래/위, 생성 + 큰 업로드
+#  겹침·plan 중 plan · KL1: 로컬 기본 한도(1GiB·100만 칸)에서 기준 95,000(허용)/100,000(거절)행
+# 사용법: [IMAGE=moajwo-backend:before] [PARTS="D1 D2"] bash output_memory.sh <출력 폴더> — 이미지 기본은 moajwo-backend:check
+set -uo pipefail
+OUT=$(mkdir -p "$1" && cd "$1" && pwd)
+HERE=$(cd "$(dirname "$0")" && pwd)
+IMAGE=${IMAGE:-moajwo-backend:check}
+FILES=$(mktemp -d)
+chmod 777 "$FILES"
+docker run -i --rm -v "$FILES:/files" -v "$HERE:/tools:ro" --entrypoint python "$IMAGE" - <<'PY' > "$OUT/files.txt" 2>&1
+import zipfile
+import openpyxl
+GU = ["종로구", "중구", "용산구", "성동구", "광진구", "동대문구", "중랑구", "성북구", "강북구", "도봉구", "노원구", "은평구",
+      "서대문구", "마포구", "양천구", "강서구", "구로구", "금천구", "영등포구", "동작구", "관악구", "서초구", "강남구", "송파구", "강동구"]
+def make(path, rows, seed):
+    wb = openpyxl.Workbook(write_only=True)
+    ws = wb.create_sheet(f"p{seed}")
+    ws.append(["주민등록 인구 현황 2026년 9월 (단위: 명)"])
+    ws.append(["시도", "시군구", "인구수"])
+    for i in range(rows):
+        ws.append(["서울특별시", GU[i % len(GU)], 1000 + (i * 7 + seed) % 50000])
+    wb.save(path)
+for per in (20000, 5000, 6000, 6200):
+    for i in range(10):
+        make(f"/files/b{per}_{i}.xlsx", per, per + i)
+for i in range(10, 15):  # A3: 15개 × 20,000행 = 묶기 행 한도 300,000행
+    make(f"/files/b20000_{i}.xlsx", 20000, 20000 + i)
+for i in range(4):
+    make(f"/files/i20000_{i}.xlsx", 20000, 7 + i)
+make("/files/i37000_0.xlsx", 37000, 3)
+def make_month(path, rows, month):  # 파일마다 기준 달이 다름 — 통계 요약에서 파일끼리 같은 대상이 겹치지 않게
+    wb = openpyxl.Workbook(write_only=True)
+    ws = wb.create_sheet(f"m{month}")
+    ws.append([f"주민등록 인구 현황 2026년 {month}월 (단위: 명)"])
+    ws.append(["시도", "시군구", "인구수"])
+    for i in range(rows):
+        ws.append(["서울특별시", GU[i % len(GU)], 1000 + (i * 7 + month) % 50000])
+    wb.save(path)
+for per in (5000, 6000):
+    for i in range(10):
+        make_month(f"/files/m{per}_{i}.xlsx", per, i + 1)
+wb = openpyxl.Workbook(write_only=True)   # 큰 xlsx (풀었을 때 16MiB 한도 아래를 노림) — 결과를 만드는 동안 올린다
+ws = wb.create_sheet("시트1")
+ws.append(["기준일자", "시도", "시군구", "기관코드", "인구", "세대수", "예산", "비고"])
+for i in range(39000):
+    ws.append([f"2026-09-{i % 28 + 1:02d}", "서울특별시", f"시군구{i % 25}", 1100000 + i, 1000 + i, 400 + i % 97, i * 1.5, "합성"])
+wb.save("/files/x_big.xlsx")
+with zipfile.ZipFile("/files/x_big.xlsx") as z:
+    print("x_big unpacked MiB", round(sum(x.file_size for x in z.infolist()) / 2**20, 2))
+# 부분 D — 긴 글자·넓은 표·큰 통계 요약·분석 입력
+HAN = "가나다라마바사아자차카타파하"
+def long_csv(path, rows, chars, seed):  # 칸마다 3,000자 (UTF-8 약 9MB — 올리기 한도 10MiB 아래)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write("시도,시군구,비고\n")
+        for i in range(rows):
+            body = f"{seed}-{i:06d}" + "".join(HAN[(i + j + seed) % len(HAN)] for j in range(chars - 10))
+            f.write(f"서울특별시,{GU[i % len(GU)]},{body}\n")
+for i in range(5):
+    long_csv(f"/files/lt_{i}.csv", 1000, 3000, i)
+LONGSTR = " " + "가" * 32000 + " "  # 앞뒤 공백 — 읽을 때 칸마다 정리한 사본이 생긴다 (공유 문자열은 파일에 한 번)
+import sys
+sys.path.insert(0, "/tools")
+from shared_xlsx import shared_xlsx  # Excel처럼 공유 문자열로 저장 (openpyxl은 칸마다 글자를 넣어 저장한다)
+for n in (499, 500, 1999, 2000, 4000, 8000):  # 499칸 = 15,968,998자 (Render 1,600만 바로 아래), 1999칸 = 로컬 6,400만 바로 아래
+    shared_xlsx(f"/files/sst_{n}.xlsx", [["시도", "시군구", "비고"]] + [["서울특별시", GU[i % len(GU)], LONGSTR] for i in range(n)])
+for k in range(8):  # D9~D11: 한도(1,600만 자) 바로 아래 파일 — 글자가 조금씩 달라 같은 파일로 보이지 않게
+    v = " " + chr(0xAC00 + k) + "가" * 31999 + " "
+    shared_xlsx(f"/files/sst499_{k}.xlsx", [["시도", "시군구", "비고"]] + [["서울특별시", GU[i % len(GU)], v] for i in range(499)])
+for n in (330, 416):  # D12_<n>: 결과 글자 예산 후보를 재려고 한 파일만 (같은 32,002자 × n칸)
+    v = " " + chr(0xAC00) + "가" * 31999 + " "
+    shared_xlsx(f"/files/sst{n}_0.xlsx", [["시도", "시군구", "비고"]] + [["서울특별시", GU[i % len(GU)], v] for i in range(n)])
+shared_xlsx("/files/merge_300k.xlsx", [["시도", "인구수"], ["서울특별시", "10"]], merges=("A3:Z11540",))  # 26 × 11,538 ≈ 30만 칸
+shared_xlsx("/files/merge_1m.xlsx", [["시도", "인구수"], ["서울특별시", "10"]], merges=("A3:Z40000",))  # 26 × 39,998 ≈ 104만 칸
+wb = openpyxl.Workbook(write_only=True)  # 1,000열 × 290행
+ws = wb.create_sheet("w")
+ws.append(["시도", "시군구"] + [f"항목{j}" for j in range(998)])
+for i in range(290):
+    ws.append(["서울특별시", GU[i % len(GU)]] + [i * 1000 + j for j in range(998)])
+wb.save("/files/w_wide.xlsx")
+def stats(path, rows, seed):  # 숫자 항목 7개
+    wb = openpyxl.Workbook(write_only=True)
+    ws = wb.create_sheet(f"s{seed}")
+    ws.append([f"인구·예산 현황 2026년 {seed + 1}월"])
+    ws.append(["시도", "시군구", "인구수(명)", "남자(명)", "여자(명)", "세대수(세대)", "예산(천원)", "지출(천원)", "집행률(%)"])
+    for i in range(rows):
+        ws.append(["서울특별시", GU[i % len(GU)], 1000 + i % 5000, 500 + i % 2500, 500 + i % 2400, 400 + i % 97, i * 10, i * 7,
+                   (i % 100) / 1.0])
+    wb.save(path)
+for i in range(4):
+    stats(f"/files/s7_{i}.xlsx", 27000, i)
+wb = openpyxl.Workbook(write_only=True)  # 분석: 시군구 5,000개, 숫자 아닌 값 5,000행
+ws = wb.create_sheet("a")
+ws.append(["주민등록 인구 현황 2026년 9월 (단위: 명)"])
+ws.append(["시도", "시군구", "인구수"])
+for i in range(30000):
+    ws.append(["서울특별시", f"시군구{i % 5000:04d}", (1000 + i) if i % 6 else "자료없음"])
+wb.save("/files/an_30k.xlsx")
+# 부분 E1·E3 — 칸마다 다른 긴 한글 (공유 문자열 없음: 실제 업무 문장처럼 낱말을 섞어 칸마다 다르게). 파일 하나 약 461만 자
+# (풀었을 때 약 10.2MiB — xlsx 16MiB·파일 글자 1,600만 한도 안), 묶기·통합 6개 ≈ 2,770만 자(예산 안) · 7개 ≈ 3,230만 자(넘음)
+import random
+ORG = ["행정안전부", "보건복지부", "국토교통부", "서울특별시", "부산광역시", "경기도", "강원특별자치도", "제주특별자치도",
+       "종로구청", "해운대구청", "수원시청", "춘천시청", "한국지역정보개발원", "국민건강보험공단", "한국토지주택공사"]
+TASK = ["주민등록 인구 통계", "지방재정 집행 현황", "공공시설 안전 점검", "복지 급여 지급 실적", "도로 정비 사업",
+        "재난 대비 훈련", "청년 일자리 지원", "노인 돌봄 서비스", "전자정부 시스템 운영", "민원 처리 실적"]
+NOTE = ["전년 대비 증가하였으며", "분기별로 집계한 결과", "현장 확인을 거쳐", "관계 기관과 협의하여", "예산 범위 안에서",
+        "자료 제출 기한을 지켜", "담당 부서의 검토를 마친 뒤", "시스템 장애 없이", "주민 의견을 반영해", "추가 확인이 필요하여"]
+END = ["정상 처리함.", "보완 요청함.", "다음 달에 다시 확인함.", "결과를 공유함.", "개선 계획을 세움.", "목표를 달성함."]
+def remark(rng, n):
+    out = []
+    while sum(len(s) for s in out) < n:
+        out.append(f"{rng.choice(ORG)} {rng.choice(TASK)} {rng.randint(1, 99999):05d}건은 {rng.choice(NOTE)} {rng.choice(END)} ")
+    return "".join(out)[:n].strip()
+for k in range(8):
+    rng = random.Random(1000 + k)
+    wb = openpyxl.Workbook(write_only=True)
+    ws = wb.create_sheet(f"d{k}")
+    ws.append(["시도", "시군구", "비고"])
+    for i in range(1125):
+        ws.append(["서울특별시", GU[i % len(GU)], f"[{k}-{i:04d}] " + remark(rng, 4090)])
+    wb.save(f"/files/dk_{k}.xlsx")
+    with zipfile.ZipFile(f"/files/dk_{k}.xlsx") as z:
+        print(f"dk_{k} unpacked MiB", round(sum(x.file_size for x in z.infolist()) / 2**20, 2))
+# 부분 K — 공통 key 연결 (docs/MEMORY.md '공통 key 연결'): 6행 합성 4파일, 큰 key 인덱스(예산 바로 아래/위), 긴 값, 다수 열. CSV만 (xls는 pytest).
+import csv
+def kcsv(path, header, rows):
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+kcsv("/files/kj_a.csv", ["사번", "부서", "비고"], [["001", "총무", "메모A1"], ["002", "기획", "메모A2"], ["003", "정보", "메모A3"]])
+kcsv("/files/kj_b.csv", ["사용자번호", "교육 건수", "메모"], [["001", "10", "b1"], ["003", "30", "b3"], ["004", "40", "b4"]])
+kcsv("/files/kj_c.csv", ["사용자ID", "출장 건수", "기타"], [["001", "1", "c1"], ["002", "2", "c2"], ["005", "5", "c5"]])
+kcsv("/files/kj_d.csv", ["직원코드", "처리 건수", "설명"], [["001", "100", "d1"], ["003", "300", "d3"], ["006", "600", "d6"]])
+def kbase(path, rows, seed, width=1, chars=0, start=0):  # key 10자('K000000001', start부터) + 선택 열 width개 (chars > 0이면 그 길이의 글자)
+    def cell(i, j):
+        return (f"{seed}" + "v" * (chars - 1)) if chars else f"값{seed}-{i}-{j}"
+    kcsv(path, ["key", *[f"v{j}" for j in range(width)]], [[f"K{start + i:09d}", *[cell(i, j) for j in range(width)]] for i in range(rows)])
+for n in (20000, 28000, 29000, 95000, 100000):  # K2·K3·KL1 기준 입력 (key 10자, 선택 열 1)
+    kbase(f"/files/kj_base_{n}.csv", n, 0)
+for i in range(3):  # 다른 입력 3개 × 3,000행
+    kbase(f"/files/kj_in_{i}.csv", 3000, i + 1)
+# K5 — 범위 비교(base·common·all이 모두 예산 안: 기준 15,000행), 겹치지 않는 key(입력 key가 기준에 없음), 20개 입력 분산(기준 5,000행 + 19 × 250행 = MAX_INPUTS)
+kbase("/files/kj_base_15000.csv", 15000, 0)
+kbase("/files/kj_base_5000.csv", 5000, 0)
+for i in range(3):
+    kbase(f"/files/kj_off_{i}.csv", 3000, i + 1, start=100000000)
+for i in range(19):  # 기준 포함 20개 입력 = MAX_INPUTS (21개는 요청 검증 422 — run 40446578692에서 확인)
+    kbase(f"/files/kj_split_{i}.csv", 250, i + 1, start=i * 250)
+for i in range(4):  # 긴 값: 500행 × 5열 × 2,000자 (파일 약 5MB — 올리기 한도 10MiB 아래)
+    kbase(f"/files/kj_long_{i}.csv", 500, i, width=5, chars=2000)
+for rows in (500, 1000):  # 다수 열: 49열 × 4입력 (결과 열 1 + 196 ≤ 200)
+    for i in range(4):
+        kbase(f"/files/kj_wide{rows}_{i}.csv", rows, i, width=49)
+PY
+ls -l "$FILES" >> "$OUT/files.txt"
+# Render 권장 읽기 한도 (docs/MEMORY.md). 글자 수 한도는 수정 전 이미지에 없는 변수라 무시된다 — 같은 명령으로 둘을 잰다
+LIMITS="-e MOAJWO_MAX_UPLOAD_MIB=10 -e MOAJWO_MAX_XLSX_UNCOMPRESSED_MIB=16 -e MOAJWO_MAX_FILE_CELLS=400000 -e MOAJWO_VIEW_CACHE_MIB=32 -e MOAJWO_PARSE_SLOTS=1 -e MOAJWO_MAX_FILE_TEXT_CHARS=16000000 -e MOAJWO_MAX_OUTPUT_TEXT_CHARS=48000000"
+# 최종 Render 권장값 그대로 (docs/MEMORY.md — 9개, 결과 글자 3,200만·결과 차례 1개). E 부분은 이 값으로만 잰다
+FINAL="-e MOAJWO_MAX_UPLOAD_MIB=10 -e MOAJWO_MAX_XLSX_UNCOMPRESSED_MIB=16 -e MOAJWO_MAX_FILE_CELLS=400000 -e MOAJWO_VIEW_CACHE_MIB=32 -e MOAJWO_PARSE_SLOTS=1 -e MOAJWO_MAX_FILE_TEXT_CHARS=16000000 -e MOAJWO_MAX_OUTPUT_TEXT_CHARS=32000000 -e MOAJWO_OUTPUT_SLOTS=1"
+run_part() {  # run_part <부분> <결과 칸 예산> [메모리] [LIMITS 대신 쓸 환경 변수]
+  local name="out$1" memory="${3:-512m}" limits="${4-$LIMITS}"
+  docker run -d --name "$name" --memory="$memory" --memory-swap="$memory" -e OLLAMA_BASE_URL=http://127.0.0.1:9 $limits \
+    -e MOAJWO_MAX_OUTPUT_CELLS="$2" -p 127.0.0.1:18100:8000 "$IMAGE" > /dev/null
+  for _ in $(seq 1 60); do
+    [ "$(docker inspect --format '{{.State.Health.Status}}' "$name" 2>/dev/null)" = healthy ] && break
+    sleep 2
+  done
+  python3 "$HERE/output_memory.py" "$1" http://127.0.0.1:18100 "$name" "$FILES" "$OUT" > "$OUT/output-memory-$1.log" 2>&1
+  echo "exit=$?" >> "$OUT/output-memory-$1.log"
+  docker logs "$name" > "$OUT/out$1-backend.log" 2>&1
+  docker inspect "$name" --format 'OOMKilled={{.State.OOMKilled}} running={{.State.Running}} restarts={{.RestartCount}}' >> "$OUT/output-memory-$1.log"
+  docker rm -f "$name" > /dev/null
+}
+for part in ${PARTS:-A B}; do
+  case "$part" in
+    A|A3) run_part "$part" 5000000 ;;
+    D3L|D10L_*|D11L_*) run_part "$part" 1000000 1g "" ;;  # 로컬·폐쇄망 기본 한도(환경 변수 없음) — 로컬은 컨테이너 제한이 없어 1GiB로 잰다
+    D8) run_part D8 300000 512m "$LIMITS -e MOAJWO_OUTPUT_SLOTS=2" ;;
+    E*) run_part "$part" 300000 512m "$FINAL" ;;  # 최종 Render 권장값 (결과 칸 예산 30만도 같은 값)
+    K1|K2|K3|K5) run_part "$part" 300000 512m "$FINAL" ;;  # 공통 key 연결 — 최종 Render 권장값
+    KL1) run_part KL1 1000000 1g "" ;;  # 공통 key 연결 — 로컬 기본 한도 (환경 변수 없음, 1GiB)
+    *) run_part "$part" 300000 ;;
+  esac
+done
+rm -rf "$FILES"
