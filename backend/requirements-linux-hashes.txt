@@ -1,6 +1,6 @@
 # backend/requirements.txt 와 같은 고정 목록에 linux x86_64 / CPython 3.11 휠의 sha256을 붙인 것 (pip --require-hashes 용).
 # 만드는 법: 진단 워크플로 hashes.yml (pip 26.2.2로 pip download → sha256). 다른 플랫폼(Windows 개발)은 requirements.txt를 그대로 쓴다.
-# 생성: 진단 분기 ci/hashes-b9e9d08 run 40282942270 (2026-10-26, pip 26.2.2 · pip 내장 certifi 2026.10.19), requirements.txt는 185f0ba와 같음.
+# 생성: 진단 분기 ci/hashes-otel-edffa04 run 40652535643 (2026-10-28, pip 26.2.2 · pip 내장 certifi 2026.10.19), requirements.txt는 edffa04와 같음.
 alembic==1.20.0 --hash=sha256:77eb101048d95f982c0353e9233404889dcd7a6fc244c107836c0e2fc9cf7d9d  # alembic-1.20.0-py3-none-any.whl
 annotated-doc==0.0.5 --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101  # annotated_doc-0.0.5-py3-none-any.whl
 annotated-types==0.8.0 --hash=sha256:f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0  # annotated_types-0.8.0-py3-none-any.whl
@@ -14,7 +14,7 @@ idna==3.20 --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db
 mako==1.4.3 --hash=sha256:723296007c870bfd6b3f0c3230dba7198096e5269297ebf5e4eff9e7ffa39d4f  # mako-1.4.3-py3-none-any.whl
 markupsafe==3.0.4 --hash=sha256:6da83a088f8ef93b2d483a8232a4dbf4d69d3d8496b568a03c56becac43e1808  # markupsafe-3.0.4-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
 openpyxl==3.1.5 --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2  # openpyxl-3.1.5-py2.py3-none-any.whl
-opentelemetry-api==1.45.0 --hash=sha256:80e068aba7cd56c8b58512d6a36f8d25cb1dfaa0c0a4cc1c938ccf9f362d9cb3  # opentelemetry_api-1.45.0-py3-none-any.whl
+opentelemetry-api==1.45.1 --hash=sha256:b31553efa588ae44bc306f863c785c5333a9ecc091248c6ee68b4b6c87fdedfb  # opentelemetry_api-1.45.1-py3-none-any.whl
 psycopg==3.3.6 --hash=sha256:a1db9f7148b06a28606767efaca51fa6f9398c5c0a3810519be69d7000bdb631  # psycopg-3.3.6-py3-none-any.whl
 psycopg-binary==3.3.6 --hash=sha256:a2e44a342d2aee40508e28a563d8961c39d9bbd8cae36d8578f0a3c6658aab0f  # psycopg_binary-3.3.6-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
 pydantic==2.13.5 --hash=sha256:346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73  # pydantic-2.13.5-py3-none-any.whl
