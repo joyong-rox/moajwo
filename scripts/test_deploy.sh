@@ -139,6 +139,7 @@ chmod +x "$STUB/docker"
 # deploy.sh는 3단계 검증(scripts/image_gate.sh)·자원 확인(scripts/memory_guard.py)을 이 저장소(승인한 트리)의 파일로만 부른다 —
 # 그래서 대역도 환경 변수가 아니라 임시 저장소에 커밋한 파일로 둔다 (운영과 같은 경로).
 cp "${DEPLOY_SH:-$ROOT/scripts/deploy.sh}" "$WORK/repo/scripts/deploy.sh"   # DEPLOY_SH: 다른 버전 시험용
+unset DEPLOY_SH   # deploy.sh는 DEPLOY_* 변수가 있으면 멈추므로 시험 대상에게 넘기지 않는다
 cat > "$WORK/repo/scripts/image_gate.sh" <<'EOF'
 #!/usr/bin/env bash
 # 검증 대역 — 호출을 기록하고 시나리오대로 통과 기록(gate.result)을 쓰거나 쓰지 않는다
@@ -190,6 +191,7 @@ run_case() {  # 이름, 시나리오, 승인 SHA, 기대 종료 코드, 있어�
   export STUB_LOG_W
   if [ -n "${CASE_GATE:-}" ]; then export DEPLOY_IMAGE_GATE="$CASE_GATE"; else unset DEPLOY_IMAGE_GATE; fi   # 우회 시험: 운영 판은 무시해야 함
   if [ -n "${CASE_COMPOSE_FILE:-}" ]; then export COMPOSE_FILE="$CASE_COMPOSE_FILE"; else unset COMPOSE_FILE; fi   # 기본 파일 찾기를 바꾸는 변수
+  if [ -n "${CASE_ENV_FILES:-}" ]; then export COMPOSE_ENV_FILES="$CASE_ENV_FILES"; else unset COMPOSE_ENV_FILES; fi
   if [ -n "${CASE_REHEARSAL:-}" ]; then export DEPLOY_REHEARSAL=1 DEPLOY_TAG_REPO=rehearsal; else unset DEPLOY_REHEARSAL DEPLOY_TAG_REPO; fi
   if [ -n "${CASE_BASH_ENV:-}" ]; then printf 'true\n' > "$state/benv.sh"; export BASH_ENV="$state/benv.sh"; else unset BASH_ENV; fi
   : > "$STUB_LOG"
@@ -205,11 +207,13 @@ run_case() {  # 이름, 시나리오, 승인 SHA, 기대 종료 코드, 있어�
       BK_CHECKED) grep -q "moajwo.step=backup-check" "$STUB_LOG" || { ok=0; why="$why 백업 DB 검사가 실행되지 않음"; } ;;
       VERIFIED) grep -qx "verified yes" backups/moajwo-data-*[0-9].txt 2>/dev/null || { ok=0; why="$why 요약에 'verified yes' 없음"; } ;;
       UNVERIFIED) grep -qx "verified no" backups/moajwo-data-*[0-9].txt 2>/dev/null || { ok=0; why="$why 요약에 'verified no' 없음"; } ;;
-      NO_SWITCH) grep -q "compose up" "$STUB_LOG" && { ok=0; why="$why 전환(up)이 실행됨"; } ;;
-      NO_START) grep -q "compose start" "$STUB_LOG" && { ok=0; why="$why 재시작이 실행됨"; } ;;
-      NO_STOP) grep -q "compose stop" "$STUB_LOG" && { ok=0; why="$why 정지가 실행됨"; } ;;
+      NO_SWITCH) grep -qE "compose( -[fp] [^ ]+)* up( |$)" "$STUB_LOG" && { ok=0; why="$why 전환(up)이 실행됨"; } ;;
+      NO_START) grep -qE "compose( -[fp] [^ ]+)* start( |$)" "$STUB_LOG" && { ok=0; why="$why 재시작이 실행됨"; } ;;
+      NO_STOP) grep -qE "compose( -[fp] [^ ]+)* stop( |$)" "$STUB_LOG" && { ok=0; why="$why 정지가 실행됨"; } ;;
       NO_DONE) grep -q "전환 완료" "$state/out" && { ok=0; why="$why '전환 완료'가 출력됨"; } ;;
-      START) grep -q "compose start" "$STUB_LOG" || { ok=0; why="$why 재시작이 실행되지 않음"; } ;;
+      START) grep -qE "compose( -[fp] [^ ]+)* start( |$)" "$STUB_LOG" || { ok=0; why="$why 재시작이 실행되지 않음"; } ;;
+      ALL_COMPOSE_F)  # 모든 Compose 호출이 docker-compose.yml을 직접 지정 (기본 파일 찾기·COMPOSE_FILE이 끼어들지 못하게)
+        grep "^docker compose" "$STUB_LOG" | grep -qv "^docker compose -f docker-compose.yml " && { ok=0; why="$why -f docker-compose.yml 없는 Compose 호출이 있음"; } ;;
       DONE) grep -q "전환 완료" "$state/out" || { ok=0; why="$why '전환 완료'가 없음"; } ;;
       NO_RETAG) grep -q "^docker tag sha256:cand" "$STUB_LOG" && { ok=0; why="$why 후보 이미지에 latest 태그가 붙음"; } ;;
       CAND_BUILD)  # 빌드는 후보 태그 덧붙임 파일로만, backend·frontend 모두 (한 번에든 하나씩이든) — latest를 옮기는 그냥 build 없음
@@ -272,7 +276,7 @@ run_case() {  # 이름, 시나리오, 승인 SHA, 기대 종료 코드, 있어�
   local calls
   calls=$(awk '/moajwo.step=/ { match($0, /moajwo.step=[a-z-]+/); print substr($0, RSTART + 12, RLENGTH - 12); next }
                /--entrypoint python/ { print "revision-check"; next }
-               /compose (stop|start|up)/ { match($0, /compose (stop|start|up)/); print substr($0, RSTART + 8, RLENGTH - 8) }' "$STUB_LOG" | tr '\n' ' ')
+               /^docker compose/ && match($0, / (stop|start|up)( |$)/) { print substr($0, RSTART + 1, (substr($0, RSTART + RLENGTH - 1, 1) == " ") ? RLENGTH - 2 : RLENGTH - 1) }' "$STUB_LOG" | tr '\n' ' ')
   if [ "$ok" -eq 1 ]; then PASS=$((PASS + 1)); echo "통과 | $name | 종료 $rc | 호출: ${calls:-없음}"
   else FAILN=$((FAILN + 1)); echo "실패 | $name | $why | 호출: ${calls:-없음}"; sed 's/^/      /' "$state/out" | tail -8; fi
 }
@@ -306,7 +310,7 @@ run_case "백업DB조회실패"         sqlite_fail      "$APPROVED" 1 "백업�
 run_case "백업DB결과누락"         bk_incomplete    "$APPROVED" 1 "백업 DB 검사 결과가 불완전함"       UNVERIFIED NO_SWITCH NO_DONE START
 run_case "백업해시불일치"         sha_mismatch     "$APPROVED" 1 "백업 sha256 불일치"                 BK_CHECKED UNVERIFIED NO_SWITCH NO_DONE START
 echo "== 후보 이미지 빌드 · 반영 전 검증 · 검증한 ID로만 전환 (docs/DEPLOY.md 11장)"
-run_case "검증한ID로만전환"         ok                  "$APPROVED" 0 "실행 중 이미지 = 3단계에서 검증한 이미지" CAND_BUILD GATE_CALLED RETAG_THEN_UP VERIFIED DONE NO_START
+run_case "검증한ID로만전환"         ok                  "$APPROVED" 0 "실행 중 이미지 = 3단계에서 검증한 이미지" CAND_BUILD GATE_CALLED RETAG_THEN_UP VERIFIED DONE NO_START ALL_COMPOSE_F
 run_case "이미지검증실패_정지없음"  gate_fail           "$APPROVED" 1 "이미지 검증 실패 \(종료 코드 1\) — 기존 서비스·latest 태그는 그대로" CAND_BUILD GATE_CALLED NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
 run_case "후보ID조회실패"           cand_id_fail        "$APPROVED" 1 "후보 backend 이미지 ID를 읽을 수 없음"  NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
 run_case "이미지이름조회실패"       name_fail           "$APPROVED" 1 "backend의 Compose 이미지 이름을 읽을 수 없음" NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
@@ -340,6 +344,10 @@ run_case "이미지이름에태그_멈춤" image_tagged "$APPROVED" 1 "backend�
 echo 'services: {}' > docker-compose.yaml
 run_case "다른이름Compose파일_멈춤" ok "$APPROVED" 1 "추적하지 않는 파일이 있음: \?\? docker-compose.yaml" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
 rm -f docker-compose.yaml
+# COMPOSE_ENV_FILES가 가리키는 env 파일의 COMPOSE_FILE — 멈추지는 않지만, 모든 Compose 호출이 -f를 직접 주므로 끼어들지 못한다
+printf 'COMPOSE_FILE=docker-compose.yml:local.yml\n' > "$WORK/extra.env"
+CASE_ENV_FILES="$WORK/extra.env" \
+run_case "COMPOSE_ENV_FILES있음_같은설정" ok "$APPROVED" 0 "전환 완료" ALL_COMPOSE_F CAND_BUILD DONE
 CASE_COMPOSE_FILE=docker-compose.yml:local.yml \
 run_case "COMPOSE_FILE변수_멈춤" ok "$APPROVED" 1 "COMPOSE_FILE 환경 변수가 있음 \(docker-compose.yml:local.yml\)" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
 echo 'COMPOSE_FILE=docker-compose.yml:local.yml' > .env

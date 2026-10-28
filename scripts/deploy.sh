@@ -64,6 +64,12 @@ for n in names:
     print("rows", n, c.execute("select count(*) from [" + n + "]").fetchone()[0])
 print("end ok")'
 read -r -a COMPOSE_ARGS <<< "${DEPLOY_COMPOSE_ARGS:-}"
+# 모든 Compose 호출(조회·후보 빌드·정지·전환)이 같은 파일을 직접 지정해 읽는다 — 기본 파일 찾기·덧붙임 파일·COMPOSE_FILE(셸·.env·
+# COMPOSE_ENV_FILES의 파일)이 전환에만 끼어들지 못하게. -f를 하나라도 주면 기본 파일을 읽지 않으므로 docker-compose.yml을 함께 준다
+case " ${COMPOSE_ARGS[*]} " in
+  *" -f "*) ;;
+  *) COMPOSE_ARGS=(-f docker-compose.yml "${COMPOSE_ARGS[@]}") ;;
+esac
 VOLUME="${DEPLOY_VOLUME:-moajwo_moajwo-data}"
 BACKUP_DIR="${DEPLOY_BACKUP_DIR:-backups}"
 TS=$(date +%Y%m%d-%H%M%S)
@@ -196,8 +202,8 @@ BUILD_SRC=$("${GITQ[@]}" status --porcelain --untracked-files=all 2>>"$LOG") || 
 FILTERED=$(git ls-files -z 2>>"$LOG" | git check-attr --stdin -z filter 2>>"$LOG" | tr '\0' '\n' | paste - - - \
   | awk -F'\t' '$3 != "unspecified" && $3 != "unset" && n < 3 { print $1 " (filter=" $3 ")"; n++ }') || fail "git 속성(filter)을 읽을 수 없음"
 [ -z "$FILTERED" ] || fail "filter 속성이 붙은 추적 파일이 있음 — 작업 파일과 승인한 트리가 달라도 git이 같다고 볼 수 있음: $(printf '%s' "$FILTERED" | tr '\n' ' ')"
-# 후보 빌드는 docker-compose.yml을 직접 지정하고(-f), 정지·전환(up)은 Compose의 기본 파일 찾기를 따른다 — 둘이 같은 설정을 읽도록
-# 기본 파일 찾기를 바꾸는 것(다른 이름의 Compose 파일, 덧붙임 파일, 셸이나 .env의 COMPOSE_FILE)이 하나라도 있으면 멈춘다
+# 이 스크립트의 Compose 호출은 모두 -f로 파일을 직접 지정하지만, 4장 롤백 같은 손 명령은 Compose의 기본 파일 찾기를 따른다 —
+# 그 찾기를 바꾸는 것(다른 이름의 Compose 파일, 덧붙임 파일, 셸이나 .env의 COMPOSE_FILE)이 하나라도 있으면 멈춘다
 for f in $COMPOSE_OTHER; do [ ! -e "$f" ] || fail "Compose가 저절로 읽는 다른 파일이 있음: $f — 빌드와 전환이 다른 설정을 쓸 수 있음"; done
 [ -z "${COMPOSE_FILE:-}" ] || fail "COMPOSE_FILE 환경 변수가 있음 ($COMPOSE_FILE) — 빌드와 전환이 다른 설정을 쓸 수 있음"
 ! grep -q 'COMPOSE_FILE' .env 2>/dev/null || fail ".env에 COMPOSE_FILE이 있음 — 빌드와 전환이 다른 설정을 쓸 수 있음"   # 꼴(BOM·'키: 값')과 상관없이
@@ -295,10 +301,7 @@ CAND_COMPOSE="$BACKUP_DIR/candidate-$TS.compose.yml"
   echo "  frontend:"
   echo "    image: $F_REPO:$CAND_TAG"
 } >"$CAND_COMPOSE" || fail "후보 빌드용 덧붙임 파일을 쓸 수 없음: $CAND_COMPOSE"
-case " ${COMPOSE_ARGS[*]} " in
-  *" -f "*) BUILD_ARGS=("${COMPOSE_ARGS[@]}") ;;
-  *) BUILD_ARGS=(-f docker-compose.yml "${COMPOSE_ARGS[@]}") ;;   # -f를 하나라도 주면 기본 파일을 읽지 않으므로 함께 준다
-esac
+BUILD_ARGS=("${COMPOSE_ARGS[@]}")   # 정지·전환과 같은 파일 + 아래에서 후보 태그 덧붙임
 for svc in backend frontend; do   # 하나씩 빌드한다 (동시 빌드보다 메모리를 덜 씀) — 빌드 동안의 시작·최저 여유를 기록
   "$PY" -I -X utf8 scripts/memory_guard.py watch "build-$svc" "$OLD_B" "$MEM_TSV" -- \
     docker compose "${BUILD_ARGS[@]}" -f "$CAND_COMPOSE" build "$svc" >>"$LOG" 2>&1 \
