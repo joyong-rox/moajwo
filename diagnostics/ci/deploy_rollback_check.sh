@@ -12,9 +12,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 RES="$OUT/results.tsv"; : > "$RES"
 res() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" | tee -a "$RES"; }
 export PROBE_PW="Rh-$(openssl rand -hex 12)"
-# deploy.sh는 Git Bash의 'pwd -W'(Windows 경로)로 백업 폴더를 마운트한다 — 리눅스 러너에서는 그대로의 경로를 쓰게 한다
-pwd() { if [ "${1:-}" = "-W" ]; then builtin pwd; else builtin pwd "$@"; fi; }
-export -f pwd
+# deploy.sh는 'pwd -W'(Git Bash)가 없으면 pwd를 쓴다 — 2026-10-28부터 pwd 함수를 내보내지 않음 (deploy.sh는 내보낸 셸 함수가 있으면 멈춘다)
 
 snapshot() {  # snapshot <단계>
   local stage=$1

@@ -1,0 +1,48 @@
+name: gate-rehearsal (diagnostic)
+
+# 반영 전 이미지 검증(docs/DEPLOY.md 11장)이 들어간 scripts/deploy.sh를 실제 Docker로: 이전 판(main, DB 0021) → 검증 실패 경로 →
+# 정상 반영(검증한 ID로만 전환) → 4장 B 롤백(리비전 같음 — 1·2·6·7단계). 진단 전용 브랜치에서만.
+on:
+  push:
+    branches: ["ci/gate-rehearsal-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  rehearsal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OLD: 71f36eb52d567f4ad2192ff3dfa4a056c9ad68b7  # main = 지금 운영과 같은 트리 (DB 0021)
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: bash  # bash -eo pipefail
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: old (main) → gate failure → candidate deploy.sh → rollback B (1·2·6·7)
+        run: |
+          NEW=$(git rev-parse HEAD^)   # 이 브랜치 = 후보 위에 이 워크플로 파일 하나
+          echo "candidate $NEW" | tee "$RUNNER_TEMP/candidate.txt"   # 기록은 저장소 밖에 — deploy.sh 1단계가 추적하지 않는 파일을 막는다
+          cp diagnostics/ci/image_gate_rehearsal.sh diagnostics/ci/deploy_probe.py "$RUNNER_TEMP/"
+          docker compose version
+          bash "$RUNNER_TEMP/image_gate_rehearsal.sh" "$RUNNER_TEMP/out" "$OLD" "$NEW"
+      - name: copy the records into the workspace for upload (after the last deploy.sh run)
+        if: always()
+        run: |
+          cp -r "$RUNNER_TEMP/out" out || true
+          cp "$RUNNER_TEMP/candidate.txt" candidate.txt || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: gate-rehearsal
+          path: |
+            out
+            candidate.txt
+            backups/*.log
+            backups/*.compose.yml
+            backups/image-gate-*
+          retention-days: 14

@@ -39,17 +39,33 @@ if [ "$1" = compose ]; then
       fi
       exit 0 ;;
     up) touch "$STUB_STATE/switched"; exit 0 ;;
-    config)                              # config --images <서비스> — 서비스의 Compose 이미지 이름
+    config)                              # config --format json — 서비스별 image(없으면 <name>-<서비스>) · config --images — 전체 목록
       [ "$S" = name_fail ] && exit 1
-      echo "moajwo-${2:-x}"; exit 0 ;;
+      if [ "${1:-}" = "--format" ]; then
+        if [ "$S" = image_tagged ]; then echo '{"name":"moajwo","services":{"backend":{"image":"moajwo-backend:v1"},"frontend":{}}}'   # image: <이름>:<태그>
+        else echo '{"name":"moajwo","services":{"backend":{},"frontend":{}}}'; fi
+        exit 0
+      fi
+      B=moajwo-backend; [ "$S" = image_tagged ] && B=moajwo-backend:v1
+      [ "$S" = images_mismatch ] && B=other-backend    # Compose의 기본 이름이 <name>-<서비스> 규칙과 다른 경우
+      case "${2:-}" in                   # --images <서비스>: 실제 Compose처럼 frontend는 depends_on의 backend까지 (순서 무작위 → 대역은 backend 먼저)
+        backend) echo "$B" ;;
+        *) printf '%s\nmoajwo-frontend\n' "$B" ;;
+      esac
+      exit 0 ;;
     build|stop|start) exit 0 ;;
   esac
   exit 0
 fi
 case "$1" in
-  image)                                 # image inspect <후보 참조> --format {{.Id}} — 후보 이미지 ID
+  image)                                 # image inspect <참조> --format {{.Id}} — 후보 참조는 후보 ID, <이름>:latest는 지금 태그 상태
     [ "$S" = cand_id_fail ] && exit 1
-    case "$3" in *backend*) echo "sha256:cand00000000000cid-backend" ;; *) echo "sha256:cand00000000000cid-frontend" ;; esac
+    repo=${3%:*}
+    case "$3" in
+      *:latest) if [ -f "$STUB_STATE/latest-$repo" ]; then cat "$STUB_STATE/latest-$repo"; else echo "sha256:old000000000000cid-${repo#moajwo-}"; fi ;;
+      *backend*) echo "sha256:cand00000000000cid-backend" ;;
+      *) echo "sha256:cand00000000000cid-frontend" ;;
+    esac
     exit 0 ;;
   inspect)
     case "$*" in *Health*) echo healthy; exit 0 ;; esac
@@ -68,8 +84,15 @@ case "$1" in
       echo "sha256:old000000000000$2"
     fi
     exit 0 ;;
-  tag)                                   # tag_fail: 검증한 후보에 latest를 붙이는 호출만 실패
-    case "$S:$2" in tag_fail:sha256:cand*) exit 1 ;; esac
+  tag)                                   # latest 태그 상태를 기억한다. tag_fail: 후보→latest가 모두 실패.
+    #                                      tag_partial: backend 후보 이동 성공 → frontend 후보 실패 → backend 되돌림 실패 (frontend 되돌림 성공)
+    case "$S:$2:$3" in
+      tag_fail:sha256:cand*) exit 1 ;;
+      tag_partial:sha256:cand*frontend:*) exit 1 ;;
+      tag_partial:sha256:old*backend:*latest) exit 1 ;;
+      tag_all_fail:*:latest) exit 1 ;;     # latest를 옮기는 명령이 모두 실패 (되돌림 명령 포함) — 태그는 반영 전 그대로
+    esac
+    case "$3" in *:latest) printf '%s\n' "$2" > "$STUB_STATE/latest-${3%:*}" ;; esac
     exit 0 ;;
   ps)                                    # ps --filter volume=… --format {{.Names}}
     [ "$S" = volps_fail ] && exit 1      # 비정상 종료 + 빈 표준출력
@@ -111,32 +134,68 @@ esac
 exit 0
 EOF
 chmod +x "$STUB/docker"
-# 3단계 검증 명령 대역 (scripts/image_gate.sh 대신 — DEPLOY_IMAGE_GATE). 호출을 기록하고 gate_fail이면 실패
-cat > "$STUB/gate" <<'EOF'
-#!/usr/bin/env bash
-{ printf 'gate'; printf ' %s' "$@"; echo; } >> "$STUB_LOG"
-if [ "${STUB_SCENARIO:-ok}" = gate_fail ]; then echo "[검증 실패] (대역) 완성 이미지가 검증한 이미지와 실행 환경이 다름"; exit 1; fi
-echo "[검증 통과] (대역)"
-EOF
-chmod +x "$STUB/gate"
-export DEPLOY_IMAGE_GATE="$STUB/gate"
 
 # ---------------------------------------------------------------- 임시 저장소 (승인 커밋 = HEAD, 다른 커밋 하나)
+# deploy.sh는 3단계 검증(scripts/image_gate.sh)·자원 확인(scripts/memory_guard.py)을 이 저장소(승인한 트리)의 파일로만 부른다 —
+# 그래서 대역도 환경 변수가 아니라 임시 저장소에 커밋한 파일로 둔다 (운영과 같은 경로).
 cp "${DEPLOY_SH:-$ROOT/scripts/deploy.sh}" "$WORK/repo/scripts/deploy.sh"   # DEPLOY_SH: 다른 버전 시험용
+cat > "$WORK/repo/scripts/image_gate.sh" <<'EOF'
+#!/usr/bin/env bash
+# 검증 대역 — 호출을 기록하고 시나리오대로 통과 기록(gate.result)을 쓰거나 쓰지 않는다
+{ printf 'gate'; printf ' %s' "$@"; echo; } >> "$STUB_LOG"
+mkdir -p "$3"
+case "${STUB_SCENARIO:-ok}" in
+  gate_fail) printf 'status=fail\nreason=대역\n' > "$3/gate.result"; echo "[검증 실패] (대역) 실행 환경이 다름"; exit 1 ;;
+  gate_lie) echo "[검증 통과] (대역 — 종료 0이지만 통과 기록 없음)"; exit 0 ;;
+  gate_wrongid) printf 'status=pass\nbackend=sha256:other\nfrontend=%s\n' "$2" > "$3/gate.result"; echo "[검증 통과] (대역 — 다른 ID)"; exit 0 ;;
+esac
+printf 'status=pass\nbackend=%s\nfrontend=%s\ninventory=same\nsmoke=pass\n' "$1" "$2" > "$3/gate.result"
+echo "[검증 통과] (대역)"
+EOF
+cat > "$WORK/repo/scripts/memory_guard.py" <<'EOF'
+"""자원 확인 대역 — 호출을 기록한다. check: mem_low면 4(기준 미달), mem_fail이면 3(측정 실패). watch: 감싼 명령은 실행하지 않고
+가짜 docker와 같은 꼴로 호출만 기록한다(Windows Python이 bash -c 인자의 따옴표를 망가뜨리므로 — 시험이 보는 것은 deploy.sh가 넘긴
+인자다). build_fail이면 빌드 실패. Windows Python은 Git Bash 꼴 경로(/tmp/…)를 못 열어 STUB_LOG_W(Windows 꼴)를 먼저 쓴다."""
+import os
+import sys
+
+s = os.environ.get("STUB_SCENARIO", "ok")
+log = os.environ.get("STUB_LOG_W") or os.environ["STUB_LOG"]
+with open(log, "a", encoding="utf-8") as f:
+    f.write("memory_guard " + " ".join(sys.argv[1:]) + "\n")
+if sys.argv[1] == "check":
+    rc = {"mem_low": 4, "mem_fail": 3}.get(s, 0)
+    print(f"자원 | {sys.argv[2]} 시작 전: host 900 MiB · vm 5000 MiB (대역) → {({0: '통과', 4: '기준 미달', 3: '확인 실패'})[rc]}")
+    sys.exit(rc)
+cmd = sys.argv[sys.argv.index("--") + 1 :]
+with open(log, "a", encoding="utf-8") as f:
+    f.write(" ".join(cmd) + "\n")
+rc = 1 if s == "build_fail" and "build" in cmd else 0
+print(f"자원 | {sys.argv[2]} 동안: host 시작 900 MiB · 최저 800 MiB (표본 3) · vm 시작 5000 MiB · 최저 4900 MiB (표본 2) (대역)")
+sys.exit(rc)
+EOF
 cd "$WORK/repo" || exit 1
 git init -q && git config user.email t@example.invalid && git config user.name t && git config core.autocrlf false
-echo old > backend/app.txt && echo f > frontend/app.txt && printf 'backups/\n' > .gitignore
+echo old > backend/app.txt && echo f > frontend/app.txt && printf 'backups/\n.env\n' > .gitignore   # 운영 저장소처럼 .env는 무시
 git add -A && git commit -qm old && OLD_COMMIT=$(git rev-parse HEAD)
 echo new > backend/app.txt && git add -A && git commit -qm new && APPROVED=$(git rev-parse HEAD)
 
 PASS=0; FAILN=0
 run_case() {  # 이름, 시나리오, 승인 SHA, 기대 종료 코드, 있어야 할 로그(정규식), 없어야 할 호출들…
   local name="$1" scenario="$2" sha="$3" want_rc="$4" want_log="$5"; shift 5
+  if [ -n "${ONLY:-}" ] && ! [[ "$name" =~ $ONLY ]]; then return 0; fi   # ONLY=<정규식>: 고른 사례만 (다른 판 비교용)
   local state="$WORK/state-$name"; rm -rf "$state" backups; mkdir -p "$state"
   export STUB_LOG="$state/calls" STUB_STATE="$state" STUB_SCENARIO="$scenario"
+  STUB_LOG_W=$(cygpath -w "$STUB_LOG" 2>/dev/null || printf '%s' "$STUB_LOG")
+  export STUB_LOG_W
+  if [ -n "${CASE_GATE:-}" ]; then export DEPLOY_IMAGE_GATE="$CASE_GATE"; else unset DEPLOY_IMAGE_GATE; fi   # 우회 시험: 운영 판은 무시해야 함
+  if [ -n "${CASE_COMPOSE_FILE:-}" ]; then export COMPOSE_FILE="$CASE_COMPOSE_FILE"; else unset COMPOSE_FILE; fi   # 기본 파일 찾기를 바꾸는 변수
+  if [ -n "${CASE_REHEARSAL:-}" ]; then export DEPLOY_REHEARSAL=1 DEPLOY_TAG_REPO=rehearsal; else unset DEPLOY_REHEARSAL DEPLOY_TAG_REPO; fi
+  if [ -n "${CASE_BASH_ENV:-}" ]; then printf 'true\n' > "$state/benv.sh"; export BASH_ENV="$state/benv.sh"; else unset BASH_ENV; fi
   : > "$STUB_LOG"
   PATH="$STUB:$PATH" bash scripts/deploy.sh "$sha" "${CASE_PREV:-0014_old}" > "$state/out" 2>&1
   local rc=$? ok=1 why=""
+  unset BASH_ENV
   [ "$rc" -eq "$want_rc" ] || { ok=0; why="종료 코드 $rc (기대 $want_rc)"; }
   grep -Eq "$want_log" "$state/out" || { ok=0; why="$why 로그 없음: $want_log"; }
   local forbidden
@@ -153,9 +212,11 @@ run_case() {  # 이름, 시나리오, 승인 SHA, 기대 종료 코드, 있어�
       START) grep -q "compose start" "$STUB_LOG" || { ok=0; why="$why 재시작이 실행되지 않음"; } ;;
       DONE) grep -q "전환 완료" "$state/out" || { ok=0; why="$why '전환 완료'가 없음"; } ;;
       NO_RETAG) grep -q "^docker tag sha256:cand" "$STUB_LOG" && { ok=0; why="$why 후보 이미지에 latest 태그가 붙음"; } ;;
-      CAND_BUILD)  # 빌드는 후보 태그 덧붙임 파일로만 (latest를 옮기는 그냥 build 없음)
-        grep -qE "compose .*-f backups/candidate-[0-9-]+\.compose\.yml build backend frontend" "$STUB_LOG" \
-          || { ok=0; why="$why 후보 태그 빌드가 없음"; }
+      CAND_BUILD)  # 빌드는 후보 태그 덧붙임 파일로만, backend·frontend 모두 (한 번에든 하나씩이든) — latest를 옮기는 그냥 build 없음
+        for svc in backend frontend; do
+          grep -qE "compose .*-f backups/candidate-[0-9-]+\.compose\.yml build( [a-z]+)* $svc( |$)" "$STUB_LOG" \
+            || { ok=0; why="$why 후보 태그 $svc 빌드가 없음"; }
+        done
         grep "compose" "$STUB_LOG" | grep " build" | grep -qv "candidate-" && { ok=0; why="$why 후보 파일 없는 build가 실행됨"; }
         f=$(ls backups/candidate-*.compose.yml 2>/dev/null | head -1)
         { [ -n "$f" ] && grep -qE '^    image: moajwo-backend:cand-[0-9-]+$' "$f" && grep -qE '^    image: moajwo-frontend:cand-[0-9-]+$' "$f"; } \
@@ -172,6 +233,31 @@ run_case() {  # 이름, 시나리오, 승인 SHA, 기대 종료 코드, 있어�
       RETAG_RESTORED) grep -q "^docker tag sha256:old000000000000cid-backend moajwo-backend:latest" "$STUB_LOG" \
           && grep -q "^docker tag sha256:old000000000000cid-frontend moajwo-frontend:latest" "$STUB_LOG" \
           || { ok=0; why="$why latest가 반영 전 이미지로 되돌아가지 않음"; } ;;
+      RETAG_TRUTH)  # 끝난 뒤 실제 latest 상태(대역이 기억한 값)와 출력이 맞는지: 모두 되돌아갔으면 '되돌림'을 말하고,
+        #            일부만 되돌아갔으면 '되돌림 확인 안 됨'과 남은 태그를 말해야 하며 되돌렸다고 말하면 안 된다
+        lb=$(cat "$state/latest-moajwo-backend" 2>/dev/null || echo sha256:old000000000000cid-backend)
+        lf=$(cat "$state/latest-moajwo-frontend" 2>/dev/null || echo sha256:old000000000000cid-frontend)
+        if [ "$lb" = sha256:old000000000000cid-backend ] && [ "$lf" = sha256:old000000000000cid-frontend ]; then
+          { grep -Eq "반영 전 이미지로 되돌림 확인|읽은 latest는 반영 전 이미지와 같음" "$state/out" && ! grep -q "되돌림 확인 안 됨" "$state/out"; } \
+            || { ok=0; why="$why latest가 반영 전 그대로인데 출력이 그렇게 말하지 않음"; }
+        else
+          grep -q "되돌림 확인 안 됨" "$state/out" && grep -q "backend latest ${lb:7:12}" "$state/out" \
+            || { ok=0; why="$why latest가 일부만 되돌아갔는데(backend ${lb:7:12}) 출력이 그렇게 말하지 않음"; }
+          grep -Eq "latest는 반영 전 이미지로 되돌림|반영 전 이미지로 되돌림 확인" "$state/out" && { ok=0; why="$why 되돌리지 못했는데 되돌렸다고 말함"; }
+        fi ;;
+      NO_RESTORE_CLAIM)  # 되돌림 명령이 실패했으면 '되돌림 확인'이라고 말하지 않음
+        grep -q "반영 전 이미지로 되돌림 확인" "$state/out" && { ok=0; why="$why 되돌림 명령이 실패했는데 '되돌림 확인'이라고 말함"; } ;;
+      RESUME_AND_TAG)  # 컨테이너 재개와 latest 태그 상태를 따로 적음
+        grep -q "결과: 기존 컨테이너 재개 확인 · latest 태그:" "$state/out" || { ok=0; why="$why 재개·태그 상태를 따로 적지 않음"; } ;;
+      NO_BUILD) grep "compose" "$STUB_LOG" | grep -q " build" && { ok=0; why="$why 빌드가 실행됨"; } ;;
+      NO_GATE) grep -q "^gate " "$STUB_LOG" && { ok=0; why="$why 검증이 실행됨"; } ;;
+      NO_STEP6_HEADER) grep -q "== 6\. 새 이미지로 전환" "$state/out" && { ok=0; why="$why 6단계 머리줄이 출력됨 (4장 B 0단계가 전환 도중으로 읽음)"; } ;;
+      MEM_FIRST)  # 빌드 전 자원 확인(운영 backend 이미지로)이 어떤 빌드보다 먼저
+        awk '/^memory_guard check build sha256:old000000000000cid-backend / { if (!m) m = NR } / build / && /compose/ { if (!b) b = NR }
+             END { exit !(m && b && m < b) }' "$STUB_LOG" || { ok=0; why="$why 빌드 전 자원 확인이 먼저 오지 않음"; } ;;
+      SEQ_BUILD)  # 하나씩 빌드하고 각 빌드를 자원 기록(watch)으로 감쌈
+        grep -q "^memory_guard watch build-backend " "$STUB_LOG" && grep -q "^memory_guard watch build-frontend " "$STUB_LOG" \
+          && ! grep -qE "build backend frontend" "$STUB_LOG" || { ok=0; why="$why 하나씩 빌드·자원 기록이 아님"; } ;;
       ROLLBACK_PORTS)  # 반영 전 포트 연결을 그대로 되돌리는 덧붙임 파일 (덧붙이지 않고 바꾸는 !override)
         f=$(ls backups/rollback-*.compose.yml 2>/dev/null | head -1)
         { [ -n "$f" ] && grep -q '^    ports: !override$' "$f" && grep -qx '      - "127.0.0.1:8080:80/tcp"' "$f" \
@@ -224,7 +310,63 @@ run_case "검증한ID로만전환"         ok                  "$APPROVED" 0 "�
 run_case "이미지검증실패_정지없음"  gate_fail           "$APPROVED" 1 "이미지 검증 실패 \(종료 코드 1\) — 기존 서비스·latest 태그는 그대로" CAND_BUILD GATE_CALLED NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
 run_case "후보ID조회실패"           cand_id_fail        "$APPROVED" 1 "후보 backend 이미지 ID를 읽을 수 없음"  NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
 run_case "이미지이름조회실패"       name_fail           "$APPROVED" 1 "backend의 Compose 이미지 이름을 읽을 수 없음" NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
-run_case "latest태그실패_되돌리고재개" tag_fail          "$APPROVED" 1 "검증한 이미지에 latest 태그를 붙일 수 없음" VERIFIED RETAG_RESTORED NO_SWITCH NO_DONE START
+run_case "latest태그실패_되돌리고재개" tag_fail          "$APPROVED" 1 "검증한 이미지에 latest 태그를 붙" VERIFIED RETAG_RESTORED RETAG_TRUTH NO_STEP6_HEADER NO_SWITCH NO_DONE START
 run_case "전환후이미지가검증과다름" post_image_mismatch "$APPROVED" 1 "전환 후 backend 이미지\(other0000000\)가 검증한 이미지\(cand00000000\)와 다름" NO_DONE
+echo "== 2026-10-28 PR #59 보완: 검증 기록 확인 · 환경 변수로 검증 바꾸기 없음 · 자원 확인 · latest 복구를 사실대로"
+run_case "검증종료0_통과기록없음"     gate_lie     "$APPROVED" 1 "이번 후보의 통과를 확인할 수 없음" GATE_CALLED NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+run_case "검증기록이_다른ID"         gate_wrongid "$APPROVED" 1 "이번 후보의 통과를 확인할 수 없음" GATE_CALLED NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+CASE_GATE=true \
+run_case "DEPLOY_IMAGE_GATE=true_멈춤" gate_fail   "$APPROVED" 1 "DEPLOY_\* 변수가 있음 \(DEPLOY_IMAGE_GATE\)" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+run_case "자원기준미달_빌드안함"       mem_low      "$APPROVED" 1 "빌드 전 자원 기준 미달 — 후보를 만들지 않음" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+run_case "자원확인실패_빌드안함"       mem_fail     "$APPROVED" 1 "빌드 전 자원 확인 실패 \(종료 3\)" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+run_case "하나씩빌드_자원기록"         ok           "$APPROVED" 0 "자원 \| build-frontend 동안"       MEM_FIRST SEQ_BUILD CAND_BUILD GATE_CALLED DONE
+run_case "latest일부복구실패_사실대로" tag_partial  "$APPROVED" 1 "되돌림 확인 안 됨"                VERIFIED RETAG_TRUTH RESUME_AND_TAG NO_STEP6_HEADER NO_SWITCH NO_DONE START
+# 1단계가 막아야 하는 것: 변경을 숨기는 git 표시, 검증 입력(scripts)의 추적하지 않는 파일, Compose가 저절로 읽는 덧붙임 파일.
+# 준비·정리는 사례 밖에서 한다 (ONLY로 거른 경우에도 정리는 실행됨)
+git update-index --skip-worktree backend/app.txt && echo tampered > backend/app.txt
+run_case "숨김표시skip-worktree_멈춤" ok "$APPROVED" 1 "변경을 숨기는 git 표시" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+git update-index --no-skip-worktree backend/app.txt && git checkout -q -- backend/app.txt
+git update-index --assume-unchanged backend/app.txt && echo tampered > backend/app.txt
+run_case "숨김표시assume-unchanged_멈춤" ok "$APPROVED" 1 "변경을 숨기는 git 표시" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+git update-index --no-assume-unchanged backend/app.txt && git checkout -q -- backend/app.txt
+echo 'raise SystemExit(0)' > scripts/json.py
+run_case "검증입력에추적안하는파일_멈춤" ok "$APPROVED" 1 "빌드·검증 입력.*추적하지 않는 파일이 있음: \?\? scripts/json.py" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+rm -f scripts/json.py
+printf 'services:\n  backend:\n    image: other\n' > docker-compose.override.yml
+run_case "Compose덧붙임파일_멈춤" ok "$APPROVED" 1 "추적하지 않는 파일이 있음: \?\? docker-compose.override.yml" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+rm -f docker-compose.override.yml
+run_case "이미지이름에태그_멈춤" image_tagged "$APPROVED" 1 "backend의 Compose 이미지 참조에 태그·digest가 지정됨 \(moajwo-backend:v1\)" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+# 후보 빌드(-f docker-compose.yml)와 전환(기본 파일 찾기)이 다른 설정을 읽게 하는 것 — 다른 이름의 Compose 파일, COMPOSE_FILE(셸·.env)
+echo 'services: {}' > docker-compose.yaml
+run_case "다른이름Compose파일_멈춤" ok "$APPROVED" 1 "추적하지 않는 파일이 있음: \?\? docker-compose.yaml" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+rm -f docker-compose.yaml
+CASE_COMPOSE_FILE=docker-compose.yml:local.yml \
+run_case "COMPOSE_FILE변수_멈춤" ok "$APPROVED" 1 "COMPOSE_FILE 환경 변수가 있음 \(docker-compose.yml:local.yml\)" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+echo 'COMPOSE_FILE=docker-compose.yml:local.yml' > .env
+run_case "env파일COMPOSE_FILE_멈춤" ok "$APPROVED" 1 "\.env에 COMPOSE_FILE이 있음" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+printf '\xef\xbb\xbfCOMPOSE_FILE: docker-compose.yml:local.yml\n' > .env   # BOM + '키: 값' 꼴도 Compose는 읽는다
+run_case "env파일COMPOSE_FILE_BOM꼴_멈춤" ok "$APPROVED" 1 "\.env에 COMPOSE_FILE이 있음" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+rm -f .env
+# 저장소 루트의 추적하지 않는 파일 — Windows는 docker를 PATH보다 현재 폴더에서 먼저 찾아, 검증 도구(Python)만 그것을 실행할 수 있다
+: > docker.exe
+run_case "루트에추적안하는실행파일_멈춤" ok "$APPROVED" 1 "추적하지 않는 파일이 있음: \?\? docker.exe" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+rm -f docker.exe
+# filter 속성(clean 필터) — 작업 파일이 달라도 git status·트리 비교가 같다고 볼 수 있음
+printf 'backend/app.txt filter=hide\n' > .git/info/attributes && git config filter.hide.clean cat
+run_case "filter속성_멈춤" ok "$APPROVED" 1 "filter 속성이 붙은 추적 파일이 있음.*backend/app.txt \(filter=hide\)" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+rm -f .git/info/attributes && git config --unset filter.hide.clean
+# 2026-10-28 수정본 검토(배포) — 이름 규칙·숨긴 덧붙임 파일·stat 캐시·셸 시작 파일·리허설 표지·되돌림 명령 실패
+run_case "이미지이름규칙다름_멈춤" images_mismatch "$APPROVED" 1 "서비스별 Compose 이미지 이름을 정하지 못함" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+echo docker-compose.override.yml >> .git/info/exclude && printf 'services: {}\n' > docker-compose.override.yml   # git status에는 안 보임
+run_case "제외목록에숨긴덧붙임파일_멈춤" ok "$APPROVED" 1 "Compose가 저절로 읽는 다른 파일이 있음: docker-compose.override.yml" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+rm -f docker-compose.override.yml && sed -i '/^docker-compose.override.yml$/d' .git/info/exclude
+cp -p backend/app.txt "$WORK/app.txt.orig" && printf 'neW\n' > backend/app.txt && touch -r "$WORK/app.txt.orig" backend/app.txt   # 같은 크기·같은 수정 시각
+run_case "같은크기수정시각되돌림_멈춤" ok "$APPROVED" 1 "작업 파일 내용이 승인한 트리와 다름.*backend/app.txt" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+cp -p "$WORK/app.txt.orig" backend/app.txt
+CASE_BASH_ENV=1 \
+run_case "BASH_ENV있음_멈춤" ok "$APPROVED" 1 "내보낸 셸 함수·BASH_ENV·ENV가 있음" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+CASE_REHEARSAL=1 \
+run_case "격리리허설표지_진행" ok "$APPROVED" 0 "DEPLOY_REHEARSAL=1 — 격리 리허설, 운영 반영 아님" CAND_BUILD DONE
+run_case "latest되돌림명령실패_사실대로" tag_all_fail "$APPROVED" 1 "되돌림 명령 실패 \(종료 1/1\)" VERIFIED RETAG_TRUTH NO_RESTORE_CLAIM RESUME_AND_TAG NO_STEP6_HEADER NO_SWITCH NO_DONE START
 echo "== 결과: 통과 $PASS · 실패 $FAILN"
 [ "$FAILN" -eq 0 ]
