@@ -13,15 +13,15 @@
 **하지 않는 것**: 운영 볼륨 삭제, `docker compose down -v`, 자동 DB downgrade. backend는 일반 사용자(`app`)로 실행합니다
 (원본·결과 파일의 읽기 전용 보호는 root로 실행하면 효과가 없음).
 
-## 0. 현행 실행 기준 (2026-10-27 — PR #58)
+## 0. 현행 실행 기준 (2026-10-28 반영 뒤)
 
 | 항목 | 값 |
 |---|---|
-| 대상 PR · 코드 기준 | **#58** `rc/review-20261027` → `main` · 코드 `c078bdddbef9622ab3075d43d7413232d74adf4d` (승인 HEAD는 이 문서들을 더한 커밋 — PR #58 본문 머리의 값) |
-| 실제 배포 경로 | 운영 SQLite `0019_analysis_runs → 0020_run_worker_lease → 0021_run_request_key` — backend 기동 때 두 단계 연속 적용 |
-| 명령 | `bash scripts/deploy.sh <승인 HEAD H> 0019_analysis_runs` — 두 번째 인자는 **반영 전 리비전**(이번 실제 출발점 0019; 운영이 다른 리비전이면 실행하지 않음) |
-| 롤백 대상 | 배포 직전 실제로 실행 중이던 이미지·포트 구성(2026-10-19 반영 backend + 2026-10-20 frontend 단독 반영 — **key 취합 모듈 없음**), 반영 전 리비전 0019. 4장 B가 로그의 반영 전 리비전(0019)으로 내림 — 10장 '롤백 B' 참고 |
-| 8·9·10장의 '0020 출발' 설명 | 0020이 이미 반영된 DB에서 시작하는 경우에만 해당. 이번 실행은 0019 출발 |
+| 지금 운영 | main `71f36eb` (PR #58 병합, 트리 `69d6f100…`) · DB `0021_run_request_key` · backend `sha256:6874cec0c9a043809198c19952428d4c89dbe40a74226a844618cf2312b25560` · frontend `sha256:883f7fa5b785ad7e9b318b5af58e60c042fab2d8aa53f58190e1f02e560dc81b` (2026-10-28 11:44 반영, 기록 `backups/deploy-20261028-114420.log`) |
+| 다음 이미지 교체 명령 | `bash scripts/deploy.sh <승인 SHA> 0021_run_request_key` — 두 번째 인자는 **지금 운영 리비전 0021**입니다. 2026-10-28에 쓴 `… 0019_analysis_runs`는 그 반영의 출발점이라 다시 쓰지 않습니다 (운영이 0021이라 2단계에서 멈춤) |
+| 3단계 (이 판부터) | 후보 태그로 빌드 → 완성 이미지 목록 대조 + 격리 기동 점검 (11장) → 통과한 ID만 6단계에서 latest로 옮겨 다시 빌드하지 않고 전환 |
+| DB 변경이 없는 교체의 롤백 | 반영 직전에 실행 중이던 이미지(롤백 태그 — 지금 위의 backend·frontend) + 이전 포트 연결 + 리비전 0021 그대로. 4장 B 0단계 출력이 '리비전 0021_run_request_key → 0021_run_request_key'이면 3~5단계(정리·downgrade)를 건너뛰고 1·2·6·7단계만 합니다 |
+| 2026-10-27 실행 기준 (PR #58, 0019 출발) | 이미 반영된 기록입니다 — 10장과 `backups/deploy-20261028/RECORD.md`. 8·9·10장의 '0019 출발'·'0020 출발' 설명은 그 반영에 대한 것입니다 |
 
 ## 1·2. 반영 실행: `scripts/deploy.sh` (준비 → 빌드 → 쓰기 중단 → 백업·검증 → 전환)
 
@@ -40,7 +40,7 @@
 cd /c/Users/juho/Documents/Moajwo
 git fetch origin && git checkout main && git pull --ff-only
 bash scripts/deploy.sh <승인한 PR HEAD 커밋 SHA> <반영 전 리비전>
-# 예 (0018 반영): bash scripts/deploy.sh <SHA> 0017_auth_version
+# 예 (2026-10-28 이후 다음 교체 — 지금 운영 리비전): bash scripts/deploy.sh <SHA> 0021_run_request_key
 ```
 
 반영 전 리비전은 운영자가 미리 확인해 인자로 줍니다. 실행 중 backend의 리비전이 이 값과 다르면 **서비스를 멈추기 전에** 중단하고, 원인을
@@ -52,16 +52,16 @@ bash scripts/deploy.sh <승인한 PR HEAD 커밋 SHA> <반영 전 리비전>
 | --- | --- | --- |
 | 1 | 승인 커밋 존재·트리 일치, 미커밋 변경 확인 | 승인 커밋 없음 · 트리 불일치 · 추적 파일 변경 · backend/frontend의 추적하지 않는 파일 (**서비스 그대로**) |
 | 2 | 실행 중 컨테이너의 실제 이미지 ID로 롤백 태그(`rollback-<시각>`), 반영 전 리비전 기록 · 인자로 받은 반영 전 리비전과 같은지 확인 | 컨테이너·리비전을 읽을 수 없음 · 리비전이 인자와 다름 (**서비스 그대로**, 정지하지 않음) |
-| 3 | `docker compose build` | 빌드 실패 (**서비스 그대로**) |
+| 3 | 후보 태그(`<이미지>:cand-<시각>`)로 빌드 → `scripts/image_gate.sh`: 완성 이미지 목록이 검증한 목록(`deploy/expected-images/`)과 같은지 · 격리 기동 점검 (11장). latest 태그는 옮기지 않음 | 빌드 실패 · 후보 이미지 ID 조회 실패 · 목록 다름 · 격리 점검 실패 (**서비스·latest 태그 그대로**) |
 | 4 | `stop -t 30 frontend backend` (진행 중 요청은 최대 30초 대기) 후 실행 중 서비스 0개, 데이터 볼륨을 쓰는 컨테이너 0개 확인 (두 조회 모두 성공해야 함) | 정지 실패 · 조회 실패 · 남은 서비스 · 볼륨을 쓰는 다른 컨테이너 → **마이그레이션 미시작(리비전 그대로)을 확인할 수 있으면 기존 컨테이너 재시작, 없으면 수동 복구 안내** |
 | 5 | 백업과 검증 (아래 '5단계 백업 검증'): a 정지 상태 운영 볼륨 DB의 리비전·행 수 → b 볼륨 전체 백업·`gzip -t`·`moajwo.db` 포함·sha256 기록 → c **백업에서 꺼낸 DB**의 무결성·리비전·행 수 → d a와 c 비교 → e sha256 재확인 | 조회 실패 · 필수 결과 누락 · 백업 생성·압축 검사 실패 · 추출·열기 실패 · 백업 DB 무결성 실패 · 리비전·테이블·행 수 불일치 · sha256 불일치 → **4단계와 같은 방식으로 기존 컨테이너 재시작**, 이 백업은 요약에 `verified no` |
-| 6 | 백업 확인 후에만 `up -d --wait` (새 이미지로 재생성·마이그레이션) → 리비전 `(head)`·컨테이너·이미지 조회 | 전환 실패 · 전환 후 조회 실패 → '전환 완료' 없이 멈춤, 자동 롤백하지 않음 (4장 절차, 백업·롤백 태그는 로그에 있음) |
+| 6 | 백업 확인 후에만 3단계에서 검증한 이미지 ID에 latest 태그 → `up -d --no-build --wait` (다시 빌드하지 않고 재생성·마이그레이션) → 리비전 `(head)`·컨테이너·이미지 조회 → 실행 중 이미지 = 검증한 ID | latest 태그 실패 → latest를 반영 전 이미지로 되돌리고 4단계와 같은 방식으로 기존 컨테이너 재개 · 전환 실패 · 전환 후 조회 실패 · 실행 중 이미지가 검증한 ID와 다름 → '전환 완료' 없이 멈춤, 자동 롤백하지 않음 (4장 절차, 백업·롤백 태그는 로그에 있음) |
 
 - 모든 단계는 `backups/deploy-<시각>.log`에 남고, 마지막 줄에 **배포 단위**(승인 SHA·배포 SHA·이전 이미지 ID·롤백 태그·백업 파일·리비전 전후)를 적습니다. 롤백에 이 값들을 씁니다.
 - `set -uo pipefail`을 쓰지만 판단에 쓰는 **모든 조회는 종료 코드와 필수 결과를 함께** 검사합니다: 백업 경로 변환, git 커밋·트리·상태, 컨테이너·이미지 ID, 반영 전후 리비전, 실행 중 서비스(`compose ps --status running --services`), 볼륨 사용 컨테이너(`docker ps --filter volume=`). 조회가 **성공했고 결과가 비어 있을 때만** '없음'으로 판단하고, 조회 자체가 실패하면 '확인할 수 없음'으로 기록한 뒤 백업·전환을 하지 않습니다. 5단계의 DB 조회 결과는 파이프 없이 파일·변수로 받아 종료 코드를 보존하고, 마지막 줄(`end ok`)·리비전·행 수가 모두 있어야 '결과 있음'으로 봅니다.
 - 정지 이후 실패하면 볼륨의 DB 리비전 조회가 **성공하고** 반영 전 리비전과 같을 때만 기존 컨테이너를 `start`로 재개합니다. 리비전을 확인할 수 없거나 다르면 재개하지 않고, 로그에 현재 상태 확인·수동 복구 명령을 남깁니다.
 - 전환 후 리비전·컨테이너·이미지 조회 중 하나라도 실패하면 '전환 완료'를 출력하지 않고 실패(종료 코드 1)로 끝냅니다.
-- 실패 처리 시험: `bash scripts/test_deploy.sh` (실제 Docker를 쓰지 않는 명령 대역 시험, 아래 3차·4차 결과)
+- 실패 처리 시험: `bash scripts/test_deploy.sh` (실제 Docker를 쓰지 않는 명령 대역 시험, 아래 3차·4차 결과. 2026-10-28에 후보 빌드·검증·전환 6사례를 더해 31사례)
 - `backups/`에는 운영 데이터가 들어 있어 git에서 제외합니다 (`.gitignore`).
 - 사용자에게 반영 시각을 미리 알리고, 진행 중인 업로드·검토·통합이 없는지 확인한 뒤 실행합니다 (통합은 요청 안에서 끝나는 동기 작업).
 - frontend만 멈추면 backend가 127.0.0.1:8000으로 계속 요청을 받으므로 스크립트는 둘 다 멈춥니다.
@@ -734,6 +734,65 @@ key 취합이 있으면서 0021이 없는 판(통합 후보 `8d40c69` 계열 —
 정리한 뒤 다시 합니다. 4장 B는 1단계에서 서비스를 멈춘 뒤에만 5단계 downgrade에 이르므로 새 판 코드가 지워진 열에 쓰는 일은 없습니다.
 확인한 것: SQLite up·down·up과 채움·멈춤 조건(`tests/test_migrations.py`), PostgreSQL 같은 항목과 고유 색인·잠금 대기 5초
 (`tests/test_migration_0021_postgres.py`), 롤백 리허설은 후보 트리의 alembic head를 읽어 같은 단계 상자로 돕니다(8차 뒤 9차).
+
+## 11. 기반 이미지 고정과 반영 전 이미지 검증 (2026-10-28)
+
+**왜 바꿨나**: 2026-10-28 반영에서 backend 기반 `python:3.11-slim`(digest 없는 태그)이 레지스트리를 묻지 않고 이 PC에 남아 있던
+옛 이미지로 정해졌습니다. 그래서 CI가 검증한 이미지와 기반 판(Python 3.11.17 ↔ 3.11.18)과 OS 패키지 두 개가 다른 이미지가 운영에
+들어갔습니다. 소스와 의존성 고정 목록은 같았습니다. `docker compose build`는 기반을 새로 받지 않고, 빌드 뒤 반영 전에 완성 이미지를
+확인하는 단계도 없었습니다.
+
+**고정한 기반** — 자동 갱신은 두지 않습니다. 바꿀 때는 이 표·Dockerfile·검증 목록을 같은 PR에서 바꾸고 CI 검증을 다시 합니다.
+
+| 이미지 | 태그 | digest (멀티아키 색인) | linux/amd64 매니페스트 | 내용 |
+|---|---|---|---|---|
+| backend 기반 | `python:3.11.18-slim-trixie` | `sha256:82209229d3fda30d71e603ec95bb4bea0476635ba6df3df2e32284e036654f51` | `sha256:0451b9eeed3e5a9523d8958cc33262eb5843c7af3114c50f45d99f56e2b883ac` | Python 3.11.18 · Debian 13 trixie (2026-10-26 생성, 2026-10-27 CI 이미지 검사의 기반과 같은 매니페스트) |
+| frontend 실행 기반 | `nginx:1.30-alpine` | `sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee17884204677702951` | `sha256:84ed8c0dd296c188bfc24ed506f46589e9285fb0b11cf3a04d91d524d3067e11` | nginx 1.30.6 · Alpine 3.24.3 (2026-10-28 반영과 CI가 실제로 쓴 색인) |
+| frontend 빌드 단계 | `node:24.22.1-alpine` | `sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53` (그대로) | `sha256:1200d815de24f8dcca745fbf7651d166034a35adbcad8860a8538ffff44f1420` | 완성 이미지에 남지 않음 |
+
+**기반을 고정해도 같아지지 않는 것**: backend의 `apt-get install --only-upgrade ca-certificates`와 frontend의 `apk upgrade …`는 빌드할
+때 저장소에서 받습니다. pip 의존성은 해시 고정이라 같습니다. 그래서 반영 전에 **완성 이미지**를 다시 확인합니다.
+
+**빌드 → 검증 → 반영의 연결** (`scripts/deploy.sh` 3·6단계):
+
+1. 후보 태그로 빌드합니다 (`<이미지>:cand-<시각>`, 덧붙임 `backups/candidate-<시각>.compose.yml`). 운영이 쓰는 latest 태그는 옮기지 않습니다.
+2. `scripts/image_gate.sh <backend ID> <frontend ID> backups/image-gate-<시각>`이 두 가지를 봅니다. 하나라도 실패하면 서비스와
+   latest 태그를 그대로 두고 멈춥니다.
+   - **완성 이미지 목록** (`scripts/image_inventory.py`): 플랫폼, OS 판, OS 패키지 전체 판, Python 판과 ssl의 OpenSSL, Python 의존성
+     전체 판, CA 묶음 sha256·개수, psycopg 내장 라이브러리 해시, nginx 판이 검증한 목록 `deploy/expected-images/{backend,frontend}.json`과
+     같아야 합니다. 앱 코드·화면 파일 해시는 기록만 합니다.
+   - **격리 기동 점검** (`scripts/image_smoke.py`): 내부 네트워크(`--internal`)와 새 임시 볼륨에 띄우고 호스트 포트를 열지 않습니다.
+     기동(healthy·alembic head), DB 연결(`/health`), CA·TLS(기본 신뢰 저장소, 점검 안에서 만든 시험 CA로 Python ssl과 psycopg
+     `verify-full`의 성공·거절), frontend(첫 화면·보안 헤더·프록시), 핵심 취합(CSV·XLSX 업로드 → 공통 key 연결 → 내려받아 내용 확인,
+     묶기 → 내려받기), 로그를 봅니다. 끝나면 만든 컨테이너·볼륨·네트워크를 지웁니다.
+3. 6단계는 백업 확인 뒤 **그 ID에만** latest 태그를 옮기고 `up -d --no-build`로 전환합니다. 실행 중 이미지 ID가 검증한 ID와
+   같아야 '전환 완료'입니다.
+4. 반영 로그에 '후보 이미지', '이미지 검증 통과', '실행 중 이미지 = 3단계에서 검증한 이미지', '이미지 연결' 줄이 남습니다.
+
+**검증한 목록은 어디서 오나**: CI에서 같은 고정 입력으로 빌드한 완성 이미지에서 `image_inventory.py collect`로 만든 것입니다. 같은
+CI 실행에서 그 이미지로 격리 기동 점검과 Trivy 검사를 합니다. 파일의 `verified` 항목에 CI 실행 번호·커밋·이미지 ID가 있습니다
+(비교하지 않는 항목).
+
+**CI에서 검증한 이미지를 그대로 옮기지 않는 이유**: 옮기려면 레지스트리가 필요한데, 저장소가 공개라 이미지를 공개 레지스트리에 올리지
+않습니다(사설 레지스트리 없음). 그래서 운영 PC에서 같은 고정 입력으로 다시 빌드하고, 그 완성 이미지가 검증한 이미지와 같은 실행
+환경인지 목록으로 확인한 뒤, 같은 PC에서 격리 점검을 통과한 **그 ID**만 반영합니다. Docker Desktop(containerd 저장소)의 이미지 ID는
+매니페스트 digest이고 CI docker(기존 저장소)의 ID는 설정 digest라, 같은 이미지라도 CI와 로컬의 ID 값은 다릅니다. CI와 로컬은
+목록으로, 같은 PC 안의 빌드·검증·반영은 ID로 연결합니다.
+
+**목록이 다르면**: 반영하지 않습니다. 보통 빌드 시점의 저장소 갱신(예: ca-certificates·curl 보안 판) 때문입니다. CI에서 같은 커밋으로
+다시 빌드·검증해 `deploy/expected-images/`를 갱신하는 PR을 만들고 승인받은 뒤 반영합니다. 목록 대조를 건너뛰는 옵션은 없습니다.
+
+**미리 확인하기 (운영을 바꾸지 않음)** — 반영 창 전에 같은 PC에서 후보를 빌드해 검증만 해 볼 수 있습니다:
+
+```bash
+TS=$(date +%Y%m%d-%H%M%S)
+printf 'services:\n  backend:\n    image: moajwo-backend:pre-%s\n  frontend:\n    image: moajwo-frontend:pre-%s\n' "$TS" "$TS" > "backups/pre-$TS.compose.yml"
+docker compose -f docker-compose.yml -f "backups/pre-$TS.compose.yml" build backend frontend      # latest 태그는 그대로
+bash scripts/image_gate.sh "$(docker image inspect moajwo-backend:pre-$TS --format '{{.Id}}')" \
+  "$(docker image inspect moajwo-frontend:pre-$TS --format '{{.Id}}')" "backups/image-gate-pre-$TS"
+```
+
+**하지 않는 것**: 기반 이미지 자동 갱신(Dependabot·Renovate 등), 운영 자동 재배포.
 
 ## 리허설 결과
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # 운영 반영 (Git Bash). 사용법: scripts/deploy.sh <승인한 PR HEAD 커밋 SHA> <반영 전 리비전>
-#   예: scripts/deploy.sh 8be8436… 0017_auth_version   (반영 전 리비전이 다르면 정지하지 않고 멈춘다)
+#   예: scripts/deploy.sh <SHA> 0021_run_request_key   (2026-10-28 이후 운영 리비전. 반영 전 리비전이 다르면 정지하지 않고 멈춘다)
 #
 # 실패하면 그 자리에서 멈춘다. set -e에 맡기지 않고, 판단에 쓰는 모든 조회는 **종료 코드와 필수 결과**를 함께 검사한다.
 # (조회가 실패한 것과, 조회는 성공했는데 결과가 비어 있는 것을 구분한다.)
 #   1) 승인 변경과 배포 대상 일치 (병합 방식에 따라 main SHA는 달라질 수 있어 트리(파일 내용)를 비교)
 #   2) 미커밋 변경 없음 (backend/frontend의 추적하지 않는 파일 포함 — 빌드에 들어가므로)
-#   3) 이미지 빌드 성공 (실패하면 서비스는 그대로)
+#   3) 후보 이미지 빌드(latest가 아닌 cand-<시각> 태그) → 반영 전 이미지 검증(scripts/image_gate.sh — 완성 이미지 목록이 검증한
+#      목록 deploy/expected-images/와 같음 · 격리 기동 점검). 실패하면 서비스·latest 태그 그대로 (docs/DEPLOY.md 11장)
 #   4) 서비스 정지 성공 · 실행 중 서비스 0개 · 데이터 볼륨을 쓰는 컨테이너 0개 (각 조회가 성공한 경우에만 '없음'으로 판단)
 #   5) 백업과 검증 — 운영 볼륨 값과 백업 안의 값을 구분해 기록하고 비교한다
 #      a. 정지 상태의 운영 DB(읽기 전용): 리비전 · 모든 테이블의 행 수
@@ -19,7 +20,8 @@
 #      하나라도 실패하거나 필요한 결과가 빠지면 전환하지 않는다. 백업 검증 중 운영 DB는 읽기만 한다.
 #   → 4·5가 실패하면, 마이그레이션이 시작되지 않았음(리비전 그대로)을 **확인할 수 있을 때만** 기존 컨테이너를 다시 시작한다.
 #     확인할 수 없으면 재시작하지 않고 현재 상태와 수동 복구 절차를 보고한다.
-#   6) 백업 성공을 확인한 뒤에만 새 이미지로 전환하고, 전환 후 리비전·이미지 조회가 모두 성공해야 '전환 완료'로 보고한다.
+#   6) 백업 성공을 확인한 뒤에만 3단계에서 검증한 이미지 ID에 latest 태그를 옮기고, 다시 빌드하지 않고(up --no-build) 전환한다.
+#      전환 후 실행 중 이미지가 검증한 ID와 같고 리비전·이미지 조회가 모두 성공해야 '전환 완료'로 보고한다.
 #   롤백 단위 = 이전 이미지(롤백 태그) + 이전 컨테이너의 포트 연결(backups/rollback-<시각>.compose.yml) + 백업.
 #   이미지만 되돌리면 안 되는 반영(예: frontend 컨테이너 포트 80 → 8080)이 있어, 2단계에서 실행 중 컨테이너의 실제 포트
 #   연결을 Compose 덧붙임 파일(ports: !override)로 남긴다 — docs/DEPLOY.md 4장·8장.
@@ -30,6 +32,8 @@
 #   DEPLOY_BACKUP_DIR    백업 폴더 (기본 backups)
 #   DEPLOY_BACKUP_IMAGE  백업 one-off에 쓸 이미지 (기본: 반영 전 backend 이미지)
 #   DEPLOY_TAG_REPO      롤백 태그 이름 앞부분 (기본 moajwo → moajwo-backend:rollback-<시각>). 격리 시험이 운영 이름으로 태그를 만들지 않게
+#   DEPLOY_IMAGE_GATE    3단계 검증 명령 (기본 "bash scripts/image_gate.sh") — 명령 대역 시험(scripts/test_deploy.sh)용
+#   DEPLOY_EXPECTED_DIR  검증한 완성 이미지 목록 폴더 (기본 deploy/expected-images — scripts/image_gate.sh가 읽음)
 set -uo pipefail
 export MSYS_NO_PATHCONV=1
 
@@ -194,9 +198,47 @@ ROLLBACK_COMPOSE="$BACKUP_DIR/rollback-$TS.compose.yml"
 } >"$ROLLBACK_COMPOSE" || fail "롤백용 포트 설정 파일을 쓸 수 없음: $ROLLBACK_COMPOSE"
 log "반영 전 포트 연결: backend $OLD_B_PORTS · frontend $OLD_F_PORTS → $ROLLBACK_COMPOSE"
 
-log "== 3. 새 이미지 빌드 (서비스 중단 없음)"
-dc build >>"$LOG" 2>&1 || fail "이미지 빌드 실패 — 기존 서비스는 그대로 동작 중"
-log "빌드 완료"
+log "== 3. 후보 이미지 빌드와 반영 전 검증 (서비스 중단 없음 · latest 태그는 그대로)"
+image_name() {  # 서비스의 Compose 이미지 이름 (태그 없이). 조회 실패·결과 없음이면 실패
+  local out
+  out=$(dc config --images "$1" 2>>"$LOG") || return 1
+  out=$(printf '%s\n' "$out" | head -1)
+  case "${out##*/}" in *:*) out=${out%:*} ;; esac   # 태그가 붙어 있으면 뗀다 (레지스트리 포트의 ':'는 그대로)
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+image_id() {  # 이미지 참조의 ID (sha256:… 형식이어야 함)
+  local id
+  id=$(docker image inspect "$1" --format '{{.Id}}' 2>>"$LOG") || return 1
+  case "$id" in sha256:*) printf '%s\n' "$id" ;; *) return 1 ;; esac
+}
+B_REPO=$(image_name backend) || fail "backend의 Compose 이미지 이름을 읽을 수 없음"
+F_REPO=$(image_name frontend) || fail "frontend의 Compose 이미지 이름을 읽을 수 없음"
+CAND_TAG="cand-$TS"
+CAND_COMPOSE="$BACKUP_DIR/candidate-$TS.compose.yml"
+{
+  echo "# 후보 이미지 빌드용 덧붙임 ($TS) — 3단계에서만 쓴다. latest가 아닌 후보 태그로 만들어 검증 전에는 운영 태그를 옮기지 않는다"
+  echo "services:"
+  echo "  backend:"
+  echo "    image: $B_REPO:$CAND_TAG"
+  echo "  frontend:"
+  echo "    image: $F_REPO:$CAND_TAG"
+} >"$CAND_COMPOSE" || fail "후보 빌드용 덧붙임 파일을 쓸 수 없음: $CAND_COMPOSE"
+case " ${COMPOSE_ARGS[*]} " in
+  *" -f "*) BUILD_ARGS=("${COMPOSE_ARGS[@]}") ;;
+  *) BUILD_ARGS=(-f docker-compose.yml "${COMPOSE_ARGS[@]}") ;;   # -f를 하나라도 주면 기본 파일을 읽지 않으므로 함께 준다
+esac
+docker compose "${BUILD_ARGS[@]}" -f "$CAND_COMPOSE" build backend frontend >>"$LOG" 2>&1 \
+  || fail "후보 이미지 빌드 실패 — 기존 서비스·latest 태그는 그대로"
+CAND_B=$(image_id "$B_REPO:$CAND_TAG") || fail "후보 backend 이미지 ID를 읽을 수 없음 — 기존 서비스·latest 태그는 그대로"
+CAND_F=$(image_id "$F_REPO:$CAND_TAG") || fail "후보 frontend 이미지 ID를 읽을 수 없음 — 기존 서비스·latest 태그는 그대로"
+log "후보 이미지: backend $CAND_B · frontend $CAND_F (태그 $CAND_TAG — latest는 그대로)"
+GATE_DIR="$BACKUP_DIR/image-gate-$TS"
+read -r -a GATE_CMD <<< "${DEPLOY_IMAGE_GATE:-bash scripts/image_gate.sh}"
+"${GATE_CMD[@]}" "$CAND_B" "$CAND_F" "$GATE_DIR" 2>&1 | tee -a "$LOG"
+RC=${PIPESTATUS[0]}
+[ "$RC" -eq 0 ] || fail "이미지 검증 실패 (종료 코드 $RC) — 기존 서비스·latest 태그는 그대로. 기록: $GATE_DIR"
+log "이미지 검증 통과: backend ${CAND_B:7:12} · frontend ${CAND_F:7:12} — 6단계는 이 ID로만 전환 (기록 $GATE_DIR)"
 
 log "== 4. 쓰기 중단 (backend·frontend 정지)"
 T0=$(date +%s)
@@ -297,17 +339,29 @@ SHA_NOW=$(sha256sum "$BACKUP_DIR/$ARCHIVE" 2>>"$LOG" | cut -d' ' -f1) && [ -n "$
 SHA_LINE="sha256 $SHA_REC"
 log "백업 확인: $ARCHIVE ($SHA_LINE) — 운영 볼륨 값 $SRC_TXT · 백업 DB 값 $BK_TXT"
 
-log "== 6. 새 이미지로 전환 (백업 성공 확인 후)"
+log "== 6. 새 이미지로 전환 (백업 성공 확인 후 · 3단계에서 검증한 이미지 ID · 다시 빌드하지 않음)"   # 제목 앞부분은 4장 B 0단계가 찾는 문구
 ROLLBACK_HINT="docs/DEPLOY.md 4장 (백업 $ARCHIVE, 롤백 태그 $TAG, 포트 $ROLLBACK_COMPOSE, 반영 전 리비전 $PREV)"
-dc up -d --wait >>"$LOG" 2>&1 || fail "전환 실패 — 마이그레이션이 일부 진행됐을 수 있음. 자동 롤백하지 않습니다: $ROLLBACK_HINT"
+retag_latest() {  # latest 태그를 3단계에서 검증한 ID로 — 하나라도 실패하면 둘 다 반영 전 이미지로 되돌린다
+  docker tag "$CAND_B" "$B_REPO:latest" 2>>"$LOG" && docker tag "$CAND_F" "$F_REPO:latest" 2>>"$LOG" && return 0
+  docker tag "$OLD_B" "$B_REPO:latest" 2>>"$LOG"
+  docker tag "$OLD_F" "$F_REPO:latest" 2>>"$LOG"
+  return 1
+}
+retag_latest || abort_after_stop "검증한 이미지에 latest 태그를 붙일 수 없음 (latest는 반영 전 이미지로 되돌림)"
+log "latest 태그 → 검증한 이미지: $B_REPO ${CAND_B:7:12} · $F_REPO ${CAND_F:7:12}"
+dc up -d --no-build --wait >>"$LOG" 2>&1 || fail "전환 실패 — 마이그레이션이 일부 진행됐을 수 있음. 자동 롤백하지 않습니다: $ROLLBACK_HINT"
 NEW_REV=$(current_revision) || fail "전환 후 리비전을 확인할 수 없음 — 성공으로 보고하지 않습니다. 상태를 확인하세요: $ROLLBACK_HINT"
 case "$NEW_REV" in *"(head)"*) ;; *) fail "전환 후 리비전이 head가 아님: $NEW_REV — $ROLLBACK_HINT";; esac
 NB_CID=$(container_id backend) || fail "전환 후 backend 컨테이너를 확인할 수 없음 — 성공으로 보고하지 않습니다: $ROLLBACK_HINT"
 NF_CID=$(container_id frontend) || fail "전환 후 frontend 컨테이너를 확인할 수 없음 — 성공으로 보고하지 않습니다: $ROLLBACK_HINT"
 NEW_B=$(image_of "$NB_CID") || fail "전환 후 backend 이미지를 확인할 수 없음 — 성공으로 보고하지 않습니다: $ROLLBACK_HINT"
 NEW_F=$(image_of "$NF_CID") || fail "전환 후 frontend 이미지를 확인할 수 없음 — 성공으로 보고하지 않습니다: $ROLLBACK_HINT"
+[ "$NEW_B" = "$CAND_B" ] || fail "전환 후 backend 이미지(${NEW_B:7:12})가 검증한 이미지(${CAND_B:7:12})와 다름 — 성공으로 보고하지 않습니다: $ROLLBACK_HINT"
+[ "$NEW_F" = "$CAND_F" ] || fail "전환 후 frontend 이미지(${NEW_F:7:12})가 검증한 이미지(${CAND_F:7:12})와 다름 — 성공으로 보고하지 않습니다: $ROLLBACK_HINT"
+log "실행 중 이미지 = 3단계에서 검증한 이미지 (backend $NEW_B · frontend $NEW_F · 검증 기록 $GATE_DIR)"
 log "전환 완료: 리비전 $NEW_REV · backend ${NEW_B:7:12} · frontend ${NEW_F:7:12} · 중단 $(( $(date +%s) - T0 ))초"
 NEW_F_PORTS=$(ports_of "$NF_CID") || NEW_F_PORTS="(조회 실패)"
 log "포트 연결: frontend $OLD_F_PORTS → $NEW_F_PORTS"
 log "배포 단위: 승인 $APPROVED / 대상 $HEAD_SHA / 이전 ${OLD_B:7:12}+${OLD_F:7:12}($TAG) / 이전 포트 $ROLLBACK_COMPOSE / 백업 $ARCHIVE / 리비전 $PREV → $NEW_REV"
+log "이미지 연결: 빌드(후보 태그 $CAND_TAG) → 검증($GATE_DIR) → 실행 = 같은 ID (backend $CAND_B · frontend $CAND_F)"
 log "반영 후 점검을 진행하세요 (docs/DEPLOY.md 3장). 기록: $LOG"

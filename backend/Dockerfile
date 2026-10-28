@@ -1,4 +1,11 @@
-FROM python:3.11-slim
+# 기반 이미지는 판·배포판·digest로 고정한다 (2026-10-28, docs/DEPLOY.md 11장). 떠도는 태그(python:3.11-slim)는 빌드하는 PC에
+# 남아 있던 옛 이미지를 레지스트리에 묻지 않고 그대로 쓸 수 있어, 2026-10-28 로컬 반영에서 CI가 검증한 기반과 다른 판이 쓰였다.
+# python:3.11.18-slim-trixie = Python 3.11.18 · Debian 13 trixie. 아래 digest는 이 태그의 멀티아키 색인이고, 그 linux/amd64
+# 매니페스트는 sha256:0451b9eeed3e5a9523d8958cc33262eb5843c7af3114c50f45d99f56e2b883ac (2026-10-26T22:50:44Z 생성 — 2026-10-27 CI
+# 이미지 검사의 기반과 같은 매니페스트, 2026-10-28 Docker Hub 조회). 빌드 중 apt·pip로 받는 것은 기반 고정과 별개라, 반영 전에
+# 완성 이미지 목록을 검증한 목록(deploy/expected-images/)과 대조한다. 기반을 바꿀 때는 digest·이 설명·검증 목록을 같은 PR에서
+# 함께 바꾸고 CI 검증을 다시 한다. 자동 갱신은 두지 않는다.
+FROM python:3.11.18-slim-trixie@sha256:82209229d3fda30d71e603ec95bb4bea0476635ba6df3df2e32284e036654f51
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
