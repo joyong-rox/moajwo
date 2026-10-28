@@ -24,7 +24,7 @@ ENV_KEYS = ("platform", "os_release", "machine", "os_packages", "python", "pytho
 CA_PATH = "/etc/ssl/certs/ca-certificates.crt"
 
 BACKEND_PY = r"""
-import hashlib, importlib.metadata as md, json, os, platform, re, ssl, subprocess, sysconfig
+import hashlib, importlib.metadata as md, json, os, platform, pyexpat, re, sqlite3, ssl, subprocess, sysconfig
 o = {}
 rel = {}
 for line in open("/etc/os-release", encoding="utf-8"):
@@ -42,7 +42,8 @@ for line in subprocess.run(["dpkg-query", "-W", "-f=" + fmt], capture_output=Tru
         pk[n if n not in pk else n + ":" + a] = v
 o["os_packages"] = dict(sorted(pk.items()))
 o["python"] = {"version": platform.python_version(), "openssl": ssl.OPENSSL_VERSION,
-               "default_cafile": ssl.get_default_verify_paths().openssl_cafile}
+               "default_cafile": ssl.get_default_verify_paths().openssl_cafile,
+               "expat": pyexpat.EXPAT_VERSION, "sqlite": sqlite3.sqlite_version}  # xlsx XML 해석기 · 운영 DB 엔진
 d = {}
 for dist in md.distributions():
     d[re.sub(r"[-_.]+", "-", dist.metadata["Name"]).lower()] = dist.version

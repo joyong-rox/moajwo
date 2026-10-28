@@ -758,9 +758,9 @@ key 취합이 있으면서 0021이 없는 판(통합 후보 `8d40c69` 계열 —
 1. 후보 태그로 빌드합니다 (`<이미지>:cand-<시각>`, 덧붙임 `backups/candidate-<시각>.compose.yml`). 운영이 쓰는 latest 태그는 옮기지 않습니다.
 2. `scripts/image_gate.sh <backend ID> <frontend ID> backups/image-gate-<시각>`이 두 가지를 봅니다. 하나라도 실패하면 서비스와
    latest 태그를 그대로 두고 멈춥니다.
-   - **완성 이미지 목록** (`scripts/image_inventory.py`): 플랫폼, OS 판, OS 패키지 전체 판, Python 판과 ssl의 OpenSSL, Python 의존성
-     전체 판, CA 묶음 sha256·개수, psycopg 내장 라이브러리 해시, nginx 판이 검증한 목록 `deploy/expected-images/{backend,frontend}.json`과
-     같아야 합니다. 앱 코드·화면 파일 해시는 기록만 합니다.
+   - **완성 이미지 목록** (`scripts/image_inventory.py`): 플랫폼, OS 판, OS 패키지 전체 판, Python 판·ssl의 OpenSSL·내장 Expat(xlsx
+     XML 해석)·SQLite, Python 의존성 전체 판, CA 묶음 sha256·개수, psycopg 내장 라이브러리 해시, nginx 판이 검증한 목록
+     `deploy/expected-images/{backend,frontend}.json`과 같아야 합니다. 앱 코드·화면 파일 해시는 기록만 합니다.
    - **격리 기동 점검** (`scripts/image_smoke.py`): 내부 네트워크(`--internal`)와 새 임시 볼륨에 띄우고 호스트 포트를 열지 않습니다.
      기동(healthy·alembic head), DB 연결(`/health`), CA·TLS(기본 신뢰 저장소, 점검 안에서 만든 시험 CA로 Python ssl과 psycopg
      `verify-full`의 성공·거절), frontend(첫 화면·보안 헤더·프록시), 핵심 취합(CSV·XLSX 업로드 → 공통 key 연결 → 내려받아 내용 확인,
