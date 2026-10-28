@@ -1,0 +1,61 @@
+# 진단 전용: backend/requirements.txt(완전 고정 목록)의 linux x86_64 / CPython 3.11 휠을 받아 sha256 해시 목록을 만든다
+# (--require-hashes 설치용). 'ci/hashes-*' 브랜치를 올릴 때만 돈다. 수정판 pip 26.2.2를 고정 주소+sha256으로 먼저 설치한다.
+name: hashes (diagnostic)
+
+on:
+  push:
+    branches: ["ci/hashes-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  hashes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: pip 26.2.2 (pinned URL + sha256), then download the linux/cp311 wheels and hash them
+        run: |
+          mkdir -p out wheels
+          python -m pip install --no-cache-dir "pip @ https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl#sha256=fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+          python -m pip --version | tee out/pip-version.txt
+          python -c "from pip._vendor import certifi; print('pip-vendored certifi', certifi.__version__)" | tee -a out/pip-version.txt
+          python -m pip download -r backend/requirements.txt -d wheels --only-binary=:all: --no-deps \
+            --python-version 3.11 --implementation cp --abi cp311 --abi abi3 --abi none \
+            --platform manylinux_2_28_x86_64 --platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64 --platform manylinux_2_5_x86_64 --platform manylinux1_x86_64 --platform any \
+            2>&1 | tee out/download.log
+          ls -la wheels | tee out/wheels.txt
+          python - <<'PY'
+          import hashlib, pathlib, re
+          wheels = sorted(pathlib.Path("wheels").glob("*.whl"))
+          req = [ln.strip() for ln in open("backend/requirements.txt", encoding="utf-8") if ln.strip() and not ln.startswith("#")]
+          by_name = {}
+          for w in wheels:
+              name, ver = w.name.split("-")[0:2]
+              by_name.setdefault(name.lower().replace("_", "-"), []).append((ver, w))
+          out = ["# backend/requirements.txt 와 같은 고정 목록에 linux x86_64 / CPython 3.11 휠의 sha256을 붙인 것 (pip --require-hashes 용).",
+                 "# 만드는 법: 진단 워크플로 hashes.yml (pip 26.2.2로 pip download → sha256). 다른 플랫폼(Windows 개발)은 requirements.txt를 그대로 쓴다.",
+                 "# 생성 커밋·시각은 PR 본문에 기록."]
+          missing = []
+          for line in req:
+              m = re.match(r"([A-Za-z0-9_.-]+)==([^\s;]+)", line)
+              name, ver = m.group(1).lower().replace("_", "-"), m.group(2)
+              cands = [w for v, w in by_name.get(name, []) if v == ver]
+              if not cands:
+                  missing.append(line); continue
+              hashes = " ".join(f"--hash=sha256:{hashlib.sha256(w.read_bytes()).hexdigest()}" for w in cands)
+              out.append(f"{line} {hashes}  # {' '.join(w.name for w in cands)}")
+          pathlib.Path("out/requirements-linux-hashes.txt").write_text("\n".join(out) + "\n", encoding="utf-8")
+          pathlib.Path("out/missing.txt").write_text("\n".join(missing) + "\n", encoding="utf-8")
+          print("hashed", len(out) - 3, "missing", len(missing), missing)
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: hashes
+          path: out
+          retention-days: 30
