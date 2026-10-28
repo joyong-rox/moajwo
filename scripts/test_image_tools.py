@@ -228,12 +228,27 @@ SMOKE_CASES = [
     ("unicode_sep", True, "점검 값에 U+2028·U+2029·U+0085 (결과 줄이 끊기지 않아야 함)"),
     ("log_join", False, "backend 로그 표준출력이 줄바꿈 없이 끝나고 표준오류가 ERROR 줄로 시작"),
     ("anon_volume", False, "후보 backend 이미지에 VOLUME 선언 (익명 볼륨 — 격리 확인에서 멈추고 익명 볼륨까지 지움)"),
+    ("print_fail", False, "모든 점검이 통과인데 화면 출력이 실패 (통과 JSON을 남기지 않아야 함)"),
+    ("write_fail", False, "모든 점검이 통과인데 결과 JSON 쓰기가 실패 (통과 JSON이 없어야 함)"),
 ]
 # 종료 코드 기대 (적힌 사례만): 0 통과 · 4 측정한 점검 실패 · 3 도구 오류. 정리 실패·확인 불가가 있으면 3이 먼저
-SMOKE_RC = {"normal": 0, "one_failed": 4, "exec_fail": 3, "logs_fail": 3, "network_rm_fail": 3, "list_fail": 3,
+SMOKE_RC = {"normal": 0, "empty": 3, "partial": 3, "duplicate": 3, "ok_string": 3, "ok_missing": 3, "unknown_id": 3, "not_list": 3,
+            "one_failed": 4, "exec_fail": 3, "logs_fail": 3, "logs_empty": 4, "rm_fail": 3, "volume_rm_fail": 3, "network_rm_fail": 3,
+            "network_ls_fail": 3, "list_fail": 3, "not_internal": 3, "port_published": 3, "leftover": 3,
             "front_daemon_err": 3, "health_then_timeout": 3, "one_failed_rm_fail": 3, "child_step_error": 4, "unicode_sep": 0,
-            "log_join": 4, "anon_volume": 3}  # fmt: skip
+            "log_join": 4, "anon_volume": 3, "print_fail": 3, "write_fail": 3}  # fmt: skip
 SMOKE_LEAK_OK = {"rm_fail", "volume_rm_fail", "network_rm_fail", "one_failed_rm_fail", "leftover"}  # 삭제 실패를 일부러 일으킨 사례
+
+
+class _BrokenOut(io.TextIOWrapper):
+    """쓰기마다 실패하는 표준출력 (출력 실패 시험)."""
+
+    def write(self, s: str) -> int:
+        raise OSError(5, "가짜 출력 실패")
+
+
+def _fail_write(path: str, data: dict) -> None:
+    raise OSError(28, "가짜 쓰기 실패 (디스크 가득)")
 
 
 def run_smoke(scripts: Path, scenario: str, tmp: Path) -> dict:
@@ -242,7 +257,11 @@ def run_smoke(scripts: Path, scenario: str, tmp: Path) -> dict:
     out = tmp / f"smoke-{scenario}.json"
     clock = [0.0]
     saved = (subprocess.run, time.sleep, time.monotonic, sys.argv, sys.stdout)
-    buf = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    buf = (_BrokenOut if scenario == "print_fail" else io.TextIOWrapper)(io.BytesIO(), encoding="utf-8")
+    if scenario == "write_fail":
+        if not hasattr(mod, "write_atomic"):  # 옛 판은 결과 파일 쓰기를 따로 부르지 않아 실패를 주입할 곳이 없다
+            return {"rc": None, "passed": None, "na": "주입할 곳 없음 (write_atomic 없음)", "summary": "", "leak": []}
+        mod.write_atomic = _fail_write
     try:
         subprocess.run = fake
         time.sleep = lambda s: clock.__setitem__(0, clock[0] + s)
@@ -261,7 +280,7 @@ def run_smoke(scripts: Path, scenario: str, tmp: Path) -> dict:
     text = buf.buffer.getvalue().decode("utf-8", "replace")
     data = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
     summary = next((x for x in text.splitlines() if x.startswith("요약")), "")
-    passed = rc == 0
+    passed = rc == 0 or (data or {}).get("ok") is True  # 실패로 끝났는데 통과 JSON(ok true)이 남으면 통과로 센다 (기대와 다름)
     left = sorted({c for c in fake.containers if c.startswith("moajwo-smoke-")} | (fake.volumes - {"moajwo_moajwo-data"})
                   | {n for n in fake.networks if n.startswith("moajwo-smoke-")})  # fmt: skip
     return {"rc": rc, "passed": passed, "summary": summary[:160], "status": (data or {}).get("status"),
@@ -598,8 +617,12 @@ def main() -> int:
                 rows.append({"tool": "memory_guard", "case": name, "what": what, "want_pass": want, "want_rc": MEM_RC.get(name), **r})
         except FileNotFoundError:
             print("건너뜀 | memory_guard.py 없음 (이 판에는 자원 확인 도구가 없음)")
-    bad = bad_pass = bad_rc = 0
+    bad = bad_pass = bad_rc = na = 0
     for r in rows:
+        if r.get("na"):  # 이 판에는 해당하지 않는 사례 — 세지 않고 표시만
+            na += 1
+            print(f"해당 없음 | {r['tool']} | {r['case']} | {r['na']}")
+            continue
         pass_ok = r["passed"] == r["want_pass"] and not r.get("leak")  # 점검·감시 자원을 남기면 종료 코드와 상관없이 기대와 다름
         rc_ok = r.get("want_rc") is None or r["rc"] == r["want_rc"]
         ok = pass_ok and rc_ok
@@ -609,7 +632,8 @@ def main() -> int:
         want = f"기대 {'통과' if r['want_pass'] else '막힘'}" + (f"·종료 {r['want_rc']}" if r.get("want_rc") is not None else "")
         leak = f" · 남은 자원 {r['leak']}" if r.get("leak") else ""
         print(f"{'맞음' if ok else '틀림'} | {r['tool']} | {r['case']} | {want} | 실제 {'통과' if r['passed'] else '막힘'} (종료 {r['rc']}){leak} | {r.get('summary', '')}")
-    print(f"요약 | {scripts} | 사례 {len(rows)} · 기대와 다름 {bad} (통과·막힘·자원 남김 {bad_pass} · 막혔지만 종료 코드 구분만 {bad_rc})")
+    print(f"요약 | {scripts} | 사례 {len(rows) - na} · 기대와 다름 {bad} (통과·막힘·자원 남김 {bad_pass} · 막혔지만 종료 코드 구분만 {bad_rc})"
+          + (f" · 해당 없음 {na}" if na else ""))  # fmt: skip
     if ns.json:
         Path(ns.json).write_text(json.dumps({"scripts": str(scripts), "rows": rows}, ensure_ascii=False, indent=1), encoding="utf-8")
     return 0 if bad == 0 else 1

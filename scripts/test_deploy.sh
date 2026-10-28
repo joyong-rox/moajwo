@@ -192,6 +192,7 @@ run_case() {  # 이름, 시나리오, 승인 SHA, 기대 종료 코드, 있어�
   if [ -n "${CASE_GATE:-}" ]; then export DEPLOY_IMAGE_GATE="$CASE_GATE"; else unset DEPLOY_IMAGE_GATE; fi   # 우회 시험: 운영 판은 무시해야 함
   if [ -n "${CASE_COMPOSE_FILE:-}" ]; then export COMPOSE_FILE="$CASE_COMPOSE_FILE"; else unset COMPOSE_FILE; fi   # 기본 파일 찾기를 바꾸는 변수
   if [ -n "${CASE_ENV_FILES:-}" ]; then export COMPOSE_ENV_FILES="$CASE_ENV_FILES"; else unset COMPOSE_ENV_FILES; fi
+  if [ -n "${CASE_COMPOSE_ARGS:-}" ]; then export DEPLOY_COMPOSE_ARGS="$CASE_COMPOSE_ARGS"; else unset DEPLOY_COMPOSE_ARGS; fi
   if [ -n "${CASE_REHEARSAL:-}" ]; then export DEPLOY_REHEARSAL=1 DEPLOY_TAG_REPO=rehearsal; else unset DEPLOY_REHEARSAL DEPLOY_TAG_REPO; fi
   if [ -n "${CASE_BASH_ENV:-}" ]; then printf 'true\n' > "$state/benv.sh"; export BASH_ENV="$state/benv.sh"; else unset BASH_ENV; fi
   : > "$STUB_LOG"
@@ -319,6 +320,8 @@ run_case "전환후이미지가검증과다름" post_image_mismatch "$APPROVED" 
 echo "== 2026-10-28 PR #59 보완: 검증 기록 확인 · 환경 변수로 검증 바꾸기 없음 · 자원 확인 · latest 복구를 사실대로"
 run_case "검증종료0_통과기록없음"     gate_lie     "$APPROVED" 1 "이번 후보의 통과를 확인할 수 없음" GATE_CALLED NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
 run_case "검증기록이_다른ID"         gate_wrongid "$APPROVED" 1 "이번 후보의 통과를 확인할 수 없음" GATE_CALLED NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+CASE_COMPOSE_ARGS="-f elsewhere/compose.yml" \
+run_case "DEPLOY_COMPOSE_ARGS_멈춤" ok "$APPROVED" 1 "DEPLOY_\* 변수가 있음 \(DEPLOY_COMPOSE_ARGS\)" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
 CASE_GATE=true \
 run_case "DEPLOY_IMAGE_GATE=true_멈춤" gate_fail   "$APPROVED" 1 "DEPLOY_\* 변수가 있음 \(DEPLOY_IMAGE_GATE\)" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
 run_case "자원기준미달_빌드안함"       mem_low      "$APPROVED" 1 "빌드 전 자원 기준 미달 — 후보를 만들지 않음" NO_BUILD NO_GATE NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START

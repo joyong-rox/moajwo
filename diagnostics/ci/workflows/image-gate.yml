@@ -30,7 +30,7 @@ jobs:
           mkdir -p out
           python3 -m pip install -q "ruff==0.16.10"
           (cd scripts && ruff check . && ruff format --check .) 2>&1 | tee out/ruff-scripts.txt
-          for f in scripts/deploy.sh scripts/image_gate.sh scripts/test_deploy.sh diagnostics/ci/image_gate_rehearsal.sh; do bash -n "$f" || exit 1; done
+          for f in scripts/deploy.sh scripts/image_gate.sh scripts/test_deploy.sh diagnostics/ci/image_gate_rehearsal.sh diagnostics/ci/rollback_doc_rehearsal.sh diagnostics/ci/deploy_rollback_check.sh; do bash -n "$f" || exit 1; done
           python3 scripts/test_image_tools.py --json out/tools-test.json | tee out/tools-test.txt   # scripts/test_deploy.sh는 Git Bash 전용(pwd -W·cygpath) — 운영 PC(Windows)에서 돈다
       - name: build the candidate images from the pinned bases (the same candidate override as deploy.sh step 3)
         run: |
