@@ -19,7 +19,7 @@
 |---|---|
 | 지금 운영 | main `71f36eb` (PR #58 병합, 트리 `69d6f100…`) · DB `0021_run_request_key` · backend `sha256:6874cec0c9a043809198c19952428d4c89dbe40a74226a844618cf2312b25560` · frontend `sha256:883f7fa5b785ad7e9b318b5af58e60c042fab2d8aa53f58190e1f02e560dc81b` (2026-10-28 11:44 반영, 기록 `backups/deploy-20261028-114420.log`) |
 | 다음 이미지 교체 명령 | `bash scripts/deploy.sh <승인 SHA> 0021_run_request_key` — 두 번째 인자는 **지금 운영 리비전 0021**입니다. 2026-10-28에 쓴 `… 0019_analysis_runs`는 그 반영의 출발점이라 다시 쓰지 않습니다 (운영이 0021이라 2단계에서 멈춤) |
-| 3단계 (이 판부터) | 후보 태그로 빌드 → 완성 이미지 목록 대조 + 격리 기동 점검 (11장) → 통과한 ID만 6단계에서 latest로 옮겨 다시 빌드하지 않고 전환 |
+| 3단계 (이 판부터) | 자원 확인 → 후보 태그로 하나씩 빌드 → 완성 이미지 목록 대조 + 격리 기동 점검 + 통과 기록 확인 (11장) → 통과한 ID만 6단계에서 latest로 옮겨 다시 빌드하지 않고 전환 |
 | DB 변경이 없는 교체의 롤백 | 반영 직전에 실행 중이던 이미지(롤백 태그 — 지금 위의 backend·frontend) + 이전 포트 연결 + 리비전 0021 그대로. 4장 B 0단계 출력이 '리비전 0021_run_request_key → 0021_run_request_key'이면 3~5단계(정리·downgrade)를 건너뛰고 1·2·6·7단계만 합니다 |
 | 2026-10-27 실행 기준 (PR #58, 0019 출발) | 이미 반영된 기록입니다 — 10장과 `backups/deploy-20261028/RECORD.md`. 8·9·10장의 '0019 출발'·'0020 출발' 설명은 그 반영에 대한 것입니다 |
 
@@ -52,7 +52,7 @@ bash scripts/deploy.sh <승인한 PR HEAD 커밋 SHA> <반영 전 리비전>
 | --- | --- | --- |
 | 1 | 승인 커밋 존재·트리 일치, 미커밋 변경 확인 | 승인 커밋 없음 · 트리 불일치 · 추적 파일 변경 · backend/frontend의 추적하지 않는 파일 (**서비스 그대로**) |
 | 2 | 실행 중 컨테이너의 실제 이미지 ID로 롤백 태그(`rollback-<시각>`), 반영 전 리비전 기록 · 인자로 받은 반영 전 리비전과 같은지 확인 | 컨테이너·리비전을 읽을 수 없음 · 리비전이 인자와 다름 (**서비스 그대로**, 정지하지 않음) |
-| 3 | 후보 태그(`<이미지>:cand-<시각>`)로 빌드 → `scripts/image_gate.sh`: 완성 이미지 목록이 검증한 목록(`deploy/expected-images/`)과 같은지 · 격리 기동 점검 (11장). latest 태그는 옮기지 않음 | 빌드 실패 · 후보 이미지 ID 조회 실패 · 목록 다름 · 격리 점검 실패 (**서비스·latest 태그 그대로**) |
+| 3 | 자원 확인 → 후보 태그(`<이미지>:cand-<시각>`)로 하나씩 빌드(여유 메모리 기록) → `scripts/image_gate.sh`: 완성 이미지 목록이 검증한 목록(`deploy/expected-images/`)과 같은지 · 자원 확인 · 격리 기동 점검 → 통과 기록(`gate.result`의 두 이미지 ID) 확인 (11장). latest 태그는 옮기지 않음 | 자원 기준 미달·측정 실패 · Python 없음 · 빌드 실패 · 후보 이미지 ID 조회 실패 · 목록 다름·입력 오류 · 격리 점검 실패·도구 오류 · 통과 기록 없음·ID 다름 (**서비스·latest 태그 그대로**) |
 | 4 | `stop -t 30 frontend backend` (진행 중 요청은 최대 30초 대기) 후 실행 중 서비스 0개, 데이터 볼륨을 쓰는 컨테이너 0개 확인 (두 조회 모두 성공해야 함) | 정지 실패 · 조회 실패 · 남은 서비스 · 볼륨을 쓰는 다른 컨테이너 → **마이그레이션 미시작(리비전 그대로)을 확인할 수 있으면 기존 컨테이너 재시작, 없으면 수동 복구 안내** |
 | 5 | 백업과 검증 (아래 '5단계 백업 검증'): a 정지 상태 운영 볼륨 DB의 리비전·행 수 → b 볼륨 전체 백업·`gzip -t`·`moajwo.db` 포함·sha256 기록 → c **백업에서 꺼낸 DB**의 무결성·리비전·행 수 → d a와 c 비교 → e sha256 재확인 | 조회 실패 · 필수 결과 누락 · 백업 생성·압축 검사 실패 · 추출·열기 실패 · 백업 DB 무결성 실패 · 리비전·테이블·행 수 불일치 · sha256 불일치 → **4단계와 같은 방식으로 기존 컨테이너 재시작**, 이 백업은 요약에 `verified no` |
 | 6 | 백업 확인 후에만 3단계에서 검증한 이미지 ID에 latest 태그 → `up -d --no-build --wait` (다시 빌드하지 않고 재생성·마이그레이션) → 리비전 `(head)`·컨테이너·이미지 조회 → 실행 중 이미지 = 검증한 ID | latest 태그 실패 → latest를 반영 전 이미지로 되돌리고 4단계와 같은 방식으로 기존 컨테이너 재개 · 전환 실패 · 전환 후 조회 실패 · 실행 중 이미지가 검증한 ID와 다름 → '전환 완료' 없이 멈춤, 자동 롤백하지 않음 (4장 절차, 백업·롤백 태그는 로그에 있음) |
@@ -61,7 +61,7 @@ bash scripts/deploy.sh <승인한 PR HEAD 커밋 SHA> <반영 전 리비전>
 - `set -uo pipefail`을 쓰지만 판단에 쓰는 **모든 조회는 종료 코드와 필수 결과를 함께** 검사합니다: 백업 경로 변환, git 커밋·트리·상태, 컨테이너·이미지 ID, 반영 전후 리비전, 실행 중 서비스(`compose ps --status running --services`), 볼륨 사용 컨테이너(`docker ps --filter volume=`). 조회가 **성공했고 결과가 비어 있을 때만** '없음'으로 판단하고, 조회 자체가 실패하면 '확인할 수 없음'으로 기록한 뒤 백업·전환을 하지 않습니다. 5단계의 DB 조회 결과는 파이프 없이 파일·변수로 받아 종료 코드를 보존하고, 마지막 줄(`end ok`)·리비전·행 수가 모두 있어야 '결과 있음'으로 봅니다.
 - 정지 이후 실패하면 볼륨의 DB 리비전 조회가 **성공하고** 반영 전 리비전과 같을 때만 기존 컨테이너를 `start`로 재개합니다. 리비전을 확인할 수 없거나 다르면 재개하지 않고, 로그에 현재 상태 확인·수동 복구 명령을 남깁니다.
 - 전환 후 리비전·컨테이너·이미지 조회 중 하나라도 실패하면 '전환 완료'를 출력하지 않고 실패(종료 코드 1)로 끝냅니다.
-- 실패 처리 시험: `bash scripts/test_deploy.sh` (실제 Docker를 쓰지 않는 명령 대역 시험, 아래 3차·4차 결과. 2026-10-28에 후보 빌드·검증·전환 6사례를 더해 31사례)
+- 실패 처리 시험: `bash scripts/test_deploy.sh` (실제 Docker를 쓰지 않는 명령 대역 시험, 아래 3차·4차 결과. 2026-10-28 후보 빌드·검증·전환 6사례, 같은 날 PR #59 검토 보완 24사례를 더해 55사례 — 검증 도구 자체는 `scripts/test_image_tools.py` 72사례)
 - `backups/`에는 운영 데이터가 들어 있어 git에서 제외합니다 (`.gitignore`).
 - 사용자에게 반영 시각을 미리 알리고, 진행 중인 업로드·검토·통합이 없는지 확인한 뒤 실행합니다 (통합은 요청 안에서 끝나는 동기 작업).
 - frontend만 멈추면 backend가 127.0.0.1:8000으로 계속 요청을 받으므로 스크립트는 둘 다 멈춥니다.
@@ -106,7 +106,7 @@ docker inspect moajwo-backend-1 --format '{{.Image}}'   # 로그의 새 backend 
 롤백 전에 **항상 backend·frontend를 먼저 멈춥니다** (DB를 쓰는 프로세스가 없어야 백업·복원·downgrade가 안전). 이전 코드는 새 리비전을 모르므로
 (그대로 두면 이전 backend가 `alembic upgrade head`에서 실패) DB도 이전 리비전으로 맞춥니다.
 
-- 롤백 단위는 되돌릴 반영의 로그(`backups/deploy-<시각>.log`)에 남은 **배포 단위** 줄입니다: 이전 이미지(롤백 태그 `rollback-<시각>`) + 이전 컨테이너의 포트 연결(`backups/rollback-<시각>.compose.yml`) + 반영 전 백업 + 반영 전 리비전. 전환(1·2장 6단계)에서 멈춘 반영은 배포 단위 줄 대신 `[중단] … docs/DEPLOY.md 4장 (백업 …, 롤백 태그 …, 포트 …, 반영 전 리비전 …)` 줄이 남습니다. 이전 이미지와 포트 연결은 **함께** 씁니다.
+- 롤백 단위는 되돌릴 반영의 로그(`backups/deploy-<시각>.log`)에 남은 **배포 단위** 줄입니다: 이전 이미지(롤백 태그 `rollback-<시각>`) + 이전 컨테이너의 포트 연결(`backups/rollback-<시각>.compose.yml`) + 반영 전 백업 + 반영 전 리비전. 전환(1·2장 6단계)에서 멈춘 반영은 배포 단위 줄 대신 `[중단] … docs/DEPLOY.md 4장 (백업 …, 롤백 태그 …, 포트 …, 반영 전 리비전 …)` 줄이 남습니다. 그 앞(3단계 검증·5f 전환 준비 포함)에서 멈춘 반영은 전환이 없어 되돌릴 것이 없고, 0단계가 그렇게 안내합니다. 이전 이미지와 포트 연결은 **함께** 씁니다.
 - **이미지만 되돌리지 않습니다.** 지금 저장소의 `docker-compose.yml`은 새 버전의 설정이라, 이전 이미지를 이 파일로 띄우면 설정이 맞지
   않을 수 있습니다 (예: 8장 — 이전 frontend는 컨테이너 80에서 듣는데 새 설정은 8080으로 연결). 덧붙임 파일을 `-f`로 붙여 이전 포트 연결로 띄우고,
   최종 설정과 실제 컨테이너의 포트 연결이 그 파일과 같은지 확인합니다 (덧붙임이 목록을 더하지 않고 바꾸도록 `!override` — Docker Compose 2.24.4 이상).
@@ -160,6 +160,12 @@ elif [ -n "$HINT" ] || { [ -n "$START" ] && grep -q "== 6\. 새 이미지로 전
   else NEWREV=; echo "[중단] 지금 DB 리비전을 읽지 못함 — 데이터 볼륨·moajwo-backend:latest 이미지 확인 (1단계가 멈춤)"; fi
 else
   echo "[안내] 이 로그로는 되돌릴 배포 단위를 정하지 않음 (배포 단위 줄·전환 실패 줄 없음) — 로그 끝을 보고 판단:"
+  if [ -n "$LOGF" ] && ! grep -q "== 4\. 쓰기 중단" "$LOGF"; then   # 2026-10-28 이미지 검증(11장) 뒤의 deploy.sh 기준
+    echo "  정지(4단계) 전에 멈춘 반영 (3단계 이미지 검증 실패 등) — 서비스·latest 태그는 그대로라 되돌릴 것이 없음"
+  elif [ -n "$LOGF" ] && grep -q "== 5f\. 전환 준비" "$LOGF"; then
+    echo "  전환 준비(5f, latest 태그 이동)에서 멈춘 반영 — 전환하지 않았음. 로그의 'latest 태그:' 줄이 '되돌림 확인'이면 태그도 반영 전 그대로,"
+    echo "  '[주의] 되돌림 확인 안 됨'이면 그 줄의 반영 전 ID로 docker tag <반영 전 ID> <이름>:latest 를 하고 docker image inspect로 확인 (11장)"
+  fi
   echo "  '기존 서비스 재개'가 있으면 반영 전 판이 다시 떠 있어 되돌릴 것이 없음 · '[수동 확인 필요]'가 있으면 그 아래 안내대로"
   echo "  둘 다 없으면 로그 이름을 확인 (앞 반영은 ROLLBACK_LOG를 지정해 0단계부터)"
 fi
@@ -347,7 +353,7 @@ docker compose run --rm --no-deps backend python -m app.recovery resolve <실행
 | 1단계, 정지 전 확인 (배포 단위·프로젝트·포트 파일·덧붙인 설정의 포트·DB 리비전) | 없음 — 서비스 그대로 | 이름은 반영 로그의 배포 단위 줄(또는 `[중단] … 4장 (…)` 줄)에 있음. 로그를 잘못 골랐으면 `ROLLBACK_LOG`를 입력하고 0단계부터. 포트 파일이 없는 예전 반영은 `git show <이전 main SHA>:docker-compose.yml`로 이전 설정을 꺼내 덧붙임 파일을 만든 뒤 (이미지만 되돌리지 않음) |
 | 1단계 '이미 되돌렸거나 이미지를 바꾸지 않음' | 없음 — 서비스 그대로 | 되돌릴 것이 없음 — 다시 되돌리지 않음 (A도 하지 않음: 되돌린 뒤 생긴 자료가 빠짐). 다른 반영을 되돌리려던 것이면 `ROLLBACK_LOG`를 입력하고 0단계부터 |
 | 1단계 '롤백 태그 이미지 없음' | 없음 — 서비스 그대로 | 아래 **R 상자**로 이전 커밋의 이미지를 다시 만들어 롤백 태그를 붙인 뒤 1단계부터. `scripts/deploy.sh`로 이전 커밋을 반영하지 않음 — 이전 코드는 새 리비전을 몰라 전환(기동 때 `alembic upgrade head`)에서 멈춤 |
-| 1단계 'latest가 아님'·'backend 컨테이너를 찾지 못함'·'이 로그가 띄운 이미지가 아님' | 없음 | 나중 반영이 빌드 뒤(4·5단계) 멈춰 기존 서비스를 재개했다면 `latest`만 그 빌드를 가리킴 — 실행 중 이미지로 되돌린 뒤(`docker tag $(docker inspect moajwo-backend-1 --format '{{.Image}}') moajwo-backend:latest`, frontend도 같게) 0단계부터. 전환 실패 로그인데 backend 컨테이너가 롤백 태그 이미지이거나 없으면(전환이 컨테이너를 바꾸기 전에 멈춤) 2~5단계 없이 6·7단계 — 6단계가 DB 리비전이 반영 전인지 먼저 확인하고, 아니면 멈춤(그때는 이 표 밖 — 상태를 기록해 판단) |
+| 1단계 'latest가 아님'·'backend 컨테이너를 찾지 못함'·'이 로그가 띄운 이미지가 아님' | 없음 | 나중 반영이 전환 준비(5f)에서 멈췄고 그 로그의 'latest 태그:' 줄이 '[주의] 되돌림 확인 안 됨'이면 `latest`가 검증한 후보를 가리킬 수 있음 (2026-10-28 이미지 검증 전의 deploy.sh는 빌드가 latest를 옮겨, 4·5단계에서 멈춘 반영도 그랬음) — 실행 중 이미지로 되돌린 뒤(`docker tag $(docker inspect moajwo-backend-1 --format '{{.Image}}') moajwo-backend:latest`, frontend도 같게) 0단계부터. 전환 실패 로그인데 backend 컨테이너가 롤백 태그 이미지이거나 없으면(전환이 컨테이너를 바꾸기 전에 멈춤) 2~5단계 없이 6·7단계 — 6단계가 DB 리비전이 반영 전인지 먼저 확인하고, 아니면 멈춤(그때는 이 표 밖 — 상태를 기록해 판단) |
 | 1단계, 정지 뒤 확인 (실행 중 서비스·볼륨을 쓰는 컨테이너 — 조회 실패 포함) | 서비스만 멈춤 | 남은 컨테이너·조회 오류를 확인해 멈춘 뒤 1단계부터. 되돌리지 않으려면 `docker compose start backend frontend` (지금 판 재개) |
 | 2단계 (백업·검증·정리 전 상태) | 서비스 멈춤. 검증을 통과한 백업에만 `.sha256` 파일이 생김 — `.sha256`이 없는 `moajwo-data-before-rollback-*.tgz`는 만들다 만 백업이라 쓰지 않음 | 원인(백업 폴더 권한·디스크)을 고친 뒤 2단계부터, 또는 지금 판 재개. 정리 전 `status`가 '리비전과 열이 맞지 않음'으로 멈추면(전환이 마이그레이션 도중 멈춘 경우 등) 지금 판도 뜨지 않을 수 있음 — A를 판단 |
 | 3단계 종료 2 | 서비스 멈춤 (정리된 행이 있을 수 있음 — 출력) | `next_s`초 뒤 3단계만 다시. 계속 2면 같은 DB를 쓰는 다른 서버가 떠 있는지 확인 |
@@ -632,7 +638,7 @@ bash scripts/deploy.sh <후보 HEAD SHA> 0019_analysis_runs
 
 **보안 수정 전 이미지로 되돌릴 때의 위험**: 2026-10 인증서 사고 보완(`docs/SECURITY-CA-20261026.md` — pip·CA 묶음 갱신, Render 앞단의 상류 인증서 검증)이 든 이미지에서 롤백 태그(그 전 이미지)로 되돌리면 그 보완이 없는 상태로 돌아갑니다. 로컬 운영은 아웃바운드 TLS가 없어 운영 중 영향은 없지만, 되돌린 뒤 다시 빌드할 때는 수정판 pip·CA로 빌드되는 보완 포함 커밋을 쓰고, Render에는 보완 전 이미지를 다시 배포하지 않습니다.
 
-**frontend 단독 반영 경로**(`docker compose up -d --no-deps frontend`)는 이번 반영에 쓰지 않습니다 — backend도 바뀌고, 포트 설정과 이미지가 함께 바뀌어야 하기 때문입니다. 이번 반영 뒤 frontend만 바뀌는 다음 반영에서는 포트가 그대로(8080)라 그 경로를 쓸 수 있지만, 그때 이 반영 이전 frontend 이미지로 되돌리려면 이번 반영의 `rollback-<시각>.compose.yml`이 필요합니다.
+**frontend 단독 반영 경로**(`docker compose up -d --no-deps frontend`)는 이번 반영에 쓰지 않습니다 — backend도 바뀌고, 포트 설정과 이미지가 함께 바뀌어야 하기 때문입니다. 이 경로(`docker compose build frontend` → `up -d --no-deps frontend`)는 빌드가 latest 태그를 바로 옮기고 11장의 완성 이미지 대조·격리 점검을 거치지 않으므로, 2026-10-28 이미지 검증(11장)을 넣은 뒤로는 **frontend만 바뀌어도 쓰지 않습니다** — `scripts/deploy.sh`로 반영합니다 (backend도 같은 검증을 거쳐 다시 만들어지고 리비전은 그대로). 이 반영 이전 frontend 이미지로 되돌릴 때는 이번 반영의 `rollback-<시각>.compose.yml`이 필요합니다.
 
 **격리 확인**: 지금 절차(4장 B 단계 상자 그대로)는 아래 '리허설 결과' 7차. 5차(포트, 0019 그대로)·6차(통합 후보 — 0020 downgrade 포함)는 이 정리 전 8장 명령의 기록입니다. Windows Docker Desktop에서는 `ports: !override` 덧붙임과 `pwd -W` 경로 백업 마운트를 명령 수준으로만 확인했습니다 (6차 아래).
 
@@ -755,23 +761,85 @@ key 취합이 있으면서 0021이 없는 판(통합 후보 `8d40c69` 계열 —
 
 **빌드 → 검증 → 반영의 연결** (`scripts/deploy.sh` 3·6단계):
 
-1. 후보 태그로 빌드합니다 (`<이미지>:cand-<시각>`, 덧붙임 `backups/candidate-<시각>.compose.yml`). 운영이 쓰는 latest 태그는 옮기지 않습니다.
-2. `scripts/image_gate.sh <backend ID> <frontend ID> backups/image-gate-<시각>`이 두 가지를 봅니다. 하나라도 실패하면 서비스와
-   latest 태그를 그대로 두고 멈춥니다.
+1. **빌드 전 자원 확인** (`scripts/memory_guard.py check build`): 아래 '자원 기준'에 못 미치거나 재지 못하면 후보를 만들지 않고 멈춥니다.
+2. **후보 빌드** — backend·frontend를 하나씩, 후보 태그로 빌드합니다 (`<이미지>:cand-<시각>`, 덧붙임 `backups/candidate-<시각>.compose.yml`).
+   운영이 쓰는 latest 태그는 옮기지 않습니다. 빌드 동안의 시작·최저 여유 메모리를 기록합니다.
+3. **검증** — `scripts/image_gate.sh <backend ID> <frontend ID> backups/image-gate-<시각>`. 하나라도 실패하면 서비스와 latest 태그를
+   그대로 두고 멈춥니다.
    - **완성 이미지 목록** (`scripts/image_inventory.py`): 플랫폼, OS 판, OS 패키지 전체 판, Python 판·ssl의 OpenSSL·내장 Expat(xlsx
      XML 해석)·SQLite, Python 의존성 전체 판, CA 묶음 sha256·개수, psycopg 내장 라이브러리 해시, nginx 판이 검증한 목록
-     `deploy/expected-images/{backend,frontend}.json`과 같아야 합니다. 앱 코드·화면 파일 해시는 기록만 합니다.
+     `deploy/expected-images/{backend,frontend}.json`과 같아야 합니다. 비교 전에 두 목록의 도구 판·종류와 종류별 필수 항목·자료형을
+     검사합니다 — 항목이 빠졌거나 형식이 틀린 목록은 '같음'이 아니라 입력 오류입니다. 앱 코드·화면 파일 해시는 기록만 합니다.
+   - **격리 점검 전 자원 확인** (`memory_guard.py check smoke`) — 미달·측정 실패면 점검을 건너뛰지 않고 멈춥니다.
    - **격리 기동 점검** (`scripts/image_smoke.py`): 내부 네트워크(`--internal`)와 새 임시 볼륨에 띄우고 호스트 포트를 열지 않습니다.
      기동(healthy·alembic head), DB 연결(`/health`), CA·TLS(기본 신뢰 저장소, 점검 안에서 만든 시험 CA로 Python ssl과 psycopg
      `verify-full`의 성공·거절), frontend(첫 화면·보안 헤더·프록시), 핵심 취합(CSV·XLSX 업로드 → 공통 key 연결 → 내려받아 내용 확인,
-     묶기 → 내려받기), 로그를 봅니다. 끝나면 만든 컨테이너·볼륨·네트워크를 지웁니다.
-3. 6단계는 백업 확인 뒤 **그 ID에만** latest 태그를 옮기고 `up -d --no-build`로 전환합니다. 실행 중 이미지 ID가 검증한 ID와
-   같아야 '전환 완료'입니다.
-4. 반영 로그에 '후보 이미지', '이미지 검증 통과', '실행 중 이미지 = 3단계에서 검증한 이미지', '이미지 연결' 줄이 남습니다.
+     묶기 → 내려받기), 로그를 봅니다. 끝나면 이 실행이 만든 컨테이너(익명 볼륨 포함)·볼륨·네트워크만 지우고, 목록을 다시 조회해 남지 않았음을
+     확인합니다.
+4. 검증 스크립트는 종료 0만 믿지 않습니다. 목록 대조는 '같음' 요약 줄까지, 격리 점검은 결과 JSON이 이번 두 이미지 ID·필수 점검 22개
+   전부 통과·도구 오류 0을 말해야 통과입니다. 통과하면 마지막에 `gate.result`에 `status=pass`와 두 이미지 ID를 쓰고, `deploy.sh`는
+   종료 코드와 이 기록을 함께 확인합니다.
+5. 백업 확인 뒤 전환 준비(로그 `== 5f.`)에서 **그 ID에만** latest 태그를 옮기고, 옮긴 결과를 실제 이미지 ID로 확인합니다. 그다음 6단계
+   `up -d --no-build`로 전환하며, 실행 중 이미지 ID가 검증한 ID와 같아야 '전환 완료'입니다. 태그를 옮기지 못하면 전환하지 않고 둘 다 반영
+   전 이미지로 되돌린 뒤, 되돌린 결과도 실제 ID로 확인해 '되돌림 확인'(되돌림 명령 종료 0이고 읽은 ID가 둘 다 반영 전), '읽은 latest는
+   반영 전 이미지와 같음 — 되돌림 명령 실패', 또는 '[주의] 되돌림 확인 안 됨'(어느 태그가 어느 이미지에 남았는지)
+   으로 적고 기존 컨테이너를 재개합니다. 컨테이너 재개 결과와 latest 태그 상태는 따로 적습니다 (`결과: … · latest 태그: …` 줄).
+   이 실패는 `== 6.` 머리줄 앞이라 4장 B 0단계가 '전환 도중 끊긴 반영'으로 분류하지 않습니다 — 전환이 없었으므로 4장 B는 쓰지 않고,
+   '[주의] 되돌림 확인 안 됨'이면 그 줄의 이미지 ID로 `docker tag <반영 전 ID> <이름>:latest`를 직접 하고 `docker image inspect`로 확인합니다.
+6. 반영 로그에 '자원 | …', '후보 이미지', '이미지 검증 통과', '실행 중 이미지 = 3단계에서 검증한 이미지', '이미지 연결' 줄이 남습니다.
+
+**격리 점검의 통과 판정** — 점검마다 바뀌지 않는 id가 있고(`image_smoke.py`의 `REQUIRED`, 22개: 호스트 5 + 컨테이너 안 17), 통과는
+22개가 각각 정확히 한 번, `ok`가 참거짓 값 `true`로 있을 때만입니다. 빈 결과·일부·중복·모르는 id·`ok`가 문자열·숫자·null인 결과,
+`docker logs` 조회 실패(종료 코드가 0이 아님), 기동 표지가 없는 빈 로그, 자원 삭제 실패·삭제 뒤 목록 조회 실패는 통과가 아닙니다.
+결과 JSON은 화면 출력 뒤에 원자적으로 쓰고, 출력이 실패하면 통과로 남기지 않습니다.
+상태·응답 조회가 docker 쪽에서 실패한 채 끝난 점검(docker 명령 시간 초과·데몬 연결 실패)은 대상의 실패가 아니라 미측정(도구
+오류)입니다. 컨테이너 안 한 단계가 예외로 끝나 하지 못한 점검은 사유(`not_run`)와 함께 실패로 남습니다 — 대부분 후보 쪽 원인
+(응답 없음·모듈 없음·파일 손상)입니다. 컨테이너는 익명 볼륨과 함께 지우고(`rm -f -v`), 자원별 삭제 결과·오류 원문·남은 것은
+결과 JSON의 `cleanup`에 남습니다. 측정한 실패와 도구 오류가 함께 있으면 정리 실패·확인 불가·출력 실패는 3(남은 자원·기록부터 봐야
+함), 그 밖에는 4가 먼저입니다 — 실패한 id와 도구 오류는 어느 쪽이든 결과 JSON과 출력에 모두 남습니다.
+
+| 도구 | 종료 0 | 4 | 3 | 1 | 2 |
+|---|---|---|---|---|---|
+| `image_inventory.py compare` | 같음 | 실행 환경이 다름 | 입력 오류 (도구 판·종류·필수 항목·형식) | 예상치 못한 중단 | 사용법 |
+| `image_smoke.py` | 통과 | 측정한 점검 실패 | 도구 오류 (빠짐·중복·형식, docker 명령 실패, 정리 실패·확인 불가, 출력 실패) | 예상치 못한 중단 | 사용법 |
+| `memory_guard.py check` | 통과 | 기준 미달 | 측정 실패 | 예상치 못한 중단 | 사용법 |
+
+**자원 기준 (공유 PC)** — 운영 서비스와 같은 PC·같은 Docker에서 후보를 빌드하고 격리 점검을 띄우므로, 각 단계를 시작하기 전에
+여유 메모리를 재고 기준에 못 미치거나 재지 못하면 후보 준비 단계에서 멈춥니다 (운영은 멈추지 않고 검사도 건너뛰지 않음).
+단위는 MiB(1024×1024 바이트)이고 두 곳을 따로 잽니다.
+
+| 측정 위치 | 무엇 | 빌드 시작 기준 | 격리 점검 시작 기준 |
+|---|---|---|---|
+| host | Windows 사용 가능 물리 메모리 (`GlobalMemoryStatusEx.ullAvailPhys`, 작업 관리자의 '사용 가능'). 리눅스 러너는 `/proc/meminfo` MemAvailable | 850 | 450 |
+| vm | Docker 엔진 VM(Docker Desktop은 WSL2 VM)의 `/proc/meminfo` MemAvailable — 네트워크·볼륨 없는 일회용 컨테이너로 읽음 | 1536 | 1536 |
+
+근거가 된 측정 (2026-10-28, 이 PC):
+
+| 단계 | host 시작 → 최저 | vm 시작 → 최저 | 측정 방법 | 결과 |
+|---|---|---|---|---|
+| 반영 전체 (backend·frontend 동시 빌드 ~ 전환, 11:44~11:46) | 1940 → 364 (11:45:20 — 빌드 중인지 백업 중인지는 기록만으로 알 수 없음) | 미측정 | CIM `FreePhysicalMemory`, 약 6초 간격 | 끝까지 정상 (OOM·재시작 없음) |
+| 미리 확인 빌드 backend (새 기반 받음) | 739 → 330 (끝 시점) | 미측정 | CIM, 시작·끝만 | 정상 |
+| 미리 확인 격리 점검 | 1082 → 849 (끝 시점) | 미측정 | CIM, 시작·끝만 | 22/22 |
+| 빌드 backend (층 캐시) | 867 → 601 | 5462 → 5452 | `memory_guard.py` (ullAvailPhys 1초·VM 2초 간격) | 정상 |
+| 빌드 frontend (층 캐시) | 557 → 543 | 5455 → 5455 | 〃 | 정상 |
+| 격리 점검 (새 판) | 479 → 326 | 5466 → 5351 | 〃 | 22/22 |
+
+- host 기준은 그 단계가 OOM·재시작 없이 끝난 가장 낮은 시작값(빌드 867, 격리 점검 479 — ullAvailPhys) 바로 아래로 정했습니다. 그보다
+  낮은 여유에서의 안전은 확인하지 않았으므로 시작하지 않습니다. 이 측정들은 '끝까지 정상'의 관측이고 안전 여유를 증명하지는 않습니다 —
+  여러 번 host가 330~364 MiB까지 내려갔습니다(Windows가 다른 프로그램의 메모리를 줄이기 시작하는 쪽).
+- CIM `FreePhysicalMemory`와 ullAvailPhys는 같은 때에도 값이 다릅니다 (2026-10-28 15:4x 741 대 900). 앞 세 줄(CIM)은 기준 계산에
+  쓰지 않았습니다.
+- vm 기준 1536 = 격리 점검 컨테이너 상한 합(backend `--memory 1g` + frontend `256m` = 1280) + 256입니다. 상한은 실측이 아니라 넘지 못하는
+  선입니다. 빌드의 vm 기준도 같은 값으로 두었지만 근거는 약합니다 — 층 캐시 빌드에서 VM 여유는 10 MiB 남짓만 줄었고, 새 기반을 받는
+  빌드의 VM 사용은 재지 않았습니다(미검증). 측정한 VM 여유는 5.3 GiB 이상이라 실제로 막는 쪽은 host입니다.
+- 기준을 바꿀 때는 `scripts/memory_guard.py`의 값과 이 표를 같은 PR에서 바꿉니다. 미달로 멈추면 다른 프로그램을 닫는 등 여유를 만든
+  뒤 다시 실행합니다 — 고의로 메모리를 채워 시험하지 않습니다.
 
 **검증한 목록은 어디서 오나**: CI에서 같은 고정 입력으로 빌드한 완성 이미지에서 `image_inventory.py collect`로 만든 것입니다. 같은
-CI 실행에서 그 이미지로 격리 기동 점검과 Trivy 검사를 합니다. 파일의 `verified` 항목에 CI 실행 번호·커밋·이미지 ID가 있습니다
-(비교하지 않는 항목).
+CI 실행에서 그 이미지로 격리 기동 점검과 Trivy 검사를 합니다. 파일의 `verified` 항목에 CI 실행 번호·커밋이 있고(CI 이미지 ID는
+`image` 항목), 대조할 때 `ci_run`·`commit`이 있는지 확인합니다 (나머지는 비교하지 않는 기록). 그 CI 워크플로는 기본 가지에서 저절로 돌지 않도록 저장소에는
+`diagnostics/ci/workflows/`(`image-gate.yml`·`gate-rehearsal.yml`)에 사본으로 두고, 실행할 때만 진단 가지에 `.github/workflows/`로
+넣어 올립니다 — `image-gate.yml`은 `ci/image-gate-*`, `gate-rehearsal.yml`은 `ci/gate-rehearsal-*` 가지에서만 돕니다.
 
 **CI에서 검증한 이미지를 그대로 옮기지 않는 이유**: 옮기려면 레지스트리가 필요한데, 저장소가 공개라 이미지를 공개 레지스트리에 올리지
 않습니다(사설 레지스트리 없음). 그래서 운영 PC에서 같은 고정 입력으로 다시 빌드하고, 그 완성 이미지가 검증한 이미지와 같은 실행
@@ -780,16 +848,52 @@ CI 실행에서 그 이미지로 격리 기동 점검과 Trivy 검사를 합니�
 목록으로, 같은 PC 안의 빌드·검증·반영은 ID로 연결합니다.
 
 **목록이 다르면**: 반영하지 않습니다. 보통 빌드 시점의 저장소 갱신(예: ca-certificates·curl 보안 판) 때문입니다. CI에서 같은 커밋으로
-다시 빌드·검증해 `deploy/expected-images/`를 갱신하는 PR을 만들고 승인받은 뒤 반영합니다. 목록 대조를 건너뛰는 옵션은 없습니다.
+다시 빌드·검증해 `deploy/expected-images/`를 갱신하는 PR을 만들고 승인받은 뒤 반영합니다. 목록을 손으로 고쳐 통과값에 맞추지 않습니다.
+
+**보호 범위 — 무엇을 막고 무엇은 막지 않나**:
+
+- `deploy.sh`·`image_gate.sh`에는 검증을 바꾸거나 건너뛰는 환경 변수가 없습니다 (2026-10-28에 `DEPLOY_IMAGE_GATE`·`DEPLOY_EXPECTED_DIR`·
+  `PYTHON`을 없앰). 검증 스크립트·검증 목록·자원 기준은 1단계에서 승인한 트리와 같다고 확인한 이 저장소의 파일이고, Python은 `python`·
+  `python3` 가운데 무작위 응답을 돌려주는 3.10 이상만, 격리 모드(`-I` — `PYTHON*` 환경 변수·스크립트 폴더의 모듈을 쓰지 않음)로
+  씁니다. 명령 대역 시험은 임시 저장소에 대역 파일을 커밋해 같은 경로로 부릅니다.
+- 1단계는 추적 파일의 미커밋 변경 외에, 저장소 어디든 추적하지 않는 파일(`.gitignore` 대상인 `backups/` 등은 제외 — 빌드·검증 입력,
+  Compose 덧붙임 파일, 그리고 Windows가 PATH보다 먼저 현재 폴더에서 찾는 `docker.exe` 같은 실행 파일), 변경을 숨기는 git 표시
+  (assume-unchanged·skip-worktree)·`filter` 속성이 붙은 추적 파일이 있으면 멈춥니다. git 조회는 fsmonitor 훅·untracked 캐시 없이 합니다.
+  후보 빌드(`-f docker-compose.yml`)와 정지·전환(Compose 기본 파일 찾기)이 같은 설정을 읽도록, 다른 이름·덧붙임 Compose 파일(추적 여부와 상관없이)이나 `COMPOSE_FILE`(셸·`.env`)이 있어도 멈춥니다. Compose 이미지 참조에 태그·digest가
+  지정돼 있어도 멈춥니다 (이 스크립트가 옮기는 것은 `<이름>:latest`뿐).
+- 검증 목록에는 CI 출처 기록(`verified.ci_run`·`commit`)이 있어야 하고, 후보 자신의 목록(같은 이미지 ID — ID는 `sha256:` + 소문자
+  16진수 64자리 한 가지 표기만 받음)은 검증 목록으로 받지 않습니다. 이 검사는 형식 확인이라, 목록이 정말 CI에서 왔는지는 목록을
+  바꾸는 PR의 검토(CI 실행 번호·산출물과 대조)로 확인합니다.
+- 다른 `DEPLOY_*` 변수(Compose 인자·볼륨·백업 폴더·백업 이미지·롤백 태그 이름)는 격리 리허설용입니다. Compose 파일·볼륨을 바꿔
+  승인하지 않은 설정으로 빌드·전환하게 할 수 있으므로, 운영 반영에서는 하나라도 있으면 1단계에서 멈춥니다 (격리 리허설은
+  `DEPLOY_REHEARSAL=1`을 함께 지정 — 반영 로그 1단계 줄에 남음).
+- 내보낸 셸 함수·`BASH_ENV`·`ENV`가 있거나 시작할 때 이미 정의된 함수가 있으면 `deploy.sh`·`image_gate.sh` 모두 멈춥니다 (셸 시작
+  파일·함수가 `docker`·`git` 같은 명령을 바꿀 수 있음). Windows에서는 실행 파일을 현재 폴더에서 먼저 찾지 않게
+  (`NoDefaultCurrentDirectoryInExePath=1`) 합니다.
+- 1단계는 git 상태 외에 빌드·검증 입력(`backend`·`frontend`·`scripts`·`deploy`·`docker-compose.yml`)의 작업 파일 내용을 승인한 트리의
+  blob과 직접 대조합니다 — git은 크기·수정 시각이 같으면 내용을 읽지 않아, 같은 크기로 고치고 수정 시각을 되돌린 파일을 놓칩니다.
+- 서비스별 Compose 이미지 이름은 설정(JSON)의 `image`(없으면 `<프로젝트>-<서비스>`)로 정하고 Compose 자신의 이미지 목록과
+  맞춰 봅니다 (`config --images <서비스>`는 depends_on 서비스까지 순서 없이 찍어 frontend가 backend 이름을 받을 수 있었음).
+  두 이름이 같거나 후보 두 ID가 같으면 멈춥니다.
+- 막지 못하는 것: 운영 PC의 `docker`·`python` 실행 파일 자체를 바꾸는 경우, `deploy.sh` 자체를 바꾸는 경우(실행하는 스크립트는
+  자기를 검사할 수 없음 — 1단계의 내용 대조는 실수로 바뀐 것을 잡지만 바뀐 스크립트는 그 확인을 건너뛸 수 있음), 셸 시작 파일이
+  스스로 흔적을 지우는 경우, `deploy.sh`를 거치지 않고 손으로 빌드·태그를 옮겨
+  `docker compose up`을 하는 경우 (그냥 `docker compose build`는 latest 태그를 바로 옮깁니다 — 8장의 frontend 단독 반영 경로가 그
+  예라 쓰지 않습니다). 이런 변경은 승인 절차 밖의 일입니다.
 
 **미리 확인하기 (운영을 바꾸지 않음)** — 반영 창 전에 같은 PC에서 후보를 빌드해 검증만 해 볼 수 있습니다:
 
 ```bash
-TS=$(date +%Y%m%d-%H%M%S)
+TS=$(date +%Y%m%d-%H%M%S); OLD_B=$(docker inspect "$(docker compose ps -q backend)" --format '{{.Image}}')
+mkdir -p "backups/image-gate-pre-$TS"
 printf 'services:\n  backend:\n    image: moajwo-backend:pre-%s\n  frontend:\n    image: moajwo-frontend:pre-%s\n' "$TS" "$TS" > "backups/pre-$TS.compose.yml"
-docker compose -f docker-compose.yml -f "backups/pre-$TS.compose.yml" build backend frontend      # latest 태그는 그대로
+python -X utf8 scripts/memory_guard.py check build "$OLD_B" "backups/image-gate-pre-$TS/memory.tsv" && for s in backend frontend; do
+  python -X utf8 scripts/memory_guard.py watch "build-$s" "$OLD_B" "backups/image-gate-pre-$TS/memory.tsv" -- \
+    docker compose -f docker-compose.yml -f "backups/pre-$TS.compose.yml" build "$s" || break      # latest 태그는 그대로
+done
 bash scripts/image_gate.sh "$(docker image inspect moajwo-backend:pre-$TS --format '{{.Id}}')" \
   "$(docker image inspect moajwo-frontend:pre-$TS --format '{{.Id}}')" "backups/image-gate-pre-$TS"
+docker rmi "moajwo-backend:pre-$TS" "moajwo-frontend:pre-$TS"   # 끝나면 pre 태그만 지움 (반영 때는 deploy.sh가 다시 빌드·검증)
 ```
 
 **하지 않는 것**: 기반 이미지 자동 갱신(Dependabot·Renovate 등), 운영 자동 재배포.
