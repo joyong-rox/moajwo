@@ -87,6 +87,7 @@ class FakeDocker:
         self.unknown: list[str] = []
         self.meta: dict[str, dict] = {}  # 컨테이너별 네트워크·볼륨 (격리 확인 조회용)
         self.removed = False  # 정리를 시작했는지 (목록 조회 실패를 '삭제 뒤'에만 일으키려고)
+        self.called: set[str] = set()  # 실패를 넣는 자리 중 실제로 불린 것 (CMD_INJECT — 주입이 닿았는지)
         self.health_calls = 0
         if scenario == "leftover":  # 앞 실행이 남긴 점검 컨테이너
             self.containers.add("moajwo-smoke-20261028000000-1-abc123-backend")
@@ -129,25 +130,32 @@ class FakeDocker:
                 return 0, f"{ports}|{mounts}|{m.get('net', '')};", ""
             if "Health" in fmt and "State.Status" in fmt:
                 self.health_calls += 1
+                if self.health_calls > 1:
+                    self.called.add("health_repeat")
                 if s == "health_then_timeout" and self.health_calls > 1:  # 첫 조회는 됐고 그다음부터 docker가 응답하지 않음
                     raise subprocess.TimeoutExpired(["docker", "inspect"], 60)
                 return 0, "running starting 0" if s == "health_then_timeout" else "running healthy 0", ""
             if "Health" in fmt:  # 옛 판의 상태 조회 형식 — 같은 시나리오를 흉내 낸다
                 self.health_calls += 1
+                if self.health_calls > 1:
+                    self.called.add("health_repeat")
                 if s == "health_then_timeout" and self.health_calls > 1:
                     raise subprocess.TimeoutExpired(["docker", "inspect"], 60)
                 return 0, "starting" if s == "health_then_timeout" else "healthy", ""
             return 0, "running 0", ""
         if a[0] == "exec" and "wget" in a:
+            self.called.add("wget")
             if s == "front_daemon_err":  # docker 쪽 연결 실패 — frontend에 닿지 못함
                 return 1, "", 'error during connect: Get "http://%2F%2F.%2Fpipe%2FdockerDesktopLinuxEngine/v1.47/exec": open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.'
             return 0, "", ""
         if a[:2] == ["exec", "-i"]:
+            self.called.add("exec_i")
             if s == "exec_fail":
                 return 1, "", "OCI runtime exec failed"
             return 0, "점검 중…\n@@RESULT " + json.dumps(child_items(self.mod, s), ensure_ascii=False) + "\n", ""
         if a[0] == "logs":
             backend = a[1].endswith("-backend")
+            self.called.update(("logs", "logs_backend") if backend else ("logs",))
             if s == "logs_fail" and backend:
                 return 17, "", "Error response from daemon: can not get logs"
             if s == "logs_empty":
@@ -158,6 +166,7 @@ class FakeDocker:
             return 0, "", mark
         if a[:2] == ["rm", "-f"]:  # 새 판: rm -f -v <이름>, 옛 판: rm -f <이름>
             self.removed = True
+            self.called.add("rm")
             name = a[-1]
             if s in ("rm_fail", "one_failed_rm_fail"):
                 return 1, "", "Error response from daemon: removal in progress"
@@ -166,17 +175,21 @@ class FakeDocker:
                 self.volumes.discard(self.meta[name]["anon"])
             return 0, name, ""
         if a[:2] == ["volume", "rm"]:
+            self.called.add("volume_rm")
             if s == "volume_rm_fail":
                 return 1, "", "Error response from daemon: volume is in use"
             self.volumes.discard(a[2])
             return 0, a[2], ""
         if a[:2] == ["network", "rm"]:
+            self.called.add("network_rm")
             if s == "network_rm_fail":
                 return 1, "", "Error response from daemon: network has active endpoints"
             self.networks.discard(a[2])
             return 0, a[2], ""
-        if a[:2] == ["ps", "-a"]:  # 옛 판: --filter name=<tag>, 새 판: 전부 이름만
-            if s == "list_fail" and "--filter" not in a and self.removed:
+        if a[:2] == ["ps", "-a"]:  # 옛 판: --filter name=<tag>, 새 판: 전부 이름만 — 삭제 뒤 조회 실패는 두 꼴 모두에 넣는다
+            if self.removed:
+                self.called.add("list_after_rm")
+            if s == "list_fail" and self.removed:
                 return 1, "", "Cannot connect to the Docker daemon"
             names = sorted(self.containers | {"moajwo-backend-1", "moajwo-frontend-1"})
             if "--filter" in a:
@@ -184,7 +197,9 @@ class FakeDocker:
                 names = [n for n in names if tag in n]
             return 0, "\n".join(names), ""
         if a[:2] == ["volume", "ls"]:
-            if s == "list_fail" and "--filter" not in a and self.removed:
+            if self.removed:
+                self.called.add("list_after_rm")
+            if s == "list_fail" and self.removed:
                 return 1, "", "Cannot connect to the Docker daemon"
             names = sorted(self.volumes)
             if "--filter" in a:
@@ -192,6 +207,8 @@ class FakeDocker:
                 names = [n for n in names if tag in n]
             return 0, "\n".join(names), ""
         if a[:2] == ["network", "ls"]:
+            if self.removed:
+                self.called.update(("list_after_rm", "network_ls_after_rm"))
             if s in ("list_fail", "network_ls_fail") and self.removed:
                 return 1, "", "Cannot connect to the Docker daemon"
             return 0, "\n".join(sorted(self.networks)), ""
@@ -228,12 +245,34 @@ SMOKE_CASES = [
     ("unicode_sep", True, "점검 값에 U+2028·U+2029·U+0085 (결과 줄이 끊기지 않아야 함)"),
     ("log_join", False, "backend 로그 표준출력이 줄바꿈 없이 끝나고 표준오류가 ERROR 줄로 시작"),
     ("anon_volume", False, "후보 backend 이미지에 VOLUME 선언 (익명 볼륨 — 격리 확인에서 멈추고 익명 볼륨까지 지움)"),
+    ("print_fail", False, "모든 점검이 통과인데 화면 출력이 실패 (통과 JSON을 남기지 않아야 함)"),
+    ("write_fail", False, "모든 점검이 통과인데 결과 JSON 쓰기가 실패 (통과 JSON이 없어야 함)"),
 ]
 # 종료 코드 기대 (적힌 사례만): 0 통과 · 4 측정한 점검 실패 · 3 도구 오류. 정리 실패·확인 불가가 있으면 3이 먼저
-SMOKE_RC = {"normal": 0, "one_failed": 4, "exec_fail": 3, "logs_fail": 3, "network_rm_fail": 3, "list_fail": 3,
+SMOKE_RC = {"normal": 0, "empty": 3, "partial": 3, "duplicate": 3, "ok_string": 3, "ok_missing": 3, "unknown_id": 3, "not_list": 3,
+            "one_failed": 4, "exec_fail": 3, "logs_fail": 3, "logs_empty": 4, "rm_fail": 3, "volume_rm_fail": 3, "network_rm_fail": 3,
+            "network_ls_fail": 3, "list_fail": 3, "not_internal": 3, "port_published": 3, "leftover": 3,
             "front_daemon_err": 3, "health_then_timeout": 3, "one_failed_rm_fail": 3, "child_step_error": 4, "unicode_sep": 0,
-            "log_join": 4, "anon_volume": 3}  # fmt: skip
+            "log_join": 4, "anon_volume": 3, "print_fail": 3, "write_fail": 3}  # fmt: skip
+# docker 명령 실패를 넣는 사례 → 그 실패를 넣는 자리. 그 명령을 부르지 않는 판에는 주입이 닿지 않는다 — 옛 판이면 '해당 없음',
+# 새 판(CHECKS_IN 있음)이면 시험이 그 경우를 확인하지 못한 것이라 기대와 다름으로 센다. 격리·포트·익명 볼륨·앞 실행 잔여처럼
+# docker 쪽 상태를 바꾸는 사례는 도구가 조회하든 않든 그 상태가 있으므로 여기에 넣지 않는다 (조회하지 않으면 그대로 결함)
+CMD_INJECT = {"exec_fail": "exec_i", "logs_fail": "logs_backend", "logs_empty": "logs", "log_join": "logs_backend", "rm_fail": "rm",
+              "one_failed_rm_fail": "rm", "volume_rm_fail": "volume_rm", "network_rm_fail": "network_rm",
+              "network_ls_fail": "network_ls_after_rm", "list_fail": "list_after_rm", "front_daemon_err": "wget",
+              "health_then_timeout": "health_repeat"}  # fmt: skip
 SMOKE_LEAK_OK = {"rm_fail", "volume_rm_fail", "network_rm_fail", "one_failed_rm_fail", "leftover"}  # 삭제 실패를 일부러 일으킨 사례
+
+
+class _BrokenOut(io.TextIOWrapper):
+    """쓰기마다 실패하는 표준출력 (출력 실패 시험)."""
+
+    def write(self, s: str) -> int:
+        raise OSError(5, "가짜 출력 실패")
+
+
+def _fail_write(path: str, data: dict) -> None:
+    raise OSError(28, "가짜 쓰기 실패 (디스크 가득)")
 
 
 def run_smoke(scripts: Path, scenario: str, tmp: Path) -> dict:
@@ -242,7 +281,11 @@ def run_smoke(scripts: Path, scenario: str, tmp: Path) -> dict:
     out = tmp / f"smoke-{scenario}.json"
     clock = [0.0]
     saved = (subprocess.run, time.sleep, time.monotonic, sys.argv, sys.stdout)
-    buf = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    buf = (_BrokenOut if scenario == "print_fail" else io.TextIOWrapper)(io.BytesIO(), encoding="utf-8")
+    if scenario == "write_fail":
+        if not hasattr(mod, "write_atomic"):  # 옛 판은 결과 파일 쓰기를 따로 부르지 않아 실패를 주입할 곳이 없다
+            return {"rc": None, "passed": None, "na": "주입할 곳 없음 (write_atomic 없음)", "summary": "", "leak": []}
+        mod.write_atomic = _fail_write
     try:
         subprocess.run = fake
         time.sleep = lambda s: clock.__setitem__(0, clock[0] + s)
@@ -261,7 +304,14 @@ def run_smoke(scripts: Path, scenario: str, tmp: Path) -> dict:
     text = buf.buffer.getvalue().decode("utf-8", "replace")
     data = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
     summary = next((x for x in text.splitlines() if x.startswith("요약")), "")
-    passed = rc == 0
+    passed = rc == 0 or (data or {}).get("ok") is True  # 실패로 끝났는데 통과 JSON(ok true)이 남으면 통과로 센다 (기대와 다름)
+    point = CMD_INJECT.get(scenario)
+    if point and point not in fake.called:
+        if not hasattr(mod, "CHECKS_IN"):  # 옛 판: 그 명령을 부르지 않아 주입할 곳이 없다
+            return {"rc": rc, "passed": None, "na": f"주입할 곳 없음 (이 판은 삭제 뒤 {point}에 해당하는 docker 명령을 부르지 않음)",
+                    "summary": summary[:160], "leak": []}  # fmt: skip
+        summary = f"[시험이 확인하지 못함] 주입 자리 {point}가 불리지 않음 · {summary}"
+        passed = True  # 실패를 넣었는데 닿지 않았다 — 막혔다고 볼 근거가 없으므로 통과로 센다 (기대와 다름)
     left = sorted({c for c in fake.containers if c.startswith("moajwo-smoke-")} | (fake.volumes - {"moajwo_moajwo-data"})
                   | {n for n in fake.networks if n.startswith("moajwo-smoke-")})  # fmt: skip
     return {"rc": rc, "passed": passed, "summary": summary[:160], "status": (data or {}).get("status"),
@@ -467,7 +517,7 @@ def run_gate(scripts: Path, case: str, env_extra: dict, tmp: Path) -> dict:
 
 MEM_CASES = [
     ("check_ok", True, "check build — host 900·vm 5000 MiB (기준 이상)"),
-    ("check_host_low", False, "check build — host 800 MiB < 기준 850"),
+    ("check_host_low", False, "check build — host 800 MiB < 기준 870"),
     ("check_vm_low", False, "check smoke — vm 1000 MiB < 기준 1536"),
     ("check_host_fail", False, "check — 호스트 측정 실패 (통과가 아님)"),
     ("check_vm_fail", False, "check — Docker VM 측정 컨테이너 실패 (통과가 아님)"),
@@ -598,8 +648,12 @@ def main() -> int:
                 rows.append({"tool": "memory_guard", "case": name, "what": what, "want_pass": want, "want_rc": MEM_RC.get(name), **r})
         except FileNotFoundError:
             print("건너뜀 | memory_guard.py 없음 (이 판에는 자원 확인 도구가 없음)")
-    bad = bad_pass = bad_rc = 0
+    bad = bad_pass = bad_rc = na = 0
     for r in rows:
+        if r.get("na"):  # 이 판에는 해당하지 않는 사례 — 세지 않고 표시만
+            na += 1
+            print(f"해당 없음 | {r['tool']} | {r['case']} | {r['na']}")
+            continue
         pass_ok = r["passed"] == r["want_pass"] and not r.get("leak")  # 점검·감시 자원을 남기면 종료 코드와 상관없이 기대와 다름
         rc_ok = r.get("want_rc") is None or r["rc"] == r["want_rc"]
         ok = pass_ok and rc_ok
@@ -609,7 +663,8 @@ def main() -> int:
         want = f"기대 {'통과' if r['want_pass'] else '막힘'}" + (f"·종료 {r['want_rc']}" if r.get("want_rc") is not None else "")
         leak = f" · 남은 자원 {r['leak']}" if r.get("leak") else ""
         print(f"{'맞음' if ok else '틀림'} | {r['tool']} | {r['case']} | {want} | 실제 {'통과' if r['passed'] else '막힘'} (종료 {r['rc']}){leak} | {r.get('summary', '')}")
-    print(f"요약 | {scripts} | 사례 {len(rows)} · 기대와 다름 {bad} (통과·막힘·자원 남김 {bad_pass} · 막혔지만 종료 코드 구분만 {bad_rc})")
+    print(f"요약 | {scripts} | 사례 {len(rows) - na} · 기대와 다름 {bad} (통과·막힘·자원 남김 {bad_pass} · 막혔지만 종료 코드 구분만 {bad_rc})"
+          + (f" · 해당 없음 {na}" if na else ""))  # fmt: skip
     if ns.json:
         Path(ns.json).write_text(json.dumps({"scripts": str(scripts), "rows": rows}, ensure_ascii=False, indent=1), encoding="utf-8")
     return 0 if bad == 0 else 1

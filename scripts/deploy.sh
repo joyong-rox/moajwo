@@ -23,8 +23,11 @@
 #      하나라도 실패하거나 필요한 결과가 빠지면 전환하지 않는다. 백업 검증 중 운영 DB는 읽기만 한다.
 #   → 4·5가 실패하면, 마이그레이션이 시작되지 않았음(리비전 그대로)을 **확인할 수 있을 때만** 기존 컨테이너를 다시 시작한다.
 #     확인할 수 없으면 재시작하지 않고 현재 상태와 수동 복구 절차를 보고한다.
-#   6) 백업 성공을 확인한 뒤에만 3단계에서 검증한 이미지 ID에 latest 태그를 옮기고, 다시 빌드하지 않고(up --no-build) 전환한다.
-#      전환 후 실행 중 이미지가 검증한 ID와 같고 리비전·이미지 조회가 모두 성공해야 '전환 완료'로 보고한다.
+#   5f) 백업 성공을 확인한 뒤에만 3단계에서 검증한 이미지 ID에 latest 태그를 옮기고 실제 ID로 확인한다 (6단계 머리줄 앞).
+#      실패하면 둘 다 되돌리고 되돌린 결과도 명령 종료 코드와 실제 ID로 확인해 그대로 적은 뒤 기존 컨테이너를 재개한다
+#      (재개 결과와 태그 상태는 따로 적음).
+#   6) 다시 빌드하지 않고(up --no-build) 전환한다. 전환 후 실행 중 이미지가 검증한 ID와 같고 리비전·이미지 조회가 모두
+#      성공해야 '전환 완료'로 보고한다.
 #   롤백 단위 = 이전 이미지(롤백 태그) + 이전 컨테이너의 포트 연결(backups/rollback-<시각>.compose.yml) + 백업.
 #   이미지만 되돌리면 안 되는 반영(예: frontend 컨테이너 포트 80 → 8080)이 있어, 2단계에서 실행 중 컨테이너의 실제 포트
 #   연결을 Compose 덧붙임 파일(ports: !override)로 남긴다 — docs/DEPLOY.md 4장·8장.
@@ -64,6 +67,12 @@ for n in names:
     print("rows", n, c.execute("select count(*) from [" + n + "]").fetchone()[0])
 print("end ok")'
 read -r -a COMPOSE_ARGS <<< "${DEPLOY_COMPOSE_ARGS:-}"
+# 모든 Compose 호출(조회·후보 빌드·정지·전환)이 같은 파일을 직접 지정해 읽는다 — 기본 파일 찾기·덧붙임 파일·COMPOSE_FILE(셸·.env·
+# COMPOSE_ENV_FILES의 파일)이 전환에만 끼어들지 못하게. -f를 하나라도 주면 기본 파일을 읽지 않으므로 docker-compose.yml을 함께 준다
+case " ${COMPOSE_ARGS[*]} " in
+  *" -f "*) ;;
+  *) COMPOSE_ARGS=(-f docker-compose.yml "${COMPOSE_ARGS[@]}") ;;
+esac
 VOLUME="${DEPLOY_VOLUME:-moajwo_moajwo-data}"
 BACKUP_DIR="${DEPLOY_BACKUP_DIR:-backups}"
 TS=$(date +%Y%m%d-%H%M%S)
@@ -196,8 +205,8 @@ BUILD_SRC=$("${GITQ[@]}" status --porcelain --untracked-files=all 2>>"$LOG") || 
 FILTERED=$(git ls-files -z 2>>"$LOG" | git check-attr --stdin -z filter 2>>"$LOG" | tr '\0' '\n' | paste - - - \
   | awk -F'\t' '$3 != "unspecified" && $3 != "unset" && n < 3 { print $1 " (filter=" $3 ")"; n++ }') || fail "git 속성(filter)을 읽을 수 없음"
 [ -z "$FILTERED" ] || fail "filter 속성이 붙은 추적 파일이 있음 — 작업 파일과 승인한 트리가 달라도 git이 같다고 볼 수 있음: $(printf '%s' "$FILTERED" | tr '\n' ' ')"
-# 후보 빌드는 docker-compose.yml을 직접 지정하고(-f), 정지·전환(up)은 Compose의 기본 파일 찾기를 따른다 — 둘이 같은 설정을 읽도록
-# 기본 파일 찾기를 바꾸는 것(다른 이름의 Compose 파일, 덧붙임 파일, 셸이나 .env의 COMPOSE_FILE)이 하나라도 있으면 멈춘다
+# 이 스크립트의 Compose 호출은 모두 -f로 파일을 직접 지정하지만, 4장 롤백 같은 손 명령은 Compose의 기본 파일 찾기를 따른다 —
+# 그 찾기를 바꾸는 것(다른 이름의 Compose 파일, 덧붙임 파일, 셸이나 .env의 COMPOSE_FILE)이 하나라도 있으면 멈춘다
 for f in $COMPOSE_OTHER; do [ ! -e "$f" ] || fail "Compose가 저절로 읽는 다른 파일이 있음: $f — 빌드와 전환이 다른 설정을 쓸 수 있음"; done
 [ -z "${COMPOSE_FILE:-}" ] || fail "COMPOSE_FILE 환경 변수가 있음 ($COMPOSE_FILE) — 빌드와 전환이 다른 설정을 쓸 수 있음"
 ! grep -q 'COMPOSE_FILE' .env 2>/dev/null || fail ".env에 COMPOSE_FILE이 있음 — 빌드와 전환이 다른 설정을 쓸 수 있음"   # 꼴(BOM·'키: 값')과 상관없이
@@ -295,10 +304,7 @@ CAND_COMPOSE="$BACKUP_DIR/candidate-$TS.compose.yml"
   echo "  frontend:"
   echo "    image: $F_REPO:$CAND_TAG"
 } >"$CAND_COMPOSE" || fail "후보 빌드용 덧붙임 파일을 쓸 수 없음: $CAND_COMPOSE"
-case " ${COMPOSE_ARGS[*]} " in
-  *" -f "*) BUILD_ARGS=("${COMPOSE_ARGS[@]}") ;;
-  *) BUILD_ARGS=(-f docker-compose.yml "${COMPOSE_ARGS[@]}") ;;   # -f를 하나라도 주면 기본 파일을 읽지 않으므로 함께 준다
-esac
+BUILD_ARGS=("${COMPOSE_ARGS[@]}")   # 정지·전환과 같은 파일 + 아래에서 후보 태그 덧붙임
 for svc in backend frontend; do   # 하나씩 빌드한다 (동시 빌드보다 메모리를 덜 씀) — 빌드 동안의 시작·최저 여유를 기록
   "$PY" -I -X utf8 scripts/memory_guard.py watch "build-$svc" "$OLD_B" "$MEM_TSV" -- \
     docker compose "${BUILD_ARGS[@]}" -f "$CAND_COMPOSE" build "$svc" >>"$LOG" 2>&1 \
