@@ -3,8 +3,8 @@
  "kind": "backend",
  "verified": {
   "what": "이 목록은 CI에서 검증한 완성 이미지의 실행 환경이다. scripts/image_gate.sh가 반영 전 후보 이미지의 목록을 이 파일의 실행 환경 항목과 비교한다 (docs/DEPLOY.md 11장)",
-  "ci_run": "joyong-rox/moajwo Actions run 40640464774 (image-gate, ubuntu-24.04)",
-  "commit": "d659332f6d9ddc7db96eaa5739d84f9abfcc6eb2",
+  "ci_run": "joyong-rox/moajwo Actions run 40665331568 (image-gate, ubuntu-24.04)",
+  "commit": "606900d03c5078380e90e644f8a3c6fbe97007b5",
   "docker": [
    "docker 28.0.4",
    "Docker Compose version v2.38.2"
@@ -12,24 +12,24 @@
   "bases": [
    "docker.io/library/python:3.11.18-slim-trixie@sha256:82209229d3fda30d71e603ec95bb4bea0476635ba6df3df2e32284e036654f51"
   ],
-  "smoke": "scripts/image_smoke.py 22/22 통과 (backend·frontend 함께)",
-  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-10-28T01:21:08Z — 결과는 그 run의 산출물",
-  "collected_at": "2026-10-28T05:52:39Z"
+  "smoke": "scripts/image_smoke.py (image_smoke 2) 22/22 통과 · 도구 오류 0 (backend·frontend 함께)",
+  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-10-28T07:10:42Z — 결과는 그 run의 산출물",
+  "collected_at": "2026-10-28T09:35:24Z"
  },
  "image": {
-  "id": "sha256:64fbbff0912e4ba36fa3cab375355664c40b87a00e97036395daf896745a5487",
+  "id": "sha256:2f3966718a696ea4974ebf98b441b3a31f69cf96a8b82d786bb585f9b1184134",
   "id_meaning": "config digest (기존 저장소)",
-  "created": "2026-10-28T05:52:36.962202958Z",
+  "created": "2026-10-28T09:35:23.881046174Z",
   "diff_ids": [
    "sha256:a70f6272827f64e1427d048ced77491aab5d64ab95725e56920802ff391197d7",
    "sha256:cc28e9b8727bd558eb76d69889c971452f06f6f6c91bb2e56b786e46e276de0f",
    "sha256:c8624fffa1d06e06d3bc5dcc16e8da97838cd0279166bda3a2086e48d9d6c5bc",
    "sha256:95e5c677aa457a1c20a4e8cebe2559c1d572003dfb9ad923e260ae20c09a9195",
-   "sha256:7763e50e7dcfe3aa0c1d7b6e57ad210401d8f640f7a61e928215f99602843f5f",
-   "sha256:690a5dc2498915ca3aaa18c82b83673d2c4067bdf9af7efcca51c450fc2620c4",
-   "sha256:500f1613efe90db95adaedf3e0b12e06b9968caf00a5b2fab80c6e43b930e668",
-   "sha256:ac1a104e7548e0278c30ac26ea895b9f656454ab83cf2249648e0542754cd797",
-   "sha256:4d9653e8c8234b58fe9f5fceae890ecc2869144c202ac7e34796ad963720d21d"
+   "sha256:95f39dfbc9ec68aa584b21f97ddc5530f6c98121d8f5b534747cbb32ffd8eb80",
+   "sha256:087e3b0f92e35967ace12e804231591482584a251cc5ce770aa619c84d67bc30",
+   "sha256:4f2c6a98d7c67cdf422c26e7df65d13c461c1ec63b733a11b1e5f0f3feed8c13",
+   "sha256:36e3d6544011896d4a032598c297c1d5ec09e01a4d1c1a1b107bf2d4e209345f",
+   "sha256:a18273380560824382726f8b8259d169eae9b1f988d6eef324ecc7085ddf4c2a"
   ]
  },
  "platform": {
@@ -154,7 +154,7 @@
   "mako": "1.4.3",
   "markupsafe": "3.0.4",
   "openpyxl": "3.1.5",
-  "opentelemetry-api": "1.45.0",
+  "opentelemetry-api": "1.45.1",
   "packaging": "26.3",
   "psycopg": "3.3.6",
   "psycopg-binary": "3.3.6",
