@@ -38,8 +38,7 @@ PY
 echo "후보 DB head: $NEW_HEAD"
 res() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" | tee -a "$RES"; }
 export PROBE_PW="Rh-$(openssl rand -hex 12)"
-pwd() { if [ "${1:-}" = "-W" ]; then builtin pwd; else builtin pwd "$@"; fi; }
-export -f pwd   # deploy.sh용 — 단계 상자는 run_box가 이 함수를 빼고 돌린다
+# (deploy.sh는 'pwd -W'가 없으면 pwd를 쓴다 — 2026-10-28부터 pwd 함수를 내보내지 않음: deploy.sh는 내보낸 셸 함수가 있으면 멈춘다)
 STEPS="$OUT/steps"
 OLD_DOC=4d245b8  # 이 문서 정리 전 통합 후보 — 수정 전 9장 롤백 명령의 출처
 
@@ -288,7 +287,7 @@ services:
     command: ["sh", "-c", "alembic upgrade head && exit 3"]
     restart: "no"
 YML
-DEPLOY_COMPOSE_ARGS="-f docker-compose.yml -f $OUT/fail-switch.yml" bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-3.out" 2>&1
+DEPLOY_REHEARSAL=1 DEPLOY_COMPOSE_ARGS="-f docker-compose.yml -f $OUT/fail-switch.yml" bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-3.out" 2>&1
 D3=$?
 LOG3=$(newest_log)
 HINT3=$(grep -h "\[중단\].*docs/DEPLOY.md 4장 (백업 " "$LOG3" | tail -1)
@@ -307,7 +306,7 @@ expect f1_again.refused "1:1" "$r" "$(state "$TS3")" "rev=0019_analysis_runs" "r
 check f1_again.message "$(grep -h '^\[중단\]' "$OUT/f1_again-step1.log" | head -1)" "이미 되돌렸거나"
 
 # ---------------------------------------------------------------- 7b. 전환 도중에 끊긴 반영 (창 닫힘·재부팅) — 로그 끝을 잘라 만든다
-DEPLOY_COMPOSE_ARGS="-f docker-compose.yml -f $OUT/fail-switch.yml" bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-3b.out" 2>&1
+DEPLOY_REHEARSAL=1 DEPLOY_COMPOSE_ARGS="-f docker-compose.yml -f $OUT/fail-switch.yml" bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-3b.out" 2>&1
 D3B=$?
 LOG3B=$(newest_log); cp "$LOG3B" "$OUT/deploy-3b-full.log"
 sed -i '/\[중단\]/,$d' "$LOG3B"   # 전환 실패 줄부터 끝을 지움 — '== 6.' 뒤 compose 출력까지만 남은, 도중에 끊긴 로그
@@ -385,7 +384,7 @@ services:
   backend:
     command: ["sh", "-c", "alembic upgrade head && exit 3"]
 YML
-DEPLOY_COMPOSE_ARGS="-f docker-compose.yml -f $OUT/fail-switch-restart.yml" timeout -k 10 900 bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-5.out" 2>&1
+DEPLOY_REHEARSAL=1 DEPLOY_COMPOSE_ARGS="-f docker-compose.yml -f $OUT/fail-switch-restart.yml" timeout -k 10 900 bash scripts/deploy.sh "$NEW" 0019_analysis_runs > "$OUT/deploy-5.out" 2>&1
 D5=$?
 [ "$D5" -ne 124 ] || pkill -f "compose up -d --wait" || true   # up --wait가 끝나지 않아 끊었으면 남은 compose도 끝낸다 (컨테이너는 그대로)
 LOG5=$(newest_log)

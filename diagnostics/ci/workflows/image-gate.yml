@@ -1,0 +1,102 @@
+name: image-gate (diagnostic)
+
+# 기반 이미지 고정·반영 전 이미지 검증(docs/DEPLOY.md 11장)의 CI 쪽: 고정한 기반으로 후보 이미지를 deploy.sh 3단계와 같은
+# 덧붙임으로 빌드하고, 완성 이미지 목록·격리 기동 점검·검증 단계(image_gate.sh)·Trivy 검사를 남긴다. 진단 전용 브랜치에서만.
+on:
+  push:
+    branches: ["ci/image-gate-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        shell: bash  # bash -eo pipefail — '| tee'가 앞 명령(시험·ruff·체크섬)의 실패를 가리지 않게
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2  # 후보 = HEAD^ (이 진단 가지는 후보 위에 워크플로 파일 하나)
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: static checks and the gate tool tests (fake docker / stub tools — no real docker in these)
+        run: |
+          mkdir -p out
+          python3 -m pip install -q "ruff==0.16.10"
+          (cd scripts && ruff check . && ruff format --check .) 2>&1 | tee out/ruff-scripts.txt
+          for f in scripts/deploy.sh scripts/image_gate.sh scripts/test_deploy.sh diagnostics/ci/image_gate_rehearsal.sh diagnostics/ci/rollback_doc_rehearsal.sh diagnostics/ci/deploy_rollback_check.sh; do bash -n "$f" || exit 1; done
+          python3 scripts/test_image_tools.py --json out/tools-test.json | tee out/tools-test.txt   # scripts/test_deploy.sh는 Git Bash 전용(pwd -W·cygpath) — 운영 PC(Windows)에서 돈다
+      - name: build the candidate images from the pinned bases (the same candidate override as deploy.sh step 3)
+        run: |
+          mkdir -p out
+          git rev-parse HEAD^ | sed 's/^/candidate /' | tee out/candidate.txt
+          { docker version --format 'docker {{.Server.Version}}'; docker compose version; docker info --format '{{json .DriverStatus}}'; python3 --version; } | tee out/docker.txt
+          printf 'services:\n  backend:\n    image: moajwo-backend:cand-ci\n  frontend:\n    image: moajwo-frontend:cand-ci\n' > out/candidate.compose.yml
+          docker compose -f docker-compose.yml -f out/candidate.compose.yml build --progress plain backend frontend > out/build.log 2>&1 || { tail -40 out/build.log; exit 1; }
+          grep -E '\] FROM docker\.io' out/build.log | sed -E 's/^#[0-9]+ //' | sort -u | tee out/bases-used.txt
+          grep -E 'Python 3\.|^#[0-9]+ [0-9.]+ ca-certificates [0-9]|pip-vendored certifi|node root certificates' out/build.log | sed -E 's/^#[0-9]+ [0-9.]+ //' | sort -u | tee out/build-versions.txt
+          for s in backend frontend; do docker image inspect "moajwo-$s:cand-ci" --format '{{.Id}}' | tee "out/$s.id"; done
+      - name: final image inventory and comparison with the committed expected lists (scripts/image_inventory.py)
+        run: |
+          for s in backend frontend; do
+            python3 scripts/image_inventory.py collect "$s" "$(cat out/$s.id)" "out/$s.inventory.json"
+            if [ -s "deploy/expected-images/$s.json" ]; then
+              python3 scripts/image_inventory.py compare "deploy/expected-images/$s.json" "out/$s.inventory.json" | tee "out/$s.compare.txt" || true
+            else
+              echo "검증 목록 없음 (첫 실행)" | tee "out/$s.compare.txt"
+            fi
+          done
+      - name: isolated smoke on these images (scripts/image_smoke.py)
+        run: python3 scripts/image_smoke.py "$(cat out/backend.id)" "$(cat out/frontend.id)" out/smoke.json
+      - name: the deploy gate as deploy.sh step 3 runs it (scripts/image_gate.sh) — passes only once the expected lists are committed
+        if: always()
+        run: |
+          set +e
+          bash scripts/image_gate.sh "$(cat out/backend.id)" "$(cat out/frontend.id)" out/gate > out/gate.log 2>&1
+          echo "exit=$?" | tee -a out/gate.log
+          grep -E '^\[검증|^요약|^다름' out/gate.log
+      - name: vulnerability scan of these images (Trivy 0.76.0, release checksum checked, all severities)
+        if: always()
+        run: |
+          TV=0.76.0
+          TGZ="trivy_${TV}_Linux-64bit.tar.gz"
+          curl -sSL -o "$TGZ" "https://github.com/aquasecurity/trivy/releases/download/v$TV/$TGZ"
+          curl -sSL -o trivy.sum "https://github.com/aquasecurity/trivy/releases/download/v$TV/trivy_${TV}_checksums.txt"
+          grep "  $TGZ\$" trivy.sum | sha256sum -c - | tee out/trivy-checksum.txt
+          tar xzf "$TGZ" trivy
+          ./trivy image --download-db-only --quiet
+          ./trivy version --format json | tee out/trivy-version.json
+          for s in backend frontend; do
+            ./trivy image --quiet --skip-db-update --format json --scanners vuln -o "out/trivy-$s.json" "moajwo-$s:cand-ci"
+          done
+          python3 - out <<'PY' | tee out/trivy-summary.txt
+          import collections
+          import json
+          import sys
+
+          out = sys.argv[1]
+          db = json.load(open(f"{out}/trivy-version.json")).get("VulnerabilityDB", {})
+          print("Trivy", json.load(open(f"{out}/trivy-version.json")).get("Version"), "DB UpdatedAt", db.get("UpdatedAt"), "DownloadedAt", db.get("DownloadedAt"))
+          for s in ("backend", "frontend"):
+              d = json.load(open(f"{out}/trivy-{s}.json"))
+              v = [x for r in d.get("Results", []) for x in (r.get("Vulnerabilities") or [])]
+              sev = collections.Counter(x.get("Severity") for x in v)
+              fixed = [x for x in v if x.get("FixedVersion")]
+              md = d.get("Metadata", {})
+              print(f"[{s}] ImageID {md.get('ImageID')} OS {md.get('OS')} 대상 {[r.get('Type') for r in d.get('Results', [])]} 항목 {len(v)} CVE {len({x['VulnerabilityID'] for x in v})} 심각도 {dict(sev)} 수정판 있음 {len(fixed)}")
+              for x in sorted(v, key=lambda x: (x.get("Severity", ""), x["PkgName"], x["VulnerabilityID"])):
+                  if x.get("Severity") in ("HIGH", "CRITICAL") or x.get("FixedVersion"):
+                      print(f"   {x.get('Severity')} {x['VulnerabilityID']} {x['PkgName']} {x['InstalledVersion']} → {x.get('FixedVersion') or '-'} ({x.get('Status')})")
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: image-gate
+          path: out
+          retention-days: 14

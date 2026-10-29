@@ -1,0 +1,3 @@
+# scripts/의 Python 도구(이미지 목록·격리 기동 점검)도 backend 규칙으로 — diagnostics/ruff.toml과 같게 줄 길이만 넓힌다
+extend = "../backend/pyproject.toml"
+line-length = 240

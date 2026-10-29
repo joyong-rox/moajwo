@@ -1,0 +1,250 @@
+{
+ "tool": "image_inventory 1",
+ "kind": "backend",
+ "verified": {
+  "what": "이 목록은 CI에서 검증한 완성 이미지의 실행 환경이다. scripts/image_gate.sh가 반영 전 후보 이미지의 목록을 이 파일의 실행 환경 항목과 비교한다 (docs/DEPLOY.md 11장)",
+  "ci_run": "joyong-rox/moajwo Actions run 40640464774 (image-gate, ubuntu-24.04)",
+  "commit": "d659332f6d9ddc7db96eaa5739d84f9abfcc6eb2",
+  "docker": [
+   "docker 28.0.4",
+   "Docker Compose version v2.38.2"
+  ],
+  "bases": [
+   "docker.io/library/python:3.11.18-slim-trixie@sha256:82209229d3fda30d71e603ec95bb4bea0476635ba6df3df2e32284e036654f51"
+  ],
+  "smoke": "scripts/image_smoke.py 22/22 통과 (backend·frontend 함께)",
+  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-10-28T01:21:08Z — 결과는 그 run의 산출물",
+  "collected_at": "2026-10-28T05:52:39Z"
+ },
+ "image": {
+  "id": "sha256:64fbbff0912e4ba36fa3cab375355664c40b87a00e97036395daf896745a5487",
+  "id_meaning": "config digest (기존 저장소)",
+  "created": "2026-10-28T05:52:36.962202958Z",
+  "diff_ids": [
+   "sha256:a70f6272827f64e1427d048ced77491aab5d64ab95725e56920802ff391197d7",
+   "sha256:cc28e9b8727bd558eb76d69889c971452f06f6f6c91bb2e56b786e46e276de0f",
+   "sha256:c8624fffa1d06e06d3bc5dcc16e8da97838cd0279166bda3a2086e48d9d6c5bc",
+   "sha256:95e5c677aa457a1c20a4e8cebe2559c1d572003dfb9ad923e260ae20c09a9195",
+   "sha256:7763e50e7dcfe3aa0c1d7b6e57ad210401d8f640f7a61e928215f99602843f5f",
+   "sha256:690a5dc2498915ca3aaa18c82b83673d2c4067bdf9af7efcca51c450fc2620c4",
+   "sha256:500f1613efe90db95adaedf3e0b12e06b9968caf00a5b2fab80c6e43b930e668",
+   "sha256:ac1a104e7548e0278c30ac26ea895b9f656454ab83cf2249648e0542754cd797",
+   "sha256:4d9653e8c8234b58fe9f5fceae890ecc2869144c202ac7e34796ad963720d21d"
+  ]
+ },
+ "platform": {
+  "os": "linux",
+  "arch": "amd64",
+  "variant": null
+ },
+ "os_release": {
+  "id": "debian",
+  "version_id": "13",
+  "codename": "trixie",
+  "detail": "13.7"
+ },
+ "machine": "x86_64",
+ "os_packages": {
+  "adduser": "3.152",
+  "apt": "3.0.3",
+  "base-files": "13.8+deb13u7",
+  "base-passwd": "3.6.7",
+  "bash": "5.2.37-2+b10",
+  "bsdutils": "1:2.41.5-0+deb13u1",
+  "ca-certificates": "20250419+deb13u1",
+  "coreutils": "9.7-3",
+  "dash": "0.5.12-12",
+  "debconf": "1.5.91",
+  "debian-archive-keyring": "2025.1",
+  "debianutils": "5.23.2",
+  "diffutils": "1:3.10-4",
+  "dpkg": "1.22.22",
+  "findutils": "4.10.0-3",
+  "gcc-14-base": "14.2.0-19",
+  "grep": "3.11-4",
+  "gzip": "1.13-1+deb13u1",
+  "hostname": "3.25",
+  "init-system-helpers": "1.69~deb13u1",
+  "libacl1": "2.3.2-2+b1",
+  "libapt-pkg7.0": "3.0.3",
+  "libattr1": "1:2.5.2-3",
+  "libaudit-common": "1:4.0.2-2+deb13u1",
+  "libaudit1": "1:4.0.2-2+deb13u1",
+  "libblkid1": "2.41.5-0+deb13u1",
+  "libbsd0": "0.12.2-2",
+  "libbz2-1.0": "1.0.8-6",
+  "libc-bin": "2.41-12+deb13u4",
+  "libc6": "2.41-12+deb13u4",
+  "libcap-ng0": "0.8.5-4+b1",
+  "libcap2": "1:2.75-10+deb13u1+b3",
+  "libcrypt1": "1:4.4.38-1",
+  "libdb5.3t64": "5.3.28+dfsg2-9",
+  "libdebconfclient0": "0.280",
+  "libffi8": "3.4.8-2",
+  "libgcc-s1": "14.2.0-19",
+  "libgdbm6t64": "1.24-2",
+  "libgmp10": "2:6.3.0+dfsg-3",
+  "libhogweed6t64": "3.10.1-1",
+  "liblastlog2-2": "2.41.5-0+deb13u1",
+  "liblz4-1": "1.10.0-4",
+  "liblzma5": "5.8.1-1+deb13u2",
+  "libmd0": "1.1.0-2+b1",
+  "libmount1": "2.41.5-0+deb13u1",
+  "libncursesw6": "6.5+20250216-2",
+  "libnettle8t64": "3.10.1-1",
+  "libpam-modules": "1.7.0-5",
+  "libpam-modules-bin": "1.7.0-5",
+  "libpam-runtime": "1.7.0-5",
+  "libpam0g": "1.7.0-5",
+  "libpcre2-8-0": "10.46-1~deb13u3",
+  "libreadline8t64": "8.2-6",
+  "libseccomp2": "2.6.0-2",
+  "libselinux1": "3.8.1-1",
+  "libsemanage-common": "3.8.1-1",
+  "libsemanage2": "3.8.1-1",
+  "libsepol2": "3.8.1-1",
+  "libsmartcols1": "2.41.5-0+deb13u1",
+  "libsqlite3-0": "3.46.1-7+deb13u2",
+  "libssl3t64": "3.5.7-1~deb13u3",
+  "libstdc++6": "14.2.0-19",
+  "libsystemd0": "257.13-1~deb13u1",
+  "libtinfo6": "6.5+20250216-2",
+  "libudev1": "257.13-1~deb13u1",
+  "libuuid1": "2.41.5-0+deb13u1",
+  "libxxhash0": "0.8.3-2",
+  "libzstd1": "1.5.7+dfsg-1",
+  "login": "1:4.16.0-2+really2.41.5-0+deb13u1",
+  "login.defs": "1:4.17.4-2",
+  "mawk": "1.3.4.20250131-1",
+  "mount": "2.41.5-0+deb13u1",
+  "ncurses-base": "6.5+20250216-2",
+  "ncurses-bin": "6.5+20250216-2",
+  "netbase": "6.5",
+  "openssl": "3.5.7-1~deb13u3",
+  "openssl-provider-legacy": "3.5.7-1~deb13u3",
+  "passwd": "1:4.17.4-2",
+  "perl-base": "5.40.1-6+deb13u1",
+  "readline-common": "8.2-6",
+  "sed": "4.9-2+deb13u1",
+  "sqv": "1.3.0-3+b2",
+  "sysvinit-utils": "3.14-4",
+  "tar": "1.35+dfsg-3.1",
+  "tzdata": "2026e-0+deb13u1",
+  "util-linux": "2.41.5-0+deb13u1",
+  "zlib1g": "1:1.3.dfsg+really1.3.1-1+b1"
+ },
+ "python": {
+  "version": "3.11.18",
+  "openssl": "OpenSSL 3.5.7 9 Jun 2026",
+  "default_cafile": "/usr/lib/ssl/cert.pem",
+  "expat": "expat_2.9.0",
+  "sqlite": "3.46.1"
+ },
+ "python_dists": {
+  "alembic": "1.20.0",
+  "annotated-doc": "0.0.5",
+  "annotated-types": "0.8.0",
+  "anyio": "4.15.1",
+  "chardet": "7.6.0",
+  "click": "8.5.0",
+  "et-xmlfile": "2.0.0",
+  "fastapi": "0.142.2",
+  "h11": "0.16.0",
+  "idna": "3.20",
+  "mako": "1.4.3",
+  "markupsafe": "3.0.4",
+  "openpyxl": "3.1.5",
+  "opentelemetry-api": "1.45.0",
+  "packaging": "26.3",
+  "psycopg": "3.3.6",
+  "psycopg-binary": "3.3.6",
+  "pydantic": "2.13.5",
+  "pydantic-core": "2.46.5",
+  "python-multipart": "0.0.32",
+  "rapidfuzz": "3.14.6",
+  "sqlalchemy": "2.1.3",
+  "starlette": "1.7.0",
+  "typing-extensions": "4.16.0",
+  "typing-inspection": "0.4.4",
+  "uvicorn": "0.54.0",
+  "xlrd": "2.0.2"
+ },
+ "ca_bundle": {
+  "path": "/etc/ssl/certs/ca-certificates.crt",
+  "sha256": "e9c7b63ee2623386e9b0a3ee32f499d01a8ea23dc83b8383ddff9f8e749543b7",
+  "pem_blocks": 148,
+  "loaded": 148,
+  "emsign_emudhra": [
+   "emSign ECC Root CA - C3",
+   "emSign Root CA - C1",
+   "emSign Root CA - G1"
+  ]
+ },
+ "psycopg": {
+  "version": "3.3.6",
+  "impl": "binary",
+  "libpq_version": 180006,
+  "bundled_libs": {
+   "libcom_err-2abe824b.so.2.1": {
+    "sha256": "5426dcb54dd01c9eedda05e2179f0e47114e8b48a534ffe9e94916e79471b257",
+    "openssl_string": null
+   },
+   "libcrypt-bc2db45e.so.1": {
+    "sha256": "e2a6f6ff300e287a60dfc0c6fdb76ee01e333068df7c60b4e87453d942ccda65",
+    "openssl_string": null
+   },
+   "libcrypto-2d1629ee.so.3": {
+    "sha256": "ac767da23afff24a34a1a86e6464f65ff45c8e3374850c117c1cffbfcd879da0",
+    "openssl_string": "OpenSSL 3.5.8 25 Aug 2026"
+   },
+   "libgssapi_krb5-497db0c6.so.2.2": {
+    "sha256": "ef73998b86c24e54667a843be6d589442dd082e1b9fc605aa15bcc2293858806",
+    "openssl_string": null
+   },
+   "libk5crypto-b1f99d5c.so.3.1": {
+    "sha256": "bf04d7ebe3937aba3855c15acbd991482286a484aeea38bb9ced85e772ea2fb0",
+    "openssl_string": null
+   },
+   "libkeyutils-dfe70bd6.so.1.5": {
+    "sha256": "c29e41b03cf4b2dffbfb4960946e2b42f82c0ca5d53d231d3f0fc597ba274488",
+    "openssl_string": null
+   },
+   "libkrb5-fcafa220.so.3.3": {
+    "sha256": "94dc6413050486a6c8de4b6f3bfdd288390892b72bc68580c6c53929721fa07b",
+    "openssl_string": null
+   },
+   "libkrb5support-d0bcff84.so.0.1": {
+    "sha256": "0eb5322b05ac46e4db7ddb779ee0269006dd01801aaa67b84f8e7f753bfdddf2",
+    "openssl_string": null
+   },
+   "liblber-a44a5afb.so.2.0.200": {
+    "sha256": "862a4715f500831283bebf04347491b17a3adb93e56a335d00a6e1b278258929",
+    "openssl_string": null
+   },
+   "libldap-7c3a4b12.so.2.0.200": {
+    "sha256": "1408b751ee5e666470af890e13a508b38a57870b6a261697e27f9c6493b645fc",
+    "openssl_string": null
+   },
+   "libpcre-9513aab5.so.1.2.0": {
+    "sha256": "02eda850e04931656d8af81f5171bff74d8bec1553d3d85c3d32d7fc5efe8864",
+    "openssl_string": null
+   },
+   "libpq-e9b5c9ac.so.5.18": {
+    "sha256": "adee4abe45a36e8f147b15e08aceca893c255dfd4133a047884807931ca8046d",
+    "openssl_string": null
+   },
+   "libsasl2-84219a89.so.3.0.0": {
+    "sha256": "e84be55110f16f7ca930af373e9f41fa7f4ec60733c013d933d1443ae5056a98",
+    "openssl_string": null
+   },
+   "libselinux-0922c95c.so.1": {
+    "sha256": "99e60178aed625f6d2e2af58bccf605b13619b1544058e9f985a2772affb4a88",
+    "openssl_string": null
+   },
+   "libssl-8bd944e8.so.3": {
+    "sha256": "ef566b112dc7532a689c07de999c16efda3b4872df0c9d011bdcf00b94dd8a2e",
+    "openssl_string": null
+   }
+  }
+ }
+}
