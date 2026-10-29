@@ -3,9 +3,9 @@
 # 이전 판(main — 지금 운영과 같은 DB 0021)을 띄우고 합성 자료를 만든 뒤, 후보 트리의 scripts/deploy.sh <후보> 0021_run_request_key로
 #   1) 검증 실패: OS 패키지 판 하나만 바꾼 검증 목록을 담은 시험용 커밋을 '승인'으로 반영 → 3단계에서 멈춤 — 서비스·컨테이너·
 #      latest 그대로, 정지·백업 없음 (검증 목록을 바꾸는 환경 변수는 없다 — 목록은 승인한 트리의 파일)
-#   1b) 격리 기동 점검 실패: frontend 설정에서 CSP 헤더만 뺀 시험용 커밋 → 목록은 같고 점검이 실패 → 3단계에서 멈춤, 점검 자원 정리
+#   1b) 격리 기동 점검 실패: frontend 설정에서 CSP 헤더만 뺀 시험용 커밋 → 목록은 같고 점검이 실패 → 3단계에서 멈춤, 점검 자원 정리 · 감시 기록은 점검 종료 4와 감시 컨테이너 정리 확인을 따로 남김
 #   2) 정상 반영: 후보 태그 빌드 → 검증 통과 → 백업 → latest를 검증한 ID로 → up --no-build → 실행 중 이미지 = 검증한 ID,
-#      리비전 0021 그대로, 같은 계정 로그인·이전 결과 다시 내려받기 해시 같음
+#      리비전 0021 그대로, 같은 계정 로그인·이전 결과 다시 내려받기 해시 같음, 격리 점검을 감싼 감시 컨테이너를 지우고 목록으로 확인
 #   3) 4장 B 롤백 (리비전이 같은 반영 — 1·2·6·7단계. 단계 상자를 후보 트리의 문서에서 그대로 꺼내 실행) → 이전 이미지·0021·자료 그대로
 # 사용법: bash image_gate_rehearsal.sh <결과 폴더> <이전 SHA> <후보 SHA>   (deploy_probe.py가 이 스크립트와 같은 폴더에 있어야 함)
 #   결과 폴더는 저장소 밖에 둔다 — deploy.sh 1단계가 저장소의 추적하지 않는 파일을 막는다
@@ -40,6 +40,9 @@ leftover() {  # 남은 점검·감시 자원 수 — 목록 조회가 실패하�
   v=$(docker volume ls --format '{{.Name}}' 2>&1) || { echo "볼륨 목록 조회 실패: $v"; return; }
   n=$(docker network ls --format '{{.Name}}' 2>&1) || { echo "네트워크 목록 조회 실패: $n"; return; }
   echo "컨테이너 $(printf '%s\n' "$c" | grep -cE '^moajwo-(smoke|memwatch)-') · 볼륨 $(printf '%s\n' "$v" | grep -c '^moajwo-smoke-') · 네트워크 $(printf '%s\n' "$n" | grep -c '^moajwo-smoke-') ·"
+}
+watchrec() {  # 격리 점검을 감싼 자원 감시의 기록(smoke.watch.json) — 점검의 종료 코드와 감시 컨테이너 정리 결과
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); c=d["cleanup"]; print(d["tool"], "command_exit", d["command_exit"], "exit", d["exit"], "cleanup", c["state"], "remove_exit", c["remove_exit"], "list_exit", c["list_exit"])' "$1" 2>&1
 }
 same() {  # 두 값이 같고 둘 다 비어 있지 않을 때만 '같음' (조회 실패로 둘 다 빈 값이면 '다름')
   if [ -n "${1// /}" ] && [ -n "${2// /}" ] && [ "$1" = "$2" ]; then echo 같음; else echo 다름; fi
@@ -101,6 +104,7 @@ check smokefail.gate "$(grep -h '^\[검증' "$OUT/deploy-smokefail.out" | tail -
 SD=$(find backups -maxdepth 1 -name 'image-gate-*' -type d | sort | tail -1)
 check smokefail.json "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["status"], "failed", d["failed"], "unmeasured", len(d["unmeasured"]), "errors", len(d["errors"]))' "$SD/smoke.json" 2>&1) · $(paste -sd' ' "$SD/gate.result" 2>&1)" \
   "fail failed ['front.index']" "unmeasured 0" "errors 0" "status=fail"
+check smokefail.watch "$(watchrec "$SD/smoke.watch.json")" "command_exit 4" "exit 4" "cleanup removed" "list_exit 0"   # 점검 실패는 그대로, 감시 정리는 확인
 check smokefail.leftover "$(leftover)" "컨테이너 0 ·" "볼륨 0 ·" "네트워크 0 ·"
 check smokefail.untouched "실행 중 $(running) · 같은 컨테이너 backend $(same "$B0" "$(cid backend)") frontend $(same "$F0" "$(cid frontend)") · latest backend $(same "$LB0" "$(latest backend)") frontend $(same "$LF0" "$(latest frontend)") · 백업 $(find backups -name 'moajwo-data-*.tgz' | wc -l)개 · 4단계 $(grep -c '== 4\.' "$OUT/deploy-smokefail.out")번" \
   "실행 중 backend frontend" "같은 컨테이너 backend 같음 frontend 같음" "latest backend 같음 frontend 같음" "백업 0개" "4단계 0번"
@@ -126,6 +130,7 @@ check deploy.api "$(probe after-deploy)" '"login": 200' '"result_same": true' '"
 GD=$(sed -n 's/.*이미지 검증 통과: .*(기록 \(backups\/image-gate-[0-9-]*\)).*/\1/p' "$LOG" | tail -1)
 check deploy.gateresult "$(paste -sd' ' "$GD/gate.result" 2>&1)" "status=pass" "backend=$CB" "frontend=$CF"
 check deploy.smokejson "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["status"], d["passed"], "/", d["required"], "errors", len(d["errors"]))' "$GD/smoke.json" 2>&1)" "pass 22 / 22 errors 0"
+check deploy.watch "$(watchrec "$GD/smoke.watch.json")" "command_exit 0" "exit 0" "cleanup removed" "list_exit 0"   # 실제 Docker에서 감시 컨테이너를 지우고 목록으로 확인
 MEMV=""   # 자원 줄은 단계마다 있어야 한다 (watch 줄은 로그에 원문과 시각 붙은 줄 두 번 남으므로 개수가 아니라 있는지로 본다)
 for w in 'build 시작 전' 'build-backend 동안' 'build-frontend 동안' 'smoke 시작 전' 'smoke 동안'; do
   MEMV+="$w $(grep -qF "자원 | $w" "$LOG" && echo 있음 || echo 없음) · "

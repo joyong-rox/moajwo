@@ -307,8 +307,10 @@ CAND_COMPOSE="$BACKUP_DIR/candidate-$TS.compose.yml"
 BUILD_ARGS=("${COMPOSE_ARGS[@]}")   # 정지·전환과 같은 파일 + 아래에서 후보 태그 덧붙임
 for svc in backend frontend; do   # 하나씩 빌드한다 (동시 빌드보다 메모리를 덜 씀) — 빌드 동안의 시작·최저 여유를 기록
   "$PY" -I -X utf8 scripts/memory_guard.py watch "build-$svc" "$OLD_B" "$MEM_TSV" -- \
-    docker compose "${BUILD_ARGS[@]}" -f "$CAND_COMPOSE" build "$svc" >>"$LOG" 2>&1 \
-    || fail "후보 $svc 빌드 실패 — 기존 서비스·latest 태그는 그대로"
+    docker compose "${BUILD_ARGS[@]}" -f "$CAND_COMPOSE" build "$svc" >>"$LOG" 2>&1
+  RC=$?
+  # 종료 코드는 빌드 실패와 감시 컨테이너 정리 확인 실패(3)를 함께 나타낸다 — 어느 쪽인지는 watch의 판정 줄(빌드 종료 코드·정리 결과)
+  [ "$RC" -eq 0 ] || fail "후보 $svc 빌드 단계 실패 (종료 $RC · $(grep "^자원 | build-$svc 판정:" "$LOG" | tail -1 | tr -d '\r' | grep . || echo '판정 줄 없음')) — 기존 서비스·latest 태그는 그대로"
   log "$(grep "^자원 | build-$svc 동안" "$LOG" | tail -1)"
 done
 CAND_B=$(image_id "$B_REPO:$CAND_TAG") || fail "후보 backend 이미지 ID를 읽을 수 없음 — 기존 서비스·latest 태그는 그대로"

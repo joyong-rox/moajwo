@@ -4,8 +4,12 @@
 사용법 (scripts/image_gate.sh가 반영 전에 부른다 — docs/DEPLOY.md 11장):
   python scripts/image_inventory.py collect backend|frontend <이미지 ID·이름> <결과.json>
   python scripts/image_inventory.py compare <기대.json> <실제.json>
-종료 코드: 0 같음 · 4 실행 환경이 다름 · 3 입력 오류(도구 판·종류가 다르거나, 종류별 필수 항목이 없거나 자료형이 틀림 — 비교하지 않음)
-· 2 사용법 · 1 예상치 못한 중단(처리하지 못한 예외 — 판정 아님). collect도 모은 목록이 필수 항목을 갖추지 못하면 종료 3이다.
+종료 코드: 0 같음 · 4 실행 환경이 다름 · 3 입력 오류(도구 판·종류가 다르거나, 종류별 필수 항목이 없거나 자료형이 틀림 — 비교하지 않음.
+또는 같은 이미지 ID인데 실행 환경 항목이 다름 — 두 목록 중 하나는 그 이미지에서 모은 것이 아니라는 모순) · 2 사용법 · 1 예상치 못한
+중단(처리하지 못한 예외 — 판정 아님). collect도 모은 목록이 필수 항목을 갖추지 못하면 종료 3이다.
+이미지 ID가 같다는 사실만으로는 통과도 거절도 하지 않는다 — ID가 같아도 검사·비교는 그대로 한다. 검증 목록의 출처는 ID가 아니라 승인한
+트리에 커밋된 고정 경로(image_gate.sh·deploy.sh가 확인)와 CI 출처 기록(verified)으로 본다. ID의 뜻은 Docker 저장 방식마다 다르다
+(containerd 저장소는 매니페스트 digest, 기존 저장소는 설정 digest — image.id_meaning에 기록).
 
 이미지는 일회용 컨테이너(--rm)로 네트워크 없이(--network none), 볼륨 없이, 읽기 전용 루트로 읽기만 한다.
 운영 컨테이너·볼륨은 건드리지 않는다. 앱 코드·정적 파일의 해시(app_tree·html_tree)는 소스마다 다르므로 기록만 하고 비교하지 않는다.
@@ -287,8 +291,6 @@ def main() -> int:
         errs = validate(a, "기대", expected=True) + validate(b, "실제")
         if not errs and a["kind"] != b["kind"]:
             errs.append(f"종류가 다름: 기대 {a['kind']} / 실제 {b['kind']}")
-        if not errs and a["image"]["id"] == b["image"]["id"]:
-            errs.append("기대 목록이 후보 자신의 목록임 (같은 이미지 ID) — 검증 목록은 CI에서 검증한 다른 빌드에서 와야 한다")
         if errs:
             for e in errs:
                 print("입력 오류 |", e)
@@ -297,6 +299,12 @@ def main() -> int:
         diffs = compare(a, b)
         for x in diffs:
             print("다름 |", x)
+        if a["image"]["id"] == b["image"]["id"]:  # 같은 이미지라면 실행 환경이 다를 수 없다 — 다르면 목록 하나가 그 이미지의 것이 아님
+            if diffs:
+                print(f"입력 오류 | 같은 이미지 ID({a['image']['id']})인데 실행 환경 항목이 다름 — 두 목록 중 하나는 그 이미지에서 모은 것이 아님")
+                print(f"요약 | 비교 결과를 받지 않음 — 같은 이미지 ID인데 다름 {len(diffs)}건 (모순, 입력 오류)")
+                return 3
+            print(f"참고 | 기대 목록과 후보가 같은 이미지 ID({a['image']['id']}) — ID로 출처를 판단하지 않고 항목을 그대로 비교함")
         print(f"요약 | {a.get('kind')} 실행 환경 항목 {'같음' if not diffs else f'다름 {len(diffs)}건'} | 기대 {a['image']['id']} | 실제 {b['image']['id']}")
         return 0 if not diffs else 4
     print(__doc__)

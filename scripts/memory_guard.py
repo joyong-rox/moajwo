@@ -5,9 +5,13 @@
 사용법:
   python scripts/memory_guard.py check <단계> <docker 이미지> <기록.tsv>
       단계 시작 기준과 비교. 종료 0 통과 · 4 기준 미달 · 3 측정 실패(측정 실패는 통과가 아니다) · 1 예상치 못한 중단
-  python scripts/memory_guard.py watch <단계> <docker 이미지> <기록.tsv> -- <명령 ...>
-      명령을 실행하는 동안 1초마다(호스트)·2초마다(Docker VM) 재서 시작·최저를 남긴다. 종료 코드는 명령의 것.
-      재지 못한 값은 '미측정'으로 적고 지어내지 않는다.
+  python scripts/memory_guard.py watch <단계> <docker 이미지> <기록.tsv> [--result <결과.json>] -- <명령 ...>
+      명령을 실행하는 동안 1초마다(호스트)·2초마다(Docker VM) 재서 시작·최저를 남긴다. 재지 못한 값은 '미측정'으로 적고
+      지어내지 않는다 — 표본을 얻지 못한 것은 판정을 바꾸지 않는다.
+      끝나면 이 실행이 만든 감시 컨테이너(고유 이름)만 지우고 목록으로 남지 않았음을 확인한다. 종료 코드는 감싼 명령의 것이고,
+      감시 컨테이너가 남았거나 남았는지 확인하지 못하면 감싼 명령의 결과와 상관없이 3(도구 오류)이다 — 남은 자원부터 봐야
+      하므로 정리 쪽이 먼저다 (image_smoke.py와 같은 우선순위). 감싼 명령의 종료 코드·삭제 결과·삭제 뒤 목록 조회 결과·남은 이름은
+      어느 쪽이든 기록(.tsv의 summary 줄, --result 파일)과 '판정' 줄에 함께 남는다.
 
 측정 위치 (단위 MiB = 1024×1024 바이트):
   host — Windows: GlobalMemoryStatusEx.ullAvailPhys (작업 관리자의 '사용 가능'), 리눅스: /proc/meminfo MemAvailable
@@ -25,7 +29,7 @@ import threading
 import time
 
 os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"  # Windows: docker를 현재 폴더(저장소)에서 먼저 찾지 않게 — 단독 실행에도
-TOOL = "memory_guard 1"
+TOOL = "memory_guard 2"
 MIB = 1024 * 1024
 # 단계를 시작해도 되는 최소 여유 (MiB). 근거와 측정값은 docs/DEPLOY.md 11장 — 바꿀 때는 그 표와 함께 바꾼다.
 # host: 기준과 비교하는 값은 단계 직전의 check 값이다. 이 PC에서 그 check 값으로 단계가 OOM·재시작 없이 끝난 것을 확인한
@@ -39,6 +43,8 @@ THRESHOLDS = {
 }
 # 감시 컨테이너는 watch가 끝날 때 지운다. 그래도 watch가 강제로 끝나 지우지 못한 경우를 위해 스스로 2시간 뒤 끝난다(--rm으로 사라짐).
 VM_SAMPLER = "import time\nend = time.time() + 7200\nwhile time.time() < end:\n    m = open('/proc/meminfo').read().split()\n    print(int(time.time()), m[m.index('MemAvailable:') + 1], flush=True)\n    time.sleep(2)\n"
+# 지운 뒤 목록에 아직 보이면(--rm 자동 삭제와 겹쳐 'Removal In Progress'인 동안 등) 다시 보기 전에 기다리는 초 — 그래도 보이면 '남음'
+RECHECK = (1, 1, 1)
 
 
 def host_available() -> tuple[int | None, str]:
@@ -108,7 +114,32 @@ def check(stage: str, image: str, tsv: str) -> int:
     return 4 if low else 0
 
 
-def watch(stage: str, image: str, tsv: str, cmd: list[str]) -> int:
+def remove_sampler(name: str) -> dict:
+    """이 실행의 감시 컨테이너(고유 이름)만 지우고, 지웠다는 응답만 믿지 않고 목록으로 남지 않았음을 확인한다.
+    state: removed(목록 조회 성공·그 이름 없음) · left(목록에 남음) · unknown(목록 조회 실패 — '없음'이 아니라 확인 불가).
+    다른 이름(앞 실행·다른 작업)의 컨테이너는 지우지도 판정에 넣지도 않는다."""
+    rrc, _, rerr = docker("rm", "-f", name, timeout=60)
+    for wait in (*RECHECK, None):
+        lrc, lout, lerr = docker("ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}}", timeout=60)
+        left = [x for x in lout.split() if x == name] if lrc == 0 else None  # 필터는 부분 일치라 이름이 정확히 같은 것만
+        if lrc != 0 or not left or wait is None:
+            break
+        time.sleep(wait)
+    return {"name": name, "state": "unknown" if lrc != 0 else ("left" if left else "removed"),
+            "remove_exit": rrc, "remove_err": rerr.strip()[-200:] if rrc else "",
+            "list_exit": lrc, "list_err": lerr.strip()[-200:] if lrc else "", "left": left}  # fmt: skip
+
+
+def cleanup_text(c: dict) -> str:
+    if c["state"] == "removed":
+        return f"확인됨 (감시 컨테이너 {c['name']} 없음)"
+    removed = f"삭제 종료 {c['remove_exit']}" + (f": {c['remove_err']}" if c["remove_err"] else "")
+    if c["state"] == "left":
+        return f"확인 실패 — 감시 컨테이너 {c['name']}가 남음 ({removed}) — 직접 지울 것"
+    return f"확인 실패 — 감시 컨테이너 {c['name']}가 남았는지 확인 불가 ({removed} · 목록 조회 종료 {c['list_exit']}: {c['list_err']}) — 직접 확인할 것"
+
+
+def watch(stage: str, image: str, tsv: str, cmd: list[str], result: str | None = None) -> int:
     host_samples: list[tuple[float, int]] = []
     stop = threading.Event()
 
@@ -146,21 +177,16 @@ def watch(stage: str, image: str, tsv: str, cmd: list[str]) -> int:
                         vm_samples.append((float(parts[0]), int(parts[1]) // 1024))
             else:
                 vm_note = f"Docker VM 감시 기록을 읽지 못함 (docker logs 종료 {lrc})"
-        # 띄우지 못했다고 나와도(시간 초과 등) 데몬이 만들었을 수 있어, 이 실행의 고유 이름으로 지우기를 늘 시도한다
-        rrc, _, rerr = docker("rm", "-f", name, timeout=60)
-        if rrc != 0 and not (rc_s != 0 and "No such container" in rerr):
-            vm_note += f" · 감시 컨테이너 {name} 삭제 실패 (종료 {rrc}: {rerr.strip()[:120]}) — 직접 지울 것"
-            print(f"자원 | {stage}: {vm_note}", flush=True)
-        else:  # 지웠다는 응답만 믿지 않고 목록으로 남지 않았는지 본다 (조회 실패는 '없음'이 아니라 확인 불가)
-            prc, pout, _ = docker("ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}}", timeout=60)
-            if prc != 0 or name in pout.split():
-                what = "가 남음" if prc == 0 else f" 삭제 확인 불가 (목록 조회 종료 {prc})"
-                vm_note += f" · 감시 컨테이너 {name}{what} — 직접 확인할 것"
-                print(f"자원 | {stage}: {vm_note}", flush=True)
+        # 띄우지 못했다고 나와도(시간 초과 등) 데몬이 만들었을 수 있어, 이 실행의 고유 이름으로 늘 지우고 목록으로 확인한다
+        cleanup = remove_sampler(name)
+        if cleanup["state"] != "removed":  # 감싼 명령이 중단돼 아래 판정 줄이 나오지 않는 경우에도 남은 자원을 알린다
+            print(f"자원 | {stage}: 감시 자원 정리 {cleanup_text(cleanup)}", flush=True)
     if rc < 0 and sys.platform != "win32":
         rc = 128 - rc  # 신호로 끝난 명령(-N) → 셸 관례 128+N (예: SIGKILL 137)
     elif sys.platform == "win32" and rc >= 2**31:
         rc -= 2**32  # Windows 상태 코드(예: Ctrl+C 0xC000013A) → 부호 있는 값으로 넘겨 셸이 원래 값을 보게
+    # 감시 자원 정리를 확인하지 못하면 도구 오류(3)가 감싼 명령의 결과보다 먼저다. 감싼 명령의 종료 코드는 command_exit로 남는다
+    final = rc if cleanup["state"] == "removed" else 3
     append_tsv(tsv, [(time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)), stage, "host", v, "") for ts, v in host_samples]
                + [(time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(ts)), stage, "vm", v, "") for ts, v in vm_samples])  # fmt: skip
 
@@ -171,12 +197,23 @@ def watch(stage: str, image: str, tsv: str, cmd: list[str]) -> int:
 
     print(f"자원 | {stage} 동안: host {summary(host_samples)} · vm {summary(vm_samples)} · {round(ended - started)}초"
           + (f" · {vm_note}" if vm_note else ""), flush=True)  # fmt: skip
-    record = {"tool": TOOL, "stage": stage, "seconds": round(ended - started, 1), "exit": rc,
+    record = {"tool": TOOL, "stage": stage, "seconds": round(ended - started, 1), "exit": final, "command_exit": rc, "cleanup": cleanup,
               "host": {"start": host_samples[0][1] if host_samples else None, "min": min((v for _, v in host_samples), default=None), "samples": len(host_samples)},
               "vm": {"start": vm_samples[0][1] if vm_samples else None, "min": min((v for _, v in vm_samples), default=None), "samples": len(vm_samples)},
               "note": vm_note}  # fmt: skip
+    if result:  # 부르는 쪽(image_gate.sh)이 이번 실행의 판정만 읽게 — 감싼 명령의 출력과 섞이지 않는 파일로
+        try:
+            tmp = f"{result}.tmp-{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(record, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, result)
+        except OSError as e:
+            final = record["exit"] = 3
+            record["note"] = (vm_note + " · " if vm_note else "") + f"결과 파일을 쓰지 못함: {e}"
     append_tsv(tsv, [(time.strftime("%Y-%m-%dT%H:%M:%S%z"), stage, "summary", json.dumps(record, ensure_ascii=False), "")])
-    return rc
+    print(f"자원 | {stage} 판정: 감싼 명령 종료 {rc} · 감시 자원 정리 {cleanup_text(cleanup)}"
+          + (f" · {record['note']}" if record["note"] != vm_note else "") + f" → 종료 {final}", flush=True)  # fmt: skip
+    return final
 
 
 def main() -> int:
@@ -184,8 +221,11 @@ def main() -> int:
     a = sys.argv[1:]
     if len(a) == 4 and a[0] == "check":
         return check(a[1], a[2], a[3])
-    if len(a) >= 6 and a[0] == "watch" and a[4] == "--":
-        return watch(a[1], a[2], a[3], a[5:])
+    if len(a) >= 6 and a[0] == "watch" and "--" in a[4:]:
+        i = a.index("--", 4)
+        opt, cmd = a[4:i], a[i + 1 :]
+        if cmd and (not opt or (len(opt) == 2 and opt[0] == "--result")):
+            return watch(a[1], a[2], a[3], cmd, opt[1] if opt else None)
     print(__doc__)
     return 2
 
