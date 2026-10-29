@@ -2,6 +2,7 @@
 # scripts/deploy.sh 실패 처리 시험 (Git Bash). 실제 Docker를 쓰지 않는다:
 # 임시 git 저장소 + 명령 대역(가짜 docker)을 PATH 앞에 두고, 모든 docker 호출을 기록해 후속 단계(백업·전환·재시작)가
 # 실행됐는지 확인한다. 사용법: bash scripts/test_deploy.sh
+#   다른 판 시험: DEPLOY_SH=<그 판의 deploy.sh> TEST_SCRIPTS=<그 판의 scripts 폴더 — 끝의 진짜 검증 단계 사례가 쓰는 image_gate.sh·memory_guard.py>
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=$(mktemp -d)
@@ -139,7 +140,8 @@ chmod +x "$STUB/docker"
 # deploy.sh는 3단계 검증(scripts/image_gate.sh)·자원 확인(scripts/memory_guard.py)을 이 저장소(승인한 트리)의 파일로만 부른다 —
 # 그래서 대역도 환경 변수가 아니라 임시 저장소에 커밋한 파일로 둔다 (운영과 같은 경로).
 cp "${DEPLOY_SH:-$ROOT/scripts/deploy.sh}" "$WORK/repo/scripts/deploy.sh"   # DEPLOY_SH: 다른 버전 시험용
-unset DEPLOY_SH   # deploy.sh는 DEPLOY_* 변수가 있으면 멈추므로 시험 대상에게 넘기지 않는다
+SCRIPTS_UT="${TEST_SCRIPTS:-$ROOT/scripts}"   # TEST_SCRIPTS: 끝의 '진짜 검증 단계' 사례에 쓸 image_gate.sh·memory_guard.py의 판 (다른 버전 시험용)
+unset DEPLOY_SH TEST_SCRIPTS   # deploy.sh는 DEPLOY_* 변수가 있으면 멈추므로 시험 대상에게 넘기지 않는다
 cat > "$WORK/repo/scripts/image_gate.sh" <<'EOF'
 #!/usr/bin/env bash
 # 검증 대역 — 호출을 기록하고 시나리오대로 통과 기록(gate.result)을 쓰거나 쓰지 않는다
@@ -256,6 +258,13 @@ run_case() {  # 이름, 시나리오, 승인 SHA, 기대 종료 코드, 있어�
         grep -q "결과: 기존 컨테이너 재개 확인 · latest 태그:" "$state/out" || { ok=0; why="$why 재개·태그 상태를 따로 적지 않음"; } ;;
       NO_BUILD) grep "compose" "$STUB_LOG" | grep -q " build" && { ok=0; why="$why 빌드가 실행됨"; } ;;
       NO_GATE) grep -q "^gate " "$STUB_LOG" && { ok=0; why="$why 검증이 실행됨"; } ;;
+      NO_GATE_RESULT) ls backups/image-gate-*/gate.result >/dev/null 2>&1 && { ok=0; why="$why 검증 단계가 실행됨 (gate.result 있음)"; } ;;
+      GATE_PASS_RECORD) f="$(ls -d backups/image-gate-*/ 2>/dev/null | tail -1)gate.result"
+        grep -qx 'status=pass' "$f" 2>/dev/null || { ok=0; why="$why gate.result에 통과 기록이 없음"; } ;;
+      GATE_FAIL_CLEANUP)  # 진짜 검증 단계의 기록: 실패 + 감시 자원 정리 사유, 통과 기록 없음
+        f="$(ls -d backups/image-gate-*/ 2>/dev/null | tail -1)gate.result"
+        { [ -f "$f" ] && grep -qx 'status=fail' "$f" && ! grep -qx 'status=pass' "$f" && grep -q '감시 자원 정리 확인 실패' "$f"; } \
+          || { ok=0; why="$why gate.result에 감시 정리 실패 기록이 없거나 통과 기록이 남음"; } ;;
       NO_STEP6_HEADER) grep -q "== 6\. 새 이미지로 전환" "$state/out" && { ok=0; why="$why 6단계 머리줄이 출력됨 (4장 B 0단계가 전환 도중으로 읽음)"; } ;;
       MEM_FIRST)  # 빌드 전 자원 확인(운영 backend 이미지로)이 어떤 빌드보다 먼저
         awk '/^memory_guard check build sha256:old000000000000cid-backend / { if (!m) m = NR } / build / && /compose/ { if (!b) b = NR }
@@ -379,5 +388,107 @@ run_case "BASH_ENV있음_멈춤" ok "$APPROVED" 1 "내보낸 셸 함수·BASH_EN
 CASE_REHEARSAL=1 \
 run_case "격리리허설표지_진행" ok "$APPROVED" 0 "DEPLOY_REHEARSAL=1 — 격리 리허설, 운영 반영 아님" CAND_BUILD DONE
 run_case "latest되돌림명령실패_사실대로" tag_all_fail "$APPROVED" 1 "되돌림 명령 실패 \(종료 1/1\)" VERIFIED RETAG_TRUTH NO_RESTORE_CLAIM RESUME_AND_TAG NO_STEP6_HEADER NO_SWITCH NO_DONE START
+
+# ---------------------------------------------------------------- 2026-10-29 보완: 진짜 검증 단계·자원 감시까지 잇기
+# 위 사례의 검증·자원 도구는 대역이다. 아래는 시험할 판의 image_gate.sh를 그대로, memory_guard.py 자리에는 진짜 파일을 불러 docker 호출만
+# 가짜로 답하는 감싸개를 커밋한 승인 커밋으로, 감시 컨테이너 정리 실패가 gate.result와 deploy.sh 3단계 뒤(정지·백업·latest·전환)까지
+# 어떻게 이어지는지 본다. 목록 수집·격리 점검은 정상 응답 대역이고, 실제 docker에는 닿지 않는다(후보 빌드도 실행하지 않고 기록만).
+echo "== 2026-10-29 보완: 진짜 검증 단계(image_gate.sh)·자원 감시(memory_guard.py watch) — 감시 컨테이너 정리 확인"
+MG_REAL=$(cygpath -w "$SCRIPTS_UT/memory_guard.py" 2>/dev/null || printf '%s' "$SCRIPTS_UT/memory_guard.py")
+export MG_REAL
+git checkout -q -b realgate "$APPROVED" || exit 1
+cp "$SCRIPTS_UT/image_gate.sh" scripts/image_gate.sh
+cat > scripts/memory_guard.py <<'EOF'
+"""자원 확인 감싸개 — 시험할 판의 진짜 memory_guard.py(MG_REAL)를 그대로 돌리고, 그 안의 docker 호출과 호스트 측정만 가짜로 답한다
+(실제 docker에 닿지 않음). watch가 감싼 명령 가운데 docker compose(후보 빌드)는 실행하지 않고 가짜 docker와 같은 꼴로 기록만 하고,
+그 밖의 명령(대역 격리 점검)은 실행한다. STUB_SCENARIO realgate_smoke_left·realgate_build_left: 그 단계(smoke·build-backend)의
+감시 컨테이너 삭제가 실패해 목록에 남음."""
+import importlib.util
+import os
+import subprocess
+import sys
+
+s = os.environ.get("STUB_SCENARIO", "ok")
+log = os.environ.get("STUB_LOG_W") or os.environ["STUB_LOG"]
+with open(log, "a", encoding="utf-8") as f:
+    f.write("memory_guard " + " ".join(sys.argv[1:]) + "\n")
+spec = importlib.util.spec_from_file_location("memory_guard_under_test", os.environ["MG_REAL"])
+mg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mg)
+real_run = subprocess.run
+stage = sys.argv[2] if len(sys.argv) > 2 else ""
+fail_rm = (s, stage) in (("realgate_smoke_left", "smoke"), ("realgate_build_left", "build-backend"))
+made, gone = [], []
+
+
+def cp(args, rc, out="", err=""):
+    return subprocess.CompletedProcess(args, rc, out.encode("utf-8"), err.encode("utf-8"))
+
+
+def fake(args, *a, **kw):
+    if not args or args[0] != "docker":
+        return real_run(args, *a, **kw)
+    d = list(args[1:])
+    if d[:1] == ["compose"]:
+        with open(log, "a", encoding="utf-8") as f:
+            f.write(" ".join(args) + "\n")
+        return cp(args, 0)
+    if d[:2] == ["run", "-d"]:
+        made.append(d[d.index("--name") + 1])
+        return cp(args, 0, "cid\n")
+    if d[:1] == ["run"]:
+        return cp(args, 0, "MemTotal: 8000000 kB\nMemAvailable: 5120000 kB\n")
+    if d[:1] == ["logs"]:
+        return cp(args, 0, "1700000000 5120000\n")
+    if d[:2] == ["rm", "-f"]:
+        if fail_rm:
+            return cp(args, 1, err="Error response from daemon: (대역) 삭제 실패")
+        gone.append(d[2])
+        return cp(args, 0, d[2] + "\n")
+    if d[:2] == ["ps", "-a"]:
+        return cp(args, 0, "".join(n + "\n" for n in made if n not in gone))
+    return cp(args, 1, err="모르는 docker 명령 (대역)")
+
+
+subprocess.run = fake
+mg.host_available = lambda: (900, "대역 호스트 측정")
+if hasattr(mg, "RECHECK"):
+    mg.RECHECK = ()
+sys.exit(mg.main())
+EOF
+cat > scripts/image_inventory.py <<'EOF'
+"""목록 도구 대역 — collect는 종류만 적은 목록을 쓰고, compare는 '같음'을 말한다 (docker 없음)."""
+import json
+import sys
+
+if sys.argv[1] == "collect":
+    with open(sys.argv[4], "w", encoding="utf-8") as f:
+        json.dump({"kind": sys.argv[2]}, f)
+    sys.exit(0)
+with open(sys.argv[3], encoding="utf-8") as f:
+    kind = json.load(f)["kind"]
+print(f"요약 | {kind} 실행 환경 항목 같음 | 기대 대역 | 실제 대역")
+EOF
+cat > scripts/image_smoke.py <<'EOF'
+"""격리 점검 대역 — 필수 점검 하나를 통과로 쓴다 (docker 없음). image_gate.sh가 읽는 TOOL·REQUIRED를 둔다."""
+TOOL = "image_smoke 대역"
+REQUIRED = [("stub.ok", "대역 점검")]
+if __name__ == "__main__":
+    import json
+    import sys
+
+    b, f, out = sys.argv[1:4]
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump({"tool": TOOL, "status": "pass", "ok": True, "images": {"backend": b, "frontend": f}, "errors": [],
+                   "checks": [{"id": "stub.ok", "ok": True, "measured": True}]}, fh)
+EOF
+mkdir -p deploy/expected-images && for k in backend frontend; do printf '{"kind": "%s"}\n' "$k" > "deploy/expected-images/$k.json"; done
+git add -A && git commit -qm "real gate + memory_guard wrapper" && REALGATE=$(git rev-parse HEAD)
+run_case "진짜검증_감시정리확인_전환"      realgate_ok         "$REALGATE" 0 "실행 중 이미지 = 3단계에서 검증한 이미지" GATE_PASS_RECORD CAND_BUILD DONE NO_START
+run_case "진짜검증_점검감시남음_정지없음"  realgate_smoke_left "$REALGATE" 1 "이미지 검증 실패 \(종료 코드 1\) — 기존 서비스·latest 태그는 그대로" GATE_FAIL_CLEANUP NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+run_case "진짜검증_빌드감시남음_검증없음"  realgate_build_left "$REALGATE" 1 "후보 backend 빌드 단계 실패 \(종료 3 · 자원 \| build-backend 판정: 감싼 명령 종료 0 · 감시 자원 정리 확인 실패" NO_GATE_RESULT NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+printf '{"kind": "backend", "edited": true}\n' > deploy/expected-images/backend.json   # 검증 목록을 커밋하지 않고 바꿈
+run_case "검증목록무단변경_멈춤" realgate_ok "$REALGATE" 1 "추적 중인 파일에 미커밋 변경이 있음" NO_BUILD NO_GATE_RESULT NO_RETAG NO_STOP NO_BACKUP NO_SWITCH NO_START
+git checkout -q -- deploy/expected-images/backend.json
 echo "== 결과: 통과 $PASS · 실패 $FAILN"
 [ "$FAILN" -eq 0 ]

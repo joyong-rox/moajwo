@@ -7,12 +7,16 @@
 
   1. image_smoke.py — main()을 프로세스 안에서 돌리고 subprocess.run을 가짜 docker로 바꾼다(실제 docker에 닿지 않음).
      정상 대조군과 빈·일부·중복·형식 오류 결과, 로그 조회 실패·빈 로그, 자원 삭제·목록 조회 실패.
-  2. image_inventory.py compare — 최소 JSON, 필수 항목이 양쪽에 다 없음, 자료형 오류, 도구 판·종류 다름, 실제 목록 같음·다름.
-  3. image_gate.sh — 임시 저장소에 이 판의 image_gate.sh를 두고 목록·점검·자원 도구는 대역으로 바꿔(docker 호출 없음)
-     종료 0인데 결과가 없거나 실패를 말하는 경우, PYTHON·DEPLOY_EXPECTED_DIR 환경 변수, 자원 기준 미달.
+  2. image_inventory.py compare — 최소·끊긴 JSON, 필수 항목이 양쪽에 다 없음, 자료형 오류, 도구 판·종류 다름, 실제 목록 같음·다름,
+     같은 이미지(같은 ID) 비교, 같은 ID인데 내용이 다름(모순), 후보에서 모은 목록을 검증 목록 자리에 씀(출처 기록 없음).
+  3. image_gate.sh — 임시 git 저장소에 이 판의 image_gate.sh를 커밋하고 목록·점검 도구는 대역으로 바꿔(docker 호출 없음)
+     종료 0인데 결과가 없거나 실패를 말하는 경우, PYTHON·DEPLOY_EXPECTED_DIR 환경 변수, 자원 기준 미달, 검증 목록의 커밋하지 않은
+     변경, 감시 컨테이너 정리 실패. 자원 도구는 이 판의 진짜 memory_guard.py를 docker 호출만 가짜로 바꿔 돌린다.
   4. memory_guard.py — main()을 프로세스 안에서 돌리고 호스트 측정과 subprocess.run(docker·감싼 명령)을 가짜로 바꾼다.
-     기준 이상·미달·측정 실패(통과가 아님), watch가 명령 종료 코드를 그대로 돌려주고 중단(Ctrl+C)에도 감시 컨테이너를 지우는지.
-     이 파일이 없는 판(수정 전)에서는 건너뛴다.
+     기준 이상·미달·측정 실패(통과가 아님), watch가 명령 종료 코드를 그대로 돌려주고 중단(Ctrl+C)에도 감시 컨테이너를 지우는지,
+     감시 컨테이너 삭제 실패·남음·목록 조회 실패는 명령 결과와 상관없이 3이고 두 결과가 기록에 남는지, 표본을 못 얻은 것은 판정을
+     바꾸지 않는지. 이 파일이 없는 판(수정 전)에서는 건너뛴다.
+  통과·막힘이 맞아도 남아야 할 근거(gate.result의 두 사유, watch 기록의 명령 종료 코드·정리 결과)가 없으면 '구분' 쪽으로 센다.
 """
 
 import argparse
@@ -331,7 +335,13 @@ def compare_cases(repo_root: Path) -> list[tuple[str, bool, str, object, object]
         c["image"]["id"] = "sha256:" + "c" * 64
         return c
 
+    def same_image(doc: dict) -> dict:  # 검증 목록과 같은 이미지(같은 ID)에서 새로 모은 목록 — 출처 기록 없음
+        return {k: v for k, v in json.loads(json.dumps(doc)).items() if k != "verified"}
+
     cb, cf = candidate(b), candidate(f)
+    sb, sf = same_image(b), same_image(f)
+    same_id_changed = same_image(b)
+    same_id_changed["os_packages"]["tzdata"] = same_id_changed["os_packages"]["tzdata"] + "~시험"
     changed = candidate(b)
     changed["os_packages"]["tzdata"] = changed["os_packages"]["tzdata"] + "~시험"
     no_verified = {k: v for k, v in b.items() if k != "verified"}
@@ -352,9 +362,13 @@ def compare_cases(repo_root: Path) -> list[tuple[str, bool, str, object, object]
         ("same_backend", True, "검증 목록 backend = 같은 환경의 다른 빌드", b, cb),
         ("same_frontend", True, "검증 목록 frontend = 같은 환경의 다른 빌드 (Python 항목 없음)", f, cf),
         ("differ", False, "OS 패키지 판 하나 다름", b, changed),
-        ("self_as_expected", False, "후보 자신의 목록을 검증 목록으로 씀 (같은 이미지 ID)", b, b),
+        ("same_image_backend", True, "같은 이미지 비교 — 검증 목록 backend와 같은 ID·같은 실행 환경 (ID만으로 거절하지 않음)", b, sb),
+        ("same_image_frontend", True, "같은 이미지 비교 — 검증 목록 frontend와 같은 ID·같은 실행 환경", f, sf),
+        ("same_id_contradiction", False, "같은 이미지 ID인데 OS 패키지 판 하나 다름 (모순 — ID가 같아도 비교함)", b, same_id_changed),
+        ("self_list_no_provenance", False, "후보에서 모은 목록을 그대로 검증 목록 자리에 씀 (출처 기록 없음 — 출처 보호)", cb, cb),
         ("no_verified", False, "검증 목록에 CI 출처 기록(verified)이 없음", no_verified, cb),
         ("dup_key", False, "후보 목록 JSON에 같은 키가 두 번 (machine)", b, dup),
+        ("broken_json", False, "후보 목록 JSON이 중간에 끊김 (불완전한 JSON)", b, json.dumps(cb, ensure_ascii=False)[:200]),
         ("minimal_backend", False, "kind·image.id만 있는 같은 JSON 두 개 (backend)", minimal_b, minimal_b),
         ("minimal_frontend", False, "kind·image.id만 있는 같은 JSON 두 개 (frontend)", minimal_f, minimal_f),
         ("both_missing_dists", False, "양쪽 다 python_dists 없음", no_dists, no_dists),
@@ -368,8 +382,9 @@ def compare_cases(repo_root: Path) -> list[tuple[str, bool, str, object, object]
     ]
 
 
-# 종료 코드 기대: 0 같음 · 4 실행 환경이 다름 · 3 입력 오류(도구 판·종류·필수 항목·형식·출처 기록·후보 자신의 목록·중복 키)
-COMPARE_RC = {"same_backend": 0, "same_frontend": 0, "differ": 4, "self_as_expected": 3, "no_verified": 3, "dup_key": 3,
+# 종료 코드 기대: 0 같음 · 4 실행 환경이 다름 · 3 입력 오류(도구 판·종류·필수 항목·형식·출처 기록·중복 키·같은 ID인데 다름)
+COMPARE_RC = {"same_backend": 0, "same_frontend": 0, "differ": 4, "same_image_backend": 0, "same_image_frontend": 0,
+              "same_id_contradiction": 3, "self_list_no_provenance": 3, "no_verified": 3, "dup_key": 3, "broken_json": 3,
               "minimal_backend": 3, "minimal_frontend": 3, "both_missing_dists": 3, "list_type": 3, "psycopg_error": 3,
               "tool_mismatch": 3, "kind_mismatch": 3, "self_respelled": 3, "kind_list": 3, "nested_types": 3}  # fmt: skip
 
@@ -404,13 +419,55 @@ print(f"요약 | {act['kind']} 실행 환경 항목 {'같음' if same else '다�
 sys.exit(0 if same else (4 if os.environ.get("GATE_NEW_CODES") else 1))
 """
 
-STUB_MEM = r"""import os, subprocess, sys
-mode = os.environ.get("GATE_STUB", "ok")
-if sys.argv[1] == "check":
-    print("자원 | 대역")
-    sys.exit(4 if mode == "mem_low" else 0)
-sys.exit(subprocess.run(sys.argv[sys.argv.index("--") + 1:]).returncode)
-"""
+STUB_MEM = r'''"""자원 확인 대역 — 시험할 판의 진짜 memory_guard.py(GATE_REAL_MEM)를 그대로 돌리고 docker 호출과 호스트 측정만 가짜로 바꾼다.
+watch가 감싼 명령(대역 격리 점검)은 진짜로 실행한다. docker 호출은 모두 여기서 답하므로 실제 docker에 닿지 않는다.
+GATE_WATCH: rm_fail(감시 컨테이너 삭제 실패 — 남음) · left(삭제 응답은 성공인데 목록에 남음) · list_fail(삭제 뒤 목록 조회 실패)."""
+import importlib.util
+import os
+import subprocess
+import sys
+
+mode, fault = os.environ.get("GATE_STUB", "ok"), os.environ.get("GATE_WATCH", "")
+spec = importlib.util.spec_from_file_location("memory_guard_under_test", os.environ["GATE_REAL_MEM"])
+mg = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mg)
+real_run = subprocess.run
+made, gone = [], []
+
+
+def cp(args, rc, out="", err=""):
+    return subprocess.CompletedProcess(args, rc, out.encode("utf-8"), err.encode("utf-8"))
+
+
+def fake(args, *a, **kw):
+    if not args or args[0] != "docker":
+        return real_run(args, *a, **kw)
+    d = list(args[1:])
+    if d[:2] == ["run", "-d"]:
+        made.append(d[d.index("--name") + 1])
+        return cp(args, 0, "cid\n")
+    if d[:1] == ["run"]:
+        return cp(args, 0, "MemTotal: 8000000 kB\nMemAvailable: 5120000 kB\n")
+    if d[:1] == ["logs"]:
+        return cp(args, 0, "1700000000 5120000\n")
+    if d[:2] == ["rm", "-f"]:
+        if fault == "rm_fail":
+            return cp(args, 1, err="Error response from daemon: (대역) 삭제 실패")
+        gone.append(d[2])
+        return cp(args, 0, d[2] + "\n")
+    if d[:2] == ["ps", "-a"]:
+        if fault == "list_fail":
+            return cp(args, 1, err="Error response from daemon: (대역) 목록 조회 실패")
+        return cp(args, 0, "".join(n + "\n" for n in made if fault == "left" or n not in gone))
+    return cp(args, 1, err="모르는 docker 명령 (대역)")
+
+
+subprocess.run = fake
+mg.host_available = lambda: (500 if mode == "mem_low" else 900, "대역 호스트 측정")
+if hasattr(mg, "RECHECK"):
+    mg.RECHECK = ()  # 남아 보일 때 다시 보기 전의 기다림 — 대역은 기다리지 않음
+sys.exit(mg.main())
+'''
 
 
 def stub_smoke(real: Path) -> str:
@@ -466,7 +523,16 @@ GATE_CASES = [
     ("mem_low", False, "격리 점검 전 자원 기준 미달", {"GATE_STUB": "mem_low"}),
     ("result_unwritable", False, "통과 기록 gate.result를 쓸 수 없음 (그 이름이 폴더)", {}),
     ("bash_env", False, "BASH_ENV가 있음 (셸 시작 파일이 검증 명령을 바꿀 수 있음)", {}),
+    ("expected_modified", False, "검증 목록을 커밋하지 않고 후보에서 모은 목록으로 덮어씀 (무단 변경)", {}),
+    ("watch_rm_fail", False, "격리 점검 통과 + 감시 컨테이너 삭제 실패·남음 (진짜 watch)", {"GATE_WATCH": "rm_fail"}),
+    ("watch_left", False, "격리 점검 통과 + 삭제 응답은 성공인데 감시 컨테이너가 목록에 남음", {"GATE_WATCH": "left"}),
+    ("watch_list_fail", False, "격리 점검 통과 + 삭제 뒤 목록 조회 실패 (남았는지 확인 불가)", {"GATE_WATCH": "list_fail"}),
+    ("watch_rm_fail_smoke_fail", False, "격리 점검 실패 + 감시 컨테이너 삭제 실패 — 두 사유 모두", {"GATE_STUB": "smoke_fail", "GATE_WATCH": "rm_fail"}),
 ]
+# 막힐 때 gate.result의 reason에 있어야 하는 조각 — 막혔어도 사유를 잃으면 '구분' 쪽으로 센다
+GATE_REASON = {"expected_modified": ["HEAD에 커밋된 내용과 다르"], "watch_rm_fail": ["감시 자원 정리 확인 실패", "남음"],
+               "watch_left": ["감시 자원 정리 확인 실패", "남음"], "watch_list_fail": ["감시 자원 정리 확인 실패", "확인 불가"],
+               "watch_rm_fail_smoke_fail": ["격리 기동 점검 실패 (측정한 점검이 실패)", "감시 자원 정리 확인 실패"]}  # fmt: skip
 
 
 def run_gate(scripts: Path, case: str, env_extra: dict, tmp: Path) -> dict:
@@ -477,12 +543,22 @@ def run_gate(scripts: Path, case: str, env_extra: dict, tmp: Path) -> dict:
     (root / "scripts" / "image_inventory.py").write_text(STUB_INV, encoding="utf-8")
     (root / "scripts" / "memory_guard.py").write_text(STUB_MEM, encoding="utf-8")
     (root / "scripts" / "image_smoke.py").write_text(stub_smoke(scripts / "image_smoke.py"), encoding="utf-8")
-    marker = "other" if case in ("compare_differ", "python_env_true", "expected_dir_env") else "built"
+    marker = "other" if case in ("compare_differ", "python_env_true", "expected_dir_env", "expected_modified") else "built"
     if case == "result_unwritable":
         (root / "out" / "gate.result").mkdir(parents=True)
     for k in ("backend", "frontend"):
         (root / "deploy" / "expected-images" / f"{k}.json").write_text(json.dumps({"kind": k, "marker": marker}), encoding="utf-8")
+    git = ["git", "-c", "core.autocrlf=false", "-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+    for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "gate stub"]):  # 운영처럼 검증 목록·도구가 커밋된 저장소
+        subprocess.run(git + cmd, cwd=root, check=True, capture_output=True)
+    if case == "expected_modified":  # 커밋한 목록(다름)을 후보에서 모은 목록(같음)으로 덮어씀 — 커밋하지 않음
+        (root / "deploy" / "expected-images" / "backend.json").write_text(json.dumps({"kind": "backend", "marker": "built"}), encoding="utf-8")
+        (root / "deploy" / "expected-images" / "frontend.json").write_text(json.dumps({"kind": "frontend", "marker": "built"}), encoding="utf-8")
     env = dict(os.environ, MSYS_NO_PATHCONV="1")
+    env["GATE_REAL_MEM"] = str(scripts / "memory_guard.py")
+    env.pop("GATE_WATCH", None)
+    if env_extra.get("GATE_WATCH"):
+        env["GATE_WATCH"] = env_extra["GATE_WATCH"]
     env.pop("PYTHON", None)
     env.pop("DEPLOY_EXPECTED_DIR", None)
     if "python_env_true" == case:
@@ -506,8 +582,15 @@ def run_gate(scripts: Path, case: str, env_extra: dict, tmp: Path) -> dict:
                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, check=False)  # fmt: skip
     res = root / "out" / "gate.result"
     lines = [x for x in r.stdout.splitlines() if x.startswith("[검증")]
-    return {"rc": r.returncode, "passed": r.returncode == 0, "summary": (lines[-1] if lines else r.stdout.strip()[-160:])[:160],
-            "gate_result": res.read_text(encoding="utf-8").splitlines()[:1] if res.is_file() else None}  # fmt: skip
+    record = res.read_text(encoding="utf-8").splitlines() if res.is_file() else []
+    reason = next((x[len("reason=") :] for x in record if x.startswith("reason=")), "")
+    out = {"rc": r.returncode, "passed": r.returncode == 0 or "status=pass" in record,  # 막혔어도 통과 기록이 남으면 통과로 본다
+           "summary": (lines[-1] if lines else r.stdout.strip()[-160:])[:160], "gate_result": record[:1] or None}  # fmt: skip
+    missing = [w for w in GATE_REASON.get(case, []) if w not in reason]
+    if r.returncode != 0 and missing:
+        out["evidence_ok"] = False
+        out["summary"] = f"gate.result 사유에 없음 {missing} | {out['summary']}"[:200]
+    return out
 
 
 # ---------------------------------------------------------------- 실행
@@ -531,13 +614,26 @@ MEM_CASES = [
     ("watch_signal", False, "watch — 명령이 신호·Windows 상태 코드로 끝남 (셸이 보는 값 그대로)"),
     ("watch_permission", False, "watch — 명령 실행 권한 없음 (126)"),
     ("watch_vm_clock_skew", True, "watch — Docker VM 시계가 100초 어긋나도 VM 표본을 버리지 않음"),
+    ("watch_logs_fail", True, "watch — 감시 기록(docker logs)을 못 읽음: VM '미측정'일 뿐 판정은 그대로 (표본 부족 ≠ 정리 실패)"),
+    ("watch_removal_in_progress", True, "watch — 삭제가 '이미 진행 중' 오류여도 다시 본 목록에서 없어졌으면 정리 확인"),
+    ("watch_rm_fail", False, "watch — 명령 종료 0 + 감시 컨테이너 삭제 실패·목록에 남음 → 3"),
+    ("watch_left", False, "watch — 명령 종료 0 + 삭제 응답은 성공인데 목록에 남음 → 3"),
+    ("watch_list_fail", False, "watch — 명령 종료 0 + 삭제 뒤 목록 조회 실패 (남았는지 확인 불가) → 3"),
+    ("watch_cmd_fail_rm_fail", False, "watch — 명령 종료 2 + 감시 컨테이너 삭제 실패 → 3, 기록에 명령 종료 2와 남은 이름"),
+    ("watch_result_file", True, "watch --result — 이번 실행의 판정 기록(명령 종료 코드·정리 결과)을 따로 남김"),
 ]
 
 
-# watch는 감싼 명령의 종료 코드를 그대로 돌려준다
+# watch는 감시 자원 정리를 확인하면 감싼 명령의 종료 코드를, 확인하지 못하면 3을 돌려준다
 MEM_RC = {"check_ok": 0, "check_host_low": 4, "check_vm_low": 4, "check_host_fail": 3, "check_vm_fail": 3, "check_vm_garbage": 3,
           "check_unknown_stage": 3, "watch_ok": 0, "watch_cmd_fail": 2, "watch_sampler_fail": 0, "watch_sampler_timeout": 0,
-          "watch_signal": -1073741510 if sys.platform == "win32" else 137, "watch_permission": 126, "watch_vm_clock_skew": 0}  # fmt: skip
+          "watch_signal": -1073741510 if sys.platform == "win32" else 137, "watch_permission": 126, "watch_vm_clock_skew": 0,
+          "watch_logs_fail": 0, "watch_removal_in_progress": 0, "watch_rm_fail": 3, "watch_left": 3, "watch_list_fail": 3,
+          "watch_cmd_fail_rm_fail": 3, "watch_result_file": 0}  # fmt: skip
+MEM_LEAK_OK = {"watch_rm_fail", "watch_cmd_fail_rm_fail"}  # 삭제 실패를 일부러 일으킨 사례 — 남은 감시 컨테이너는 기대한 것
+# 기록(.tsv summary·--result)에 남아야 하는 (감싼 명령의 종료 코드, 정리 상태)
+MEM_RECORD = {"watch_rm_fail": (0, "left"), "watch_left": (0, "left"), "watch_list_fail": (0, "unknown"),
+              "watch_cmd_fail_rm_fail": (2, "left"), "watch_result_file": (0, "removed")}  # fmt: skip
 
 
 def _cp(args: list[str], rc: int, out: str = "", err: str = "") -> subprocess.CompletedProcess:
@@ -551,6 +647,7 @@ class FakeMemDocker:
         self.s = scenario
         self.started: list[str] = []
         self.removed: list[str] = []
+        self.listed = 0
 
     def __call__(self, args, input=None, capture_output=False, env=None, timeout=None, check=False, **kw):  # noqa: A002, ANN001, ARG002
         a = list(args)
@@ -561,7 +658,7 @@ class FakeMemDocker:
                 raise PermissionError(13, "액세스 거부 (가짜)")
             if self.s == "watch_signal":  # Windows: Ctrl+C 상태 코드(부호 없는 값), 리눅스: SIGKILL(-9)
                 return _cp(a, 3221225786 if sys.platform == "win32" else -9)
-            return _cp(a, 2 if self.s == "watch_cmd_fail" else 0)
+            return _cp(a, 2 if self.s in ("watch_cmd_fail", "watch_cmd_fail_rm_fail") else 0)
         d = a[1:]
         if d[:2] == ["run", "-d"]:  # watch의 VM 감시 컨테이너
             if self.s == "watch_sampler_fail":
@@ -578,13 +675,24 @@ class FakeMemDocker:
             vm = 1000 if self.s == "check_vm_low" else 5000
             return _cp(a, 0, f"MemTotal: 8000000 kB\nMemAvailable: {vm * 1024} kB\n")
         if d[:1] == ["logs"]:
+            if self.s == "watch_logs_fail":
+                return _cp(a, 1, err="Error response from daemon: (가짜) 기록을 읽지 못함")
             return _cp(a, 0, f"{int(time.time()) + (100 if self.s == 'watch_vm_clock_skew' else 0)} {5000 * 1024}\n")
         if d[:2] == ["ps", "-a"]:  # 삭제 뒤 확인: 띄우고 지우지 않은 감시 컨테이너
+            self.listed += 1
+            if self.s == "watch_list_fail":
+                return _cp(a, 1, err="Error response from daemon: (가짜) 목록 조회 실패")
+            if self.s == "watch_left" or (self.s == "watch_removal_in_progress" and self.listed == 1):  # 지웠다는데 보임
+                return _cp(a, 0, "".join(n + "\n" for n in self.started))
             return _cp(a, 0, "".join(n + "\n" for n in self.started if n not in self.removed))
         if d[:2] == ["rm", "-f"]:
             if d[2] not in self.started:
                 return _cp(a, 1, err=f"Error response from daemon: No such container: {d[2]}")
+            if self.s in ("watch_rm_fail", "watch_cmd_fail_rm_fail"):
+                return _cp(a, 1, err="Error response from daemon: (가짜) 삭제 실패")
             self.removed.append(d[2])
+            if self.s == "watch_removal_in_progress":  # --rm 자동 삭제와 겹침 — 오류지만 곧 없어진다
+                return _cp(a, 1, err=f"Error response from daemon: removal of container {d[2]} is already in progress")
             return _cp(a, 0, d[2] + "\n")
         return _cp(a, 1, err="모르는 명령 (가짜)")
 
@@ -598,13 +706,20 @@ def run_mem(scripts: Path, scenario: str, tmp: Path) -> dict:
     host = {"check_host_low": 800, "check_host_fail": None}.get(scenario, 900)
     stage = {"check_vm_low": "smoke", "check_unknown_stage": "deploy"}.get(scenario, "build")
     tsv = tmp / f"mem-{scenario}.tsv"
+    result = tmp / f"mem-{scenario}.watch.json"
+    if scenario == "watch_result_file" and getattr(mod, "TOOL", "") == "memory_guard 1":
+        return {"rc": None, "passed": None, "na": "이 판의 watch에는 --result가 없음 (판정 기록 파일은 새 동작)"}
     saved = (subprocess.run, sys.argv, sys.stdout, mod.host_available)
     buf = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    if hasattr(mod, "RECHECK"):
+        mod.RECHECK = (0, 0, 0)  # 남아 보이면 다시 보는 동작은 그대로, 기다림만 없앰
     try:
         subprocess.run = fake
         mod.host_available = lambda: (host, "가짜 호스트 측정")
         if scenario.startswith("check"):
             sys.argv = ["memory_guard.py", "check", stage, "img", str(tsv)]
+        elif scenario == "watch_result_file":
+            sys.argv = ["memory_guard.py", "watch", "build-backend", "img", str(tsv), "--result", str(result), "--", "fake-build", "backend"]
         else:
             sys.argv = ["memory_guard.py", "watch", "build-backend", "img", str(tsv), "--", "fake-build", "backend"]
         sys.stdout = buf
@@ -616,10 +731,28 @@ def run_mem(scripts: Path, scenario: str, tmp: Path) -> dict:
         subprocess.run, sys.argv, sys.stdout, mod.host_available = saved
     buf.flush()
     text = buf.buffer.getvalue().decode("utf-8", "replace")
-    line = next((x for x in text.splitlines() if x.startswith("자원")), "")
+    res_lines = [x for x in text.splitlines() if x.startswith("자원")]
+    line = next((x for x in res_lines if " 동안: " in x), res_lines[0] if res_lines else "")
+    verdict = next((x for x in res_lines if " 판정: " in x), "")
     leak = sorted(set(fake.started) - set(fake.removed))  # 띄우고 지우지 않은 감시 컨테이너 — 있으면 기대와 다름
     passed = rc == 0 and (scenario != "watch_vm_clock_skew" or "vm 시작" in line)  # 시계가 어긋나도 VM 표본을 남겨야 함
-    return {"rc": rc, "passed": passed, "summary": line[:160], "leak": leak}
+    out = {"rc": rc, "passed": passed, "summary": (verdict or line)[:200], "leak": [] if scenario in MEM_LEAK_OK else leak}
+    if scenario in MEM_RECORD:  # 정리 실패가 명령 결과를 덮지 않고 둘 다 기록에 남는지 (.tsv summary, --result 파일)
+        want_cmd, want_state = MEM_RECORD[scenario]
+        rows = [x.split("\t") for x in tsv.read_text(encoding="utf-8").splitlines()] if tsv.exists() else []
+        rec = next((json.loads(r[3]) for r in reversed(rows) if len(r) > 3 and r[2] == "summary"), {})
+        c = rec.get("cleanup") if isinstance(rec.get("cleanup"), dict) else {}
+        problems = []
+        if rec.get("command_exit") != want_cmd or c.get("state") != want_state:
+            problems.append(f"기록 command_exit {rec.get('command_exit')!r}·cleanup {c.get('state')!r} (기대 {want_cmd}·{want_state})")
+        if want_state == "left" and not (c.get("left") and all(str(n).startswith("moajwo-memwatch-") for n in c["left"])):
+            problems.append("남은 감시 컨테이너 이름이 기록에 없음")
+        if scenario == "watch_result_file" and (not result.exists() or json.loads(result.read_text(encoding="utf-8")) != rec):
+            problems.append("--result 파일이 없거나 .tsv 기록과 다름")
+        if problems:
+            out["evidence_ok"] = False
+            out["summary"] = ("; ".join(problems) + " | " + out["summary"])[:240]
+    return out
 
 
 def main() -> int:
@@ -655,7 +788,7 @@ def main() -> int:
             print(f"해당 없음 | {r['tool']} | {r['case']} | {r['na']}")
             continue
         pass_ok = r["passed"] == r["want_pass"] and not r.get("leak")  # 점검·감시 자원을 남기면 종료 코드와 상관없이 기대와 다름
-        rc_ok = r.get("want_rc") is None or r["rc"] == r["want_rc"]
+        rc_ok = (r.get("want_rc") is None or r["rc"] == r["want_rc"]) and r.get("evidence_ok", True)  # 근거(사유·기록)를 잃은 것도 '구분'
         ok = pass_ok and rc_ok
         bad += not ok
         bad_pass += not pass_ok
@@ -663,7 +796,7 @@ def main() -> int:
         want = f"기대 {'통과' if r['want_pass'] else '막힘'}" + (f"·종료 {r['want_rc']}" if r.get("want_rc") is not None else "")
         leak = f" · 남은 자원 {r['leak']}" if r.get("leak") else ""
         print(f"{'맞음' if ok else '틀림'} | {r['tool']} | {r['case']} | {want} | 실제 {'통과' if r['passed'] else '막힘'} (종료 {r['rc']}){leak} | {r.get('summary', '')}")
-    print(f"요약 | {scripts} | 사례 {len(rows) - na} · 기대와 다름 {bad} (통과·막힘·자원 남김 {bad_pass} · 막혔지만 종료 코드 구분만 {bad_rc})"
+    print(f"요약 | {scripts} | 사례 {len(rows) - na} · 기대와 다름 {bad} (통과·막힘·자원 남김 {bad_pass} · 막혔지만 종료 코드·근거 구분만 {bad_rc})"
           + (f" · 해당 없음 {na}" if na else ""))  # fmt: skip
     if ns.json:
         Path(ns.json).write_text(json.dumps({"scripts": str(scripts), "rows": rows}, ensure_ascii=False, indent=1), encoding="utf-8")
