@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "prebuild": "node scripts/check-csp-style-hashes.mjs",
+    "test": "node --test scripts/check-csp-style-hashes.test.mjs",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview"
