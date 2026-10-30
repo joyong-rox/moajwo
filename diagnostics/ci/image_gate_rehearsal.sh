@@ -5,7 +5,8 @@
 #    다르면 마이그레이션이 있는 반영. 0022(계정 발급) 후보는 0021 → 0022)
 #   1) 검증 실패: OS 패키지 판 하나만 바꾼 검증 목록을 담은 시험용 커밋을 '승인'으로 반영 → 3단계에서 멈춤 — 서비스·컨테이너·
 #      latest 그대로, 정지·백업 없음 (검증 목록을 바꾸는 환경 변수는 없다 — 목록은 승인한 트리의 파일)
-#   1b) 격리 기동 점검 실패: frontend 설정에서 CSP 헤더만 뺀 시험용 커밋 → 목록은 같고 점검이 실패 → 3단계에서 멈춤, 점검 자원 정리 · 감시 기록은 점검 종료 4와 감시 컨테이너 정리 확인을 따로 남김
+#   1b) 격리 기동 점검 실패: frontend 설정에서 nosniff 헤더만 뺀 시험용 커밋 → 목록은 같고 점검(front.index)이 실패 → 3단계에서 멈춤, 점검 자원 정리 · 감시 기록은 점검 종료 4와 감시 컨테이너 정리 확인을 따로 남김
+#       (CSP 헤더를 빼면 #61의 빌드 때 CSP 검사가 빌드를 먼저 멈춰 격리 점검까지 가지 않는다 — 그 경로는 1)과 같은 '빌드 단계 실패'로 멈춘다)
 #   2) 정상 반영: 후보 태그 빌드 → 검증 통과 → 백업 → latest를 검증한 ID로 → up --no-build → 실행 중 이미지 = 검증한 ID,
 #      리비전이 후보 리비전(head), 같은 계정 로그인·이전 결과 다시 내려받기 해시 같음, 격리 점검을 감싼 감시 컨테이너를 지우고 목록으로 확인
 #   3) 4장 B 롤백 (단계 상자를 후보 트리의 문서에서 그대로 꺼내 실행: 리비전이 같으면 1·2·6·7단계, 바뀌었으면 1~7단계 — 3·4 정리·상태,
@@ -96,10 +97,11 @@ check gatefail.api "$(probe after-gatefail)" '"login": 200' '"result_same": true
 git checkout -q "$NEW" || exit 2
 
 # ---------------------------------------------------------------- 1b) 격리 기동 점검 실패 — 실제 Docker에서 점검이 실패해도 3단계에서 멈추고 정리
-# frontend 설정에서 CSP 헤더만 뺀 시험용 커밋: 실행 환경 목록은 같고(설정 파일은 비교 항목이 아님) 격리 점검의 front.index만 실패해야 한다
+# frontend 설정에서 nosniff 헤더만 뺀 시험용 커밋: 실행 환경 목록은 같고(설정 파일은 비교 항목이 아님) 빌드 때 CSP 검사는 통과하며
+# 격리 점검의 front.index(첫 화면 200 · CSP · nosniff)만 실패해야 한다
 git checkout -q -b rehearsal-bad-smoke "$NEW" || exit 2
-sed -i '/add_header Content-Security-Policy/d' frontend/nginx.conf
-git -c user.email=rehearsal@example.invalid -c user.name=rehearsal commit -qam "rehearsal: CSP header removed (the isolated smoke must fail)" || exit 2
+sed -i '/add_header X-Content-Type-Options/d' frontend/nginx.conf
+git -c user.email=rehearsal@example.invalid -c user.name=rehearsal commit -qam "rehearsal: nosniff header removed (the isolated smoke must fail)" || exit 2
 SMOKE_SHA=$(git rev-parse HEAD)
 B0=$(cid backend)
 F0=$(cid frontend)
