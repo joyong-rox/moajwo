@@ -65,7 +65,7 @@ curl http://localhost:8000/health   # {"status":"ok","database":"ok"}
 
    비밀번호는 명령 인자로 받지 않습니다 (본인만 읽는 파일·표준 입력·대화식 숨김 입력, 또는 `--generate`로 서버가 만든 임시 비밀번호를 터미널에 한 번만 보임 — 첫 로그인에서 바꿈). 계정이나 초기화 표시(`app_settings.owner_setup`)가 이미 있으면 아무것도 만들거나 덮지 않고(종료 2), 동시에 두 번 실행돼도 DB 기본 키로 하나만 생깁니다. 스키마가 준비되지 않았거나(리비전 ≠ head) SQLite 파일이 없으면 만들지 않습니다 — 연결 실패를 '새 설치'로 보지 않습니다. 재시작·재배포·환경 변수 재적용은 이 명령을 다시 부르지 않으므로 비밀번호를 되돌리지 않습니다.
 2. **사용자 계정 발급:** admin이 「관리자 → 사용자 계정」에서 아이디·표시 이름만 넣으면 서버가 **임시 비밀번호**를 만들어 그 화면에서 한 번만 보여 줍니다 (해시만 저장, 응답은 `Cache-Control: no-store`, 다시 조회 불가 — 잃으면 재발급). 임시 비밀번호는 기본 24시간(`MOAJWO_TEMP_PASSWORD_HOURS`로 조정) 안에 써야 하고, 사용자는 그것으로 로그인하면 **본인 비밀번호 설정 화면만** 열립니다 (서버도 업무 API를 403으로 막음). 바꾸면 모든 세션이 끝나고 새 비밀번호로 다시 로그인합니다. 임시 비밀번호 전달은 관리자가 기관의 허용된 방법으로 직접 합니다 (이메일 발송·외부 계정 서비스 없음). `admin`은 발급할 수 없는 아이디입니다.
-3. **비밀번호 초기화 = 임시 비밀번호 재발급:** 기존 비밀번호·기존 임시 비밀번호·그 사용자의 로그인은 즉시 효력을 잃습니다. 이용 중지 계정은 재발급으로 활성화되지 않습니다 (재개는 따로). 화면이 본 계정 상태가 그 사이 바뀌었으면(다른 재발급이 먼저) 덮지 않고 409로 알립니다. admin 비밀번호를 잃으면 설치 담당자가 `python -m app.adminctl recover`로 재설정합니다 (공개 초기화 API·공통 복구 비밀번호·재시작으로 되돌리는 경로 없음).
+3. **비밀번호 초기화 = 임시 비밀번호 재발급:** 기존 비밀번호·기존 임시 비밀번호·그 사용자의 로그인은 즉시 효력을 잃습니다. 이용 중지 계정은 재발급으로 활성화되지 않습니다 (재개는 따로). 재발급 요청은 목록에서 본 인증 버전(`expected_auth_version`)을 반드시 함께 보내며(없거나 정수가 아니면 422), 화면이 본 계정 상태가 그 사이 바뀌었으면(다른 재발급·상태 변경이 먼저) 덮지 않고 409로 알립니다. admin 비밀번호를 잃으면 설치 담당자가 `python -m app.adminctl recover`로 재설정합니다 (공개 초기화 API·공통 복구 비밀번호·재시작으로 되돌리는 경로 없음).
 4. **기존 설치의 관리자 아이디 전환:** 이미 있는 소유자 계정(예: `rox`)은 마이그레이션이 개명하거나 비밀번호를 바꾸지 않습니다. `python -m app.adminctl transition`으로 계획을 확인한 뒤 `--apply`로 로그인 아이디만 `admin`으로 바꿉니다 (내부 번호·비밀번호·자료 소유·이력 그대로, 그 관리자의 로그인만 끊겨 다시 로그인). `admin`을 다른 계정이 쓰고 있거나 소유자가 없거나 여럿이면 바꾸지 않습니다. 예전 공개 가입으로 남은 '승인 대기' 계정은 그대로 승인·반려할 수 있고, 새 공개 가입은 받지 않습니다.
 
 ### 기본 Seed 데이터 (마이그레이션)
@@ -346,12 +346,12 @@ npm run lint && npm run build
 | `/moajwoAdmin/audit` | 관리 이력 (최신 200건) |
 
 - 비로그인으로 열면 로그인 화면, 일반 사용자는 403 화면이 나오고 관련 API도 403입니다. 예전 주소 `/users`는 `/moajwoAdmin/users`로 이동합니다.
-- API: `GET /admin/overview?start=&end=`, `GET /admin/audit`, `GET /users?q=&status=`, `POST /users`(일반 사용자, `status`: `active`|`pending` 필수), `PATCH /users/{id}`(표시 이름만), `POST /users/{id}/approve|reject|suspend|resume`(`reason` 선택), `POST /users/{id}/password`
+- API: `GET /admin/overview?start=&end=`, `GET /admin/audit`, `GET /users?q=&status=`, `POST /users`(계정 발급 — `username`·`display_name`만, 임시 비밀번호는 응답에서 한 번), `PATCH /users/{id}`(표시 이름만), `POST /users/{id}/approve|reject|suspend|resume`(`reason` 선택), `POST /users/{id}/password`(임시 비밀번호 재발급 — 목록에서 본 `expected_auth_version` **필수**: 없거나 정수가 아니면 422, 다르면 409)
 
 - **결과 데이터는 누구도 직접 수정할 수 없습니다** (최고 관리자 포함): 실행 기록·변경 기록(`run_changes`)·결과 파일을 바꾸는 API가 없고(`PUT/PATCH/DELETE /runs/{id}` → 405), 결과 파일은 읽기 전용입니다. 남의 검토를 대신 승인·완료·통합할 수도 없습니다 (조회만). 남의 파일로 **자기** 검토를 만들어도(조회용) 그 파일의 매핑 확정·개인정보 확인은 파일을 올린 사람만 할 수 있어 403이 되고, 재검사의 파일 교체·자동화 실행도 남의 파일에는 확정을 기록하지 않습니다. 검토 응답의 항목별 `can_change`로 화면이 이런 항목의 승인·거부 버튼을 끄고 「조회 전용이며 파일을 올린 사용자만 변경할 수 있습니다」를 안내합니다 (여러 사람의 파일이 섞인 검토는 항목별로 판단, 결정이 거부되면 최신 상태로 다시 불러옴).
 - 비밀번호: 표준 라이브러리 scrypt + salt로 저장. 로그인: HttpOnly·SameSite=Strict 쿠키(12시간), DB에는 토큰 해시만 저장. 5번 연속 실패하면 5분 잠금. 비밀번호 변경·초기화·반려·이용 중지 시 그 계정의 로그인을 끊습니다. HTTPS로 운영하면 `MOAJWO_COOKIE_SECURE=1`.
 - 계정 도입 전에 만든 기록(소유자 없음)은 최고 관리자만 봅니다.
-- API: `GET /auth/status`(최초 설정 필요 여부 + 로그인한 사용자), `POST /auth/setup`(최초 설정 전에만, 최고 관리자), `POST /auth/signup`(최초 설정 후, 승인 대기·세션 없음), `POST /auth/login`·`logout`, `GET /auth/me`, `POST /auth/password`
+- API: `GET /auth/status`(최초 설정 필요 여부 + 로그인한 사용자), `POST /auth/setup`·`POST /auth/signup`(종료 — 410, 본문을 읽지 않음), `POST /auth/login`·`logout`, `GET /auth/me`, `POST /auth/password`
 
 ## 매핑 규칙 승격 (`/admin/promotions`, `standard_terms`)
 

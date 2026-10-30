@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictInt
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -529,13 +529,13 @@ def resume_user(
 
 
 class ReissueIn(BaseModel):
-    """임시 비밀번호 재발급: 비밀번호를 받지 않는다 (서버가 만든다). expected_auth_version은 화면이 본 인증 버전 —
-    지금 값과
-    다르면(다른 재발급·상태 변경이 먼저 반영됨) 덮지 않고 409."""
+    """임시 비밀번호 재발급: 비밀번호를 받지 않는다 (서버가 만든다). expected_auth_version은 화면(목록)이 본 인증 버전 —
+    **필수**(0 이상의 정수). 지금 값과 다르면(다른 재발급·상태 변경이 먼저 반영됨) 덮지 않고 409. 본문·버전이 없거나
+    정수가 아니면(불리언·문자열·실수 포함) 422 — 조건 없는 재발급 경로는 없다."""
 
     model_config = ConfigDict(extra="forbid")
 
-    expected_auth_version: int | None = None
+    expected_auth_version: StrictInt = Field(ge=0)
 
 
 @users_router.post("/{user_id}/password", response_model=ProvisionOut)
@@ -544,10 +544,12 @@ def reissue_password(
     actor: OwnerDep,
     response: Response,
     db: Annotated[Session, Depends(get_session)],
-    body: ReissueIn | None = None,
+    body: ReissueIn,
 ) -> ProvisionOut:
     """새 임시 비밀번호를 발급하고(해시만 저장) 그 사용자의 기존 비밀번호·기존 임시 비밀번호·세션을 그 즉시 무효로 한다.
-    상태는 바꾸지 않는다 — 이용 중지 계정은 재발급으로 활성화되지 않는다(재개는 따로). 평문은 이 응답에서만."""
+    상태는 바꾸지 않는다 — 이용 중지 계정은 재발급으로 활성화되지 않는다(재개는 따로). 평문은 이 응답에서만.
+    화면이 본 인증 버전(필수)과 지금 값이 같을 때만 바꾼다 — 성공 한 번 = 버전 +1·기존 세션 종료·새 임시 비밀번호 저장·
+    성공 이력 1건. 다르면 409(거절 이력만 남고 계정·세션은 그대로)."""
     user = _target(db, user_id)
     if user.role == "owner":
         raise _deny(db, actor, user, "password_reset",
@@ -556,9 +558,8 @@ def reissue_password(
                     )  # fmt: skip
     if user.status == "rejected":
         raise _deny(db, actor, user, "password_reset", "가입 반려된 계정에는 임시 비밀번호를 발급하지 않습니다.")
-    expected = body.expected_auth_version if body else None
     issued = issue_temp_password(
-        db, actor, user, action="password_reset", expected_version=expected,
+        db, actor, user, action="password_reset", expected_version=body.expected_auth_version,
         reason="임시 비밀번호 재발급 — 기존 비밀번호·세션 종료"
         + (" (이용 중지 상태 유지)" if user.status == "suspended" else ""),
     )  # fmt: skip

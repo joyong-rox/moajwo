@@ -915,8 +915,8 @@ export async function changeUserStatus(id: number, action: StatusAction, reason:
   return json(await apiFetch(`${API_BASE}/users/${id}/${action}`, { method: 'POST', ...jsonBody({ reason }) }))
 }
 
-/** 임시 비밀번호 재발급 — 기존 비밀번호·세션은 즉시 효력을 잃는다. expectedAuthVersion은 목록에서 본 값(다른 재발급이 먼저면 409). */
-export async function reissuePassword(id: number, expectedAuthVersion: number | null): Promise<Provisioned> {
+/** 임시 비밀번호 재발급 — 기존 비밀번호·세션은 즉시 효력을 잃는다. expectedAuthVersion은 목록에서 본 값(필수 — 없으면 서버가 422, 다른 재발급·상태 변경이 먼저면 409). */
+export async function reissuePassword(id: number, expectedAuthVersion: number): Promise<Provisioned> {
   return json(
     await apiFetch(`${API_BASE}/users/${id}/password`, {
       method: 'POST',

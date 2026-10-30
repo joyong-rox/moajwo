@@ -66,9 +66,10 @@ def test_above_subtotal_needs_complete_group(tmp_path: Path) -> None:
 # ---------------------------------------------------------------- ④ 최초 소유자 경쟁
 
 
-def test_initial_owner_setup_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_initial_owner_setup_is_atomic_sqlite_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """같은 프로세스의 두 스레드가 동시에 초기화(설치 명령이 부르는 create_owner)해도 소유자는 한 명이고, 진 쪽은
-    SetupDone이며 계정·세션을 남기지 않는다. 공개 최초 설정 API는 종료(410)라 create_owner를 직접 부른다."""
+    SetupDone이며 계정·세션을 남기지 않는다. 공개 최초 설정 API는 종료(410)라 create_owner를 직접 부른다.
+    빈 임시 SQLite 파일 DB — 세션 DB와 무관한 SQLite 시험(별도 프로세스·실제 DB 경쟁은 아래 across_processes)."""
     from app import auth
     from app.db import Base
     from app.models import AuthSession, User

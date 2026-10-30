@@ -423,7 +423,13 @@ function UserAdmin() {
           `'${user.username}' ${ACTION[pending.action].label} 완료 — 현재 상태: ${updated.status_label}`,
         );
       } else {
-        // 목록에서 본 인증 버전을 함께 보낸다 — 그 사이 다른 재발급·상태 변경이 먼저 반영됐으면 서버가 409로 덮지 않는다
+        // 목록에서 본 인증 버전을 함께 보낸다(서버는 이 값을 반드시 요구) — 그 사이 다른 재발급·상태 변경이 먼저 반영됐으면
+        // 서버가 409로 덮지 않는다. 확인값이 없는 화면은 보내지 않고 목록을 다시 읽어 대상을 확인하게 한다
+        if (!Number.isInteger(user.auth_version)) {
+          setPending(null);
+          setError("계정 목록의 확인값이 없어 재발급하지 않았습니다. 목록을 다시 읽었으니 대상을 확인한 뒤 다시 시도하세요.");
+          return;
+        }
         const result = await reissuePassword(user.id, user.auth_version);
         setIssued(result);
         setNotice(null);

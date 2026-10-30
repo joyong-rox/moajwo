@@ -2,7 +2,8 @@
 
 재현 방법: 로그인의 비밀번호 확인(verify_password)이 성공한 직후 이벤트로 멈춰 세우고, 그 사이 다른 DB 연결(세션)에서
 계정을 바꾸고 커밋한 뒤 로그인을 재개한다. sleep이나 우연한 실행 순서에 기대지 않는다.
-- 함수 수준: 빈 임시 DB, 함수를 서로 다른 SQLAlchemy 세션(연결)으로 호출
+- 함수 수준: 빈 임시 **SQLite 파일** DB(전체 시험을 PostgreSQL로 돌려도 SQLite 시험 — 이름 끝 _sqlite_file), 함수를
+  서로 다른 SQLAlchemy 세션(연결)으로 호출. 실제 세션 DB(SQLite·PostgreSQL)의 동시 요청 경합은 test_auth_races_api.py
 - API 수준: 실제 쿠키 로그인(TestClient) — 경합 중 받은 쿠키로 업무 API가 열리지 않는지
 """
 
@@ -112,15 +113,19 @@ def _login(Session, password: str):
     return go
 
 
-def test_login_vs_admin_password_reset(tmp_path: Path, gate: Gate) -> None:
+def test_login_vs_admin_password_reset_sqlite_file(tmp_path: Path, gate: Gate) -> None:
     from app import auth_api
+    from app.models import User
 
     Session, actor, uid = _fresh(tmp_path)
     gate.arm()
     t, out = _in_thread(_login(Session, OLD))
     assert gate.verified.wait(15)
     with Session() as other:  # 다른 연결에서 임시 비밀번호를 재발급하고 커밋
-        issued = auth_api.reissue_password(uid, actor, Response(), other)
+        version = other.scalar(select(User.auth_version).where(User.id == uid))  # 목록이 보는 값 (필수)
+        issued = auth_api.reissue_password(
+            uid, actor, Response(), other, auth_api.ReissueIn(expected_auth_version=version)
+        )
     gate.proceed.set()
     t.join(30)
     assert not _valid(Session, out.get("value")), "이전 비밀번호로 시작한 로그인이 유효한 세션을 얻음"
@@ -128,7 +133,7 @@ def test_login_vs_admin_password_reset(tmp_path: Path, gate: Gate) -> None:
     assert _valid(Session, fresh)  # 새 임시 비밀번호 로그인은 정상 (제한된 상태지만 세션은 유효)
 
 
-def test_login_vs_own_password_change(tmp_path: Path, gate: Gate) -> None:
+def test_login_vs_own_password_change_sqlite_file(tmp_path: Path, gate: Gate) -> None:
     from app import auth_api
 
     Session, _, uid = _fresh(tmp_path)
@@ -147,7 +152,7 @@ def test_login_vs_own_password_change(tmp_path: Path, gate: Gate) -> None:
     assert _valid(Session, renewed)  # 변경한 기기는 새 세션으로 이어감 (기존 동작)
 
 
-def test_login_vs_suspend_then_resume(tmp_path: Path, gate: Gate) -> None:
+def test_login_vs_suspend_then_resume_sqlite_file(tmp_path: Path, gate: Gate) -> None:
     from app import auth_api
 
     Session, actor, uid = _fresh(tmp_path)
@@ -190,7 +195,10 @@ def test_api_reset_race_leaves_no_valid_cookie(app_real_login, owner, gate: Gate
     gate.arm()
     t, out = _in_thread(_api_login(app_real_login, "race-api-reset", OLD))
     assert gate.verified.wait(15)
-    reissued = owner.post(f"/users/{uid}/password", json={})  # 임시 비밀번호 재발급 (관리자)
+    version = next(u["auth_version"] for u in owner.get("/users").json() if u["id"] == uid)
+    reissued = owner.post(
+        f"/users/{uid}/password", json={"expected_auth_version": version}
+    )  # 재발급 (관리자, 목록의 버전)
     assert reissued.status_code == 200, reissued.text
     temp = reissued.json()["temp_password"]
     gate.proceed.set()

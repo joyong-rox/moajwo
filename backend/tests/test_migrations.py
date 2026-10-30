@@ -770,9 +770,10 @@ def test_0021_stops_before_changing_anything_when_request_ids_cannot_be_filled(
 
 
 def test_0022_temp_password_columns_default_false_and_downgrade_guard(tmp_path: Path) -> None:
-    """0022: 기존 계정은 임시 비밀번호 상태가 아니다(False·NULL — 비밀번호·상태 그대로). 임시 상태인 계정이 있으면
-    downgrade하지
-    않고(열을 지우면 그 계정이 임시 비밀번호로 업무 기능을 쓰게 됨), 없으면 두 열만 지운다."""
+    """0022: 기존 계정은 임시 비밀번호 상태가 아니다(False·NULL — 비밀번호·상태 그대로). downgrade는 **이용 중·이용
+    중지·만료와 관계없이** 임시 비밀번호 상태인 계정이 하나라도 있으면 거절하고(리비전·열·계정·업무 행 그대로), 실행
+    중인 결과 실행(담당 있음)이 있어도 거절한다. 모든 계정이 본인 비밀번호 변경을 끝낸(must_change_password = 0)
+    뒤에만 두 열을 지운다 — 이용 중지는 임시 상태를 풀지 않는다."""
     _alembic(tmp_path, "upgrade", "0021_run_request_key")
     db = tmp_path / "moajwo.db"
     with sqlite3.connect(db) as con:
@@ -787,19 +788,62 @@ def test_0022_temp_password_columns_default_false_and_downgrade_guard(tmp_path: 
         assert {"must_change_password", "temp_password_expires_at"} <= cols
         assert con.execute("select must_change_password, temp_password_expires_at from users").fetchall() == [(0, None)]
         assert con.execute("select version_num from alembic_version").fetchone() == ("0022_temp_passwords",)
-        con.execute("update users set must_change_password = 1")
-    with pytest.raises(subprocess.CalledProcessError) as info:
-        _alembic(tmp_path, "downgrade", "0021_run_request_key")
-    assert "임시 비밀번호 상태인 계정이 1개" in info.value.stderr.decode("utf-8", "replace")
+        # 임시 상태 세 가지(이용 중·이용 중지·만료) + 변경 완료 하나, 업무 행 하나
+        future, past = "2099-01-01 00:00:00.000000", "2020-01-01 00:00:00.000000"
+        for name, active, status_, must, exp in (
+            ("t-active", 1, "active", 1, future), ("t-susp", 0, "suspended", 1, future),
+            ("t-expired", 1, "active", 1, past), ("done", 1, "active", 0, None),
+        ):  # fmt: skip
+            con.execute(
+                "insert into users (username, display_name, password_hash, role, is_active, status, auth_version, "
+                "failed_logins, must_change_password, temp_password_expires_at) "
+                "values (?, ?, 'scrypt$y', 'user', ?, ?, 0, 0, ?, ?)",
+                (name, name.upper(), active, status_, must, exp),
+            )
+        con.execute(RUN_SQL, (1, 1, "done", "{}"))
+
+    def snapshot() -> tuple:
+        with sqlite3.connect(db) as con:
+            return (
+                con.execute("select version_num from alembic_version").fetchone(),
+                {r[1] for r in con.execute("pragma table_info(users)")},
+                con.execute("select * from users order by id").fetchall(),
+                con.execute("select id, status, worker, summary from runs order by id").fetchall(),
+            )
+
+    def refused(*needles: str) -> None:
+        held = snapshot()
+        with pytest.raises(subprocess.CalledProcessError) as info:
+            _alembic(tmp_path, "downgrade", "0021_run_request_key")
+        err = info.value.stderr.decode("utf-8", "replace")
+        for needle in needles:
+            assert needle in err, (needle, err[-400:])
+        assert snapshot() == held  # 리비전·열·계정·업무 행 그대로
+
+    refused("임시 비밀번호 상태인 계정이 3개", "상태와 관계없이", "이용 중지", "아무것도 바꾸지 않았습니다")
+    # 이용 중·만료 계정이 변경을 끝내도(플래그 0) 중지된 임시 계정이 남으면 거절 — 중지만으로는 풀리지 않는다
     with sqlite3.connect(db) as con:
-        assert con.execute("select version_num from alembic_version").fetchone() == ("0022_temp_passwords",)
-        assert "must_change_password" in {r[1] for r in con.execute("pragma table_info(users)")}
-        con.execute("update users set must_change_password = 0")
+        con.execute(
+            "update users set must_change_password = 0, temp_password_expires_at = null "
+            "where username in ('t-active', 't-expired')"
+        )
+    refused("임시 비밀번호 상태인 계정이 1개")
+    # 임시 계정이 없어도 실행 중인 결과 실행(담당 있음)이 있으면 거절 (0020·0021과 같은 보호)
+    with sqlite3.connect(db) as con:
+        con.execute("update users set must_change_password = 0, temp_password_expires_at = null")
+        con.execute(
+            "update runs set status = 'running', worker = 'abcdef012345-live', heartbeat_at = '2026-10-27 09:00:00' "
+            "where id = 1"
+        )
+    refused("0021로 내리지 않습니다", "app.recovery recover")
+    with sqlite3.connect(db) as con:
+        con.execute("update runs set status = 'done', worker = null, finished_at = '2026-10-27 09:01:00' where id = 1")
     _alembic(tmp_path, "downgrade", "0021_run_request_key")
     with sqlite3.connect(db) as con:
         cols = {r[1] for r in con.execute("pragma table_info(users)")}
         assert not ({"must_change_password", "temp_password_expires_at"} & cols)
-        assert con.execute("select username, password_hash from users").fetchall() == [("rox", "scrypt$x")]
-    _alembic(tmp_path, "upgrade", "head")
-    with sqlite3.connect(db) as con:
-        assert con.execute("select must_change_password from users").fetchall() == [(0,)]
+        assert con.execute("select version_num from alembic_version").fetchone() == ("0021_run_request_key",)
+        assert con.execute("select username, password_hash, status from users order by id").fetchall() == [
+            ("rox", "scrypt$x", "active"), ("t-active", "scrypt$y", "active"), ("t-susp", "scrypt$y", "suspended"),
+            ("t-expired", "scrypt$y", "active"), ("done", "scrypt$y", "active"),
+        ]  # fmt: skip

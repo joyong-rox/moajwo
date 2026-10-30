@@ -2,7 +2,9 @@
 
 - 실제 쿠키 로그인으로 검사한다 (test_auth의 app_real_login 재사용). 사용자마다 별도 TestClient.
 - 공개 가입·최초 설정은 종료됐다(410). 공개 가입을 받던 때 남은 '승인 대기' 계정은 DB에 직접 넣어 흉내 낸다.
-- 동시 초기화·동시 최초 변경·동시 승인은 빈 임시 DB에서 함수를 직접 불러 검사한다.
+- 동시 초기화·동시 최초 변경·동시 승인은 빈 임시 **SQLite 파일** DB에서 함수를 직접 불러 검사한다 (이름 끝
+  `_sqlite_file` — 전체 시험을 PostgreSQL로 돌려도 이 시험들은 SQLite 시험). 실제 세션 DB(SQLite·PostgreSQL)에서의
+  API 경합은 test_auth_races_api.py.
 """
 
 import threading
@@ -253,15 +255,44 @@ def test_temp_password_expiry_and_reissue(app_real_login, owner) -> None:  # noq
         == 200
     )
     assert again.get("/files").status_code == 403
-    # 오래된 버전(먼저 반영된 재발급 전의 화면)으로 다시 누르면 덮지 않는다
+    # 오래된 버전(먼저 반영된 재발급 전의 화면)으로 다시 누르면 덮지 않는다 — 409, 방금 발급한 임시 비밀번호는 그대로
+    # 유효
     stale = owner.post(f"/users/{uid}/password", json={"expected_auth_version": listed["auth_version"]})
     assert stale.status_code == 409 and "그 사이 바뀌" in stale.json()["detail"]
     assert again.get("/auth/me").status_code == 200  # 덮지 않았으므로 방금 로그인은 그대로
-    # 버전 없이도 재발급할 수 있다 (확인 없음)
-    assert owner.post(f"/users/{uid}/password").status_code == 200
+    still = _client(app_real_login).post(
+        "/auth/login", json={"username": "expire1", "password": reissued["temp_password"]}
+    )
+    assert still.status_code == 200
+    # 인증 버전은 필수 — 본문 없음·빈 객체·null·불리언·문자열·음수·실수·추가 항목은 422이고 계정·세션·이력이 바뀌지
+    # 않는다
+    current = _listed(owner, "expire1")["auth_version"]
+    sessions_before = _db_rows("select count(*) from auth_sessions where user_id = ?", uid)
+    events_before = len(owner.get("/admin/audit", params={"target_id": uid}).json())
+    for payload in (
+        {},
+        {"expected_auth_version": None},
+        {"expected_auth_version": True},
+        {"expected_auth_version": "1"},
+        {"expected_auth_version": -1},
+        {"expected_auth_version": 1.5},
+        {"expected_auth_version": current, "x": 1},
+    ):
+        res = owner.post(f"/users/{uid}/password", json=payload)
+        assert res.status_code == 422, (payload, res.text)
+    assert owner.post(f"/users/{uid}/password").status_code == 422  # 본문 없음
+    raw_null = owner.post(f"/users/{uid}/password", content=b"null", headers={"Content-Type": "application/json"})
+    assert raw_null.status_code == 422
+    assert _listed(owner, "expire1")["auth_version"] == current
+    assert _db_rows("select count(*) from auth_sessions where user_id = ?", uid) == sessions_before
+    assert len(owner.get("/admin/audit", params={"target_id": uid}).json()) == events_before
+    assert again.get("/auth/me").status_code == 200 and still.status_code == 200
+    # 지금 버전으로는 재발급된다 — 기존 세션(임시 로그인)은 끝난다
+    res = owner.post(f"/users/{uid}/password", json={"expected_auth_version": current})
+    assert res.status_code == 200
+    latest = res.json()["temp_password"]
     assert again.get("/auth/me").status_code == 401
     # 임시 비밀번호로 로그인한 뒤 만료되면 변경도 막힌다 (재발급 필요)
-    latest = owner.post(f"/users/{uid}/password", json={}).json()["temp_password"]
     late = _client(app_real_login)
     assert late.post("/auth/login", json={"username": "expire1", "password": latest}).status_code == 200
     with SessionLocal() as db:
@@ -273,14 +304,15 @@ def test_temp_password_expiry_and_reissue(app_real_login, owner) -> None:  # noq
     )
     assert res.status_code == 403 and "유효 기간" in res.json()["detail"]
     assert _db_rows("select must_change_password from users where id = ?", uid) == [(1,)]
-    # 최고 관리자에게는 발급하지 않는다 (내 계정·설치 담당자 복구)
+    # 최고 관리자에게는 발급하지 않는다 (내 계정·설치 담당자 복구) — 버전을 보내도
     owner_id = _uid(owner, "test-owner")
-    res = owner.post(f"/users/{owner_id}/password", json={})
+    res = owner.post(
+        f"/users/{owner_id}/password", json={"expected_auth_version": _listed(owner, "test-owner")["auth_version"]}
+    )
     assert res.status_code == 409 and "복구 명령" in res.json()["detail"]
     events = owner.get("/admin/audit", params={"target_id": uid}).json()
     assert [(e["action"], e["result"]) for e in reversed(events)] == [
-        ("provision", "ok"), ("password_reset", "ok"), ("password_reset", "denied"),
-        ("password_reset", "ok"), ("password_reset", "ok"),
+        ("provision", "ok"), ("password_reset", "ok"), ("password_reset", "denied"), ("password_reset", "ok"),
     ]  # fmt: skip
     for secret in (temp, reissued["temp_password"], latest):
         assert secret not in owner.get("/admin/audit").text and secret not in repr(_db_rows("select * from users"))
@@ -313,7 +345,7 @@ def test_reissue_ends_sessions_and_keeps_suspended_state(app_real_login, owner) 
     res = owner.post(f"/users/{uid}/suspend", json={"reason": "퇴사 예정"})
     assert res.status_code == 200 and res.json()["status"] == "suspended"
     assert restricted.get("/auth/me").status_code == 401
-    res = owner.post(f"/users/{uid}/password", json={})
+    res = owner.post(f"/users/{uid}/password", json={"expected_auth_version": _listed(owner, "work2")["auth_version"]})
     assert res.status_code == 200 and res.json()["user"]["status"] == "suspended"
     temp3 = res.json()["temp_password"]
     blocked = _client(app_real_login).post("/auth/login", json={"username": "work2", "password": temp3})
@@ -393,7 +425,8 @@ def test_legacy_pending_accounts_and_business_api_block(app_real_login, owner) -
     assert owner.post(f"/users/{b}/reject", json={"reason": "중복 신청"}).json()["status"] == "rejected"
     for action in ("approve", "resume", "suspend", "reject"):  # 반려는 다른 상태로 덮어쓰지 않는다
         assert owner.post(f"/users/{b}/{action}", json={}).status_code == 409, action
-    assert owner.post(f"/users/{b}/password", json={}).status_code == 409  # 반려 계정에는 발급하지 않는다
+    stale_b = {"expected_auth_version": _listed(owner, "trans-b")["auth_version"]}
+    assert owner.post(f"/users/{b}/password", json=stale_b).status_code == 409  # 반려 계정에는 발급하지 않는다
     assert _db_rows("select status, status_reason from users where id = ?", b) == [("rejected", "중복 신청")]
     rejected = _client(app_real_login).post("/auth/login", json={"username": "trans-b", "password": LEGACY_PASSWORD})
     assert rejected.status_code == 403 and "반려" in rejected.json()["detail"]
@@ -412,7 +445,8 @@ def test_no_self_approval_or_owner_escalation(app_real_login, owner) -> None:  #
     me = _first_change(app_real_login, "climber", temp)
     friend = _legacy_pending("climber-friend")
     for path in (f"/users/{uid}/approve", f"/users/{friend}/approve", f"/users/{uid}/resume", f"/users/{uid}/password"):
-        assert me.post(path, json={}).status_code == 403, path
+        body = {"expected_auth_version": 0} if path.endswith("/password") else {}
+        assert me.post(path, json=body).status_code == 403, path
     assert me.post("/users", json={"username": "climber2", "display_name": "C"}).status_code == 403
     assert me.patch(f"/users/{uid}", json={"display_name": "X"}).status_code == 403
     assert (
@@ -423,7 +457,8 @@ def test_no_self_approval_or_owner_escalation(app_real_login, owner) -> None:  #
     owner_id = _uid(owner, "test-owner")
     for action in ("suspend", "reject", "approve", "resume"):  # 최고 관리자 계정 자체는 바꿀 수 없다
         assert owner.post(f"/users/{owner_id}/{action}", json={}).status_code == 409, action
-    assert owner.post(f"/users/{owner_id}/password", json={}).status_code == 409
+    owner_version = {"expected_auth_version": _listed(owner, "test-owner")["auth_version"]}
+    assert owner.post(f"/users/{owner_id}/password", json=owner_version).status_code == 409
     assert _db_rows("select role, status, is_active from users where id = ?", owner_id) == [("owner", "active", 1)]
     assert _db_rows("select status from users where id = ?", friend) == [("pending",)]
 
@@ -516,7 +551,8 @@ def test_create_owner_once_and_setup_stays_closed(tmp_path: Path) -> None:
         assert [e.action for e in db.scalars(select(AccountEvent).order_by(AccountEvent.id))] == ["setup"]
 
 
-def test_concurrent_init_makes_one_owner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_concurrent_init_makes_one_owner_sqlite_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """빈 임시 SQLite 파일 DB에서 함수를 직접 부른다 — 세션 DB와 무관한 SQLite 시험."""
     from app import auth
     from app.models import AppSetting, User
 
@@ -548,7 +584,9 @@ def test_concurrent_init_makes_one_owner(tmp_path: Path, monkeypatch: pytest.Mon
         assert db.scalar(select(func.count(User.id))) == 1 and db.get(AppSetting, auth.SETUP_KEY) is not None
 
 
-def test_concurrent_first_change_applies_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_concurrent_first_change_applies_once_sqlite_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """빈 임시 SQLite 파일 DB에서 함수를 직접 부른다 — 세션 DB와 무관한 SQLite 시험 (실제 DB의 API 경합은
+    test_auth_races_api.py)."""
     from app import auth, auth_api
     from app.auth import CurrentUser
     from app.models import AuthSession, User
@@ -602,7 +640,8 @@ def test_concurrent_first_change_applies_once(tmp_path: Path, monkeypatch: pytes
         assert sum(auth.verify_password(f"chosen-pass-{i}", row.password_hash) for i in range(3)) == 1
 
 
-def test_concurrent_approvals_apply_once(tmp_path: Path) -> None:
+def test_concurrent_approvals_apply_once_sqlite_file(tmp_path: Path) -> None:
+    """빈 임시 SQLite 파일 DB에서 함수를 직접 부른다 — 세션 DB와 무관한 SQLite 시험."""
     from app import auth, auth_api
     from app.auth import CurrentUser
     from app.models import AccountEvent, User

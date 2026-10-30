@@ -448,24 +448,21 @@ def issue_temp_password(
     *,
     action: str,
     reason: str,
-    expected_version: int | None = None,
+    expected_version: int,
 ) -> tuple[str, datetime] | None:
     """새 임시 비밀번호를 만들어 해시만 저장하고 평문·만료 시각을 돌려준다 (평문은 저장·기록하지 않는다 — 호출한 쪽이
     한 번 보여 준다).
 
     같은 UPDATE에서 인증 버전을 올리고 세션을 끝내 기존 비밀번호·기존 임시 비밀번호·진행 중 로그인이 그 즉시 효력을 잃게
-    한다. expected_version(화면이 본 인증 버전)이 지금 값과 다르면 아무것도 바꾸지 않고 None — 다른 재발급·상태 변경이
-    먼저 반영된 것이다. 상태(이용 중·중지)는 바꾸지 않는다 — 중지된 계정은 재발급으로 활성화되지 않는다. 커밋은 호출한
-    쪽에서.
+    한다. expected_version(화면·목록이 본 인증 버전, 필수)이 지금 값과 다르면 아무것도 바꾸지 않고 None — 다른 재발급·
+    상태 변경이 먼저 반영된 것이다. 조건 없는 재발급 경로는 없다. 상태(이용 중·중지)는 바꾸지 않는다 — 중지된 계정은
+    재발급으로 활성화되지 않는다. 커밋은 호출한 쪽에서.
     """
     plain = generate_temp_password()
     expires = temp_password_expiry()
-    conditions = [User.id == user.id]
-    if expected_version is not None:
-        conditions.append(User.auth_version == expected_version)
     changed = db.execute(
         update(User)
-        .where(*conditions)
+        .where(User.id == user.id, User.auth_version == expected_version)
         .values(
             password_hash=hash_password(plain),
             must_change_password=True,
