@@ -32,7 +32,7 @@ from app.models import (
 )
 from app.review import ReviewError, complete
 from tests.test_accounts import owner  # noqa: F401
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 ROWS = [["구분", "집행액"], ["사업A", "100"], ["사업B", "200"]]
 
@@ -45,9 +45,7 @@ def _learnable(tag: str) -> dict[str, str]:
 
 @pytest.fixture(scope="module")
 def user(app_real_login, owner) -> TestClient:  # noqa: F811
-    body = {"username": "once-user", "display_name": "ONCE", "status": "active", "password": "pass-once-user"}
-    res = owner.post("/users", json=body)
-    assert res.status_code == 201, res.text
+    _provision_user(owner, app_real_login, "once-user", "pass-once-user", "ONCE")
     return _client(app_real_login, "once-user", "pass-once-user")
 
 

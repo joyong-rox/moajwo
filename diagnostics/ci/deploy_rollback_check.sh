@@ -32,7 +32,9 @@ snapshot() {  # snapshot <단계>
 git checkout -q --detach "$OLD"
 docker compose up -d --build --wait > "$OUT/old-up.log" 2>&1
 res old.up $? "docker compose up -d --build --wait ($(git rev-parse --short HEAD))"
-res seed "$(python3 "$HERE/deploy_probe.py" seed http://127.0.0.1:8080 "$OUT/seed.json")" "최초 소유자·합성 CSV·매핑 확정·묶기 결과"
+# 0022 이후 판은 공개 최초 설정 대신 설치 초기화 명령으로 admin을 만든다 (이전 판에는 명령이 없어 실패해도 됨 — 탐침이 setup을 씀)
+docker compose exec -T backend python -m app.adminctl init --yes --password-stdin <<< "$PROBE_PW" > /dev/null 2>&1 || true
+res seed "$(python3 "$HERE/deploy_probe.py" seed http://127.0.0.1:8080 "$OUT/seed.json")" "소유자(설정 또는 admin 로그인)·합성 CSV·매핑 확정·묶기 결과"
 snapshot old
 
 # ---------------------------------------------------------------- 2. 후보 반영 (deploy.sh 그대로)

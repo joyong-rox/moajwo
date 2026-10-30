@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event, func, select
 
 from tests.test_accounts import owner  # noqa: F401
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 ROWS = [["구분", "집행액"], ["사업A", "100"], ["사업B", "200"]]
 
@@ -23,9 +23,7 @@ ROWS = [["구분", "집행액"], ["사업A", "100"], ["사업B", "200"]]
 def people(app_real_login, owner) -> dict[str, TestClient]:  # noqa: F811
     made = {"owner": owner}
     for name in ("rl-user1", "rl-user2", "rl-user3"):
-        res = owner.post("/users", json={"username": name, "display_name": name.upper(), "status": "active",
-                                         "password": f"pass-{name}"})  # fmt: skip
-        assert res.status_code == 201, res.text
+        _provision_user(owner, app_real_login, name, f"pass-{name}", name.upper())
         made[name] = _client(app_real_login, name, f"pass-{name}")
     return made
 

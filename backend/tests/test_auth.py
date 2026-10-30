@@ -66,23 +66,26 @@ def _client(app: Any, username: str | None = None, password: str = "test-passwor
     return c
 
 
+def _provision_user(owner: TestClient, app: Any, username: str, password: str, display_name: str | None = None) -> int:
+    """0022: 최고 관리자가 발급(임시 비밀번호) → 그 사용자가 첫 로그인에서 본인 비밀번호(password)로 바꾼다.
+    사용자 번호를 돌려준다."""
+    res = owner.post("/users", json={"username": username, "display_name": display_name or username.upper()})
+    assert res.status_code == 201, res.text
+    temp = res.json()["temp_password"]
+    first = _client(app, username, temp)
+    body = {"current_password": temp, "new_password": password, "new_password_confirm": password}
+    assert first.post("/auth/password", json=body).status_code == 204
+    return res.json()["user"]["id"]
+
+
 @pytest.fixture(scope="module")
 def accounts(app_real_login) -> dict[str, TestClient]:
     owner = _client(app_real_login, "test-owner")
     made = {"owner": owner}
-    # 0016: 역할은 owner(최고 관리자)·user 두 가지.
-    # 예전 admin1이 맡던 '전체 조회·남의 것 변경 불가' 검사는 owner로 옮겼다
+    # 0016: 역할은 owner(최고 관리자)·user 두 가지. 예전 admin1이 맡던 '전체 조회·남의 것 변경 불가' 검사는 owner로.
+    # 0022: 일반 사용자는 최고 관리자가 발급한다(임시 비밀번호) → 첫 로그인에서 본인 비밀번호로 바꾼 뒤 다시 로그인
     for username in ["user1", "user2", "user3", "user4"]:
-        res = owner.post(
-            "/users",
-            json={
-                "username": username,
-                "display_name": username.upper(),
-                "status": "active",
-                "password": "pass-" + username,
-            },
-        )
-        assert res.status_code == 201, res.text
+        _provision_user(owner, app_real_login, username, "pass-" + username)
         made[username] = _client(app_real_login, username, "pass-" + username)
     return made
 
@@ -99,9 +102,10 @@ def test_login_required_and_session_lifecycle(app_real_login, accounts) -> None:
         assert getattr(anon, method)(path).status_code == 401, path
     assert anon.get("/health").status_code == 200
     assert anon.get("/auth/status").json() == {"setup_required": False, "user": None}
-    # 계정이 이미 있으면 최초 설정은 막힌다
+    # 공개 최초 설정·회원가입은 종료됐다 (계정 유무와 무관하게 410, 보낸 값을 되돌리지 않음)
     res = anon.post("/auth/setup", json={"username": "evil", "display_name": "x", "password": "password-123"})
-    assert res.status_code == 409
+    assert res.status_code == 410 and "password-123" not in res.text
+    assert anon.post("/auth/signup", json={"username": "evil", "password": "password-123"}).status_code == 410
 
     bad = anon.post("/auth/login", json={"username": "user1", "password": "wrong-password"})
     unknown = anon.post("/auth/login", json={"username": "nobody", "password": "wrong-password"})
@@ -124,13 +128,13 @@ def test_login_required_and_session_lifecycle(app_real_login, accounts) -> None:
 
 
 def test_lockout_after_repeated_failures(app_real_login, accounts) -> None:
-    accounts["owner"].post(
-        "/users", json={"username": "locky", "display_name": "L", "status": "active", "password": "pass-locky"}
-    )
+    made = accounts["owner"].post("/users", json={"username": "locky", "display_name": "L"})
+    assert made.status_code == 201, made.text
+    temp = made.json()["temp_password"]
     c = _client(app_real_login)
     for _ in range(5):
         assert c.post("/auth/login", json={"username": "locky", "password": "nope-nope"}).status_code == 401
-    res = c.post("/auth/login", json={"username": "locky", "password": "pass-locky"})
+    res = c.post("/auth/login", json={"username": "locky", "password": temp})  # 맞는 임시 비밀번호여도 잠긴 동안은 거절
     assert res.status_code == 401 and "잠" in res.json()["detail"]
 
 

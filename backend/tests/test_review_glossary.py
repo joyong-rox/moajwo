@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from tests.test_accounts import owner  # noqa: F401
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 _users = itertools.count(1)
 _codes = itertools.count(101)
@@ -39,9 +39,7 @@ def n() -> dict[str, str]:
 @pytest.fixture
 def user(app_real_login, owner) -> TestClient:  # noqa: F811
     name = f"rg-user{next(_users)}"
-    res = owner.post("/users", json={"username": name, "display_name": name.upper(), "status": "active",
-                                     "password": f"pass-{name}"})  # fmt: skip
-    assert res.status_code == 201, res.text
+    _provision_user(owner, app_real_login, name, f"pass-{name}", name.upper())
     return _client(app_real_login, name, f"pass-{name}")
 
 

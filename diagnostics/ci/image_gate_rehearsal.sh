@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
 # 반영 전 이미지 검증(docs/DEPLOY.md 11장) 리허설 — 격리 러너 전용 (운영 PC에서 돌리지 않는다).
-# 이전 판(main — 지금 운영과 같은 DB 0021)을 띄우고 합성 자료를 만든 뒤, 후보 트리의 scripts/deploy.sh <후보> 0021_run_request_key로
+# 이전 판(main — 지금 운영과 같은 DB)을 띄우고 합성 자료를 만든 뒤, 후보 트리의 scripts/deploy.sh <후보> <이전 리비전>으로
+#   (이전·후보 리비전은 각 트리의 backend/alembic/versions에서 가장 큰 번호의 파일 이름으로 읽는다 — 같으면 리비전 유지 반영,
+#    다르면 마이그레이션이 있는 반영. 0022(계정 발급) 후보는 0021 → 0022)
 #   1) 검증 실패: OS 패키지 판 하나만 바꾼 검증 목록을 담은 시험용 커밋을 '승인'으로 반영 → 3단계에서 멈춤 — 서비스·컨테이너·
 #      latest 그대로, 정지·백업 없음 (검증 목록을 바꾸는 환경 변수는 없다 — 목록은 승인한 트리의 파일)
 #   1b) 격리 기동 점검 실패: frontend 설정에서 CSP 헤더만 뺀 시험용 커밋 → 목록은 같고 점검이 실패 → 3단계에서 멈춤, 점검 자원 정리 · 감시 기록은 점검 종료 4와 감시 컨테이너 정리 확인을 따로 남김
 #   2) 정상 반영: 후보 태그 빌드 → 검증 통과 → 백업 → latest를 검증한 ID로 → up --no-build → 실행 중 이미지 = 검증한 ID,
-#      리비전 0021 그대로, 같은 계정 로그인·이전 결과 다시 내려받기 해시 같음, 격리 점검을 감싼 감시 컨테이너를 지우고 목록으로 확인
-#   3) 4장 B 롤백 (리비전이 같은 반영 — 1·2·6·7단계. 단계 상자를 후보 트리의 문서에서 그대로 꺼내 실행) → 이전 이미지·0021·자료 그대로
+#      리비전이 후보 리비전(head), 같은 계정 로그인·이전 결과 다시 내려받기 해시 같음, 격리 점검을 감싼 감시 컨테이너를 지우고 목록으로 확인
+#   3) 4장 B 롤백 (단계 상자를 후보 트리의 문서에서 그대로 꺼내 실행: 리비전이 같으면 1·2·6·7단계, 바뀌었으면 1~7단계 — 3·4 정리·상태,
+#      5 새 이미지로 downgrade) → 이전 이미지·이전 리비전·자료 그대로
 # 사용법: bash image_gate_rehearsal.sh <결과 폴더> <이전 SHA> <후보 SHA>   (deploy_probe.py가 이 스크립트와 같은 폴더에 있어야 함)
 #   결과 폴더는 저장소 밖에 둔다 — deploy.sh 1단계가 저장소의 추적하지 않는 파일을 막는다
 # 러너 맞춤: 백업 컨테이너(uid 1000)가 쓸 수 있게 backups/ 권한. (deploy.sh는 'pwd -W'가 없으면 pwd를 쓰고, 내보낸 셸 함수가 있으면 멈춘다)
@@ -50,15 +53,20 @@ same() {  # 두 값이 같고 둘 다 비어 있지 않을 때만 '같음' (조�
 
 # ---------------------------------------------------------------- 0) 이전 판 기동 · 합성 자료
 git checkout -q "$OLD" || exit 2
+treerev() { ls backend/alembic/versions | sed -n 's/\.py$//p' | grep -E '^[0-9]{4}_' | sort | tail -1; }  # 그 트리의 head 리비전
+OLD_REV=$(treerev)
 mkdir -p backups && chmod 777 backups
 docker compose up -d --build --wait > "$OUT/old-up.log" 2>&1
 check old.up "exit=$? · 실행 중 $(running)" "exit=0" "backend frontend"
-check old.rev "$(rev)" "0021_run_request_key (head)"
+check old.rev "$(rev)" "$OLD_REV (head)"
+docker compose exec -T backend python -m app.adminctl init --yes --password-stdin <<< "$PROBE_PW" > /dev/null 2>&1 || true  # 0022 이후 판용 (이전 판은 setup)
 check old.seed "$(python3 "$HERE/deploy_probe.py" seed http://127.0.0.1:8080 "$OUT/seed.json" 2>&1 | tail -1)" '"bundle": 201' '"download": 200'
 OLD_B=$(img_of backend)
 OLD_F=$(img_of frontend)
 echo "이전 이미지 backend $OLD_B · frontend $OLD_F" | tee -a "$OUT/notes.txt"
 git checkout -q "$NEW" || exit 2
+NEW_REV=$(treerev)
+echo "리비전 이전 $OLD_REV → 후보 $NEW_REV" | tee -a "$OUT/notes.txt"
 
 # ---------------------------------------------------------------- 1) 검증 실패 — 정지·백업·latest 이동 없음
 git checkout -q -b rehearsal-bad-list "$NEW" || exit 2
@@ -77,7 +85,7 @@ B0=$(cid backend)
 F0=$(cid frontend)
 LB0=$(latest backend)
 LF0=$(latest frontend)
-bash scripts/deploy.sh "$BAD_SHA" 0021_run_request_key > "$OUT/deploy-gatefail.out" 2>&1
+bash scripts/deploy.sh "$BAD_SHA" "$OLD_REV" > "$OUT/deploy-gatefail.out" 2>&1
 check gatefail.exit "exit=$? ·" "exit=1 ·"   # 정확히 1 (126·127 등이 부분 문자열로 통과하지 않게)
 check gatefail.stop "$(grep -h '\[중단\]' "$OUT/deploy-gatefail.out" | tail -1)" "이미지 검증 실패" "latest 태그는 그대로"
 check gatefail.diff "$(grep -h '^다름 |' "$OUT/deploy-gatefail.out" | head -1)" "os_packages.tzdata" "~rehearsal"
@@ -97,7 +105,7 @@ B0=$(cid backend)
 F0=$(cid frontend)
 LB0=$(latest backend)
 LF0=$(latest frontend)
-bash scripts/deploy.sh "$SMOKE_SHA" 0021_run_request_key > "$OUT/deploy-smokefail.out" 2>&1
+bash scripts/deploy.sh "$SMOKE_SHA" "$OLD_REV" > "$OUT/deploy-smokefail.out" 2>&1
 check smokefail.exit "exit=$? ·" "exit=1 ·"
 check smokefail.gate "$(grep -h '^\[검증' "$OUT/deploy-smokefail.out" | tail -1) · $(grep -h '^\[[0-9:]*\] \[중단\]' "$OUT/deploy-smokefail.out" | tail -1)" \
   "[검증 실패] 격리 기동 점검 실패 (측정한 점검이 실패)" "이미지 검증 실패" "latest 태그는 그대로"
@@ -112,7 +120,7 @@ check smokefail.api "$(probe after-smokefail)" '"login": 200' '"result_same": tr
 git checkout -q "$NEW" || exit 2
 
 # ---------------------------------------------------------------- 2) 정상 반영 — 검증한 ID로만 전환
-bash scripts/deploy.sh "$NEW" 0021_run_request_key > "$OUT/deploy-ok.out" 2>&1
+bash scripts/deploy.sh "$NEW" "$OLD_REV" > "$OUT/deploy-ok.out" 2>&1
 check deploy.exit "exit=$? ·" "exit=0 ·"
 LOG=$(find backups -name 'deploy-*.log' | sort | tail -1)
 CB=$(sed -n 's/.*후보 이미지: backend \(sha256:[0-9a-f]*\) · frontend .*/\1/p' "$LOG" | tail -1)
@@ -123,13 +131,13 @@ check deploy.ids "후보=실행 backend $(same "$CB" "$(img_of backend)") fronte
 check deploy.gate "$(grep -h '\[검증 통과\]' "$LOG" | tail -1)" "완성 이미지 목록 = 검증한 목록" "격리 기동 점검 통과"
 check deploy.lines "$(grep -c -e '이미지 검증 통과:' -e '실행 중 이미지 = 3단계에서 검증한 이미지' -e '이미지 연결:' -e '배포 단위:' "$LOG")줄" "4줄"
 check deploy.build "$(grep -h 'image: moajwo-backend:cand-' "$(find backups -name 'candidate-*.compose.yml' | sort | tail -1)")" "image: moajwo-backend:cand-"
-check deploy.rev "$(rev)" "0021_run_request_key (head)"
-check deploy.unit "$(grep -h '배포 단위:' "$LOG" | tail -1)" "리비전 0021_run_request_key → 0021_run_request_key (head)"
+check deploy.rev "$(rev)" "$NEW_REV (head)"
+check deploy.unit "$(grep -h '배포 단위:' "$LOG" | tail -1)" "리비전 $OLD_REV → $NEW_REV (head)"
 check deploy.base "$(docker image inspect "$CB" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E '^PYTHON_VERSION=')" "PYTHON_VERSION=3.11.18"
 check deploy.api "$(probe after-deploy)" '"login": 200' '"result_same": true' '"original_preview": 200'
 GD=$(sed -n 's/.*이미지 검증 통과: .*(기록 \(backups\/image-gate-[0-9-]*\)).*/\1/p' "$LOG" | tail -1)
 check deploy.gateresult "$(paste -sd' ' "$GD/gate.result" 2>&1)" "status=pass" "backend=$CB" "frontend=$CF"
-check deploy.smokejson "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["status"], d["passed"], "/", d["required"], "errors", len(d["errors"]))' "$GD/smoke.json" 2>&1)" "pass 22 / 22 errors 0"
+check deploy.smokejson "$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["status"], "all" if d["passed"] == d["required"] else "partial", d["passed"], "/", d["required"], "errors", len(d["errors"]))' "$GD/smoke.json" 2>&1)" "pass all" "errors 0"
 check deploy.watch "$(watchrec "$GD/smoke.watch.json")" "command_exit 0" "exit 0" "cleanup removed" "list_exit 0"   # 실제 Docker에서 감시 컨테이너를 지우고 목록으로 확인
 MEMV=""   # 자원 줄은 단계마다 있어야 한다 (watch 줄은 로그에 원문과 시각 붙은 줄 두 번 남으므로 개수가 아니라 있는지로 본다)
 for w in 'build 시작 전' 'build-backend 동안' 'build-frontend 동안' 'smoke 시작 전' 'smoke 동안'; do
@@ -139,7 +147,7 @@ check deploy.memory "$MEMV$(grep -h '자원 | smoke 동안' "$LOG" | tail -1)" "
   "smoke 시작 전 있음" "smoke 동안 있음" "host 시작" "vm 시작"
 check deploy.leftover "$(leftover)" "컨테이너 0 ·" "볼륨 0 ·" "네트워크 0 ·"
 
-# ---------------------------------------------------------------- 3) 4장 B 롤백 — 리비전이 같아 1·2·6·7단계
+# ---------------------------------------------------------------- 3) 4장 B 롤백 — 리비전이 같으면 1·2·6·7단계, 바뀌었으면 1~7단계
 python3 - docs/DEPLOY.md "$OUT/steps" <<'PY'
 import re
 import sys
@@ -158,16 +166,17 @@ $(cat "$OUT/steps/step$n.sh")" > "$OUT/rollback-step$n.log" 2>&1
   rc=$?
   if [ "$rc" -ne 0 ] || ! grep -q "^\[$n 완료\]" "$OUT/rollback-step$n.log"; then echo "$n:$rc"; else echo done; fi
 }
-check rollback.unit "$(env -u 'BASH_FUNC_pwd%%' bash "$OUT/steps/step0.sh" 2>&1 | grep -h '되돌릴 배포 단위:' | tail -1)" "리비전 0021_run_request_key → 0021_run_request_key"
+check rollback.unit "$(env -u 'BASH_FUNC_pwd%%' bash "$OUT/steps/step0.sh" 2>&1 | grep -h '되돌릴 배포 단위:' | tail -1)" "리비전 $OLD_REV → $NEW_REV"
+if [ "$OLD_REV" = "$NEW_REV" ]; then STEPS="1 2 6 7"; NOTE="리비전이 같아 3~5단계 없음"; else STEPS="1 2 3 4 5 6 7"; NOTE="리비전이 바뀌어 3·4 정리·상태, 5 새 이미지로 downgrade 포함"; fi
 R=done
-for n in 1 2 6 7; do
+for n in $STEPS; do
   r=$(run_box "$n")
   [ "$r" = done ] || { R=$r; break; }
 done
-check rollback.steps "$R (1·2·6·7단계 — 리비전이 같아 3~5단계 없음)" "done"
+check rollback.steps "$R ($(echo $STEPS | tr ' ' '·')단계 — $NOTE)" "done"
 check rollback.ids "실행=이전 backend $(same "$OLD_B" "$(img_of backend)") frontend $(same "$OLD_F" "$(img_of frontend)") · latest=이전 backend $(same "$OLD_B" "$(latest backend)") frontend $(same "$OLD_F" "$(latest frontend)")" \
   "실행=이전 backend 같음 frontend 같음" "latest=이전 backend 같음 frontend 같음"
-check rollback.rev "$(rev)" "0021_run_request_key (head)"
+check rollback.rev "$(rev)" "$OLD_REV (head)"
 check rollback.api "$(probe after-rollback)" '"login": 200' '"result_same": true'
 docker compose logs --no-color > "$OUT/compose.log" 2>&1
 echo "== 결과: 통과 $PASS · 실패 $FAIL" | tee -a "$RES"

@@ -93,8 +93,10 @@ docker exec frontend sh -c 'cd /usr/share/nginx/html && find . -type f -exec sha
 
 # 업로드·내려받기 (nginx 프록시를 거쳐, 새 최초 소유자 계정·합성 CSV)
 JAR="$OUT/.cookies"; PW="Ci-$(openssl rand -hex 12)"
+# 공개 최초 설정은 종료됐다 — 설치 담당자의 초기화 명령으로 admin을 만든 뒤 로그인한다 (비밀번호는 표준 입력으로만)
+docker exec -i backend python -m app.adminctl init --yes --password-stdin <<< "$PW" | sed 's/^/init /' >> "$LOG"
 curl -s -c "$JAR" -o /dev/null -w '%{http_code}\n' -H 'Content-Type: application/json' \
-  -d "{\"username\":\"ci-owner\",\"display_name\":\"CI\",\"password\":\"$PW\"}" $H/api/auth/setup | sed 's/^/setup /' >> "$LOG"
+  -d "{\"username\":\"admin\",\"password\":\"$PW\"}" $H/api/auth/login | sed 's/^/login /' >> "$LOG"
 printf '시도,인구\n서울특별시,100\n부산광역시,200\n' > "$OUT/ci.csv"
 UP=$(curl -s -b "$JAR" -F "files=@$OUT/ci.csv;type=text/csv" $H/api/files)
 FID=$(echo "$UP" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["id"])' 2>/dev/null)
@@ -370,8 +372,9 @@ done
 S=http://127.0.0.1:18000
 TMPD=$(mktemp -d)
 JAR="$TMPD/cookies"; PW="Ci-$(openssl rand -hex 12)"
+docker exec -i small python -m app.adminctl init --yes --password-stdin <<< "$PW" > /dev/null
 curl -s -c "$JAR" -o /dev/null -H 'Content-Type: application/json' \
-  -d "{\"username\":\"ci-owner\",\"display_name\":\"CI\",\"password\":\"$PW\"}" $S/auth/setup
+  -d "{\"username\":\"admin\",\"password\":\"$PW\"}" $S/auth/login
 # 최대 메모리는 컨테이너 기동부터의 누적 최대다 (memory.peak 초기화는 리눅스 6.12+에서도 쓴 쪽 파일 설명자에만 적용되어
 # 다른 읽기에는 누적 값이 보인다 — 2회차에서 확인). 사례를 작은 것부터 돌려 늘어난 만큼을 그 사례의 몫으로 읽는다.
 PEAK_MODE=누적

@@ -22,7 +22,7 @@ from app.pii import mask_text
 from tests.conftest import db_connect
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_analysis import POP, THREE, _body, _file, _run, _upload
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 GLUE = "인구수kim@example.com"  # 수정 전 규칙이 놓친 형식 (한글에 붙은 이메일)
 GLUE_U = "인구수_kim@example.com"
@@ -187,9 +187,7 @@ def _taint(fid: int, rid: int) -> None:
 def past(app_real_login, owner) -> Iterator[dict[str, Any]]:  # noqa: F811
     users = {}
     for name, display in (("am-user1", "분석자kim@example.com"), ("am-user2", "AM-USER2")):
-        res = owner.post("/users", json={"username": name, "display_name": display, "status": "active",
-                                         "password": "pass-" + name})  # fmt: skip
-        assert res.status_code == 201, res.text
+        _provision_user(owner, app_real_login, name, "pass-" + name, display)
         users[name] = _client(app_real_login, name, "pass-" + name)
     u = users["am-user1"]
     head = [[POP], ["시도", "기관명", "인구수"]]

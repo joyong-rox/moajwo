@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import db_connect
 from tests.test_accounts import owner  # noqa: F401
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -64,9 +64,7 @@ def users(app_real_login, owner) -> dict[str, TestClient]:  # noqa: F811
     patch.setattr(mapping_review, "get_engine", lambda: engine)
     made = {"owner": owner}
     for name in ("mw-user1", "mw-user2"):
-        res = owner.post("/users", json={"username": name, "display_name": name.upper(), "status": "active",
-                                         "password": "pass-" + name})  # fmt: skip
-        assert res.status_code == 201, res.text
+        _provision_user(owner, app_real_login, name, "pass-" + name, name.upper())
         made[name] = _client(app_real_login, name, "pass-" + name)
     yield made
     patch.undo()

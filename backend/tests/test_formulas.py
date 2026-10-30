@@ -21,7 +21,7 @@ from app.formulas import check_totals
 from app.validation import ValidationParams, validate
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_analysis import _upload, _xlsx
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 from tests.test_mail_statistics import evaluate
 from tests.test_validation import make_input, make_xlsx
 
@@ -129,9 +129,7 @@ def test_summary_notes_double_counting_of_a_total_and_its_parts() -> None:
 
 @pytest.fixture(scope="module")
 def fm(app_real_login, owner) -> TestClient:  # noqa: F811
-    res = owner.post("/users", json={"username": "fm-user1", "display_name": "FM-USER1", "status": "active",
-                                     "password": "pass-fm-user1"})  # fmt: skip
-    assert res.status_code == 201, res.text
+    _provision_user(owner, app_real_login, "fm-user1", "pass-fm-user1", "FM-USER1")
     return _client(app_real_login, "fm-user1", "pass-fm-user1")
 
 

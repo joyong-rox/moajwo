@@ -101,3 +101,9 @@ MAX_OUTPUT_TEXT_CHARS = _env_int("MOAJWO_MAX_OUTPUT_TEXT_CHARS", 96_000_000)
 # 결과 만들기(묶기·통합·통계 요약·데이터 분석) 동시 실행 수 — 프로세스마다 (app/output_slot.py). 칸 예산은 요청 하나만
 # 막으므로, 한도 가까운 결과 둘이 동시에 만들어지지 않게 한다. 차례가 없으면 기다리지 않고 거절한다
 OUTPUT_SLOTS = _env_int("MOAJWO_OUTPUT_SLOTS", 1)
+
+# 관리자가 발급·재발급하는 임시 비밀번호의 유효 시간 — 제품 기본값 24시간(조정 가능). 지나면 그 비밀번호로 로그인하지
+# 못하고
+# 관리자가 재발급한다 (app/auth.py). 짧게 두면 전달이 늦은 사용자가 재발급을 자주 받고, 길게 두면 전달 경로의 노출
+# 위험이 길어진다.
+TEMP_PASSWORD_HOURS = _env_int("MOAJWO_TEMP_PASSWORD_HOURS", 24)
