@@ -315,15 +315,22 @@ SELECT pg_has_role('moajwo_app', 'neon_superuser', 'MEMBER') AS in_neon_superuse
 -- 소유: 0행 (스키마·표·시퀀스의 소유자가 아님)
 SELECT nspname FROM pg_namespace WHERE nspowner = 'moajwo_app'::regrole;
 SELECT relname FROM pg_class WHERE relowner = 'moajwo_app'::regrole;
--- 권한: public의 모든 표에 SELECT,INSERT,UPDATE,DELETE · 모든 시퀀스에 USAGE,SELECT (두 수가 같아야 함)
-SELECT count(*) FILTER (WHERE has_table_privilege('moajwo_app', c.oid, 'SELECT,INSERT,UPDATE,DELETE')) AS ok, count(*) AS tables
-  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r';
-SELECT count(*) FILTER (WHERE has_sequence_privilege('moajwo_app', c.oid, 'USAGE,SELECT')) AS ok, count(*) AS sequences
-  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'S';
+-- 권한: 권한마다 따로 확인한다 (2026-10-30 3차 정정 — has_*_privilege에 쉼표로 나열한 권한은 '하나라도 있으면 true'라
+-- 'SELECT,INSERT,UPDATE,DELETE' 한 번 호출은 SELECT만 있어도 참이다). 통과 = 아래 두 '빠진 권한' 조회가 0행이고 표·시퀀스 수가
+-- 0이 아님 (표 0개는 스키마가 준비되지 않은 것 — 0/0 일치를 통과로 보지 않는다). 빠진 행은 (객체, 권한) 이름으로 보고한다
+WITH t AS (SELECT c.oid, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r'),
+     p AS (SELECT unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS priv)
+SELECT t.relname, p.priv AS missing FROM t CROSS JOIN p WHERE NOT has_table_privilege('moajwo_app', t.oid, p.priv) ORDER BY 1, 2;
+WITH s AS (SELECT c.oid, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'S'),
+     p AS (SELECT unnest(ARRAY['USAGE', 'SELECT']) AS priv)
+SELECT s.relname, p.priv AS missing FROM s CROSS JOIN p WHERE NOT has_sequence_privilege('moajwo_app', s.oid, p.priv) ORDER BY 1, 2;
+SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r') AS tables,
+       (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'S') AS sequences;  -- 둘 다 0이 아니어야 함
 ```
 
 - **앱 계정으로 확인 (`service=moajwo-app`):** 소유 계정이 만든 **별도 시험 표**(`CREATE TABLE public.zz_privilege_probe (id serial PRIMARY KEY, v text)`)에 INSERT(시퀀스 사용)·SELECT·UPDATE·DELETE가 되고, 다음은 모두 `42501`(권한 없음)로 거절돼야 합니다: `CREATE TABLE public.zz_app_probe (id int)`, `ALTER TABLE public.zz_privilege_probe ADD COLUMN x int`, `DROP TABLE public.zz_privilege_probe`, `TRUNCATE public.zz_privilege_probe`, `ALTER SEQUENCE public.zz_privilege_probe_id_seq RESTART WITH 100`, `CREATE ROLE zz_role`, `CREATE DATABASE zz_db`, `ALTER TABLE public.users ADD COLUMN zz int`. 시험 표는 소유 계정이 지웁니다. **기존 업무 표를 지우는 시험은 하지 않습니다.**
-- 로컬 확인 (2026-10-30 2차, 포터블 PostgreSQL 17.11·psycopg 3.3.6, 합성 역할): `backups/followup-20261030/round2/neon-prep/pgrole-check.json` **25/25 통과**(21:10) — 소유 계정(CREATEDB·CREATEROLE — Neon의 소유 역할에 해당)이 빈 DB에 `alembic upgrade head`(0021_run_request_key) 뒤 위 SQL로 `moajwo_app`을 만들고(비밀번호는 클라이언트가 만든 SCRAM 검증자), 속성 5개 모두 false·직접 멤버십 0·소유 객체 0·표 21/21 DML·시퀀스 19/19 권한, 앱 계정으로 시험 표 INSERT(serial)/SELECT/UPDATE/DELETE ok, DDL 8종(CREATE TABLE·ALTER TABLE·DROP·TRUNCATE·ALTER SEQUENCE·CREATE ROLE·CREATE DATABASE·업무 표 ALTER) 모두 42501, 앱(uvicorn, 앱 계정 주소)에서 최초 설정 201·로그인 200·`/auth/me` 200, 평문 비밀번호가 하위 프로세스 인자·서버 로그(`log_statement=all`)에 없음. `neon_superuser`는 로컬에 없어 그 항목(`pg_has_role`)은 Neon에서 확인합니다. 앞선 세 번의 실행 실패는 시험 도구 오류(pg_ctl 파이프·`PGSERVICEFILE` 환경·함수 이름)이며 기록을 남겼습니다. 실제 Neon이 아닙니다.
+- 로컬 확인 (2026-10-30 2차, 포터블 PostgreSQL 17.11·psycopg 3.3.6, 합성 역할): `backups/followup-20261030/round2/neon-prep/pgrole-check.json` **25/25 통과**(21:10) — 소유 계정(CREATEDB·CREATEROLE — Neon의 소유 역할에 해당)이 빈 DB에 `alembic upgrade head`(0021_run_request_key) 뒤 위 SQL로 `moajwo_app`을 만들고(비밀번호는 클라이언트가 만든 SCRAM 검증자), 속성 5개 모두 false·직접 멤버십 0·소유 객체 0·표 21/21 DML·시퀀스 19/19 권한(당시의 집계 판정 — 3차에서 권한별 판정으로 정정), 앱 계정으로 시험 표 INSERT(serial)/SELECT/UPDATE/DELETE ok, DDL 8종(CREATE TABLE·ALTER TABLE·DROP·TRUNCATE·ALTER SEQUENCE·CREATE ROLE·CREATE DATABASE·업무 표 ALTER) 모두 42501, 앱(uvicorn, 앱 계정 주소)에서 최초 설정 201·로그인 200·`/auth/me` 200, 평문 비밀번호가 하위 프로세스 인자·서버 로그(`log_statement=all`)에 없음. `neon_superuser`는 로컬에 없어 그 항목(`pg_has_role`)은 Neon에서 확인합니다. 앞선 세 번의 실행 실패는 시험 도구 오류(pg_ctl 파이프·`PGSERVICEFILE` 환경·함수 이름)이며 기록을 남겼습니다. 실제 Neon이 아닙니다.
+- 로컬 확인 3차 (2026-10-30 21:59, 같은 환경 — 권한 판정 정정 뒤): `pgrole-check.json` **27/27** — 정상 대조군(표 21·시퀀스 19, 빠진 권한 0행) 통과. 부정 대조군: `glossary_entries`의 INSERT·UPDATE·DELETE·SELECT를 하나씩 빼면 새 판정은 그 (표, 권한)을 보고하며 실패하고 **예전 집계는 21/21로 통과**(판정 누락의 재현), 권한을 복구하면 다시 통과; 시퀀스의 USAGE·SELECT도 같음. 빈 스키마(복원 전 `rv_restore`)는 새 판정이 표 0개로 실패하고 예전 집계는 0/0 일치로 통과. 2차의 25/25는 당시 판정으로 얻은 결과로 보존하며, 이 정정은 확인 SQL의 판정 누락이지 배포 역할의 오설정이 아닙니다(실제 배포 역할은 아직 없음). 실제 Neon이 아닙니다.
 - **`idle_in_transaction_session_timeout`은 600초:** 원본을 읽는 요청(미리보기·열 매핑 등)은 원본 기록을 읽은 트랜잭션을 연 채 읽기 차례를 기다리고(최대 `MOAJWO_PARSE_WAIT_S` 60초) 파일을 읽습니다 (`app/files.py`의 `load_parsed`). 이 제한을 60초로 두면 차례를 다 기다린 정상 요청도 서버가 끊어 'DB에 연결하지 못함'(503)이 됩니다 — Render 무료 인스턴스는 0.1 CPU라 큰 파일 읽기 자체도 러너(약 6초)보다 길 수 있습니다 (추정, Render에서 재지 않음). 이 값은 버려진 연결이 잠금을 쥐고 있는 시간의 상한이라 10분으로 둡니다.
 - 앱 계정은 시퀀스를 바꿀 수 없습니다 (`ALTER SEQUENCE` 42501 — 확인). 이관 도구는 소유 계정으로 돌립니다.
 - **스키마 초기화:** 빈 DB에 `alembic upgrade head`를 실제로 실행합니다 (기동 때 자동). 표를 맞추지 않고 `alembic stamp head`만 하지 않습니다.
