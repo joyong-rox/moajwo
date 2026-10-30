@@ -65,6 +65,7 @@ from sqlalchemy.engine import URL, make_url
 
 RESULTS: list[tuple[str, str, str]] = []
 ARGV: list[list[str]] = []  # 이 스크립트가 띄운 모든 하위 프로세스의 명령 인자 (9단계 비밀값 점검)
+SERVERS: list[Server] = []  # 띄운 앱 프로세스 — 중간에 멈춰도 끝에서 모두 내린다 (남은 프로세스가 다음 실행의 포트를 차지하지 않게)
 # 하위 프로세스용 서비스 파일에 옮기는 접속 매개변수 (관리자 연결에서 읽음 — 비밀번호 없음)
 CONN_KEYS = ("host", "hostaddr", "port", "sslmode", "sslrootcert", "sslcert", "sslkey", "channel_binding")
 
@@ -105,7 +106,7 @@ class Client:
         try:
             with self.op.open(req, timeout=120) as r:
                 raw = r.read()
-                return r.status, (json.loads(raw) if raw[:1] in b"[{" else raw)
+                return r.status, (json.loads(raw) if raw[:1] in (b"[", b"{") else raw)  # 빈 본문(204)은 그대로
         except urllib.error.HTTPError as e:
             raw = e.read()
             try:
@@ -216,9 +217,17 @@ class Server:
                                stdout=out, stderr=subprocess.STDOUT)  # fmt: skip
             if m.returncode != 0:
                 return False
+        try:  # 이 포트에 이미 무엇인가 떠 있으면(앞 실행의 남은 프로세스 등) 시작하지 않는다 — 그쪽에 요청하게 되므로
+            urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=2)
+            return False
+        except urllib.error.HTTPError:
+            return False
+        except OSError:
+            pass
         self.proc = subprocess.Popen([self.a.python, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
                                       "--port", str(self.port)], cwd=self.a.backend, env=env, stdout=out,
                                      stderr=subprocess.STDOUT)  # fmt: skip
+        SERVERS.append(self)
         for _ in range(120):
             if self.proc.poll() is not None:
                 return False
@@ -378,6 +387,8 @@ def main() -> None:
     except Exception:  # 중간에 멈춰도 지금까지의 결과와 아래 점검은 남긴다 (오류 종류와 위치만)
         res("aborted", type(sys.exc_info()[1]).__name__, traceback.format_exc().strip().splitlines()[-1][:160])
     finally:
+        for srv in SERVERS:  # 중간에 멈춘 실행의 앱 프로세스도 내린다 (작업 폴더 삭제·다음 실행의 포트를 위해)
+            srv.stop()
         removed = vault.remove()
         work_removed = remove_tree(work)
 
@@ -551,7 +562,7 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
     res("redeploy_start", pgs.start(), "빈 데이터 폴더 + 외부 DB")
     ca, s, me = login(pgs, "ex-a", pw["a"])
     res("redeploy_login_a", f"{s} id={me.get('id')} role={me.get('role')}", f"이관 전 id={me_a.get('id')}")
-    co, s, me_o = login(pgs, "ex-owner", pw["owner"])
+    co, s, me_o = login(pgs, "admin", pw["owner"])  # 소유자는 초기화 명령이 만든 admin
     res("redeploy_login_owner", f"{s} role={me_o.get('role')}")
     _, s, _ = login(pgs, "ex-pending", pw["pending"])
     res("redeploy_suspended_still_blocked", s, "이용 중지 계정은 그대로 로그인 거절(403)")
@@ -565,9 +576,9 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
         res("redeploy_result_gone", s, (body.get("detail") if isinstance(body, dict) else "")[:60])
     s, runs = ca.call("GET", "/runs")
     res("redeploy_run_records", f"{s} {len(runs) if isinstance(runs, list) else runs}", "실행 기록은 DB에 그대로")
-    s, new = co.call("POST", "/users", {"username": "ex-new", "display_name": "새 계정", "status": "active",
-                                        "password": pw["new"]})  # fmt: skip
-    res("redeploy_new_account", f"{s} id={new.get('id') if isinstance(new, dict) else None}", "번호가 이관한 최대값 다음")
+    s, new = co.call("POST", "/users", {"username": "ex-new", "display_name": "새 계정"})  # 관리자 발급(0022) — 임시 비밀번호는 응답에만
+    new_user = new.get("user") if isinstance(new, dict) else None
+    res("redeploy_new_account", f"{s} id={new_user.get('id') if isinstance(new_user, dict) else None}", "번호가 이관한 최대값 다음")
     s, up2 = ca.call("POST", "/files", files=[("다시올림.csv", csv_bytes(rows))])
     fid2 = up2[0].get("id") if s == 200 else None
     res("redeploy_reupload", f"{s} id={fid2}", f"이관 전 마지막 id={fid}")
@@ -591,9 +602,9 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
     probe = pgs.client
     outage = {p: probe.call(m, p, b)[0] for m, p, b in (("GET", "/auth/status", None),
               ("POST", "/auth/login", {"username": "ex-a", "password": pw["a"]}),
-              ("GET", "/auth/me", None),
               ("GET", "/health", None))}  # fmt: skip
-    res("outage_503", outage, "인증 실패(앱 계정 로그인 금지) 동안")
+    outage["/auth/me(로그인 쿠키)"] = ca.call("GET", "/auth/me")[0]  # 세션 조회가 DB에 닿아야 하므로 503 — 401('로그인 필요')이면 안 됨
+    res("outage_503", outage, "인증 실패(앱 계정 로그인 금지) 동안 — 모두 503, '설정 필요'·'로그인 필요' 아님")
     admin_password(app_role, pw["role_a"])
     res("outage_recovered", login(pgs, "ex-a", pw["a"])[1], "되돌린 뒤 로그인")
     pgs.stop()
