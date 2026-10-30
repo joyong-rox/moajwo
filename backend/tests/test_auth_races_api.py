@@ -108,7 +108,8 @@ def test_api_concurrent_reissue_same_version_applies_once(app_real_login, owner,
     after = _listed(owner, "race-reissue")
     assert after["auth_version"] == version + 1 and after["must_change_password"] is True
     assert worker.get("/files").status_code == 401  # 기존 세션 종료
-    assert _sessions(uid) == 0
+    sessions_after = _sessions(uid)
+    assert sessions_after == 0
     login = {"username": "race-reissue", "password": NEW_PASSWORD}
     assert _client(app_real_login).post("/auth/login", json=login).status_code == 401  # 이전 본인 비밀번호 무효
     restricted = _client(app_real_login)
@@ -118,7 +119,7 @@ def test_api_concurrent_reissue_same_version_applies_once(app_real_login, owner,
     assert events.count(("password_reset", "ok")) == 1 and events.count(("password_reset", "denied")) == 1, events
     _record("api_concurrent_reissue_same_version", {
         "requests": 2, "responses": sorted(r[0] for r in results), "final_auth_version": after["auth_version"],
-        "version_before": version, "sessions_after": _sessions(uid), "events": events, **gate.summary(),
+        "version_before": version, "sessions_after": sessions_after, "events": events, **gate.summary(),
     })  # fmt: skip
 
 
