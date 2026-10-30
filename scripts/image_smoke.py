@@ -77,7 +77,7 @@ DOCKER_DOWN = re.compile(r"error during connect|Cannot connect to the Docker dae
 ANON_VOLUME = re.compile(r"[0-9a-f]{64}")  # 이름 없는(익명) 볼륨 — 이미지의 VOLUME 선언으로 docker run이 만든다
 
 CHECK_PY = r"""
-import io, json, os, secrets, socket, ssl, subprocess, tempfile, threading, time, urllib.error, urllib.request
+import io, json, os, secrets, socket, ssl, subprocess, sys, tempfile, threading, time, urllib.error, urllib.request
 
 ITEMS = dict(json.loads(__CHECKS_IN__))
 R = []

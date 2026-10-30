@@ -79,7 +79,7 @@ def check(base: str, seed_file: str, stage: str) -> dict:
     with open(seed_file, encoding="utf-8") as f:
         info = json.load(f)
     c = Client(base)
-    s_login, me = c.call("POST", "/api/auth/login", {"username": seed.get("username", "rehearsal"), "password": os.environ["PROBE_PW"]})
+    s_login, me = c.call("POST", "/api/auth/login", {"username": info.get("username", "rehearsal"), "password": os.environ["PROBE_PW"]})
     s_runs, runs = c.call("GET", "/api/runs")
     s_dl, raw = c.call("GET", f"/api/runs/{info['run_id']}/download")
     same = isinstance(raw, bytes) and hashlib.sha256(raw).hexdigest() == info["result_sha256"]
