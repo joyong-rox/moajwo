@@ -3,6 +3,10 @@
 이 문서는 Render 검토·시연 서비스가 재시작·재배포돼도 계정과 기록이 남도록 외부 PostgreSQL을 쓰는 방법입니다.
 로컬 운영·폐쇄망 구성은 그대로 SQLite(파일)와 로컬 Ollama를 씁니다. 외부 DB에 접속하지 않습니다.
 
+> **2026-10-30 보완:** 날짜가 붙은 과거 관측(2026-10-23·25·27)은 그 날짜의 기록으로 두고, 2026-10-30에 확인한 것만 날짜를 붙여 더했습니다. 실제 Neon 연결·Render 변경은 여전히 하지 않았습니다 (`backups/followup-20261030/EXTERNAL-DB-STATUS.md`).
+>
+> **2026-10-30 2차 보완(검토 지시 4장):** 앱 역할은 콘솔이 아니라 SQL로만 만들고 만든 뒤 확인하는 절차(5장), 복원 뒤 권한 재적용·앱 계정 로그인 확인(7장), 서비스 파일의 CA 절대 경로와 설치·점검 절차(3-1), 소유자 최소 준비(3-3), Render 배포 커밋 관측(8-3)을 더했고, 5·7장 절차를 로컬 PostgreSQL 17.11에서 합성 역할·계정으로 다시 확인했습니다 — 실제 Neon은 여전히 미연결 (`backups/followup-20261030/round2/`).
+
 ## 1. 보존하는 것과 보존하지 않는 것
 
 | 구분 | 외부 DB로 보존 | 비고 |
@@ -27,6 +31,7 @@
 
 '무료 영구 보존 보장'이 아닙니다. 사용량 한도·정책 변경·장애·계정 삭제는 별개이므로 7장의 따로 받는 백업을 둡니다.
 유료 전환·결제 수단 등록·여러 무료 계정 만들기·휴면을 막는 반복 요청은 하지 않습니다.
+- 2026-10-30 재확인(검토자, 공식 페이지 조회): Neon Free 월 $0·기간 제한·카드 요구 없음, 저장 프로젝트당 1 GB, 컴퓨트 프로젝트당 월 100 CU-시간 — 위 표(2026-10-25)와 같음. Render Free: 로컬 파일(SQLite 포함) 소실·영구 디스크 없음 — 같음. 무료 Render Postgres는 30일 만료라 계속 제외. 표의 다른 숫자(분기 수·전송·복원 이력 등)는 10-25 값이며 프로젝트를 만들기 직전에 다시 확인합니다.
 
 ### 시험 프로젝트 기본안
 
@@ -43,7 +48,7 @@
 | 백업 위치 | `C:\Users\juho\Documents\Moajwo\backups\external-db\` 아래 접근 제한 폴더 — Git·공개 링크 제외 |
 | 세션 | 이관하지 않고 다시 로그인. 계정·비밀번호 해시·역할·상태·소유 관계는 유지 |
 
-**이 작업에서는 실제 Neon에 연결하지 않았습니다.** 소유자 Neon 계정에 접근할 수단이 없어 프로젝트 생성·연결·풀러·휴면 동작은 모두 미검증입니다 (시험은 로컬 PostgreSQL 17.11). 실제 Neon 로그인·프로젝트 생성은 소유자가 합니다.
+**이 작업에서는 실제 Neon에 연결하지 않았습니다.** 소유자 Neon 계정에 접근할 수단이 없어 프로젝트 생성·연결·풀러·휴면 동작은 모두 미검증입니다 (시험은 로컬 PostgreSQL 17.11). 실제 Neon 로그인·프로젝트 생성은 소유자가 합니다. **2026-10-30 재확인:** 이 PC에 Neon 접근 수단(서비스·비밀번호 파일, `PG*`·`DATABASE_URL` 환경 변수, Neon CLI)이 없어 여전히 미연결입니다. 합성 자료 전용 검증에 필요한 준비(전용 시험 프로젝트·앱 계정·사용자 PC의 서비스·비밀번호 파일)는 8-3 준비 2~3단계입니다.
 
 ## 3. 설정 (환경 변수)
 
@@ -72,6 +77,7 @@
 | 서비스 파일 | `~/.pg_service.conf` | `%APPDATA%\postgresql\.pg_service.conf` (점 있음) | **어느 OS에서도 하지 않음** → 비밀번호를 넣지 않음 |
 | 비밀번호 파일 | `~/.pgpass` | `%APPDATA%\postgresql\pgpass.conf` (점 없음) | POSIX: 그룹·다른 사용자에게 권한이 있으면 그 파일을 **무시**(경고) → `chmod 0600 ~/.pgpass` / Windows: **하지 않음** (안전한 폴더에 있다고 가정) |
 
+- **서비스 파일 안의 경로는 펼친 절대 경로로 씁니다 (2026-10-30 정정):** libpq는 서비스 파일 값의 `%APPDATA%`·`~`를 펼치지 않습니다. `sslrootcert`는 `C:\Users\<사용자>\AppData\Roaming\postgresql\isrgrootx1.pem`처럼 실제 폴더로 적습니다 (cmd `echo %APPDATA%` / PowerShell `$env:APPDATA`로 확인; 이전 예시의 `%APPDATA%\postgresql\isrgrootx1.pem`은 그대로 복사하면 파일을 찾지 못합니다). 컨테이너에서 쓰는 서비스 파일은 컨테이너 안에 있는 신뢰 저장소를 가리킵니다 — 이 저장소 backend 이미지는 Debian `ca-certificates`(ISRG Root X1 포함)라 `sslrootcert=system`, 또는 마운트한 파일의 컨테이너 경로.
 - `%APPDATA%`는 사용자 프로필의 `AppData\Roaming` 폴더입니다. 다른 위치는 `PGSERVICEFILE`·`PGPASSFILE` 환경 변수로 지정합니다. 경로를 직접 지정하는 쪽을 권합니다 — `PGSERVICEFILE`이 없는 파일을 가리키면 `service file "…" not found` 오류로 멈춥니다 (기본 위치의 파일이 없을 때는 조용히 건너뜀). `PGPASSFILE`의 파일이 없으면 오류 없이 비밀번호 없이 접속하다가 인증에서 실패합니다.
 - **Windows는 권한을 검사하지 않으므로** 두 파일을 사용자 프로필 폴더(`%APPDATA%\postgresql`)에 두고 본인만 읽게 줄입니다 (서비스 파일 `.pg_service.conf`도 같게):
   - cmd: `icacls "%APPDATA%\postgresql\pgpass.conf" /inheritance:r /grant:r "%USERNAME%:F"`
@@ -89,7 +95,7 @@ port=5432
 dbname=neondb
 user=neondb_owner
 sslmode=verify-full
-sslrootcert=%APPDATA%\postgresql\isrgrootx1.pem
+sslrootcert=C:\Users\<사용자>\AppData\Roaming\postgresql\isrgrootx1.pem
 channel_binding=require
 # 같은 DB 확인용: 연결 풀러 + 앱 계정 (앱 자체는 Render 환경 변수 DATABASE_URL을 씀)
 [moajwo-app]
@@ -98,13 +104,33 @@ port=5432
 dbname=neondb
 user=moajwo_app
 sslmode=verify-full
-sslrootcert=%APPDATA%\postgresql\isrgrootx1.pem
+sslrootcert=C:\Users\<사용자>\AppData\Roaming\postgresql\isrgrootx1.pem
+channel_binding=require
+# 복원 확인용 (7장): 같은 프로젝트의 빈 복원 대상 DB — 직접 연결 + 소유 계정 (운영·시연 DB 아님)
+[moajwo-restore-test]
+host=ep-….neon.tech
+port=5432
+dbname=moajwo_restore_test
+user=neondb_owner
+sslmode=verify-full
+sslrootcert=C:\Users\<사용자>\AppData\Roaming\postgresql\isrgrootx1.pem
+channel_binding=require
+# 복원 뒤 앱 계정으로 확인 (7장): 복원 대상 DB + 앱 계정 (확인용 직접 연결)
+[moajwo-app-restore-test]
+host=ep-….neon.tech
+port=5432
+dbname=moajwo_restore_test
+user=moajwo_app
+sslmode=verify-full
+sslrootcert=C:\Users\<사용자>\AppData\Roaming\postgresql\isrgrootx1.pem
 channel_binding=require
 ```
 
 ```text
 ep-….neon.tech:5432:neondb:neondb_owner:<소유 계정 비밀번호>
+ep-….neon.tech:5432:moajwo_restore_test:neondb_owner:<소유 계정 비밀번호>
 ep-…-pooler.….neon.tech:5432:neondb:moajwo_app:<앱 계정 비밀번호>
+ep-….neon.tech:5432:moajwo_restore_test:moajwo_app:<앱 계정 비밀번호>
 ```
 
 사용 (backend 폴더, PowerShell — POSIX sh는 `export PGSERVICEFILE=~/.pg_service.conf PGPASSFILE=~/.pgpass`):
@@ -119,6 +145,42 @@ python -m app.dbcheck --app-service moajwo-app --migration-service moajwo-migrat
 python -m app.dbcopy --source sqlite:///<원천 파일> --target "postgresql:///?service=moajwo-migrate"
 psql --no-password "service=moajwo-migrate" -c "SELECT count(*) FROM users"
 ```
+
+**설치·점검 절차 — 기존 파일을 덮지 않음 (2026-10-30):**
+
+1. 폴더 `%APPDATA%\postgresql`이 없으면 만듭니다. 두 파일이 이미 있으면 **덮어쓰지 않고** 어떤 서비스·계정 줄이 있는지(이름만) 본 뒤 새 블록·줄만 덧붙입니다 — 다른 도구가 같은 파일을 쓸 수 있습니다.
+2. 호스트·계정·DB 이름은 Neon 콘솔의 연결 정보에서 옮겨 적고, 비밀번호는 편집기(메모장)로 `pgpass.conf`에만 적습니다. 명령줄(`Set-Content`·`echo >`)·셸 기록·채팅·PR·캡처에 비밀번호를 넣지 않습니다.
+3. 위 `icacls`로 두 파일 모두 본인만 읽게 줄입니다.
+4. **읽기 확인(비밀값 출력 없이):** 아래 스크립트는 서비스 이름·키 목록·CA 파일 존재와, 비밀번호 파일의 `호스트:포트:DB:계정`(비밀번호 칸은 `***`)만 출력합니다 (칸 안의 `\:` 이스케이프는 다루지 않는 참고용). 파일이 있다는 것만 보지 말고, 실제 클라이언트(libpq — psql·pg_dump·psycopg)가 읽는지는 5단계로 봅니다.
+
+```python
+# check_pgfiles.py — 비밀값을 출력하지 않는 접속 파일 점검 (표준 라이브러리만)
+import configparser, os, pathlib
+d = pathlib.Path(os.environ["APPDATA"]) / "postgresql"
+svc = configparser.ConfigParser(interpolation=None)
+svc.read(d / ".pg_service.conf", encoding="utf-8")
+for s in svc.sections():
+    keys = dict(svc[s])
+    ca = keys.get("sslrootcert")
+    print("service", s, sorted(keys), "sslrootcert 파일 있음" if ca and pathlib.Path(ca).is_file() else "sslrootcert 파일 없음/미지정")
+lines = [l for l in (d / "pgpass.conf").read_text(encoding="utf-8").splitlines() if l.strip() and not l.startswith("#")]
+for l in lines:
+    f = l.split(":")
+    print("pgpass", ":".join(f[:4]) + ":***" if len(f) >= 5 else "형식 오류(칸 5개 아님)")
+print(len(lines), "pgpass 줄")
+```
+
+5. **연결 확인(실제 Neon — 네트워크 필요, 쓰기 없음):** backend 폴더에서 psycopg가 있는 파이썬으로 `python -m app.dbcheck --app-service moajwo-app --migration-service moajwo-migrate`. 실패 문구로 원인을 나눕니다 (TLS·인증·네트워크·채널 바인딩은 3-2 표):
+
+| 문구(libpq) | 원인 | 조치 |
+|---|---|---|
+| `definition of service "moajwo-app" not found` | 서비스 파일을 읽지 못했거나 `[이름]` 오타, `PGSERVICEFILE`이 다른 파일을 가리킴 | 경로·이름 확인 (`PGSERVICEFILE` 미지정이면 `%APPDATA%\postgresql\.pg_service.conf`) |
+| `service file "…" not found` | `PGSERVICEFILE`이 없는 파일을 가리킴 | 경로 확인 |
+| `fe_sendauth: no password supplied` | 비밀번호 파일에 맞는 줄이 없음 — 호스트·포트·DB·계정 네 칸이 서비스 값과 모두 일치해야 함(`*` 허용) | 줄을 서비스 값과 맞춤 |
+| `password authentication failed` | 비밀번호가 다름 | 콘솔에서 재설정한 뒤 파일만 고침 |
+| `could not translate host name` | 호스트 이름 오타·네트워크 | 콘솔 값과 대조 |
+
+로컬 PostgreSQL 17.11에서 같은 요령(서비스 파일·비밀번호 파일·`--no-password`)으로 alembic·psycopg·pg_dump·pg_restore가 접속하는 것은 2026-10-25와 2026-10-30 2차(5·7장)에서 확인했습니다 — 실제 Neon 연결은 아닙니다.
 
 - `--no-password`(`-w`): 비밀번호 파일이 맞지 않으면 비밀번호를 묻지 않고 바로 실패합니다 (묻는 창에 비밀번호를 치지 않음, 스크립트가 묻는 창에서 멈추지 않음).
 - **호환 — 권장하지 않음:** 비밀번호가 든 주소(`postgresql://계정:비밀번호@…`)도 동작은 합니다. `app.dbcopy --target`에 넣으면 stderr로 경고하고 보고에는 `target_secret_in_args: true`만 남깁니다 (주소는 남기지 않음). 주소를 꼭 써야 하면 `--target-env 변수 이름`처럼 환경 변수로 넘깁니다.
@@ -181,11 +243,28 @@ https://neon.com/docs/connect/connect-securely — 2026-10-27 확인)
 (시험 CA가 과거 유효 기간으로 서명 — 시스템 시각 변경 없음: `verify-full`·`verify-ca`·root 파일 있는 `require`는 만료 거절, root 파일 없는
 `require`는 **만료돼도 연결**)과 **실제 진입 경로**(`pg_tls_paths.py`: 앱 `/health`·`app.dbcheck`·Alembic·`app.dbcopy` — 정상 1건·호스트 이름
 불일치 거절 1건씩, 거절 때 성공 응답·빈 SQLite 대체·스키마 변경·업무 자료 변경·비밀값 노출 없음)를 더했습니다. 새 판정의 결과: run
-【새 판정 run — CI 뒤 갱신】. 실제 Neon 풀러까지 확인한 것은 아닙니다.
+40456939092(#56 `bc1cf2d` — 유효 매트릭스 11/11·실제 진입 경로 8/8·만료 판 4/4·판정기 방어 시험 16, 사본 `backups/review-20261027b/pg-tls-bc1cf2d/`)이고, 통합 후보 `c078bdd`에서 같은 워크플로를 다시 돌린 run 40456979750도 11/11·8/8·4/4였습니다(사본 `pg-tls-cand-c078bdd/`). 2026-10-30에는 다시 실행하지 않았습니다(재사용). 실제 Neon 풀러까지 확인한 것은 아닙니다.
 
 **전환 때 실제 확인(승인 뒤, 8-3 단계 안에서):** 사용자 PC에서 서비스 파일로 `psql "service=moajwo-migrate" -c "SELECT ssl,
 version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()"` → `ssl = t`와 TLS 판을 적고, Render의 backend는 배포 뒤
 `/health`(`database: ok`)와 로그의 접속 성공으로 확인합니다. 비밀번호·주소는 어디에도 적지 않습니다.
+
+### 3-3. 소유자가 할 최소 동작과 담당자가 준비한 것 (2026-10-30)
+
+소유자에게 역할 SQL·서비스 파일 작성·복원 DB 구성을 모두 맡기지 않습니다. 담당자가 준비한 것은 3-1(서비스 파일 예시·설치·점검 절차·연결 확인과 실패 분류), 5장(앱 역할 SQL·확인 SQL), 7장(복원 대상·복원 확인)이고, 5·7장 절차는 로컬 PostgreSQL 17.11에서 합성 역할·계정으로 확인했습니다(실제 Neon 아님).
+
+**소유자의 최소 동작 (한 번에):**
+
+1. Neon 로그인 → 무료 플랜인지 확인(2장의 조건 — 그 날짜를 기록). 결제 수단 등록·유료 전환 없음.
+2. 전용 시험 프로젝트 `moajwo-test`(PostgreSQL 17)를 고르거나 만들고(같은 목적의 기존 프로젝트가 있으면 새로 만들지 않음), 같은 프로젝트에 빈 DB `moajwo_restore_test`를 더합니다(콘솔의 Databases에서, 또는 소유 계정 직접 연결에서 `CREATE DATABASE moajwo_restore_test;`).
+3. 콘솔의 연결 정보(직접 호스트·풀러 호스트·소유 계정 이름·비밀번호)를 사용자 PC의 보호된 두 파일에 적습니다(3-1 설치·점검 절차 — 호스트·계정은 서비스 파일에, 비밀번호는 비밀번호 파일에만, 편집기로).
+4. "파일 준비됐다"고만 알립니다. 연결 문자열·비밀번호는 채팅·PR·첨부로 보내지 않습니다.
+
+앱 계정 `moajwo_app`과 그 비밀번호는 담당자가 소유 계정 서비스로 5장 SQL을 실행해 만들고(비밀번호는 실행 때 만들어 SCRAM 검증자로만 보냄), 비밀번호 파일에 줄을 더합니다 — 소유자가 할 일이 아닙니다.
+
+**준비가 끝나면 담당자가 하는 것 (8-3 준비 4~6단계·7장, 합성 자료만):** 읽기 확인(3-1) → `alembic upgrade head`(직접 연결) → 앱 역할 생성·확인(5장) → `app.dbcheck`(같은 DB·`verify-full`·`channel_binding=require` 두 주소) → 격리 앱 두 차례(1차 초기 실행·2차 빈 파일 폴더의 새 컨테이너) → 백업 → 복원 → 권한 재적용 → 앱 계정 로그인(7장) → `pg_stat_ssl`. 보고 이름은 "실제 Neon + 격리 앱 검증"이며 "Render 전환 완료"가 아닙니다.
+
+**이 PC의 현재 상태 (2026-10-30 확인):** PostgreSQL 클라이언트(psql·pg_dump 17)는 PATH에 없고(로컬 검증은 스크래치의 포터블 17.11로 했음), `backend/.venv`에는 psycopg가 없습니다(`requirements.txt`에는 3.3.6). Neon 검증 때는 psycopg가 있는 파이썬(`pip install -r backend/requirements.txt`한 venv)이나 backend 이미지(psycopg 3.3.6·alembic·Debian CA 포함)를 쓰고, 컨테이너에서는 서비스 파일의 `sslrootcert`를 `system`으로 둔 컨테이너용 사본을 씁니다(3-1).
 
 ## 4. 연결 관리와 장애 때 동작
 
@@ -209,7 +288,9 @@ version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()"` → `ssl = t`와
 - **계정 분리:** 앱 계정(`moajwo_app`)은 데이터 읽기·쓰기만, 스키마 변경·이관은 소유 계정(Neon 기본 `neondb_owner`)으로만 씁니다. 소유 계정으로 한 번 실행합니다:
 
 ```sql
-CREATE ROLE moajwo_app LOGIN;
+-- 같은 이름의 역할이 이미 있으면 지우거나 비밀번호를 바꾸지 말고 용도를 먼저 확인한다 (0행일 때만 새로 만든다)
+SELECT rolname FROM pg_roles WHERE rolname = 'moajwo_app';
+CREATE ROLE moajwo_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 GRANT USAGE ON SCHEMA public TO moajwo_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO moajwo_app;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO moajwo_app;
@@ -222,7 +303,34 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO moajwo_ap
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO moajwo_app;
 ```
 
-- **앱 계정 비밀번호는 평문 SQL로 보내지 않습니다.** `CREATE/ALTER ROLE … PASSWORD '평문'`은 서버 설정(`log_statement`, 실패한 문장 기록)에 따라 서버 로그에 평문이 남을 수 있습니다 (PostgreSQL `CREATE ROLE` 문서의 주의). psql에서 `\password moajwo_app`을 쓰면 psql이 클라이언트에서 암호화한 값(SCRAM 검증자)을 보냅니다 — 비밀번호는 묻는 창에 넣고 명령 인자·셸 기록에 넣지 않습니다. Neon 콘솔의 역할 관리로 만들고 Neon이 만든 비밀번호를 쓰는 방법도 있습니다 (그 화면의 동작은 전환 때 확인). 시험 스크립트·시험도 같은 방식(클라이언트에서 만든 검증자)으로 보냅니다.
+- **앱 계정 비밀번호는 평문 SQL로 보내지 않습니다.** `CREATE/ALTER ROLE … PASSWORD '평문'`은 서버 설정(`log_statement`, 실패한 문장 기록)에 따라 서버 로그에 평문이 남을 수 있습니다 (PostgreSQL `CREATE ROLE` 문서의 주의). psql에서 `\password moajwo_app`을 쓰면 psql이 클라이언트에서 암호화한 값(SCRAM 검증자)을 보냅니다 — 비밀번호는 묻는 창에 넣고 명령 인자·셸 기록에 넣지 않습니다. **Neon 콘솔·API·CLI의 '역할 만들기'로는 만들지 않습니다 (2026-10-30 정정 — 이전 문장은 이를 대안으로 적었음):** 그렇게 만든 역할은 `neon_superuser`의 멤버가 되어(Neon 문서 Manage roles, 2026-10-30 확인) 데이터 전용 앱 계정의 최소 권한이 아닙니다. `moajwo_app`은 소유 계정의 **직접 연결**에서 위 SQL로만 만듭니다. 시험 스크립트·시험도 같은 방식(클라이언트에서 만든 검증자)으로 보냅니다.
+- **만든 뒤 확인 (소유 계정으로 — 모두 기대값일 때만 전환 묶음에 넣음):**
+
+```sql
+-- 속성: 모두 f
+SELECT rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolreplication FROM pg_roles WHERE rolname = 'moajwo_app';
+-- 멤버십: 0행 (neon_superuser 등 어떤 역할의 직접 멤버도 아님). 간접 멤버십까지 — false
+SELECT r.rolname AS member_of FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE m.member = 'moajwo_app'::regrole;
+SELECT pg_has_role('moajwo_app', 'neon_superuser', 'MEMBER') AS in_neon_superuser;   -- Neon에서만 (로컬 PG에는 그 역할이 없어 오류)
+-- 소유: 0행 (스키마·표·시퀀스의 소유자가 아님)
+SELECT nspname FROM pg_namespace WHERE nspowner = 'moajwo_app'::regrole;
+SELECT relname FROM pg_class WHERE relowner = 'moajwo_app'::regrole;
+-- 권한: 권한마다 따로 확인한다 (2026-10-30 3차 정정 — has_*_privilege에 쉼표로 나열한 권한은 '하나라도 있으면 true'라
+-- 'SELECT,INSERT,UPDATE,DELETE' 한 번 호출은 SELECT만 있어도 참이다). 통과 = 아래 두 '빠진 권한' 조회가 0행이고 표·시퀀스 수가
+-- 0이 아님 (표 0개는 스키마가 준비되지 않은 것 — 0/0 일치를 통과로 보지 않는다). 빠진 행은 (객체, 권한) 이름으로 보고한다
+WITH t AS (SELECT c.oid, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r'),
+     p AS (SELECT unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS priv)
+SELECT t.relname, p.priv AS missing FROM t CROSS JOIN p WHERE NOT has_table_privilege('moajwo_app', t.oid, p.priv) ORDER BY 1, 2;
+WITH s AS (SELECT c.oid, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'S'),
+     p AS (SELECT unnest(ARRAY['USAGE', 'SELECT']) AS priv)
+SELECT s.relname, p.priv AS missing FROM s CROSS JOIN p WHERE NOT has_sequence_privilege('moajwo_app', s.oid, p.priv) ORDER BY 1, 2;
+SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'r') AS tables,
+       (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind = 'S') AS sequences;  -- 둘 다 0이 아니어야 함
+```
+
+- **앱 계정으로 확인 (`service=moajwo-app`):** 소유 계정이 만든 **별도 시험 표**(`CREATE TABLE public.zz_privilege_probe (id serial PRIMARY KEY, v text)`)에 INSERT(시퀀스 사용)·SELECT·UPDATE·DELETE가 되고, 다음은 모두 `42501`(권한 없음)로 거절돼야 합니다: `CREATE TABLE public.zz_app_probe (id int)`, `ALTER TABLE public.zz_privilege_probe ADD COLUMN x int`, `DROP TABLE public.zz_privilege_probe`, `TRUNCATE public.zz_privilege_probe`, `ALTER SEQUENCE public.zz_privilege_probe_id_seq RESTART WITH 100`, `CREATE ROLE zz_role`, `CREATE DATABASE zz_db`, `ALTER TABLE public.users ADD COLUMN zz int`. 시험 표는 소유 계정이 지웁니다. **기존 업무 표를 지우는 시험은 하지 않습니다.**
+- 로컬 확인 (2026-10-30 2차, 포터블 PostgreSQL 17.11·psycopg 3.3.6, 합성 역할): `backups/followup-20261030/round2/neon-prep/pgrole-check.json` **25/25 통과**(21:10) — 소유 계정(CREATEDB·CREATEROLE — Neon의 소유 역할에 해당)이 빈 DB에 `alembic upgrade head`(0021_run_request_key) 뒤 위 SQL로 `moajwo_app`을 만들고(비밀번호는 클라이언트가 만든 SCRAM 검증자), 속성 5개 모두 false·직접 멤버십 0·소유 객체 0·표 21/21 DML·시퀀스 19/19 권한(당시의 집계 판정 — 3차에서 권한별 판정으로 정정), 앱 계정으로 시험 표 INSERT(serial)/SELECT/UPDATE/DELETE ok, DDL 8종(CREATE TABLE·ALTER TABLE·DROP·TRUNCATE·ALTER SEQUENCE·CREATE ROLE·CREATE DATABASE·업무 표 ALTER) 모두 42501, 앱(uvicorn, 앱 계정 주소)에서 최초 설정 201·로그인 200·`/auth/me` 200, 평문 비밀번호가 하위 프로세스 인자·서버 로그(`log_statement=all`)에 없음. `neon_superuser`는 로컬에 없어 그 항목(`pg_has_role`)은 Neon에서 확인합니다. 앞선 세 번의 실행 실패는 시험 도구 오류(pg_ctl 파이프·`PGSERVICEFILE` 환경·함수 이름)이며 기록을 남겼습니다. 실제 Neon이 아닙니다.
+- 로컬 확인 3차 (2026-10-30 21:59, 같은 환경 — 권한 판정 정정 뒤): `pgrole-check.json` **27/27** — 정상 대조군(표 21·시퀀스 19, 빠진 권한 0행) 통과. 부정 대조군: `glossary_entries`의 INSERT·UPDATE·DELETE·SELECT를 하나씩 빼면 새 판정은 그 (표, 권한)을 보고하며 실패하고 **예전 집계는 21/21로 통과**(판정 누락의 재현), 권한을 복구하면 다시 통과; 시퀀스의 USAGE·SELECT도 같음. 빈 스키마(복원 전 `rv_restore`)는 새 판정이 표 0개로 실패하고 예전 집계는 0/0 일치로 통과. 2차의 25/25는 당시 판정으로 얻은 결과로 보존하며, 이 정정은 확인 SQL의 판정 누락이지 배포 역할의 오설정이 아닙니다(실제 배포 역할은 아직 없음). 실제 Neon이 아닙니다.
 - **`idle_in_transaction_session_timeout`은 600초:** 원본을 읽는 요청(미리보기·열 매핑 등)은 원본 기록을 읽은 트랜잭션을 연 채 읽기 차례를 기다리고(최대 `MOAJWO_PARSE_WAIT_S` 60초) 파일을 읽습니다 (`app/files.py`의 `load_parsed`). 이 제한을 60초로 두면 차례를 다 기다린 정상 요청도 서버가 끊어 'DB에 연결하지 못함'(503)이 됩니다 — Render 무료 인스턴스는 0.1 CPU라 큰 파일 읽기 자체도 러너(약 6초)보다 길 수 있습니다 (추정, Render에서 재지 않음). 이 값은 버려진 연결이 잠금을 쥐고 있는 시간의 상한이라 10분으로 둡니다.
 - 앱 계정은 시퀀스를 바꿀 수 없습니다 (`ALTER SEQUENCE` 42501 — 확인). 이관 도구는 소유 계정으로 돌립니다.
 - **스키마 초기화:** 빈 DB에 `alembic upgrade head`를 실제로 실행합니다 (기동 때 자동). 표를 맞추지 않고 `alembic stamp head`만 하지 않습니다.
@@ -252,9 +360,10 @@ psql --no-password "service=moajwo-restore-test" -c "SELECT count(*) FROM users"
 ```
 
 - PowerShell: `$env:PGSERVICE = "moajwo-migrate"` 뒤 같은 pg_dump 명령(끝나면 `Remove-Item Env:PGSERVICE`), 해시는 `Get-FileHash -Algorithm SHA256 moajwo-YYYYMMDD.dump`.
-- **복구를 증명합니다** — 백업 파일이 있다는 것만으로 완료로 보지 않습니다: 다른 빈 DB로 복원 → 앱 계정 권한 부여(5장) → 그 DB로 띄운 앱에 같은 계정으로 로그인 → 역할·상태·소유 관계(남의 자료 404)·표별 건수·내용 해시가 원본과 같음 → 원본 DB는 그대로.
+- **복구를 증명합니다** — 백업 파일이 있다는 것만으로 완료로 보지 않습니다: 다른 빈 DB로 복원(`--no-owner --no-privileges`라 소유자·권한은 함께 복원되지 않음) → **복원 대상 DB에서** 앱 계정 권한을 다시 적용(5장의 `GRANT USAGE ON SCHEMA`·`GRANT … ON ALL TABLES/SEQUENCES`·`ALTER DEFAULT PRIVILEGES` — 기본 권한은 DB마다 따로이며, 적용 전에는 앱 계정의 조회가 `42501`로 거절됨) → **앱 계정 서비스(`moajwo-app-restore-test`)로 띄운 앱**에 같은 계정으로 로그인(`setup_required: false` — 최초 설정이 다시 열리지 않음) → 역할·상태·소유 관계(남의 자료 404)·표별 건수·내용 해시가 원본과 같음 → 원본 DB는 그대로. 소유 계정의 `SELECT count(*)` 성공만으로 복원 완료라고 하지 않습니다 (2026-10-30).
 - 백업 파일에는 계정·비밀번호 해시·업무 기록이 들어 있습니다. 2장 백업 위치에 두고 Render 디스크·Git·공유 폴더에 두지 않습니다.
 - 격리 확인 (2026-10-25, 로컬 PostgreSQL 17.11, 합성 계정): `PGSERVICE`로 백업(85KB) → `--dbname=service=…`로 다른 빈 DB에 복원 → psql(서비스)로 users 5행 → 그 DB로 띄운 앱에 같은 계정 로그인, 계정 수 원본과 같음, 원본 DB 그대로 (`diagnostics/scripts/external_db_check.py` 8단계).
+- 로컬 확인 (2026-10-30 2차, 포터블 PostgreSQL 17.11, 합성 계정): 같은 실행(`pgrole-check.json` 7a~7f)에서 `pg_dump`(`PGSERVICE`, `--format=custom --no-owner --no-privileges`, 81KB) → 소유 계정이 만든 빈 `rv_restore`에 `pg_restore --dbname=service=…` → **권한 재적용 전 앱 계정 조회 42501** → 5장 GRANT·기본 권한 재적용 → 앱 계정 조회 users 1 = 원본 → 복원 DB로 띄운 앱(앱 계정 주소·빈 파일 폴더)에서 `setup_required: false`·같은 계정 로그인 200·`/auth/me` 200·최초 설정 재요청 409 → 원본 DB users 1 그대로. 실제 Neon이 아닙니다.
 
 ## 8. 전환 — 기존 계정 이관(A) 또는 새 계정 등록(B)
 
@@ -276,7 +385,7 @@ psql --no-password "service=moajwo-restore-test" -c "SELECT count(*) FROM users"
 - **원천은 API 서비스(`moajwo-test-api`)가 쓰던 Render DB입니다** — 프런트(`moajwo-test`·`moajwo-test-web`)는 nginx라 DB가 없습니다. 계정 DB가 실제로 이 서비스의 것인지 전환 전에 확인합니다. 로컬 운영 SQLite 백업을 Render 계정의 백업으로 보지 않고, 두 DB를 합치지 않습니다.
 - 지금 Render API 서비스의 SQLite는 **재시작·재배포·휴면(15분 무트래픽)으로 사라질 수 있습니다.** 백업을 확보하기 전에 서비스를 멈추거나 재배포하지 않습니다 (Render 환경 변수 저장의 'deploy' 선택지도 재배포 — 8-3. Auto-Deploy는 2026-10-25 조회 때 세 서비스 모두 Off였지만 당시 관측입니다 — 8-3 'Render 서비스').
 - **무료 환경에서 쓸 수 있는 추출 수단:** Render Free는 SSH·Dashboard Shell·one-off job을 지원하지 않습니다. API 서비스의 연결 브랜치는 main이고(2026-10-25 조회 — 배포된 커밋은 대시보드의 마지막 배포로 확인), main의 앱에는 DB 내보내기 기능이 없습니다 (내려받기는 용어사전 CSV·통합·분석 결과 파일뿐이고, 관리자 화면은 계정 목록·이력만 보이며 비밀번호 해시를 내보내지 않음 — 코드 확인). 그래서 **현재 Render SQLite에서 계정을 그대로(해시 포함) 꺼낼 수 있는 안전한 무료 수단은 없습니다.** 내보내기 기능을 넣으려고 먼저 재배포하면 그 재배포가 SQLite를 지우므로 하지 않습니다.
-- 이미 확보된 Render DB 백업은 이 저장소 기록에 없습니다. 소유자가 따로 가진 검증된 백업이 있으면 그것이 원천입니다 (경로 A). 없으면 **Render 계정은 이관할 수 없으므로 경로 B(새 계정 등록)** 입니다 — 결과 보고에서 '새로 만든 계정'과 '이관한 계정'을 나눠 적습니다. 이미 사라진 계정은 백업 없이 복구했다고 하지 않습니다.
+- 이미 확보된 Render DB 백업은 이 저장소 기록에 없습니다 (2026-10-30 다시 확인: 사용자 PC `backups/`에도 Render DB 백업·`external-db/` 폴더가 없습니다). 소유자가 따로 가진 검증된 백업이 있으면 그것이 원천입니다 (경로 A). 없으면 **Render 계정은 이관할 수 없으므로 경로 B(새 계정 등록)** 입니다 — 결과 보고에서 '새로 만든 계정'과 '이관한 계정'을 나눠 적습니다. 이미 사라진 계정은 백업 없이 복구했다고 하지 않습니다.
 - 원천이 정해지면: 원천 쓰기가 멈춘 시점(보호 시점)을 기록하고, 원천 파일의 sha256·크기·리비전·표별 건수·보관 위치를 남깁니다.
 
 ### 8-2. (A만) 이관 도구
@@ -328,8 +437,8 @@ python -m app.dbcopy --source sqlite:///<원천 파일> --target-env <주소가 
 **준비** (소유자 PC·Neon — Render는 그대로):
 
 1. 경로 결정: (A) 기존 계정 이관 / (B) 새 계정 등록 (8-0).
-2. Neon `moajwo-test` 프로젝트(PostgreSQL 17)와 앱 계정(5장). 그날 무료 조건(2장)을 다시 확인하고 날짜를 적습니다.
-3. 사용자 PC에 서비스 파일·비밀번호 파일(3-1): `moajwo-migrate`(직접 연결·소유 계정), `moajwo-app`(연결 풀러·앱 계정).
+2. Neon `moajwo-test` 프로젝트(PostgreSQL 17)와 같은 프로젝트의 빈 복원 대상 DB(`moajwo_restore_test`), 앱 계정(5장 — 소유 계정의 직접 연결에서 SQL로, 콘솔 역할 아님). 그날 무료 조건(2장)을 다시 확인하고 날짜를 적습니다. 소유자가 할 최소 동작은 3-3.
+3. 사용자 PC에 서비스 파일·비밀번호 파일(3-1): `moajwo-migrate`(직접 연결·소유 계정), `moajwo-app`(연결 풀러·앱 계정), `moajwo-restore-test`·`moajwo-app-restore-test`(복원 대상 DB — 소유 계정·앱 계정). CA 경로는 펼친 절대 경로. 3-1의 설치·점검 절차로 읽기 확인.
 4. 직접 연결·소유 계정으로 마이그레이션: `DATABASE_URL=postgresql:///?service=moajwo-migrate`, `MOAJWO_DB_MODE=external`로 `python -m alembic upgrade head` (3-1).
 5. **같은 DB 확인:** `python -m app.dbcheck --app-service moajwo-app --migration-service moajwo-migrate` → 종료 0, `"result": "same"`. 종료 1(다름)이면 전환하지 않고 두 주소(프로젝트·분기·DB 이름)를 다시 확인합니다. Render에 넣을 `DATABASE_URL`·`MOAJWO_MIGRATION_DATABASE_URL`과 같은 값(호스트·계정·DB)인지도 확인합니다.
 6. (A) 원천 확보(8-1) → `app.dbcopy` dry-run(`too_long_values`·`nul_values`가 빈 목록, `tz_unverified_runs: 0`, `source_encoding: UTF-8` 확인) → `--apply --report backups/external-db/<시각>/dbcopy-report.json` → 7장 백업을 받아 다른 빈 DB로 **복원 확인**.
@@ -355,7 +464,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 | 선택 | 동작 | 이 전환에서 |
 |---|---|---|
 | Save, rebuild, and deploy | 새로 빌드하고 새 변수로 배포 | 저장과 동시에 재배포가 시작됨 — 재배포되면 지금 SQLite·파일이 지워짐 |
-| Save and deploy | 지금 빌드를 새 변수로 다시 배포 (다시 빌드하지 않음) | 저장과 동시에 지금 빌드로 재배포 — 재배포되면 지금 SQLite·파일이 지워짐. 지금 빌드가 PostgreSQL을 지원하지 않는 코드(main: psycopg 드라이버 없음)면 새 변수로는 기동하지 못할 것으로 보임 (코드 확인, 실행 안 함) |
+| Save and deploy | 지금 빌드를 새 변수로 다시 배포 (다시 빌드하지 않음) | 저장과 동시에 지금 빌드로 재배포 — 재배포되면 지금 SQLite·파일이 지워짐. 지금 빌드가 PostgreSQL을 지원하지 않는 코드(2026-10-25 당시 main — psycopg 드라이버 없음. 2026-10-28 #58 병합 뒤 main `backend/requirements.txt`에는 psycopg 3.3.6이 있으나, Render에 **배포된** 커밋이 무엇인지는 관리 API로 따로 확인한다 — 2026-10-30 16:11 전달값에는 배포 SHA가 없었고, 20:08 전달값은 API의 live 배포 커밋을 `703fdcb`로 표시(그 커밋의 requirements.txt에 psycopg 없음))면 새 변수로는 기동하지 못할 것으로 보임 (코드 확인, 실행 안 함) |
 | Save only | 저장만 — 배포하지 않음. 다음 배포부터 새 값을 씀 | **권장** — 저장과 배포를 나눠, 승인된 배포 한 번(11단계)만 재배포 |
 
 - **(A)에서는 원천 확보(8-1) 전에 앞의 두 선택지를 고르지 않습니다** — 저장과 함께 재배포되어 지금 Render SQLite와 파일이 지워집니다.
@@ -391,6 +500,18 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 (훅 값은 비밀값 — 기록하지 않음). 사용자 접속 주소는 `moajwo-test`(프런트, `/api/`를 `https://moajwo-test-api.onrender.com/`으로 프록시)이고,
 `moajwo-test-web`은 같은 API를 쓰는 다른 프런트입니다 — 계정 DB의 원천은 `moajwo-test-api` 하나입니다.
 
+**2026-10-30 16:11:08~16:11:11 KST 검토자 조회 전달값** (Render 서비스 목록 읽기 — 설정·배포 변경 없음, 배포 SHA는 조회하지 않음): 세 서비스 모두 free·Auto-Deploy off이고 연결 브랜치·Dockerfile/문맥·health 경로(비어 있음)가 위 두 표와 같습니다. 이 환경에서는 Render를 읽지 못해 전달값으로 구분합니다. 기본 전환 대상(프런트 `moajwo-test`·API `moajwo-test-api`)은 그대로이고, `moajwo-test-web`을 함께 바꾸지 않습니다.
+
+**2026-10-30 20:08:06~20:08:10 KST 검토자 조회 전달값** (Render 서비스 설정과 최근 배포 목록 읽기 — 사이트·DB·계정 조회나 설정 변경 없음. 위 16:11 조회(설정만)와는 **별개의 조회**이며 하나로 합치지 않음. 이 환경에서는 Render를 읽지 못해 전달값으로 구분):
+
+| 서비스 | 연결 브랜치 | API가 live로 표시한 배포 커밋 | 배포 ID |
+|---|---|---|---|
+| `moajwo-test` | `test/render-20261021` | `60bcae82dfa27fbedb39d7b3171fce7c1ccbaead` | `dep-dbc7iu0473hc73fcj4u0` |
+| `moajwo-test-web` | `main` | `66405ef5222ee92d8a0f16f7dafb4d6ec13a741a` | `dep-dbcandg473hc73flbid0` |
+| `moajwo-test-api` | `main` | `703fdcbda6ec3600fbdab8c0ab01b9398562bc07` | `dep-dbc44ion74is73fakco0` |
+
+세 서비스 모두 free·Auto-Deploy off·HTTP health 경로 비어 있음. 연결 브랜치가 `main`이어도 실행 중인 배포 커밋은 위와 같이 다릅니다. `live`는 배포 관리 상태이며 로그인·DB 내용·HTTP 응답 정상을 확인한 것은 아닙니다. **API 배포 커밋 `703fdcb`의 `backend/requirements.txt`에는 psycopg가 없습니다**(그 커밋의 소스 확인 — 실행 컨테이너의 패키지를 조사한 것은 아님) → 지금 배포에 외부 DB 주소만 넣어 계정 보존이 된다고 가정하지 않고, 전환안은 PostgreSQL을 지원하는 검증된 새 앱 배포(0021 이상, 8-4)를 포함합니다. 실제 전환 직전에 다시 조회합니다.
+
 - **제안하는 readiness 경로(전환 때 설정, 지금은 바꾸지 않음):** API `moajwo-test-api`는 **`/health`**(이 저장소의 실제 경로 — DB에 `SELECT 1`,
   실패면 503), 프런트는 **`/api/health`**(nginx가 API로 프록시 — 프런트 자체에는 전용 health location이 없고 `/`는 정적 index라 API 상태를 담지
   않음). Render는 5초 안의 2xx·3xx를 성공으로 보므로 무료 인스턴스가 깨는 동안의 실패는 정상 범위로 둡니다.
@@ -422,7 +543,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 - **복구 대상도 PostgreSQL을 지원해야 합니다.** 기본 복구는 검증된 외부 DB를 유지한 채 PostgreSQL을 지원하는 호환 앱 이미지로 되돌리는 것입니다. 초기 SQLite 전용 이미지(이 PR 이전)로 돌아갈 수 있다고 가정하지 않습니다.
 - **환경 변수만 이전 값으로 돌리고 재배포하는 SQLite 복구는 쓰지 않습니다.** Render 재배포는 SQLite 파일을 지우므로 원천 파일이 남는다는 보장이 없습니다. SQLite로 돌아가려면 실제 백업 복원 위치·명령·파일 생존 조건이 검증된 별도 복원 절차가 있어야 하며, 지금은 없습니다 (Render Free는 셸·디스크가 없음) — 복구안으로 제시하지 않습니다.
 - Render 롤백 배포는 대상 배포 때의 설정(환경 변수 포함)으로 **그 롤백 배포만** 돌립니다. 서비스에 저장된 현재 설정은 바뀌지 않고, 다음 일반 배포는 현재 저장값(외부 DB)을 다시 씁니다. 대시보드에서 롤백하면 자동 배포가 꺼지므로 나중에 Settings에서 다시 켜야 합니다 (API로 롤백하면 끄지 않음) (https://render.com/docs/rollbacks, 2026-10-25 확인). 전환 전 배포로 롤백하면 그 롤백 배포는 외부 DB 설정 없이 빈 SQLite로 떠 최초 설정 화면이 다시 열릴 것으로 보이므로 (코드 기준 판단, 실행 안 함), 전환 전 배포로의 롤백을 복구 수단으로 쓰지 않습니다.
-- **통합 후보는 외부 DB를 `0021_run_request_key`로 올립니다**(0020 담당·생존 신호 + 0021 요청 번호, `docs/DEPLOY.md` 9·10장). 0020을 모르는 이미지(이 후보 이전 — Render에 PostgreSQL 이미지로 배포된 적 없음)로는 되돌릴 수 없습니다 (기동 때 `alembic upgrade head`가 모르는 리비전에서 멈춤). 되돌릴 대상은 0020을 아는 이미지입니다. DB를 0019로 내리는 절차(로컬은 `docs/DEPLOY.md` 9장 — 서버 정지 → `recover` → downgrade)는 Render·Neon에서 실행·검증하지 않았습니다: Render Free에는 셸·one-off 작업이 없어 사용자 PC에서 직접 연결로 해야 하고, 그 PC는 서버의 결과 폴더를 볼 수 없어 서버가 남긴 '실행 중' 행을 근거로 정하지 못합니다 ('결과 확인 필요'까지만).
+- **통합 후보는 외부 DB를 `0021_run_request_key`로 올립니다**(0020 담당·생존 신호 + 0021 요청 번호, `docs/DEPLOY.md` 9·10장). 0020을 모르는 이미지(이 후보 이전 — Render에 PostgreSQL 이미지로 배포된 적 없음)로는 되돌릴 수 없습니다 (기동 때 `alembic upgrade head`가 모르는 리비전에서 멈춤). 되돌릴 대상은 **0021(`0021_run_request_key`)을 지원하는 검증된 이미지·커밋**입니다 — 2026-10-30 기준 main `b12ba63`(2026-10-29 로컬 운영 반영분)이 0021입니다. 0020까지만 아는 이미지로는 되돌릴 수 없습니다 (2026-10-30 정정 — 이전 문장은 0020 기준이었음). DB를 0019로 내리는 절차(로컬은 `docs/DEPLOY.md` 9장 — 서버 정지 → `recover` → downgrade)는 Render·Neon에서 실행·검증하지 않았습니다: Render Free에는 셸·one-off 작업이 없어 사용자 PC에서 직접 연결로 해야 하고, 그 PC는 서버의 결과 폴더를 볼 수 없어 서버가 남긴 '실행 중' 행을 근거로 정하지 못합니다 ('결과 확인 필요'까지만).
 - 외부 DB 자체가 손상되면 7장 백업으로 **다른 빈 DB에** 복원해 확인한 뒤 주소를 바꿉니다.
 - **쓰기 재개 후**: 전환 뒤 생긴 계정·기록이 있으므로, 예전 백업으로 되돌려 새 계정·자료를 잃는 복구를 자동으로 하지 않습니다. 필요하면 그 시점 백업을 먼저 받고, 잃는 범위를 알린 뒤 승인받습니다.
 
@@ -455,4 +576,4 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
   - 9단계는 이 스크립트가 `subprocess`로 띄운 하위 프로세스(`subprocess.run` 포함 — 목록 인자만 허용하고 셸 확장은 거절, `os.system` 같은 다른 실행 경로는 쓰지 않음)의 명령 인자와 스크립트 자신의 인자, 결과 파일에 생성한 비밀번호가 없는지, 임시 파일 권한·삭제를 결과 행으로 남깁니다.
   - `--role-prefix`로 계정 이름을 바꾸면 같은 시험 서버의 다른 계정 비밀번호를 건드리지 않습니다.
   - 2026-10-25 로컬 실행 (Windows, PostgreSQL 17.11, 합성 값): 결과 46행 모두 통과 — `argv_no_secrets`(하위 프로세스 30개), `outputs_no_secrets`, `secret_files_private`·`secret_files_removed` 포함. 검토 후속(이름 자리 검사·검증자 전송·실패 시 멈춤·같은 DB 판정에 결과 값까지 확인) 뒤 다시 실행해 같은 46행 (시간 값만 다름).
-- **하지 않은 것:** 실제 Neon 프로젝트 연결(계정 생성은 소유자), Neon 휴면에서 깨는 실제 시간, 연결 풀러(PgBouncer·Neon 풀러)를 거친 연결과 `app.dbcheck` — 이것들은 소유자의 준비 단계(8-3 2~5단계)입니다. Render 환경 변수 저장·실제 재배포·전환은 승인 뒤의 단계입니다.
+- **하지 않은 것:** 실제 Neon 프로젝트 연결(계정 생성은 소유자), Neon 휴면에서 깨는 실제 시간, 연결 풀러(PgBouncer·Neon 풀러)를 거친 연결과 `app.dbcheck` — 이것들은 소유자의 준비 단계(8-3 2~5단계)입니다. 2026-10-30 2차: 5장(역할 속성·멤버십·소유·DML/DDL)과 7장(복원 → 권한 재적용 → 앱 계정 로그인)을 로컬 PostgreSQL 17.11에서 합성 역할·계정으로 확인했습니다(`backups/followup-20261030/round2/neon-prep/`) — 실제 Neon·풀러·`neon_superuser` 멤버십 확인은 여전히 소유자 준비 뒤입니다. Render 환경 변수 저장·실제 재배포·전환은 승인 뒤의 단계입니다.
