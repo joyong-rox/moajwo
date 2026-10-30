@@ -257,12 +257,12 @@ def test_0015_marks_existing_installs_and_keeps_new_ones_open(tmp_path: Path) ->
 
 
 def test_setup_stays_closed_after_0015_upgrade(tmp_path: Path) -> None:
-    """④·0015 재검증: 계정이 있는 기존 DB를 올린 뒤 실제 setup 함수가 409로 막히고 계정 수는 그대로다."""
-    from fastapi import HTTPException, Response
+    """④·0015 재검증: 계정이 있는 기존 DB를 올린 뒤 초기화(create_owner)가 '이미 초기화됨'으로 막히고 계정 수는
+    그대로다."""
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
 
-    from app import auth_api
+    from app import auth
 
     _alembic(tmp_path, "upgrade", "0014_direction_gu_sejong")
     db = sqlite3.connect(tmp_path / "moajwo.db")
@@ -275,13 +275,9 @@ def test_setup_stays_closed_after_0015_upgrade(tmp_path: Path) -> None:
     _alembic(tmp_path, "upgrade", "head")
     Session = sessionmaker(create_engine(f"sqlite:///{(tmp_path / 'moajwo.db').as_posix()}"))
     with Session() as session:
-        try:
-            auth_api.setup(
-                auth_api.SetupIn(username="late", display_name="late", password="password-123"), Response(), session
-            )
-            raise AssertionError("setup이 열려 있음")
-        except HTTPException as exc:
-            assert exc.status_code == 409
+        assert auth.setup_done(session)
+        with pytest.raises(auth.SetupDone):
+            auth.create_owner(session, "late", "late", "password-123", reason="시험")
     db = sqlite3.connect(tmp_path / "moajwo.db")
     assert db.execute("SELECT username, role FROM users").fetchall() == [("boss", "owner")]
     db.close()
@@ -483,7 +479,7 @@ def test_0019_analysis_runs_up_down_and_up_again(tmp_path: Path) -> None:
     db.close()
 
 
-HEAD = "0021_run_request_key"  # 지금 head — 바뀌면 여기와 docs/DEPLOY.md를 함께
+HEAD = "0022_temp_passwords"  # 지금 head — 바뀌면 여기와 docs/DEPLOY.md를 함께
 REQUEST_COLUMNS = {"request_kind", "request_id", "request_hash"}
 
 
@@ -672,9 +668,10 @@ def test_0021_refusal_in_the_chain_from_0019_leaves_sqlite_at_0020(tmp_path: Pat
 
 
 def test_0021_refuses_to_downgrade_while_a_run_of_this_version_is_running(tmp_path: Path) -> None:
-    """이 판에서 시작해 실행 중인 행(담당 있음)이 있으면 0021도 내리지 않는다 — 'downgrade 0019'가 0021에서 멈춰
+    """이 판에서 시작해 실행 중인 행(담당 있음)이 있으면 0021도 내리지 않는다 — 'downgrade 0019'가 맨 위 리비전에서 멈춰
     리비전·열·색인·행이 그대로다(보호가 0020에만 있으면 0021→0020은 내려가고 0020→0019에서 거절돼 0020에 남는다 —
-    롤백 리허설 10차에서 발견). 정리한 뒤에는 내린다."""
+    롤백 리허설 10차에서 발견). 0022가 head인 지금은 같은 보호가 0022에 먼저 걸려 head 그대로 남고(0022 열도 그대로),
+    0021에서 시작하면 0021이 멈춘다. 정리한 뒤에는 내린다."""
     db = _at_0020(tmp_path)
     db.commit()
     db.close()
@@ -685,15 +682,39 @@ def test_0021_refuses_to_downgrade_while_a_run_of_this_version_is_running(tmp_pa
     db.commit()
     held = db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall()
     db.close()
-    for target in ("0019_analysis_runs", "0020_run_worker_lease"):
+    for target in ("0019_analysis_runs", "0020_run_worker_lease", "0021_run_request_key"):
         try:
             _alembic(tmp_path, "downgrade", target)
             raise AssertionError(f"{target}: 담당 있는 실행 중 행이 있는데 내려갔다")
         except subprocess.CalledProcessError as exc:
             err = exc.stderr.decode("utf-8", "replace")
-            assert "0020으로 내리지 않습니다" in err and "app.recovery recover" in err, err[-400:]
+            assert "0021로 내리지 않습니다" in err and "app.recovery recover" in err, err[-400:]
         db = sqlite3.connect(tmp_path / "moajwo.db")
         assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD
+        assert REQUEST_COLUMNS <= _run_columns(db) and _request_index(db)
+        assert "must_change_password" in {r[1] for r in db.execute("pragma table_info(users)")}
+        assert db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall() == held
+        db.close()
+    # 0021 자체의 보호: 실행을 끝내 0021로 내린 뒤 다시 실행 중으로 두면 'downgrade 0019'가 0021에서 멈춘다
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    db.execute("UPDATE runs SET status = 'done', finished_at = '2026-10-27 09:01:00' WHERE id = 1")
+    db.commit()
+    db.close()
+    _alembic(tmp_path, "downgrade", "0021_run_request_key")
+    db = sqlite3.connect(tmp_path / "moajwo.db")
+    assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0021_run_request_key"
+    db.execute("UPDATE runs SET status = 'running', finished_at = NULL WHERE id = 1")
+    db.commit()
+    db.close()
+    for target in ("0019_analysis_runs", "0020_run_worker_lease"):
+        try:
+            _alembic(tmp_path, "downgrade", target)
+            raise AssertionError(f"{target}: 담당 있는 실행 중 행이 있는데 0021이 내려갔다")
+        except subprocess.CalledProcessError as exc:
+            err = exc.stderr.decode("utf-8", "replace")
+            assert "0020으로 내리지 않습니다" in err and "app.recovery recover" in err, err[-400:]
+        db = sqlite3.connect(tmp_path / "moajwo.db")
+        assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0021_run_request_key"
         assert REQUEST_COLUMNS <= _run_columns(db) and _request_index(db)
         assert db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall() == held
         db.close()
@@ -746,3 +767,39 @@ def test_0021_stops_before_changing_anything_when_request_ids_cannot_be_filled(
     assert not REQUEST_COLUMNS & _run_columns(db) and not _request_index(db)
     assert db.execute("SELECT id, user_id, status, summary FROM runs ORDER BY id").fetchall() == before
     db.close()
+
+
+def test_0022_temp_password_columns_default_false_and_downgrade_guard(tmp_path: Path) -> None:
+    """0022: 기존 계정은 임시 비밀번호 상태가 아니다(False·NULL — 비밀번호·상태 그대로). 임시 상태인 계정이 있으면
+    downgrade하지
+    않고(열을 지우면 그 계정이 임시 비밀번호로 업무 기능을 쓰게 됨), 없으면 두 열만 지운다."""
+    _alembic(tmp_path, "upgrade", "0021_run_request_key")
+    db = tmp_path / "moajwo.db"
+    with sqlite3.connect(db) as con:
+        con.execute(
+            "insert into users (username, display_name, password_hash, role, is_active, status, auth_version, "
+            "failed_logins) "
+            "values ('rox', 'R', 'scrypt$x', 'owner', 1, 'active', 0, 0)"
+        )
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(db) as con:
+        cols = {r[1] for r in con.execute("pragma table_info(users)")}
+        assert {"must_change_password", "temp_password_expires_at"} <= cols
+        assert con.execute("select must_change_password, temp_password_expires_at from users").fetchall() == [(0, None)]
+        assert con.execute("select version_num from alembic_version").fetchone() == ("0022_temp_passwords",)
+        con.execute("update users set must_change_password = 1")
+    with pytest.raises(subprocess.CalledProcessError) as info:
+        _alembic(tmp_path, "downgrade", "0021_run_request_key")
+    assert "임시 비밀번호 상태인 계정이 1개" in info.value.stderr.decode("utf-8", "replace")
+    with sqlite3.connect(db) as con:
+        assert con.execute("select version_num from alembic_version").fetchone() == ("0022_temp_passwords",)
+        assert "must_change_password" in {r[1] for r in con.execute("pragma table_info(users)")}
+        con.execute("update users set must_change_password = 0")
+    _alembic(tmp_path, "downgrade", "0021_run_request_key")
+    with sqlite3.connect(db) as con:
+        cols = {r[1] for r in con.execute("pragma table_info(users)")}
+        assert not ({"must_change_password", "temp_password_expires_at"} & cols)
+        assert con.execute("select username, password_hash from users").fetchall() == [("rox", "scrypt$x")]
+    _alembic(tmp_path, "upgrade", "head")
+    with sqlite3.connect(db) as con:
+        assert con.execute("select must_change_password from users").fetchall() == [(0,)]

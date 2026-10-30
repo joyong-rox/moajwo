@@ -22,7 +22,7 @@ from app.db import SessionLocal
 from app.integration import OUTPUT_DIR
 from app.models import IntegrationRun
 from tests.test_accounts import owner  # noqa: F401
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 from tests.test_bundle import HEAD, MAP, _confirm, _plan, _upload, _xlsx
 
 ROWS = {"ob-a": [["서울특별시", "종로구", 10], ["서울특별시", "중구", 20]], "ob-b": [["부산광역시", "중구", 30]]}
@@ -30,8 +30,7 @@ ROWS = {"ob-a": [["서울특별시", "종로구", 10], ["서울특별시", "중�
 
 @pytest.fixture(scope="module")
 def user(app_real_login, owner) -> TestClient:  # noqa: F811
-    body = {"username": "ob-user", "display_name": "OB", "status": "active", "password": "pass-ob-user"}
-    assert owner.post("/users", json=body).status_code == 201
+    _provision_user(owner, app_real_login, "ob-user", "pass-ob-user", "OB")
     return _client(app_real_login, "ob-user", "pass-ob-user")
 
 

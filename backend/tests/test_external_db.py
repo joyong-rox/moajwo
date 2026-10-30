@@ -90,10 +90,9 @@ def test_unreachable_database_is_503_not_a_login_or_setup_answer(unreachable: Te
     assert login.status_code == 503 and login.json() == {"detail": DB_UNREACHABLE + WRITE_UNCERTAIN}
     assert "비밀번호" not in login.text and "그대로입니다" not in login.text  # 쓰기 결과를 단정하지 않는다
     setup = c.post("/auth/setup", json={"username": "owner2", "display_name": "새 소유자", "password": "Pw-123456!"})
-    assert setup.status_code == 503 and "이미 계정" not in setup.text
-    signup = {"username": "new1", "display_name": "신규", "password": "Pw-123456!", "password_confirm": "Pw-123456!"}
-    res = c.post("/auth/signup", json=signup)
-    assert res.status_code == 503 and "이미" not in res.text
+    assert setup.status_code == 410 and "Pw-123456!" not in setup.text  # 공개 최초 설정은 종료 — DB와 무관하게 410
+    res = c.post("/users", json={"username": "new1", "display_name": "신규"})  # 계정 발급: DB에 닿지 못하면 503
+    assert res.status_code == 503 and "이미" not in res.text and "temp_password" not in res.text
     health = c.get("/health")
     assert health.status_code == 503 and health.json()["database"] == "error"
     for res in (status, login, setup, health):

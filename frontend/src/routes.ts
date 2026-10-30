@@ -29,7 +29,7 @@ export const ROUTES: RouteDef[] = [
   { path: ADMIN_BASE, label: '관리자', roles: OWNER, inMenu: true },
   {
     path: `${ADMIN_BASE}/users`,
-    label: '사용자·가입 신청',
+    label: '사용자 계정',
     roles: OWNER,
     inMenu: false,
   },

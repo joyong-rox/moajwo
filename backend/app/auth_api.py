@@ -1,13 +1,21 @@
 """로그인·계정 API.
 
-- 처음 실행(계정 0개)에는 최초 소유자(= 최고 관리자) 계정을 만드는 설정 화면만 열린다 (`POST /auth/setup`).
-- 최초 설정이 끝난 뒤에는 누구나 가입을 신청할 수 있다 (`POST /auth/signup`). 새 가입은 항상 일반 사용자·승인 대기이며
-  세션을 주지 않는다. 최고 관리자가 승인해야 로그인·업무 기능을 쓸 수 있다.
-- 계정 관리(가입 승인·반려, 이용 중지·재개, 비밀번호 초기화, 계정 추가)는 최고 관리자만 한다. 모든 변경은
-  account_events에 남긴다 (같은 트랜잭션).
+- 공개 최초 설정(`POST /auth/setup`)과 공개 회원가입(`POST /auth/signup`)은 종료됐다 (둘 다 410, 본문을 읽지 않는다).
+  계정은 설치 담당자의 초기화 명령(`python -m app.adminctl init` — 관리자 아이디 admin, 역할 owner)과 최고 관리자의 계정
+  발급으로만 생긴다. 초기화 전(계정 0개·표시 없음)에는 `/auth/status`가 `setup_required: true`를 돌려주고 화면은 "설치
+  담당자의 초기화가 필요하다"고만 안내한다.
+- 계정 발급(`POST /users`): 최고 관리자가 아이디·표시 이름만 넣으면 서버가 임시 비밀번호를 만들어 해시만 저장하고,
+  평문은 그 응답에서 **한 번만** 돌려준다(저장·기록·다시 조회 없음, `Cache-Control: no-store`). 발급된 계정은 임시
+  비밀번호로 로그인하면 비밀번호 변경· 본인 조회·로그아웃만 할 수 있고(제한된 로그인 — 업무 API는 403, app/auth.py
+  require_full_access), 본인 비밀번호로 바꾼 뒤 다시 로그인해야 업무 기능을 쓴다. 임시 비밀번호는 유효
+  시간(config.TEMP_PASSWORD_HOURS, 기본 24시간)이 지나면 로그인에 쓸 수 없다 — 최고 관리자가 재발급한다.
+- 비밀번호 초기화(`POST /users/{id}/password`)도 임시 비밀번호 재발급이다: 기존 비밀번호·기존 임시 비밀번호·세션은 그
+  즉시 효력을 잃는다(인증 버전). 이용 중지 계정은 재발급으로 활성화되지 않는다. 화면이 본 인증
+  버전(expected_auth_version)이 지금 값과 다르면 (다른 재발급·상태 변경이 먼저 반영됨) 덮지 않고 409.
+- 계정 관리(예전 공개 가입 신청의 승인·반려, 이용 중지·재개, 발급·재발급)는 최고 관리자만 한다. 모든 변경은
+  account_events에 남긴다 (같은 트랜잭션). 비밀번호·해시·쿠키·토큰은 발급 응답 외 어디에도 넣지 않는다.
 """
 
-import json
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
@@ -21,35 +29,54 @@ from app.auth import (
     COOKIE_NAME,
     COOKIE_SECURE,
     SESSION_HOURS,
+    SETUP_KEY,
     STATUS_LABEL,
     AccountStatusError,
     AuthError,
     CurrentUser,
     CurrentUserDep,
     OwnerDep,
+    TempPasswordExpired,
     check_password_rule,
+    check_username_available,
     check_username_rule,
+    conflict,
     current_user,
     end_sessions,
+    generate_temp_password,
     hash_password,
+    issue_temp_password,
     login,
     logout,
+    record_event,
     role_label,
     set_status,
+    temp_password_expired,
+    temp_password_expiry,
     verify_password,
 )
+from app.config import TEMP_PASSWORD_HOURS
 from app.db import get_session
-from app.models import AccountEvent, AppSetting, IntegrationRun, ReviewSession, SourceFile, User, ValidationRun
+from app.models import IntegrationRun, ReviewSession, SourceFile, User, ValidationRun
 from app.name_limits import OptionalStoredText, StoredText, no_nul
 from app.timefmt import utc_to_kst
 
+__all__ = ["SETUP_KEY", "router", "users_router"]
+
 router = APIRouter(prefix="/auth", tags=["auth"])
 users_router = APIRouter(prefix="/users", tags=["users"])
-# 최초 소유자 설정이 끝났다는 표시 (app_settings 기본 키 → 동시 요청 중 하나만 성공).
-# 마이그레이션 0015가 계정이 있는 기존 설치에도 넣어 설정 화면이 다시 열리지 않게 한다.
-SETUP_KEY = "owner_setup"
 # 계정 상태 필터 — auth.STATUSES와 같은 값 (tests/test_nul_inputs.py가 대조). 다른 글자는 422(literal_error)
 AccountStatus = Literal["pending", "active", "rejected", "suspended"]
+SETUP_CLOSED = (
+    "공개 최초 설정은 종료되었습니다. 설치 담당자가 초기화 명령(python -m app.adminctl init)으로 "
+    "관리자 계정(admin)을 만듭니다."
+)
+SIGNUP_CLOSED = "공개 회원가입은 종료되었습니다. 계정은 관리자에게 요청해 주세요."
+PROVISION_MESSAGE = (
+    "임시 비밀번호는 이 화면에서 한 번만 보입니다. 사용자에게 안전한 방법으로 직접 전하세요. 사용자는 첫 로그인에서 "
+    "본인 비밀번호로 바꿔야 업무 기능을 쓸 수 있습니다."
+)
+_event = record_event
 
 
 class MeOut(BaseModel):
@@ -58,6 +85,10 @@ class MeOut(BaseModel):
     display_name: str
     role: str
     role_label: str
+    must_change_password: bool = (
+        False  # 임시 비밀번호 상태 — 화면은 비밀번호 변경만 보인다 (서버도 업무 API를 403으로 막음)
+    )
+    temp_password_expires_at: datetime | None = None  # 임시 비밀번호 만료(KST)
 
 
 def me_out(user: User) -> MeOut:
@@ -67,6 +98,8 @@ def me_out(user: User) -> MeOut:
         display_name=user.display_name,
         role=user.role,
         role_label=role_label(user.role),
+        must_change_password=user.must_change_password,
+        temp_password_expires_at=utc_to_kst(user.temp_password_expires_at),
     )
 
 
@@ -82,13 +115,21 @@ def _set_cookie(response: Response, token: str) -> None:
     )
 
 
+def _no_store(response: Response) -> None:
+    """임시 비밀번호가 든 응답은 브라우저·중간 저장소에 남기지 않는다."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+
 class StatusOut(BaseModel):
-    setup_required: bool
+    setup_required: bool  # 초기화 전(계정 0개·표시 없음) — 화면은 설치 담당자의 초기화가 필요하다고만 안내한다
     user: MeOut | None = None  # 로그인돼 있으면 그 사용자 (로그인 전 화면이 401 없이 상태를 알 수 있게)
 
 
 @router.get("/status", response_model=StatusOut)
 def auth_status(request: Request, db: Annotated[Session, Depends(get_session)]) -> StatusOut:
+    from app.models import AppSetting
+
     setup_required = (db.scalar(select(func.count(User.id))) or 0) == 0 and db.get(AppSetting, SETUP_KEY) is None
     try:
         row = db.get(User, current_user(request, db).id)
@@ -97,122 +138,16 @@ def auth_status(request: Request, db: Annotated[Session, Depends(get_session)]) 
     return StatusOut(setup_required=setup_required, user=me_out(row) if row is not None else None)
 
 
-def _conflict(exc: IntegrityError | OperationalError) -> bool:
-    """동시 요청끼리의 충돌인지: 기본 키·유일 제약 위반, 또는 SQLite 쓰기 잠금(database is locked).
-    그 밖의 OperationalError(연결 실패·인증 실패 등)는 충돌이 아니다."""
-    return isinstance(exc, IntegrityError) or "database is locked" in str(getattr(exc, "orig", exc))
+@router.post("/setup", status_code=status.HTTP_410_GONE)
+def setup_closed() -> None:
+    """공개 최초 설정 종료 — 본문을 읽지 않고(되돌리지 않고) 410. 관리자 계정은 설치 담당자의 초기화 명령이 만든다."""
+    raise HTTPException(status.HTTP_410_GONE, SETUP_CLOSED)
 
 
-class SetupIn(BaseModel):
-    username: str = Field(max_length=32)
-    display_name: StoredText = Field(min_length=1, max_length=64)
-    password: str = Field(max_length=128)
-
-
-@router.post("/setup", response_model=MeOut, status_code=status.HTTP_201_CREATED)
-def setup(body: SetupIn, response: Response, db: Annotated[Session, Depends(get_session)]) -> MeOut:
-    """계정이 하나도 없을 때만 최초 소유자 계정을 만든다.
-
-    동시에 들어온 요청이 함께 '계정 0개'를 보더라도 소유자는 한 명만 생기도록, 계정과 같은 트랜잭션에서
-    고정 키(app_settings.key = SETUP_KEY, 기본 키)를 넣는다. 늦은 요청은 기본 키 충돌로 실패해 409가 되고
-    계정·세션을 남기지 않는다 (프로세스 안의 잠금이 아니라 DB 제약으로 막는다).
-    """
-    if (db.scalar(select(func.count(User.id))) or 0) > 0 or db.get(AppSetting, SETUP_KEY) is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "이미 계정이 있습니다. 로그인하세요.")
-    username = body.username.strip().lower()
-    try:
-        check_username_rule(username)
-        check_password_rule(body.password)
-    except AuthError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    password_hash = hash_password(body.password)
-    try:
-        db.add(AppSetting(key=SETUP_KEY, value=json.dumps({"owner": username}), updated_at=datetime.now(UTC)))
-        db.flush()  # 다른 요청이 먼저 넣었으면 여기서(또는 커밋에서) 기본 키 충돌
-        owner = User(
-            username=username,
-            display_name=body.display_name.strip(),
-            password_hash=password_hash,
-            role="owner",
-            failed_logins=0,
-        )
-        set_status(owner, "active")  # 최초 소유자는 승인 대기 없이 바로 이용한다
-        db.add(owner)
-        db.flush()
-        _event(db, None, owner, "setup", None, "active", after_role="owner", reason="최초 설정 — 최고 관리자 계정")
-        db.commit()
-    except (IntegrityError, OperationalError) as exc:
-        db.rollback()
-        if not _conflict(exc):
-            raise  # DB에 닿지 못함 → 503 (main) — '이미 계정이 있음'으로 보이지 않게
-        raise HTTPException(status.HTTP_409_CONFLICT, "이미 계정이 있습니다. 로그인하세요.") from exc
-    user, token = login(db, username, body.password)
-    _set_cookie(response, token)
-    return me_out(user)
-
-
-class SignupIn(BaseModel):
-    """공개 가입 신청. 역할·상태·활성 여부 같은 다른 필드는 받지 않는다 (보내면 422) — 서버가 정한다."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    username: str = Field(max_length=32)
-    display_name: StoredText = Field(min_length=1, max_length=64)
-    password: str = Field(max_length=128)
-    password_confirm: str = Field(max_length=128)
-
-
-class SignupOut(BaseModel):
-    username: str
-    status: str
-    status_label: str
-    message: str
-
-
-SIGNUP_DONE = "가입 신청이 완료되었습니다. 최고 관리자의 승인 후 로그인할 수 있습니다."
-
-
-@router.post("/signup", response_model=SignupOut, status_code=status.HTTP_201_CREATED)
-def signup(body: SignupIn, db: Annotated[Session, Depends(get_session)]) -> SignupOut:
-    """본인 계정의 가입을 신청한다. 항상 일반 사용자·승인 대기로 저장하고 세션(쿠키)을 주지 않는다.
-
-    최초 설정(최고 관리자 계정 만들기)이 끝나기 전에는 막는다 — 가입으로 계정을 먼저 만들어 최초 설정을 막지 못하게.
-    아이디 중복은 DB 유일 조건으로도 막는다 (동시 가입 중 하나만 성공, 나머지 409).
-    """
-    if db.get(AppSetting, SETUP_KEY) is None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT, "최초 설정(최고 관리자 계정 만들기)이 끝난 뒤에 가입할 수 있습니다."
-        )
-    username = body.username.strip().lower()
-    try:
-        check_username_rule(username)
-        check_password_rule(body.password)
-    except AuthError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    if body.password != body.password_confirm:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "비밀번호 확인이 일치하지 않습니다.")
-    taken = HTTPException(status.HTTP_409_CONFLICT, f"이미 사용 중인 아이디입니다: {username}")
-    if db.scalar(select(User.id).where(User.username == username)) is not None:
-        raise taken
-    user = User(
-        username=username,
-        display_name=body.display_name.strip(),
-        password_hash=hash_password(body.password),
-        role="user",
-        failed_logins=0,
-    )
-    set_status(user, "pending")
-    try:
-        db.add(user)
-        db.flush()
-        _event(db, None, user, "signup", None, "pending", after_role="user", actor_self=True)
-        db.commit()
-    except (IntegrityError, OperationalError) as exc:
-        db.rollback()
-        if not _conflict(exc):
-            raise  # DB에 닿지 못함 → 503 (main) — '이미 있는 아이디'로 보이지 않게
-        raise taken from exc
-    return SignupOut(username=username, status="pending", status_label=STATUS_LABEL["pending"], message=SIGNUP_DONE)
+@router.post("/signup", status_code=status.HTTP_410_GONE)
+def signup_closed() -> None:
+    """공개 회원가입 종료 — 본문을 읽지 않고 410. 계정은 최고 관리자가 발급한다."""
+    raise HTTPException(status.HTTP_410_GONE, SIGNUP_CLOSED)
 
 
 class LoginIn(BaseModel):
@@ -225,6 +160,8 @@ def do_login(body: LoginIn, response: Response, db: Annotated[Session, Depends(g
     try:
         user, token = login(db, body.username, body.password)
     except AccountStatusError as exc:  # 아이디·비밀번호가 맞을 때만 — 본인 계정의 상태 안내 (세션 없음)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    except TempPasswordExpired as exc:  # 아이디·임시 비밀번호가 맞지만 만료 — 재발급 안내 (세션 없음)
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     except AuthError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, str(exc)) from exc
@@ -250,34 +187,62 @@ def me(user: CurrentUserDep, db: Annotated[Session, Depends(get_session)]) -> Me
 class PasswordChangeIn(BaseModel):
     current_password: str = Field(max_length=256)
     new_password: str = Field(max_length=128)
+    new_password_confirm: str | None = Field(default=None, max_length=128)  # 화면은 두 번 입력 — 보내면 같아야 한다
 
 
 @router.post("/password", status_code=status.HTTP_204_NO_CONTENT)
 def change_password(
-    body: PasswordChangeIn, user: CurrentUserDep, response: Response, db: Annotated[Session, Depends(get_session)]
+    body: PasswordChangeIn, user: CurrentUserDep, db: Annotated[Session, Depends(get_session)]
 ) -> Response:
+    """본인 비밀번호 변경. 임시 비밀번호 상태(발급 직후)에서는 이것이 유일한 쓰기 — 바꾸면 임시 상태가 끝나고 세션이
+    모두
+    끝나므로 새 비밀번호로 다시 로그인한다 (일반 변경은 지금 화면의 세션만 새로 잇는다)."""
     row = db.get(User, user.id)
     assert row is not None
-    version = row.auth_version
+    version, first = row.auth_version, row.must_change_password
     if not verify_password(body.current_password, row.password_hash):
         raise HTTPException(status.HTTP_409_CONFLICT, "현재 비밀번호가 올바르지 않습니다.")
+    if first and temp_password_expired(row):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "임시 비밀번호의 유효 기간이 지났습니다. 관리자에게 재발급을 요청하세요."
+        )
     try:
         check_password_rule(body.new_password)
     except AuthError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    # 확인한 그대로일 때만 바꾼다 (그 사이 초기화·중지가 커밋됐으면 0행). 버전을 올려 다른 세션·진행 중 로그인을 무효로
+    if body.new_password_confirm is not None and body.new_password_confirm != body.new_password:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "새 비밀번호 확인이 일치하지 않습니다.")
+    if body.new_password == body.current_password:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "새 비밀번호는 지금 비밀번호" + ("(임시 비밀번호)" if first else "") + "와 달라야 합니다.",
+        )
+    # 확인한 그대로일 때만 바꾼다 (그 사이 재발급·중지가 커밋됐으면 0행 — 같은 임시 비밀번호로 두 번 바꾸지 못한다).
+    # 버전을 올려 다른 세션·진행 중 로그인·기존 임시 비밀번호를 무효로
     changed = db.execute(
         update(User)
-        .where(User.id == row.id, User.auth_version == version)
-        .values(password_hash=hash_password(body.new_password), auth_version=User.auth_version + 1)
+        .where(User.id == row.id, User.auth_version == version, User.must_change_password.is_(first))
+        .values(
+            password_hash=hash_password(body.new_password),
+            auth_version=User.auth_version + 1,
+            must_change_password=False,
+            temp_password_expires_at=None,
+        )
         .execution_options(synchronize_session=False)
     ).rowcount
     if changed != 1:
         db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "계정 정보가 바뀌었습니다. 다시 로그인한 뒤 시도하세요.")
     end_sessions(db, row.id)
+    if first:
+        _event(db, None, row, "first_password_change", row.status, row.status,
+               reason="임시 비밀번호 → 본인 비밀번호 (제한된 로그인 종료 · 다시 로그인)", actor_self=True)  # fmt: skip
     db.commit()
     db.refresh(row)
+    out = Response(status_code=status.HTTP_204_NO_CONTENT)
+    if first:  # 임시 자격·제한 세션은 끝났다 — 새 비밀번호로 다시 로그인한다 (자동으로 잇지 않음)
+        out.delete_cookie(COOKIE_NAME, path="/")
+        return out
     # 다른 기기의 로그인은 끊고, 지금 화면은 새 세션으로 이어간다
     try:
         _, token = login(db, row.username, body.new_password)
@@ -285,45 +250,11 @@ def change_password(
         raise HTTPException(
             status.HTTP_409_CONFLICT, "비밀번호는 바뀌었지만 계정 상태가 바뀌어 다시 로그인해야 합니다."
         ) from exc
-    out = Response(status_code=status.HTTP_204_NO_CONTENT)
     _set_cookie(out, token)
     return out
 
 
 # ---------------------------------------------------------------- 계정 관리 (최고 관리자)
-
-
-def _event(
-    db: Session,
-    actor: CurrentUser | None,
-    target: User,
-    action: str,
-    before: str | None,
-    after: str | None,
-    *,
-    reason: str | None = None,
-    result: str = "ok",
-    before_role: str | None = None,
-    after_role: str | None = None,
-    actor_self: bool = False,
-) -> None:
-    """관리 이력 1건 (커밋은 호출한 쪽에서 계정 변경과 함께). 비밀번호·쿠키·토큰은 넣지 않는다."""
-    db.add(
-        AccountEvent(
-            created_at=datetime.now(UTC),
-            actor_id=target.id if actor_self else (actor.id if actor else None),
-            actor_name=target.username if actor_self else (actor.username if actor else None),
-            target_id=target.id,
-            target_name=target.username,
-            action=action,
-            before_status=before,
-            after_status=after,
-            before_role=before_role,
-            after_role=after_role,
-            reason=reason,
-            result=result,
-        )
-    )
 
 
 class UserOut(BaseModel):
@@ -340,6 +271,10 @@ class UserOut(BaseModel):
     created_at: datetime
     last_login_at: datetime | None
     last_activity_at: datetime | None  # 실제 업무 활동(업로드·검증·검토·통합 실행)의 마지막 시각 — 로그인과 별개
+    must_change_password: bool  # 임시 비밀번호 상태 (첫 로그인에서 본인 비밀번호로 바꿔야 함)
+    temp_password_expires_at: datetime | None  # 임시 비밀번호 만료(KST)
+    temp_password_expired: bool  # 임시 상태인데 만료 시각이 지남 — 재발급 필요
+    auth_version: int  # 화면이 재발급 요청에 되돌려 보내는 값 (그 사이 바뀌었으면 덮지 않음) — 화면에 표시하지 않는다
 
 
 def user_out(u: User, activity: dict[int, datetime] | None = None) -> UserOut:
@@ -357,6 +292,10 @@ def user_out(u: User, activity: dict[int, datetime] | None = None) -> UserOut:
         created_at=utc_to_kst(u.created_at),
         last_login_at=utc_to_kst(u.last_login_at),
         last_activity_at=utc_to_kst((activity or {}).get(u.id)),
+        must_change_password=u.must_change_password,
+        temp_password_expires_at=utc_to_kst(u.temp_password_expires_at),
+        temp_password_expired=temp_password_expired(u),
+        auth_version=u.auth_version,
     )
 
 
@@ -388,7 +327,7 @@ def list_users(
     q: Annotated[str | None, Query(max_length=64), AfterValidator(no_nul)] = None,
     status_filter: Annotated[AccountStatus | None, Query(alias="status")] = None,
 ) -> list[UserOut]:
-    """아이디·표시 이름 검색(q, 부분 일치), 상태 필터(status). 승인 대기 → 최근 가입 순.
+    """아이디·표시 이름 검색(q, 부분 일치), 상태 필터(status). 승인 대기(예전 공개 가입 신청) → 최근 순.
     검색어의 NUL·모르는 상태는 422 — LIKE·= 매개변수를 PostgreSQL 드라이버가 거절하므로 두 DB 같게 요청에서 막는다."""
     stmt = select(User)
     if q and q.strip():
@@ -401,49 +340,78 @@ def list_users(
     return [user_out(u, activity) for u in rows]
 
 
-class UserIn(BaseModel):
-    """최고 관리자가 직접 추가하는 계정: 항상 일반 사용자. 승인 여부(status)를 반드시 정한다."""
+class ProvisionIn(BaseModel):
+    """계정 발급: 아이디·표시 이름만 받는다. 비밀번호·역할·상태는 서버가 정한다 (보내면 422) — 항상 일반 사용자·이용 중·
+    임시 비밀번호."""
 
     model_config = ConfigDict(extra="forbid")
 
     username: str = Field(max_length=32)
     display_name: StoredText = Field(min_length=1, max_length=64)
-    role: Literal["user"] = "user"
-    status: Literal["active", "pending"]
-    password: str = Field(max_length=128)
 
 
-@users_router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-def create_user(body: UserIn, actor: OwnerDep, db: Annotated[Session, Depends(get_session)]) -> UserOut:
+class ProvisionOut(BaseModel):
+    user: UserOut
+    temp_password: str  # 이 응답에서만 — 서버는 해시만 저장하고 다시 보여 주지 않는다 (잃으면 재발급)
+    expires_at: datetime  # 임시 비밀번호 만료(KST)
+    valid_hours: int
+    message: str
+
+
+def _provision_out(user: User, plain: str, expires: datetime) -> ProvisionOut:
+    return ProvisionOut(
+        user=user_out(user),
+        temp_password=plain,
+        expires_at=utc_to_kst(expires),
+        valid_hours=TEMP_PASSWORD_HOURS,
+        message=PROVISION_MESSAGE,
+    )
+
+
+@users_router.post("", response_model=ProvisionOut, status_code=status.HTTP_201_CREATED)
+def provision_user(
+    body: ProvisionIn, actor: OwnerDep, response: Response, db: Annotated[Session, Depends(get_session)]
+) -> ProvisionOut:
+    """사용자 계정 발급 — 서버가 만든 임시 비밀번호(해시만 저장)를 이 응답에서 한 번 돌려준다.
+    아이디 중복은 DB 유일 조건으로도 막는다 (같은 발급을 두 번 누르면 둘째는 409 — 첫 발급을 조용히 덮지 않는다)."""
     username = body.username.strip().lower()
+    display_name = body.display_name.strip()
     try:
         check_username_rule(username)
-        check_password_rule(body.password)
+        check_username_available(username)
+        if not display_name:
+            raise AuthError("표시 이름을 입력하세요.")
     except AuthError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     taken = HTTPException(status.HTTP_409_CONFLICT, f"이미 있는 아이디입니다: {username}")
     if db.scalar(select(User.id).where(User.username == username)) is not None:
         raise taken
+    plain, expires = generate_temp_password(), temp_password_expiry()
     user = User(
         username=username,
-        display_name=body.display_name.strip(),
-        password_hash=hash_password(body.password),
+        display_name=display_name,
+        password_hash=hash_password(plain),
         role="user",
         failed_logins=0,
+        must_change_password=True,
+        temp_password_expires_at=expires,
     )
-    set_status(user, body.status)
+    set_status(user, "active")
     try:
         db.add(user)
         db.flush()
-        reason = "최고 관리자가 추가 — " + ("바로 이용(승인함)" if body.status == "active" else "승인 대기로 추가")
-        _event(db, actor, user, "create", None, body.status, after_role="user", reason=reason)
+        _event(db, actor, user, "provision", None, "active", after_role="user",
+               reason=f"계정 발급 — 임시 비밀번호(유효 {TEMP_PASSWORD_HOURS}시간), 첫 로그인에서 본인 비밀번호로 변경",
+               )  # fmt: skip
         db.commit()
     except (IntegrityError, OperationalError) as exc:
         db.rollback()
-        if not _conflict(exc):
+        if not conflict(exc):
             raise  # DB에 닿지 못함 → 503 (main) — '이미 있는 아이디'로 보이지 않게
         raise taken from exc
-    return user_out(user)
+    db.refresh(user)
+    _no_store(response)
+    return _provision_out(user, plain, expires)
 
 
 class UserPatch(BaseModel):
@@ -470,6 +438,7 @@ def update_user(user_id: int, body: UserPatch, _: OwnerDep, db: Annotated[Sessio
 
 
 # 상태 전이: 동작 → (허용하는 현재 상태, 바뀔 상태). 반려 계정의 승인·중지 계정의 승인처럼 표에 없는 전이는 막는다.
+# 승인·반려는 예전 공개 가입으로 남은 승인 대기 계정의 처리다 (새 공개 가입은 받지 않는다).
 TRANSITIONS: dict[str, tuple[str, str]] = {
     "approve": ("pending", "active"),
     "reject": ("pending", "rejected"),
@@ -559,36 +528,46 @@ def resume_user(
     return _change_status(db, actor, user_id, "resume", body.reason if body else None)
 
 
-class PasswordResetIn(BaseModel):
+class ReissueIn(BaseModel):
+    """임시 비밀번호 재발급: 비밀번호를 받지 않는다 (서버가 만든다). expected_auth_version은 화면이 본 인증 버전 —
+    지금 값과
+    다르면(다른 재발급·상태 변경이 먼저 반영됨) 덮지 않고 409."""
+
     model_config = ConfigDict(extra="forbid")
 
-    password: str = Field(max_length=128)
+    expected_auth_version: int | None = None
 
 
-@users_router.post("/{user_id}/password", status_code=status.HTTP_204_NO_CONTENT)
-def reset_password(
-    user_id: int, body: PasswordResetIn, actor: OwnerDep, db: Annotated[Session, Depends(get_session)]
-) -> Response:
-    """새 비밀번호로 바꾸고(해시만 저장) 그 사용자의 세션을 모두 끝낸다. 기존 비밀번호는 조회할 수 없다."""
+@users_router.post("/{user_id}/password", response_model=ProvisionOut)
+def reissue_password(
+    user_id: int,
+    actor: OwnerDep,
+    response: Response,
+    db: Annotated[Session, Depends(get_session)],
+    body: ReissueIn | None = None,
+) -> ProvisionOut:
+    """새 임시 비밀번호를 발급하고(해시만 저장) 그 사용자의 기존 비밀번호·기존 임시 비밀번호·세션을 그 즉시 무효로 한다.
+    상태는 바꾸지 않는다 — 이용 중지 계정은 재발급으로 활성화되지 않는다(재개는 따로). 평문은 이 응답에서만."""
     user = _target(db, user_id)
     if user.role == "owner":
-        raise _deny(db, actor, user, "password_reset", "최고 관리자 비밀번호는 '내 계정'에서 직접 바꾸세요.")
-    try:
-        check_password_rule(body.password)
-    except AuthError as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
-    db.execute(
-        update(User)
-        .where(User.id == user.id)
-        .values(
-            password_hash=hash_password(body.password),
-            failed_logins=0,
-            locked_until=None,
-            auth_version=User.auth_version + 1,  # 진행 중이던 이전 비밀번호 로그인·기존 세션을 무효로
-        )
-        .execution_options(synchronize_session=False)
-    )
-    end_sessions(db, user.id)
-    _event(db, actor, user, "password_reset", user.status, user.status, reason="비밀번호 초기화 · 기존 세션 종료")
+        raise _deny(db, actor, user, "password_reset",
+                    "최고 관리자 비밀번호는 '내 계정'에서 직접 바꾸거나, "
+                    "설치 담당자의 복구 명령(app.adminctl recover)으로 재설정합니다.",
+                    )  # fmt: skip
+    if user.status == "rejected":
+        raise _deny(db, actor, user, "password_reset", "가입 반려된 계정에는 임시 비밀번호를 발급하지 않습니다.")
+    expected = body.expected_auth_version if body else None
+    issued = issue_temp_password(
+        db, actor, user, action="password_reset", expected_version=expected,
+        reason="임시 비밀번호 재발급 — 기존 비밀번호·세션 종료"
+        + (" (이용 중지 상태 유지)" if user.status == "suspended" else ""),
+    )  # fmt: skip
+    if issued is None:
+        raise _deny(db, actor, user, "password_reset",
+                    "계정 정보가 그 사이 바뀌었습니다 (다른 재발급·상태 변경이 먼저 반영됨). "
+                    "목록을 새로 고친 뒤 필요하면 다시 재발급하세요.",
+                    )  # fmt: skip
     db.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    db.refresh(user)
+    _no_store(response)
+    return _provision_out(user, *issued)

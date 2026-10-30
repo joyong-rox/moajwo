@@ -18,7 +18,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import auth
 from tests.test_accounts import owner  # noqa: F401
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 OLD, NEW = "old-pass-race-1", "new-pass-race-2"
 
@@ -119,13 +119,13 @@ def test_login_vs_admin_password_reset(tmp_path: Path, gate: Gate) -> None:
     gate.arm()
     t, out = _in_thread(_login(Session, OLD))
     assert gate.verified.wait(15)
-    with Session() as other:  # 다른 연결에서 초기화하고 커밋
-        auth_api.reset_password(uid, auth_api.PasswordResetIn(password=NEW), actor, other)
+    with Session() as other:  # 다른 연결에서 임시 비밀번호를 재발급하고 커밋
+        issued = auth_api.reissue_password(uid, actor, Response(), other)
     gate.proceed.set()
     t.join(30)
     assert not _valid(Session, out.get("value")), "이전 비밀번호로 시작한 로그인이 유효한 세션을 얻음"
-    fresh = _login(Session, NEW)()
-    assert _valid(Session, fresh)  # 새 비밀번호 로그인은 정상
+    fresh = _login(Session, issued.temp_password)()
+    assert _valid(Session, fresh)  # 새 임시 비밀번호 로그인은 정상 (제한된 상태지만 세션은 유효)
 
 
 def test_login_vs_own_password_change(tmp_path: Path, gate: Gate) -> None:
@@ -138,9 +138,7 @@ def test_login_vs_own_password_change(tmp_path: Path, gate: Gate) -> None:
     assert gate.verified.wait(15)
     me = auth.CurrentUser(uid, "racer", "racer", "user")
     with Session() as other:
-        res = auth_api.change_password(
-            auth_api.PasswordChangeIn(current_password=OLD, new_password=NEW), me, Response(), other
-        )
+        res = auth_api.change_password(auth_api.PasswordChangeIn(current_password=OLD, new_password=NEW), me, other)
     renewed = res.headers["set-cookie"].split(f"{auth.COOKIE_NAME}=")[1].split(";")[0]
     gate.proceed.set()
     t.join(30)
@@ -173,11 +171,9 @@ def test_login_vs_suspend_then_resume(tmp_path: Path, gate: Gate) -> None:
 # ---------------------------------------------------------------- API 수준 (실제 쿠키)
 
 
-def _make_user(owner_client: TestClient, name: str) -> int:  # noqa: F811
-    body = {"username": name, "display_name": name, "status": "active", "password": OLD}
-    res = owner_client.post("/users", json=body)
-    assert res.status_code == 201, res.text
-    return res.json()["id"]
+def _make_user(owner_client: TestClient, app: Any, name: str) -> int:  # noqa: F811
+    """발급(임시 비밀번호) → 본인 비밀번호 OLD로 변경한 일반 사용자 (0022)"""
+    return _provision_user(owner_client, app, name, OLD, name)
 
 
 def _api_login(app: Any, name: str, password: str):
@@ -190,21 +186,27 @@ def _api_login(app: Any, name: str, password: str):
 
 
 def test_api_reset_race_leaves_no_valid_cookie(app_real_login, owner, gate: Gate) -> None:  # noqa: F811
-    uid = _make_user(owner, "race-api-reset")
+    uid = _make_user(owner, app_real_login, "race-api-reset")
     gate.arm()
     t, out = _in_thread(_api_login(app_real_login, "race-api-reset", OLD))
     assert gate.verified.wait(15)
-    assert owner.post(f"/users/{uid}/password", json={"password": NEW}).status_code == 204
+    reissued = owner.post(f"/users/{uid}/password", json={})  # 임시 비밀번호 재발급 (관리자)
+    assert reissued.status_code == 200, reissued.text
+    temp = reissued.json()["temp_password"]
     gate.proceed.set()
     t.join(30)
     client, status = out["value"]
     assert client.get("/files").status_code == 401, f"경합 로그인({status})의 쿠키로 업무 API가 열림"
     assert client.get("/auth/status").json()["user"] is None
+    restricted = _client(app_real_login, "race-api-reset", temp)  # 새 임시 비밀번호: 로그인은 되지만 제한
+    assert restricted.get("/files").status_code == 403
+    body = {"current_password": temp, "new_password": NEW, "new_password_confirm": NEW}
+    assert restricted.post("/auth/password", json=body).status_code == 204
     assert _client(app_real_login, "race-api-reset", NEW).get("/files").status_code == 200
 
 
 def test_api_own_change_race(app_real_login, owner, gate: Gate) -> None:  # noqa: F811
-    _make_user(owner, "race-api-self")
+    _make_user(owner, app_real_login, "race-api-self")
     me = _client(app_real_login, "race-api-self", OLD)
     gate.arm()
     t, out = _in_thread(_api_login(app_real_login, "race-api-self", OLD))
@@ -219,7 +221,7 @@ def test_api_own_change_race(app_real_login, owner, gate: Gate) -> None:  # noqa
 
 
 def test_api_suspend_race_cookie_stays_dead_after_resume(app_real_login, owner, gate: Gate) -> None:  # noqa: F811
-    uid = _make_user(owner, "race-api-stop")
+    uid = _make_user(owner, app_real_login, "race-api-stop")
     old_cookie = _client(app_real_login, "race-api-stop", OLD)
     gate.arm()
     t, out = _in_thread(_api_login(app_real_login, "race-api-stop", OLD))

@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_analysis import _body, _db, _file, _preview, _run, _upload, _xlsx
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 MAP = {"시도": "sido", "발신Mail건수": "count"}
 MAP2 = {"시도": "sido", "발신메일건수": "count"}  # 이름만 다른 같은 지표
@@ -23,9 +23,7 @@ MAP2 = {"시도": "sido", "발신메일건수": "count"}  # 이름만 다른 같
 
 @pytest.fixture(scope="module")
 def sc(app_real_login, owner) -> TestClient:  # noqa: F811
-    res = owner.post("/users", json={"username": "sc-user1", "display_name": "SC-USER1", "status": "active",
-                                     "password": "pass-sc-user1"})  # fmt: skip
-    assert res.status_code == 201, res.text
+    _provision_user(owner, app_real_login, "sc-user1", "pass-sc-user1", "SC-USER1")
     return _client(app_real_login, "sc-user1", "pass-sc-user1")
 
 

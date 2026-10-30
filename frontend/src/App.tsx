@@ -16,6 +16,7 @@ import Automations from './Automations'
 import Bundle from './Bundle'
 import Dashboard from './Dashboard'
 import Dictionary from './Dictionary'
+import FirstPasswordChange from './FirstPasswordChange'
 import Login from './Login'
 import Analysis from './Analysis'
 import MappingCommon from './MappingCommon'
@@ -37,7 +38,7 @@ import { Banner, Icon, type IconName } from './Workflow'
 
 type Gate =
   | { kind: 'loading' }
-  | { kind: 'signed-out'; setupRequired: boolean; unavailable?: string }
+  | { kind: 'signed-out'; setupRequired: boolean; unavailable?: string; notice?: string }
   | { kind: 'signed-in'; me: Me }
 
 async function resolveGate(): Promise<Gate> {
@@ -71,20 +72,35 @@ function App() {
   }, [])
 
   if (gate.kind === 'loading') return <p className="login-loading">확인 중…</p>
-  if (gate.kind === 'signed-out') {
-    return (
-      <Login
-        setupRequired={gate.setupRequired}
-        unavailable={gate.unavailable}
-        onSignedIn={(me) => setGate({ kind: 'signed-in', me })}
-      />
-    )
-  }
   const signOut = () => {
     void logout().finally(() => {
       setGate({ kind: 'signed-out', setupRequired: false })
       navigate('/')
     })
+  }
+  if (gate.kind === 'signed-out') {
+    return (
+      <Login
+        setupRequired={gate.setupRequired}
+        unavailable={gate.unavailable}
+        notice={gate.notice}
+        onSignedIn={(me) => setGate({ kind: 'signed-in', me })}
+      />
+    )
+  }
+  if (gate.me.must_change_password) {
+    // 임시 비밀번호 상태: 본인 비밀번호를 정하기 전에는 업무 화면을 열지 않는다 (서버도 업무 API를 403으로 막는다).
+    // 바꾸면 서버가 세션을 끝내므로 로그인 화면으로 돌아가 새 비밀번호로 다시 로그인한다.
+    return (
+      <FirstPasswordChange
+        me={gate.me}
+        onDone={() => {
+          setGate({ kind: 'signed-out', setupRequired: false, notice: '비밀번호를 바꿨습니다. 새 비밀번호로 다시 로그인하세요.' })
+          navigate('/')
+        }}
+        onSignOut={signOut}
+      />
+    )
   }
   return (
     <AuthContext.Provider value={{ me: gate.me, signOut }}>

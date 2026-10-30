@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.test_accounts import owner  # noqa: F401
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 TITLE = "2026년 9월 사업별 집행 현황 (단위: 원)"
@@ -29,9 +29,7 @@ SHORT = ["1741000", "1360000", "1310000"]
 
 @pytest.fixture(scope="module")
 def pu(app_real_login, owner) -> TestClient:  # noqa: F811
-    res = owner.post("/users", json={"username": "pid-user1", "display_name": "PID-USER1", "status": "active",
-                                     "password": "pass-pid-user1"})  # fmt: skip
-    assert res.status_code == 201, res.text
+    _provision_user(owner, app_real_login, "pid-user1", "pass-pid-user1", "PID-USER1")
     return _client(app_real_login, "pid-user1", "pass-pid-user1")
 
 

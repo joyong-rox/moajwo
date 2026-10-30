@@ -1,7 +1,9 @@
 """O-03 계정 보존 확인 (실제 프로세스·실제 PostgreSQL) — 격리 시험 DB에서만 돌린다. 운영·시연 DB 주소를 넣지 않는다.
 
 순서 (단계마다 결과를 results.tsv에 남기고, 실패해도 다음 단계로 간다):
- 1. SQLite 앱(uvicorn)으로 최초 소유자·일반 계정 A·B·승인 대기 계정과 업무 기록(업로드·확정·검토·통합·묶기·분석)을 만든다.
+ 1. SQLite 앱(uvicorn): 설치 초기화 명령(app.adminctl init — 비밀번호는 표준 입력)으로 admin(소유자)을 만들고, admin이 일반 계정
+    A·B와 중지할 계정을 발급한다(임시 비밀번호로 로그인 → 본인 비밀번호 변경). 업무 기록(업로드·확정·검토·통합·묶기·분석)을 만든다.
+    공개 최초 설정·회원가입은 종료됐다(0022).
  2. 빈 PostgreSQL에 마이그레이션(스키마 소유 계정, 서비스 주소) → 같은 DB 확인(app.dbcheck: 앱 계정 주소와 소유 계정
     주소 → 같음, 다른 DB → 다름) → 이관 dry-run(--target-env) → 적용(--target-env) → 다시 적용(서비스 주소, 거절)
     → 다른 빈 DB에서 실패 지점별(표 복사 뒤·모든 시퀀스 뒤) 되돌림: 표 건수와 시퀀스 상태가 그대로인지.
@@ -13,7 +15,7 @@
     DB 주소 없이 외부 모드로 띄우면 기동하지 않고 SQLite 파일도 만들지 않음.
     이관 잠금 대기: 다른 연결이 이관처럼 표를 잠근 동안 앱 요청은 앱 계정의 잠금 대기 제한(lock_timeout) 뒤 503(바쁨)
     — 빈 표를 읽어 '최초 설정 필요'로 답하지 않음 → 잠금이 풀리면 정상.
- 7. 빈 PostgreSQL에서 최초 소유자 설정을 동시에 8번 — 소유자는 하나.
+ 7. 빈 PostgreSQL에서 설치 초기화 명령을 8개 프로세스로 동시에 — 소유자는 하나(종료 0 하나, 나머지 2).
  8. 논리 백업(pg_dump -Fc, PGSERVICE) → 다른 빈 DB로 복원(pg_restore --dbname=service=…) → psql(서비스)로 건수,
     그 DB로 띄워 로그인·건수 확인, 원래 DB는 그대로.
  9. 비밀값 점검: 이 스크립트가 subprocess로 띄운 하위 프로세스의 명령 인자 전부(목록 인자만 허용 — 셸 확장은 기록기가
@@ -438,12 +440,25 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
     src_data = work / "src"
     sq = Server(a, src_data, a.port, {}, log)
     res("sqlite_start", sq.start())
-    c = sq.client
-    s, _ = c.call("POST", "/auth/setup", {"username": "ex-owner", "display_name": "소유자", "password": pw["owner"]})
-    res("sqlite_setup", s)
+    # 공개 최초 설정·회원가입은 종료됐다(0022): 설치 담당자의 초기화 명령으로 admin(소유자)을 만들고, 사용자는 관리자가 발급한다
+    # (임시 비밀번호 → 첫 로그인에서 본인 비밀번호로 변경). 비밀번호는 표준 입력·요청 본문으로만 넘긴다 (명령 인자 없음)
+    init = subprocess.run([a.python, "-m", "app.adminctl", "init", "--yes", "--password-stdin"], cwd=a.backend,
+                          input=pw["owner"] + "\n", capture_output=True, text=True, encoding="utf-8", errors="replace",
+                          env=child_env(a.admin_env, MOAJWO_DATA_DIR=str(src_data)))  # fmt: skip
+    ARGV.append(init.args)
+    res("sqlite_setup", f"init rc={init.returncode} · {init.stdout.strip()[-60:]}")
+    c, s, _ = login(sq, "admin", pw["owner"])
+    res("sqlite_admin_login", s)
     for u in ("a", "b", "pending"):
-        c.call("POST", "/users", {"username": f"ex-{u}", "display_name": f"계정 {u}",
-                                  "status": "pending" if u == "pending" else "active", "password": pw[u]})  # fmt: skip
+        s, issued = c.call("POST", "/users", {"username": f"ex-{u}", "display_name": f"계정 {u}"})
+        temp = issued.get("temp_password") if isinstance(issued, dict) else None
+        cu, s_first, _ = login(sq, f"ex-{u}", temp or "")
+        s_change, _ = cu.call("POST", "/auth/password", {"current_password": temp, "new_password": pw[u],
+                                                         "new_password_confirm": pw[u]})  # fmt: skip
+        res(f"provision_{u}", f"발급={s} 임시로그인={s_first} 변경={s_change}", "임시 비밀번호 → 본인 비밀번호 (발급 응답 외 저장 없음)")
+    uid_pending = next(x["id"] for x in c.call("GET", "/users")[1] if x["username"] == "ex-pending")
+    res("suspend_pending", c.call("POST", f"/users/{uid_pending}/suspend", {"reason": "검증용"})[0],
+        "이용 중지 계정 — 이관 뒤에도 로그인 거절인지 본다 (공개 가입의 '승인 대기'는 이제 생기지 않음)")  # fmt: skip
     ca, s, me_a = login(sq, "ex-a", pw["a"])
     rows = [["시도", "시군구", "인구"], ["서울특별시", "종로구", 100], ["서울특별시", "중구", 200]]
     s, up = ca.call("POST", "/files", files=[("인구.csv", csv_bytes(rows))])
@@ -539,7 +554,7 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
     co, s, me_o = login(pgs, "ex-owner", pw["owner"])
     res("redeploy_login_owner", f"{s} role={me_o.get('role')}")
     _, s, _ = login(pgs, "ex-pending", pw["pending"])
-    res("redeploy_pending_still_pending", s, "승인 대기 계정은 그대로 로그인 거절(403)")
+    res("redeploy_suspended_still_blocked", s, "이용 중지 계정은 그대로 로그인 거절(403)")
     cb, s, _ = login(pgs, "ex-b", pw["b"])
     res("redeploy_ownership", f"A 검토={ca.call('GET', f'/reviews/{rid}')[0]} B가 A 검토={cb.call('GET', f'/reviews/{rid}')[0]} "
         f"소유자 조회={co.call('GET', f'/reviews/{rid}')[0]}", "200 / 404 / 200")  # fmt: skip
@@ -576,7 +591,7 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
     probe = pgs.client
     outage = {p: probe.call(m, p, b)[0] for m, p, b in (("GET", "/auth/status", None),
               ("POST", "/auth/login", {"username": "ex-a", "password": pw["a"]}),
-              ("POST", "/auth/setup", {"username": "ex-x", "display_name": "x", "password": pw["new"]}),
+              ("GET", "/auth/me", None),
               ("GET", "/health", None))}  # fmt: skip
     res("outage_503", outage, "인증 실패(앱 계정 로그인 금지) 동안")
     admin_password(app_role, pw["role_a"])
@@ -614,10 +629,14 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
     codes: list[int] = []
     gate = threading.Barrier(8)
 
-    def claim(i: int) -> None:
+    def claim(i: int) -> None:  # 설치 초기화 명령을 8개 프로세스로 동시에 — DB 기본 키로 하나만 성공(0), 나머지는 2
         gate.wait()
-        codes.append(race.client.call("POST", "/auth/setup", {"username": f"race{i}", "display_name": f"r{i}",
-                                                               "password": pw["new"]})[0])  # fmt: skip
+        r = subprocess.run([a.python, "-m", "app.adminctl", "init", "--yes", "--password-stdin"], cwd=a.backend,
+                           input=pw["new"] + "\n", capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           env=child_env(a.admin_env, DATABASE_URL=app_url("extdb_race"), MOAJWO_DB_MODE="external",
+                                         MOAJWO_DATA_DIR=str(work / "race")))  # fmt: skip
+        ARGV.append(r.args)
+        codes.append(r.returncode)
 
     threads = [threading.Thread(target=claim, args=(i,)) for i in range(8)]
     for th in threads:
@@ -625,8 +644,8 @@ def run_checks(a: argparse.Namespace, log: Path, work: Path, pw: dict[str, str],
     for th in threads:
         th.join()
     race.stop()
-    res("race_one_owner", f"응답 {sorted(codes)} · users {count(owner_url('extdb_race'), 'users')}",
-        "201 하나, 나머지 409, 계정 1개")  # fmt: skip
+    res("race_one_owner", f"종료 코드 {sorted(codes)} · users {count(owner_url('extdb_race'), 'users')}",
+        "0 하나, 나머지 2(바꾸지 않음), 계정 1개")  # fmt: skip
 
     # ---------------------------------------------------------------- 8. 논리 백업·격리 복원 (서비스·비밀번호 파일)
     dump = work / "moajwo.dump"

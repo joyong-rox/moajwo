@@ -54,6 +54,7 @@ mkdir -p backups && chmod 777 backups
 docker compose up -d --build --wait > "$OUT/old-up.log" 2>&1
 check old.up "exit=$? · 실행 중 $(running)" "exit=0" "backend frontend"
 check old.rev "$(rev)" "0021_run_request_key (head)"
+docker compose exec -T backend python -m app.adminctl init --yes --password-stdin <<< "$PROBE_PW" > /dev/null 2>&1 || true  # 0022 이후 판용 (이전 판은 setup)
 check old.seed "$(python3 "$HERE/deploy_probe.py" seed http://127.0.0.1:8080 "$OUT/seed.json" 2>&1 | tail -1)" '"bundle": 201' '"download": 200'
 OLD_B=$(img_of backend)
 OLD_F=$(img_of frontend)

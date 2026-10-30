@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from tests.test_accounts import owner  # noqa: F401
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 TITLE = "2026년 9월 사업별 집행 현황 (단위: 원)"
@@ -33,9 +33,7 @@ _users = itertools.count(1)
 @pytest.fixture
 def user(app_real_login, owner) -> TestClient:  # noqa: F811
     name = f"rc-user{next(_users)}"
-    res = owner.post("/users", json={"username": name, "display_name": name.upper(), "status": "active",
-                                     "password": f"pass-{name}"})  # fmt: skip
-    assert res.status_code == 201, res.text
+    _provision_user(owner, app_real_login, name, f"pass-{name}", name.upper())
     return _client(app_real_login, name, f"pass-{name}")
 
 

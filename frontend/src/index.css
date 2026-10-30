@@ -2633,6 +2633,27 @@ body {
   white-space: normal;
 }
 
+/* 계정 발급·재발급 결과: 임시 비밀번호는 이 상자에서 한 번만 보인다 */
+.admin-issued-secret {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-temp-password {
+  display: inline-block;
+  padding: 4px 10px;
+  border: 1px solid var(--warning-border);
+  border-radius: 6px;
+  background: #fff;
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+  font-size: 1.15rem;
+  letter-spacing: 0.08em;
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
 .admin-help {
   margin-top: 16px;
 }

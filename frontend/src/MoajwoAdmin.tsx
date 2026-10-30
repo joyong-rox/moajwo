@@ -9,14 +9,15 @@ import {
 import {
   ACCOUNT_STATUS_LABEL,
   changeUserStatus,
-  createUser,
   fetchAdminOverview,
   fetchAudit,
   listUsers,
-  resetPassword,
+  provisionUser,
+  reissuePassword,
   type AccountStatus,
   type AdminOverview,
   type AuditEvent,
+  type Provisioned,
   type StatusAction,
   type UserAccount,
 } from "./api";
@@ -26,7 +27,7 @@ import { formatTime } from "./runFormat";
 
 const TABS = [
   { path: ADMIN_BASE, label: "관리 현황" },
-  { path: `${ADMIN_BASE}/users`, label: "사용자·가입 신청" },
+  { path: `${ADMIN_BASE}/users`, label: "사용자 계정" },
   { path: `${ADMIN_BASE}/audit`, label: "관리 이력" },
 ];
 
@@ -244,7 +245,7 @@ function Overview() {
   );
 }
 
-// ---------------------------------------------------------------- 사용자·가입 신청
+// ---------------------------------------------------------------- 사용자 계정 (발급·임시 비밀번호 재발급·상태)
 
 const STATUS_BADGE: Record<AccountStatus, string> = {
   pending: "is-pending",
@@ -255,7 +256,7 @@ const STATUS_BADGE: Record<AccountStatus, string> = {
 
 type Pending =
   | { kind: "status"; user: UserAccount; action: StatusAction }
-  | { kind: "password"; user: UserAccount };
+  | { kind: "reissue"; user: UserAccount };
 
 const ACTION: Record<
   StatusAction,
@@ -287,6 +288,87 @@ function initialFilter(): AccountStatus | "all" {
   return s && s in ACCOUNT_STATUS_LABEL ? (s as AccountStatus) : "all";
 }
 
+/** 사용자의 비밀번호 상태 (구현 용어 없이) */
+function passwordState(u: UserAccount): string {
+  if (u.role === "owner") return "본인 비밀번호";
+  if (u.status === "pending") return "예전 가입 신청 (승인 전)";
+  if (!u.must_change_password) return "본인 비밀번호";
+  if (u.temp_password_expired) return "임시 비밀번호 만료 — 재발급 필요";
+  return `임시 비밀번호 (${minute(u.temp_password_expires_at)}까지 · 첫 로그인에서 변경)`;
+}
+
+/** 발급·재발급 결과: 임시 비밀번호는 이 화면에서만 한 번 보인다 (서버는 해시만 저장하고 다시 보여 주지 않는다) */
+function IssuedPanel({
+  issued,
+  onClose,
+}: {
+  issued: Provisioned;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState<"yes" | "no" | null>(null);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(issued.temp_password);
+      setCopied("yes");
+    } catch {
+      setCopied("no");
+    }
+  }
+
+  return (
+    <section
+      className="admin-panel admin-issued"
+      aria-labelledby="issued-title"
+      aria-live="polite"
+    >
+      <h3 id="issued-title">'{issued.user.username}' 임시 비밀번호 발급</h3>
+      <p>
+        표시 이름 {issued.user.display_name} · 일반 사용자 · 상태{" "}
+        <StatusBadge status={issued.user.status} />
+      </p>
+      <p className="admin-issued-secret">
+        <span>임시 비밀번호</span>{" "}
+        <code className="admin-temp-password" aria-label="임시 비밀번호">
+          {issued.temp_password}
+        </code>{" "}
+        <button
+          type="button"
+          className="mapping-confirm"
+          onClick={() => void copy()}
+        >
+          복사
+        </button>
+        {copied === "yes" && (
+          <span className="dash-sub" role="status">
+            복사했습니다
+          </span>
+        )}
+        {copied === "no" && (
+          <span className="dash-sub" role="status">
+            복사하지 못했습니다 — 직접 옮겨 적으세요
+          </span>
+        )}
+      </p>
+      <p>
+        유효 기간: {formatTime(issued.expires_at)}까지 ({issued.valid_hours}
+        시간). 사용자는 첫 로그인에서 본인 비밀번호로 바꿔야 업무 화면을 쓸 수
+        있습니다.
+      </p>
+      <p className="upload-drop-hint">
+        {issued.message} 이 화면을 닫으면 다시 볼 수 없습니다 — 잃어버리면
+        '임시 비밀번호 재발급'으로 새로 만듭니다 (이전 것은 즉시 효력을
+        잃습니다).
+      </p>
+      <div className="admin-actions">
+        <button type="button" className="mapping-run" onClick={onClose}>
+          확인했습니다 (닫기)
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function UserAdmin() {
   const [users, setUsers] = useState<UserAccount[] | null>(null);
   const [query, setQuery] = useState("");
@@ -294,11 +376,10 @@ function UserAdmin() {
   const [filter, setFilter] = useState<AccountStatus | "all">(initialFilter);
   const [pending, setPending] = useState<Pending | null>(null);
   const [reason, setReason] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [newPassword2, setNewPassword2] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [issued, setIssued] = useState<Provisioned | null>(null);
 
   const load = useCallback((q: string) => {
     return listUsers({ q: q || undefined })
@@ -322,8 +403,6 @@ function UserAdmin() {
   function open(next: Pending) {
     setPending(next);
     setReason("");
-    setNewPassword("");
-    setNewPassword2("");
     setError(null);
     setNotice(null);
   }
@@ -344,12 +423,10 @@ function UserAdmin() {
           `'${user.username}' ${ACTION[pending.action].label} 완료 — 현재 상태: ${updated.status_label}`,
         );
       } else {
-        if (newPassword !== newPassword2)
-          throw new Error("새 비밀번호 확인이 일치하지 않습니다.");
-        await resetPassword(user.id, newPassword);
-        setNotice(
-          `'${user.username}' 비밀번호를 초기화했습니다. 기존 로그인은 모두 종료되었습니다.`,
-        );
+        // 목록에서 본 인증 버전을 함께 보낸다 — 그 사이 다른 재발급·상태 변경이 먼저 반영됐으면 서버가 409로 덮지 않는다
+        const result = await reissuePassword(user.id, user.auth_version);
+        setIssued(result);
+        setNotice(null);
       }
       setPending(null);
     } catch (err) {
@@ -362,13 +439,17 @@ function UserAdmin() {
   }
 
   return (
-    <section className="admin admin-wide" aria-label="사용자·가입 신청 관리">
-      <h2>사용자·가입 신청</h2>
+    <section className="admin admin-wide" aria-label="사용자 계정 관리">
+      <h2>사용자 계정</h2>
       <p className="upload-drop-hint">
-        가입 신청은 일반 사용자·승인 대기로 들어옵니다. 승인해야 로그인·업무
-        기능을 쓸 수 있습니다. 가입 반려(신청을 받지 않음)와 이용 중지(쓰던
-        계정을 멈춤)는 다른 상태이며, 반려한 신청은 다시 승인할 수 없습니다.
-        최고 관리자 계정은 여기서 바꿀 수 없습니다.
+        계정은 여기서 관리자가 발급합니다 (공개 회원가입은 받지 않습니다).
+        발급하면 임시 비밀번호가 한 번 보이고, 사용자는 첫 로그인에서 본인
+        비밀번호로 바꿔야 업무 화면을 쓸 수 있습니다. 비밀번호를 잊은 사용자에게는
+        '임시 비밀번호 재발급'을 합니다 (기존 로그인은 즉시 끊김). '승인 대기'는
+        공개 가입을 받던 때의 신청이며 승인하거나 반려할 수 있습니다. 가입
+        반려(신청을 받지 않음)와 이용 중지(쓰던 계정을 멈춤)는 다른 상태이고,
+        반려한 신청은 다시 승인할 수 없습니다. 최고 관리자(admin) 계정은 여기서
+        바꿀 수 없습니다.
       </p>
       <form
         className="admin-form"
@@ -416,6 +497,7 @@ function UserAdmin() {
           {error}
         </p>
       )}
+      {issued && <IssuedPanel issued={issued} onClose={() => setIssued(null)} />}
       {pending && (
         <section
           className="admin-panel"
@@ -443,50 +525,28 @@ function UserAdmin() {
             </>
           ) : (
             <>
-              <h3>비밀번호 초기화</h3>
+              <h3>임시 비밀번호 재발급</h3>
               <p>
                 대상: <strong>{pending.user.username}</strong> (
-                {pending.user.display_name}) · 기존 비밀번호는 볼 수 없으며,
-                초기화하면 그 사용자의 로그인이 모두 종료됩니다. 새 비밀번호는
-                안전한 방법으로 직접 전달하세요.
+                {pending.user.display_name}) · 새 임시 비밀번호를 만들어 한 번
+                보여 줍니다. 기존 비밀번호(임시 비밀번호 포함)와 그 사용자의
+                로그인은 모두 즉시 효력을 잃습니다. 계정 상태는 바뀌지 않습니다
+                {pending.user.status === "suspended" &&
+                  " — 이용 중지는 그대로이며 재개는 따로 합니다"}
+                .
               </p>
-              <div className="admin-form">
-                <label>
-                  새 비밀번호 (8자 이상)
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    minLength={8}
-                    maxLength={128}
-                  />
-                </label>
-                <label>
-                  새 비밀번호 확인
-                  <input
-                    type="password"
-                    autoComplete="new-password"
-                    value={newPassword2}
-                    onChange={(e) => setNewPassword2(e.target.value)}
-                    maxLength={128}
-                  />
-                </label>
-              </div>
             </>
           )}
           <div className="admin-actions">
             <button
               type="button"
               className="mapping-run"
-              disabled={
-                busy || (pending.kind === "password" && newPassword.length < 8)
-              }
+              disabled={busy}
               onClick={() => void confirm()}
             >
               {busy
                 ? "처리 중…"
-                : `'${pending.user.username}' ${pending.kind === "status" ? ACTION[pending.action].label : "비밀번호 초기화"} 확정`}
+                : `'${pending.user.username}' ${pending.kind === "status" ? ACTION[pending.action].label : "임시 비밀번호 재발급"} 확정`}
             </button>
             <button
               type="button"
@@ -511,7 +571,8 @@ function UserAdmin() {
                 <th scope="col">표시 이름</th>
                 <th scope="col">역할</th>
                 <th scope="col">상태</th>
-                <th scope="col">가입일</th>
+                <th scope="col">비밀번호</th>
+                <th scope="col">만든 날</th>
                 <th scope="col">최근 로그인</th>
                 <th scope="col">최근 업무 활동</th>
                 <th scope="col">관리</th>
@@ -537,14 +598,18 @@ function UserAdmin() {
                       )}
                     </span>
                   </td>
-                  <td data-label="가입일">{minute(u.created_at)}</td>
+                  <td data-label="비밀번호">{passwordState(u)}</td>
+                  <td data-label="만든 날">{minute(u.created_at)}</td>
                   <td data-label="최근 로그인">{minute(u.last_login_at)}</td>
                   <td data-label="최근 업무 활동">
                     {minute(u.last_activity_at)}
                   </td>
                   <td data-label="관리" className="admin-row-actions">
                     {u.role === "owner" ? (
-                      <span className="dash-sub">최고 관리자 — 변경 불가</span>
+                      <span className="dash-sub">
+                        최고 관리자 — 변경 불가 (비밀번호는 '내 계정' 또는 설치
+                        담당자의 복구 명령)
+                      </span>
                     ) : (
                       <span className="admin-buttons">
                         {ACTIONS_FOR[u.status].map((a) => (
@@ -566,11 +631,11 @@ function UserAdmin() {
                           <button
                             type="button"
                             className="mapping-confirm"
-                            aria-label={`${u.username} 비밀번호 초기화`}
+                            aria-label={`${u.username} 임시 비밀번호 재발급`}
                             disabled={busy}
-                            onClick={() => open({ kind: "password", user: u })}
+                            onClick={() => open({ kind: "reissue", user: u })}
                           >
-                            비밀번호 초기화
+                            임시 비밀번호 재발급
                           </button>
                         )}
                         {u.status === "rejected" && (
@@ -585,9 +650,11 @@ function UserAdmin() {
           </table>
         </div>
       )}
-      <AddUser
-        onAdded={(text) => {
-          setNotice(text);
+      <ProvisionUser
+        onIssued={(result) => {
+          setIssued(result);
+          setNotice(null);
+          setError(null);
           void load(applied);
         }}
       />
@@ -603,28 +670,25 @@ function StatusBadge({ status }: { status: AccountStatus }) {
   );
 }
 
-function AddUser({ onAdded }: { onAdded: (message: string) => void }) {
-  const [form, setForm] = useState({
-    username: "",
-    display_name: "",
-    password: "",
-  });
-  const [status, setStatus] = useState<"active" | "pending" | "">("");
+/** 사용자 계정 발급: 아이디·표시 이름만 넣는다 — 비밀번호는 서버가 만들어 한 번 보여 준다 (일반 사용자·바로 이용) */
+function ProvisionUser({
+  onIssued,
+}: {
+  onIssued: (result: Provisioned) => void;
+}) {
+  const [form, setForm] = useState({ username: "", display_name: "" });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
-    if (!status || busy) return;
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
-      const made = await createUser({ ...form, status });
-      onAdded(
-        `'${made.username}' 계정을 추가했습니다 — 일반 사용자 · ${made.status_label}`,
-      );
-      setForm({ username: "", display_name: "", password: "" });
-      setStatus("");
+      const result = await provisionUser(form);
+      setForm({ username: "", display_name: "" });
+      onIssued(result);
     } catch (err) {
       setError(message(err));
     } finally {
@@ -633,8 +697,14 @@ function AddUser({ onAdded }: { onAdded: (message: string) => void }) {
   }
 
   return (
-    <details className="admin-help">
-      <summary>계정 직접 추가 (일반 사용자)</summary>
+    <details className="admin-help" open>
+      <summary>사용자 계정 발급 (일반 사용자)</summary>
+      <p className="upload-drop-hint">
+        아이디는 영문 소문자·숫자로 시작하고 영문 소문자·숫자·마침표(.)·밑줄(_)·
+        하이픈(-) 3~32자입니다. 'admin'은 관리자 전용이라 발급할 수 없습니다.
+        발급한 계정은 바로 이용할 수 있으며, 임시 비밀번호는 발급 직후 한 번만
+        보입니다.
+      </p>
       <form className="admin-form" onSubmit={(e) => void submit(e)}>
         <label>
           아이디
@@ -644,6 +714,7 @@ function AddUser({ onAdded }: { onAdded: (message: string) => void }) {
             required
             maxLength={32}
             placeholder="영문 소문자·숫자"
+            autoComplete="off"
           />
         </label>
         <label>
@@ -653,47 +724,11 @@ function AddUser({ onAdded }: { onAdded: (message: string) => void }) {
             onChange={(e) => setForm({ ...form, display_name: e.target.value })}
             required
             maxLength={64}
+            autoComplete="off"
           />
         </label>
-        <label>
-          처음 비밀번호
-          <input
-            type="password"
-            autoComplete="new-password"
-            value={form.password}
-            onChange={(e) => setForm({ ...form, password: e.target.value })}
-            required
-            minLength={8}
-            maxLength={128}
-          />
-        </label>
-        <fieldset className="admin-choice">
-          <legend>승인 여부 (반드시 선택)</legend>
-          <label>
-            <input
-              type="radio"
-              name="add-status"
-              checked={status === "active"}
-              onChange={() => setStatus("active")}
-            />
-            바로 이용 (승인함)
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="add-status"
-              checked={status === "pending"}
-              onChange={() => setStatus("pending")}
-            />
-            승인 대기로 추가
-          </label>
-        </fieldset>
-        <button
-          type="submit"
-          className="mapping-run"
-          disabled={busy || !status}
-        >
-          {busy ? "추가 중…" : "계정 추가"}
+        <button type="submit" className="mapping-run" disabled={busy}>
+          {busy ? "발급 중…" : "계정 발급 (임시 비밀번호 만들기)"}
         </button>
       </form>
       {error && (
@@ -730,8 +765,9 @@ function Audit() {
     <section className="admin admin-wide" aria-label="관리 이력">
       <h2>관리 이력</h2>
       <p className="upload-drop-hint">
-        가입 신청·승인·반려·이용 중지·재개·비밀번호 초기화·계정 추가와 역할
-        전환을 최신 순으로 최대 200건 보여줍니다. '반영 안 됨'은 상태가 맞지
+        계정 발급·임시 비밀번호 재발급·본인 비밀번호 설정·이용 중지·재개, 예전
+        가입 신청의 승인·반려, 관리자 아이디 전환·복구를 최신 순으로 최대 200건
+        보여줍니다. '반영 안 됨'은 상태가 맞지
         않아(중복 클릭·이미 처리된 신청 등) 계정을 바꾸지 않은 요청입니다.
         비밀번호는 기록하지 않습니다.
       </p>
@@ -771,7 +807,7 @@ function Audit() {
               {shown.map((e) => (
                 <tr key={e.id}>
                   <td data-label="시각">{formatTime(e.created_at)}</td>
-                  <td data-label="작업자">{e.actor_name ?? "(시스템 전환)"}</td>
+                  <td data-label="작업자">{e.actor_name ?? "(시스템·설치 담당자)"}</td>
                   <td data-label="대상">{e.target_name}</td>
                   <td data-label="작업">{e.action_label}</td>
                   <td data-label="변경">

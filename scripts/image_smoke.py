@@ -53,7 +53,7 @@ CHECKS_IN = [  # backend 컨테이너 안에서 (CHECK_PY)
     ("tls.pg.system_unknown_ca", "TLS(psycopg·libpq verify-full): sslrootcert=system → 모르는 CA 거절"),
     ("front.index", "frontend: 첫 화면 200 · CSP · nosniff"),
     ("front.proxy_health", "frontend 프록시: /api/health → backend ok"),
-    ("flow.setup", "핵심 취합 준비: 최초 소유자 설정(점검 DB) 201 · 세션 쿠키"),
+    ("flow.setup", "핵심 취합 준비: 설치 초기화 명령(app.adminctl init — 점검 DB)으로 admin 생성 · 로그인 200 · 세션 쿠키"),
     ("flow.upload", "업로드(프록시): CSV·XLSX 2개를 읽음"),
     ("flow.keyjoin_plan", "공통 key 연결 확인(plan): 준비됨"),
     ("flow.keyjoin_run", "공통 key 연결 만들기(run): 201"),
@@ -276,10 +276,19 @@ API = "http://frontend:8080/api"
 def flow():
     import openpyxl
 
-    s, h, _ = http("POST", API + "/auth/setup", {"username": "smoke-owner", "display_name": "점검", "password": "Sm-" + secrets.token_hex(12)})
+    # 공개 최초 설정은 종료됐다 — 설치 담당자의 초기화 명령(app.adminctl init, 점검 DB)으로 admin을 만들고 로그인한다.
+    # 비밀번호는 점검 컨테이너 안의 본인만 읽는 임시 파일로만 넘기고 바로 지운다 (출력·기록 없음)
+    pw = "Sm-" + secrets.token_hex(12)
+    pwfile = "/tmp/smoke-admin-pw"
+    with open(pwfile, "w", encoding="utf-8", opener=lambda p, f: os.open(p, f, 0o600)) as fh:
+        fh.write(pw + "\n")
+    rc, out = sh(sys.executable, "-m", "app.adminctl", "init", "--yes", "--password-file", pwfile)
+    os.remove(pwfile)
+    s, h, _ = http("POST", API + "/auth/login", {"username": "admin", "password": pw})
     cookie = (h.get("set-cookie") or "").split(";")[0]
     COOKIE["v"] = cookie
-    rec("flow.setup", s == 201 and "=" in cookie, {"status": s, "cookie": bool(cookie)})
+    rec("flow.setup", rc == 0 and s == 200 and "=" in cookie,
+        {"init_rc": rc, "init_tail": out.strip()[-160:], "login": s, "cookie": bool(cookie)})  # fmt: skip
     csv_a = "코드,인구\nK001,100\nK002,200\nK003,300\n".encode("utf-8")
     wb = openpyxl.Workbook()
     ws = wb.active
