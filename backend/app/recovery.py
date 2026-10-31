@@ -32,7 +32,8 @@
                                                1 = 오류
     python -m app.recovery resolve RUN_ID --failed   결과 확인 필요 → 실패 (조건부, 파일은 지우지 않고 경로만 알림)
   세 명령 모두 먼저 이 DB의 리비전(alembic_version)과 runs 표의 0020 열(담당·생존 신호)을 읽기만 하고 맞춰 본다.
-  - 0020_run_worker_lease 또는 0021_run_request_key(0020 열 그대로 + 요청 번호 열) + 담당 열 있음: 위 동작.
+  - 0020_run_worker_lease 또는 0021_run_request_key(0020 열 그대로 + 요청 번호 열)·0022_temp_passwords(users 열만
+    더함, runs 그대로) + 담당 열 있음: 위 동작.
   - 0019_analysis_runs + 열 없음(예: 반영 전 운영 DB): status는 실행 기록의 상태별 건수만 보여 주고(종료 0),
     recover·resolve는 아무것도 바꾸지 않고 종료 1.
   - 그 밖(리비전 없음·빈 값·여러 개·이 판이 다루지 않는 리비전·리비전과 열이 맞지 않음·runs 표 없음): status를 포함해
@@ -443,7 +444,7 @@ def resolve_failed(run_id: int) -> dict[str, Any]:
 
 LEASE_REVISION = "0020_run_worker_lease"  # 담당·생존 신호 열이 생긴 판 — status·recover·resolve
 # 담당·생존 신호 열이 있는 판들 (0021은 요청 번호 열만 더함 — 정리 동작은 같다)
-LEASE_REVISIONS = (LEASE_REVISION, "0021_run_request_key")
+LEASE_REVISIONS = (LEASE_REVISION, "0021_run_request_key", "0022_temp_passwords")  # 0022는 users 열만 더함(runs 그대로)
 LEGACY_REVISION = "0019_analysis_runs"  # 그 바로 앞 판 — status는 상태별 건수만, 바꾸는 명령은 거절
 LEASE_COLUMNS = frozenset({"worker", "heartbeat_at"})
 

@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_analysis import POP, _body, _confirm, _file, _run
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 MAP = {"시도": "sido", "인구": "population"}
 CRLF = chr(13) + chr(10)
@@ -27,9 +27,7 @@ BIG = 2**53 + 1  # 9007199254740993 — 배정밀도로 바꾸면 ...992가 된�
 
 @pytest.fixture(scope="module")
 def pr(app_real_login, owner) -> TestClient:  # noqa: F811
-    res = owner.post("/users", json={"username": "pr-user1", "display_name": "PR-USER1", "status": "active",
-                                     "password": "pass-pr-user1"})  # fmt: skip
-    assert res.status_code == 201, res.text
+    _provision_user(owner, app_real_login, "pr-user1", "pass-pr-user1", "PR-USER1")
     return _client(app_real_login, "pr-user1", "pass-pr-user1")
 
 

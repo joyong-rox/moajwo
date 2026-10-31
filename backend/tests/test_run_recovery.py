@@ -47,7 +47,7 @@ TEST_PG = os.environ.get("MOAJWO_TEST_DATABASE_URL", "").strip()
 TEST_PG_ADMIN = os.environ.get("MOAJWO_TEST_PG_ADMIN_URL", "").strip()
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 HEAD = ["시도", "시군구", "인구수"]
-CURRENT_REVISION = "0021_run_request_key"  # alembic head (tests/test_migrations.HEAD와 함께 올린다)
+CURRENT_REVISION = "0022_temp_passwords"  # alembic head (tests/test_migrations.HEAD와 함께 올린다)
 MAP = {"시도": "sido", "시군구": "sigungu", "인구수": "population"}
 PASSWORD = "Rec-pass-2026!"
 
@@ -174,6 +174,7 @@ class Server:
         self.ctl = stack.tmp / f"ctl-{name}"
         self.ctl.mkdir()
         env = {**stack.base, "MOAJWO_DATA_DIR": str(data), "T_CTL": str(self.ctl), **extra}
+        self.env = env  # 같은 DB를 보는 설치 담당자 명령(app.adminctl)에도 쓴다
         self.log = open(stack.tmp / f"{name}.log", "w", encoding="utf-8")  # noqa: SIM115 — 서버가 끝날 때 닫는다
         cmd = [sys.executable, str(stack.tmp / "child.py"), str(self.port)]
         self.proc = subprocess.Popen(cmd, cwd=BACKEND, env=env, stdout=self.log, stderr=subprocess.STDOUT)
@@ -238,9 +239,26 @@ def _xlsx(rows: list[list], sheet: str) -> bytes:
     return buf.getvalue()
 
 
-def _owner(c: httpx.Client) -> None:
-    res = c.post("/auth/setup", json={"username": "rec-owner", "display_name": "정리 시험", "password": PASSWORD})
+def _owner(server: "Server", c: httpx.Client) -> None:
+    """설치 담당자의 초기화 명령으로 그 서버의 DB에 관리자(admin)를 만들고 c로 로그인한다 (공개 최초 설정은 종료)."""
+    res = subprocess.run(
+        [sys.executable, "-X", "utf8", "-m", "app.adminctl", "init", "--yes", "--password-stdin"], cwd=BACKEND,
+        env=server.env, input=PASSWORD + "\n", capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=300,
+    )  # fmt: skip
+    assert res.returncode == 0, res.stdout + res.stderr
+    _login(c, "admin")
+
+
+def _provision(admin: httpx.Client, c: httpx.Client, username: str) -> None:
+    """관리자(admin)가 발급 → 그 사용자가 c에서 임시 비밀번호로 로그인해 본인 비밀번호(PASSWORD)로 바꾼다
+    (제한 세션은 끝남)."""
+    res = admin.post("/users", json={"username": username, "display_name": "다른 사용자"})
     assert res.status_code == 201, res.text
+    temp = res.json()["temp_password"]
+    assert c.post("/auth/login", json={"username": username, "password": temp}).status_code == 200
+    body = {"current_password": temp, "new_password": PASSWORD, "new_password_confirm": PASSWORD}
+    assert c.post("/auth/password", json=body).status_code == 204
 
 
 def _login(c: httpx.Client, username: str) -> None:
@@ -336,7 +354,7 @@ def _age_heartbeat(stack: Stack, run_id: int, seconds: int) -> None:
 def test_live_run_is_kept_while_another_server_starts_and_completes_once(stack: Stack) -> None:
     a = stack.server("a")
     ca = a.client()
-    _owner(ca)
+    _owner(a, ca)
     body = _bundle_ready(ca, "live")
     legacy = _legacy_temp(stack.data)
     a.pause_at("saved")
@@ -363,7 +381,7 @@ def test_live_run_is_kept_while_another_server_starts_and_completes_once(stack: 
 def test_two_processes_on_one_folder_keep_each_others_temp_files(stack: Stack) -> None:
     a = stack.server("a")
     ca = a.client()
-    _owner(ca)
+    _owner(a, ca)
     body = _bundle_ready(ca, "folder")
     legacy = _legacy_temp(stack.data)
     a.pause_at("saved")
@@ -372,7 +390,7 @@ def test_two_processes_on_one_folder_keep_each_others_temp_files(stack: Stack) -
     a_temps = _temps(stack.data) - {legacy.name}
     b = stack.server("b")
     cb = b.client()
-    _login(cb, "rec-owner")
+    _login(cb, "admin")
     listed = cb.get("/runs")  # B의 목록 요청도 아무것도 바꾸지 않는다 (정리는 예약만)
     assert listed.status_code == 200
     assert a_temps <= _temps(stack.data) and legacy.exists()
@@ -387,13 +405,12 @@ def test_two_processes_on_one_folder_keep_each_others_temp_files(stack: Stack) -
 def test_killed_server_only_its_run_and_temp_are_cleaned(stack: Stack) -> None:
     a1, a2 = stack.server("a1"), stack.server("a2")
     c1, c2 = a1.client(), a2.client()
-    _owner(c1)
+    _owner(a1, c1)
     done = c1.post("/bundle/run", json=_bundle_ready(c1, "kept"))  # 완료된 결과 — 그대로여야 한다
     assert done.status_code == 201, done.text
     done_row = stack.row(done.json()["id"])
     done_file = _final(stack.data, done_row)
-    user = {"username": "rec-user2", "display_name": "다른 사용자", "status": "active", "password": PASSWORD}
-    assert c1.post("/users", json=user).status_code == 201
+    _provision(c1, c2, "rec-user2")
     _login(c2, "rec-user2")
     b1, b2 = _bundle_ready(c1, "dead"), _bundle_ready(c2, "alive")
     legacy = _legacy_temp(stack.data)
@@ -431,7 +448,7 @@ def test_killed_keyjoin_run_is_failed_and_its_record_keeps_the_mode(stack: Stack
     남는다."""
     a = stack.server("a")
     ca = a.client()
-    _owner(ca)
+    _owner(a, ca)
     body = _keyjoin_ready(ca, "kj")
     a.pause_at("saved")
     t, _ = _start(ca, body, "/keyjoin/run")
@@ -454,7 +471,7 @@ def test_killed_keyjoin_run_is_failed_and_its_record_keeps_the_mode(stack: Stack
 def test_killed_after_rename_is_completed_from_the_saved_file(stack: Stack) -> None:
     a = stack.server("a")
     ca = a.client()
-    _owner(ca)
+    _owner(a, ca)
     body = _bundle_ready(ca, "renamed")
     a.pause_at("after_replace")
     _start(ca, body)
@@ -473,7 +490,7 @@ def test_killed_after_rename_is_completed_from_the_saved_file(stack: Stack) -> N
 def test_killed_after_prepare_before_rename_is_completed_from_the_temp_file(stack: Stack) -> None:
     a = stack.server("a")
     ca = a.client()
-    _owner(ca)
+    _owner(a, ca)
     body = _bundle_ready(ca, "prepared")
     a.pause_at("before_replace")
     _start(ca, body)
@@ -496,7 +513,7 @@ def test_other_disk_run_is_never_failed_without_evidence(stack: Stack) -> None:
     disk_a.mkdir()
     a = stack.server("a", data=disk_a)  # 같은 DB, 다른 결과 폴더 (Render 무중단 배포의 이전·새 인스턴스와 같은 꼴)
     ca = a.client()
-    _owner(ca)
+    _owner(a, ca)
     body = _bundle_ready(ca, "otherdisk")
     a.pause_at("saved")
     _start(ca, body)
@@ -521,7 +538,7 @@ def test_alive_other_disk_run_marked_check_can_still_complete(stack: Stack) -> N
     disk_a.mkdir()
     a = stack.server("a", data=disk_a, T_SLOW_BEAT="1")
     ca = a.client()
-    _owner(ca)
+    _owner(a, ca)
     body = _bundle_ready(ca, "slowbeat")
     a.pause_at("saved")
     th, out = _start(ca, body)
@@ -1019,7 +1036,7 @@ def test_cli_status_on_a_0020_database_names_the_revision(tmp_path: Path) -> Non
     res = _cli(data, "-m", "app.recovery", "status")
     assert res.returncode == 0, (res.stdout, res.stderr[-400:])
     out = json.loads(res.stdout)
-    assert out["revision"] == "0021_run_request_key" and out["running"] == [] and out["check"] == [], out
+    assert out["revision"] == CURRENT_REVISION and out["running"] == [] and out["check"] == [], out
     _no_raw(res, data)
 
 
@@ -1075,7 +1092,7 @@ def test_cli_reads_a_sqlite_uri_address_as_its_file(tmp_path: Path, form: str) -
 
     res = _cli(data, "-m", "app.recovery", "status", url=address(data / "moajwo.db", "mode=ro&uri=true"))
     assert res.returncode == 0, (res.stdout, res.stderr[-400:])
-    assert json.loads(res.stdout)["revision"] == "0021_run_request_key", res.stdout
+    assert json.loads(res.stdout)["revision"] == CURRENT_REVISION, res.stdout
     _no_raw(res, data)
     other = tmp_path / "other"
     other.mkdir()

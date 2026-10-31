@@ -23,7 +23,7 @@ from app.config import DATA_DIR
 from app.integration import OUTPUT_DIR
 from tests.conftest import db_connect, db_dump
 from tests.test_accounts import owner  # noqa: F401
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 XLS = "application/vnd.ms-excel"
@@ -229,9 +229,7 @@ def _first(plan: dict[str, Any], code: str, level: str = "problems") -> dict[str
 def kj(app_real_login, owner) -> dict[str, TestClient]:  # noqa: F811
     made = {"owner": owner}
     for name in ("kj-user1", "kj-user2"):
-        res = owner.post("/users", json={"username": name, "display_name": name.upper(), "status": "active",
-                                         "password": "pass-" + name})  # fmt: skip
-        assert res.status_code == 201, res.text
+        _provision_user(owner, app_real_login, name, "pass-" + name, name.upper())
         made[name] = _client(app_real_login, name, "pass-" + name)
     return made
 

@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import PG_ADMIN, POSTGRES, db_connect, db_rows, pg_database
-from tests.test_accounts import _signup, _uid, owner  # noqa: F401
+from tests.test_accounts import _legacy_pending, _uid, owner  # noqa: F401
 from tests.test_auth import ROWS, _client, _upload, app_real_login  # noqa: F401
 
 CODE = "[VALUE_HAS_NUL]"
@@ -129,46 +129,58 @@ def _scalar(engine: Any, sql: str) -> Any:
 # ---------------------------------------------------------------- 저장 필드 (수정 전: SQLite 2xx 저장 · PG 안전망 422)
 
 
-def test_setup_display_name_nul_is_refused_before_any_row(blank_app) -> None:  # noqa: ANN001
-    # 최초 소유자 설정은 app_settings(owner_setup)를 먼저 flush한 뒤 계정을 넣는다 — 요청 검증에서 거절하므로
-    # 두 표 모두 0건 (PostgreSQL에서 먼저 flush한 행도 남지 않음)
+def test_init_display_name_nul_is_refused_before_any_row(blank_app) -> None:  # noqa: ANN001
+    # 설치 초기화(create_owner)는 app_settings(owner_setup)를 먼저 flush한 뒤 계정을 넣는다 — 규칙 검사에서 거절하므로
+    # 두 표 모두 0건 (PostgreSQL에서 먼저 flush한 행도 남지 않음). 공개 최초 설정 요청은 종료돼 본문을 읽지 않고
+    # 410이다.
+    from sqlalchemy.orm import sessionmaker
+
+    from app import auth
+
     app, engine = blank_app
-    c = TestClient(app)
-    body = {"username": "first-owner", "display_name": "소유\x00자", "password": "password-123"}
-    res = c.post("/auth/setup", json=body)
-    _refused(res, "body", "display_name", raws=("소유\x00자",))
-    assert "set-cookie" not in res.headers
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        with pytest.raises(auth.AuthError):
+            auth.create_owner(db, "first-owner", "소유\x00자", "password-123", reason="시험")
+        with pytest.raises(auth.AuthError):
+            auth.create_owner(db, "first-owner", "소유자", "pass\x00word-123", reason="시험")
     for sql in ("select count(*) from users", "select count(*) from account_events",
                 "select count(*) from app_settings where key = 'owner_setup'"):  # fmt: skip
         assert _scalar(engine, sql) == 0, sql
-    res = c.post("/auth/setup", json={**body, "display_name": "소유자"})
-    assert res.status_code == 201 and res.json()["display_name"] == "소유자", res.text
+    c = TestClient(app)
+    res = c.post(
+        "/auth/setup", json={"username": "first-owner", "display_name": "소유\x00자", "password": "password-123"}
+    )
+    assert res.status_code == 410 and "\\u0000" not in res.text and "set-cookie" not in res.headers
+    assert _scalar(engine, "select count(*) from users") == 0
+    with Session() as db:
+        made = auth.create_owner(db, "first-owner", "소유자", "password-123", reason="시험")
+        assert made.display_name == "소유자"
     assert _scalar(engine, "select count(*) from users") == 1
     assert _scalar(engine, "select count(*) from app_settings where key = 'owner_setup'") == 1
 
 
-def test_signup_display_name_nul_is_refused_and_username_rule_stays(app_real_login, owner) -> None:  # noqa: ANN001, F811
-    anon = _client(app_real_login)
+def test_provision_display_name_nul_is_refused_and_username_rule_stays(owner) -> None:  # noqa: ANN001, F811
     users, events = _count("users"), _count("account_events")
-    res = _signup(anon, "nulsign1", display_name="가입\x00자")
+    res = owner.post("/users", json={"username": "nulsign1", "display_name": "가입\x00자"})
     _refused(res, "body", "display_name", raws=("가입\x00자",))
     assert (_count("users"), _count("account_events")) == (users, events)
     # 아이디의 NUL은 전처럼 아이디 규칙(문자열 detail)이 막는다 — 값은 되돌리지 않음
-    res = _signup(anon, "nul\x00sign", display_name="가입자")
+    res = owner.post("/users", json={"username": "nul\x00sign", "display_name": "가입자"})
     assert res.status_code == 422 and isinstance(res.json()["detail"], str), res.text
     assert "아이디는" in res.json()["detail"] and "\\u0000" not in res.text
     assert _count("users") == users
-    assert _signup(anon, "nulsign1", display_name="가입자").status_code == 201
+    assert owner.post("/users", json={"username": "nulsign1", "display_name": "가입자"}).status_code == 201
 
 
 def test_user_create_and_patch_display_name_nul(owner) -> None:  # noqa: ANN001, F811
     users = _count("users")
-    body = {"username": "nuluser1", "display_name": "표시\x00이름", "status": "active", "password": PASSWORD}
+    body = {"username": "nuluser1", "display_name": "표시\x00이름"}
     _refused(owner.post("/users", json=body), "body", "display_name", raws=("표시\x00이름",))
     assert _count("users") == users and not db_rows("select 1 from users where username = 'nuluser1'")
     res = owner.post("/users", json={**body, "display_name": "표시이름"})
     assert res.status_code == 201, res.text
-    uid = res.json()["id"]
+    uid = res.json()["user"]["id"]
     events = _count("account_events", "target_id = ?", uid)
     _refused(owner.patch(f"/users/{uid}", json={"display_name": "바뀐\x00이름"}), "body", "display_name",
              raws=("바뀐\x00이름",))  # fmt: skip
@@ -179,9 +191,8 @@ def test_user_create_and_patch_display_name_nul(owner) -> None:  # noqa: ANN001,
 
 
 def test_status_change_reason_nul_changes_nothing(app_real_login, owner) -> None:  # noqa: ANN001, F811
-    anon = _client(app_real_login)
-    for name in ("nulpend1", "nulpend2"):
-        assert _signup(anon, name).status_code == 201, name
+    for name in ("nulpend1", "nulpend2"):  # 예전 공개 가입으로 남은 승인 대기 계정 (지금은 API로 만들 수 없음)
+        _legacy_pending(name)
     a, b = _uid(owner, "nulpend1"), _uid(owner, "nulpend2")
 
     def row(uid: int) -> tuple:
@@ -245,8 +256,12 @@ def test_promotion_note_nul_leaves_candidate_and_dictionary_alone(owner) -> None
 
 
 def test_login_username_nul_is_a_field_error_not_a_write_warning(app_real_login, owner) -> None:  # noqa: ANN001, F811
-    body = {"username": "nullogin1", "display_name": "로그인 시험", "status": "active", "password": PASSWORD}
-    assert owner.post("/users", json=body).status_code == 201
+    made = owner.post("/users", json={"username": "nullogin1", "display_name": "로그인 시험"})
+    assert made.status_code == 201, made.text
+    temp = made.json()["temp_password"]  # 발급 → 임시 비밀번호로 로그인 → 본인 비밀번호(PASSWORD)로 변경
+    first = _client(app_real_login, "nullogin1", temp)
+    body = {"current_password": temp, "new_password": PASSWORD, "new_password_confirm": PASSWORD}
+    assert first.post("/auth/password", json=body).status_code == 204
     anon = _client(app_real_login)
     res = anon.post("/auth/login", json={"username": "nul\x00login1", "password": PASSWORD})
     _refused(res, "body", "username", raws=("nul\x00login1",))
@@ -402,10 +417,9 @@ def test_review_decision_choice_nul_and_length(owner) -> None:  # noqa: ANN001, 
 
 def test_plain_text_is_stored_unchanged_and_length_errors_keep_their_type(owner) -> None:  # noqa: ANN001, F811
     name = "홍\t길동\n— 😀"
-    res = owner.post("/users", json={"username": "nulplain1", "display_name": name, "status": "active",
-                                     "password": PASSWORD})  # fmt: skip
-    assert res.status_code == 201 and res.json()["display_name"] == name, res.text
-    uid = res.json()["id"]
+    res = owner.post("/users", json={"username": "nulplain1", "display_name": name})
+    assert res.status_code == 201 and res.json()["user"]["display_name"] == name, res.text
+    uid = res.json()["user"]["id"]
     assert db_rows("select display_name from users where id = ?", uid) == [(name,)]
     too_long = (
         ("patch", f"/users/{uid}", {"display_name": "가" * 65}, "display_name"),

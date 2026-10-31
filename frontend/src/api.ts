@@ -809,7 +809,15 @@ export async function runAutomation(
 
 export type Role = 'user' | 'owner'
 export const ROLE_LABEL: Record<Role, string> = { user: '일반 사용자', owner: '최고 관리자(소유자)' }
-export type Me = { id: number; username: string; display_name: string; role: Role; role_label: string }
+export type Me = {
+  id: number
+  username: string
+  display_name: string
+  role: Role
+  role_label: string
+  must_change_password: boolean // 임시 비밀번호로 로그인한 상태 — 본인 비밀번호를 정하기 전에는 업무 화면이 열리지 않는다 (서버도 403)
+  temp_password_expires_at: string | null // 임시 비밀번호 만료(KST)
+}
 
 const jsonBody = (body: unknown): RequestInit => ({
   headers: { 'Content-Type': 'application/json' },
@@ -832,30 +840,21 @@ export async function login(username: string, password: string): Promise<Me> {
   return json(await apiFetch(`${API_BASE}/auth/login`, { method: 'POST', ...jsonBody({ username, password }) }))
 }
 
-export async function setupOwner(body: { username: string; display_name: string; password: string }): Promise<Me> {
-  return json(await apiFetch(`${API_BASE}/auth/setup`, { method: 'POST', ...jsonBody(body) }))
-}
-
-export type SignupResult = { username: string; status: AccountStatus; status_label: string; message: string }
-
-/** 가입 신청 (역할·상태는 서버가 정한다 — 일반 사용자·승인 대기). 세션은 생기지 않는다. */
-export async function signup(body: {
-  username: string
-  display_name: string
-  password: string
-  password_confirm: string
-}): Promise<SignupResult> {
-  return json(await apiFetch(`${API_BASE}/auth/signup`, { method: 'POST', ...jsonBody(body) }))
-}
+// 공개 최초 설정(/auth/setup)·회원가입(/auth/signup)은 서버에서 종료됐다(410) — 계정은 설치 담당자의 초기화 명령과 관리자의 발급으로만 생긴다.
 
 export async function logout(): Promise<void> {
   await apiFetch(`${API_BASE}/auth/logout`, { method: 'POST' })
 }
 
-export async function changePassword(current_password: string, new_password: string): Promise<void> {
+/** 본인 비밀번호 변경. 임시 비밀번호 상태(발급 직후)에서 바꾸면 서버가 세션을 모두 끝내므로 새 비밀번호로 다시 로그인한다. */
+export async function changePassword(
+  current_password: string,
+  new_password: string,
+  new_password_confirm?: string,
+): Promise<void> {
   const res = await apiFetch(`${API_BASE}/auth/password`, {
     method: 'POST',
-    ...jsonBody({ current_password, new_password }),
+    ...jsonBody({ current_password, new_password, new_password_confirm }),
   })
   if (!res.ok) await json(res)
 }
@@ -882,6 +881,10 @@ export type UserAccount = {
   created_at: string
   last_login_at: string | null
   last_activity_at: string | null
+  must_change_password: boolean // 임시 비밀번호 상태 (첫 로그인에서 본인 비밀번호로 바꿔야 함)
+  temp_password_expires_at: string | null // 임시 비밀번호 만료(KST)
+  temp_password_expired: boolean // 임시 상태인데 만료 — 재발급 필요
+  auth_version: number // 재발급 요청에 되돌려 보내는 값(그 사이 바뀌었으면 서버가 덮지 않음) — 화면에 표시하지 않는다
 }
 
 export async function listUsers(params: { q?: string; status?: AccountStatus } = {}): Promise<UserAccount[]> {
@@ -892,13 +895,17 @@ export async function listUsers(params: { q?: string; status?: AccountStatus } =
   return json(await apiFetch(`${API_BASE}/users${qs ? `?${qs}` : ''}`))
 }
 
-/** 최고 관리자가 직접 추가하는 계정 — 항상 일반 사용자, 승인 여부(status)를 명시한다. */
-export async function createUser(body: {
-  username: string
-  display_name: string
-  status: 'active' | 'pending'
-  password: string
-}): Promise<UserAccount> {
+/** 발급 결과 — 임시 비밀번호(temp_password)는 이 응답에서만 받는다 (서버는 해시만 저장하고 다시 보여 주지 않는다). */
+export type Provisioned = {
+  user: UserAccount
+  temp_password: string
+  expires_at: string // KST
+  valid_hours: number
+  message: string
+}
+
+/** 사용자 계정 발급 — 아이디·표시 이름만 보내고 서버가 임시 비밀번호를 만든다 (항상 일반 사용자·이용 중). */
+export async function provisionUser(body: { username: string; display_name: string }): Promise<Provisioned> {
   return json(await apiFetch(`${API_BASE}/users`, { method: 'POST', ...jsonBody(body) }))
 }
 
@@ -908,9 +915,14 @@ export async function changeUserStatus(id: number, action: StatusAction, reason:
   return json(await apiFetch(`${API_BASE}/users/${id}/${action}`, { method: 'POST', ...jsonBody({ reason }) }))
 }
 
-export async function resetPassword(id: number, password: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/users/${id}/password`, { method: 'POST', ...jsonBody({ password }) })
-  if (!res.ok) await json(res)
+/** 임시 비밀번호 재발급 — 기존 비밀번호·세션은 즉시 효력을 잃는다. expectedAuthVersion은 목록에서 본 값(필수 — 없으면 서버가 422, 다른 재발급·상태 변경이 먼저면 409). */
+export async function reissuePassword(id: number, expectedAuthVersion: number): Promise<Provisioned> {
+  return json(
+    await apiFetch(`${API_BASE}/users/${id}/password`, {
+      method: 'POST',
+      ...jsonBody({ expected_auth_version: expectedAuthVersion }),
+    }),
+  )
 }
 
 // ---------------------------------------------------------------- 관리 화면 (/moajwoAdmin)

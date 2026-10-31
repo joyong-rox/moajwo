@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import HTTPException, Response
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
@@ -67,8 +66,11 @@ def test_above_subtotal_needs_complete_group(tmp_path: Path) -> None:
 # ---------------------------------------------------------------- ④ 최초 소유자 경쟁
 
 
-def test_initial_owner_setup_is_atomic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app import auth_api
+def test_initial_owner_setup_is_atomic_sqlite_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """같은 프로세스의 두 스레드가 동시에 초기화(설치 명령이 부르는 create_owner)해도 소유자는 한 명이고, 진 쪽은
+    SetupDone이며 계정·세션을 남기지 않는다. 공개 최초 설정 API는 종료(410)라 create_owner를 직접 부른다.
+    빈 임시 SQLite 파일 DB — 세션 DB와 무관한 SQLite 시험(별도 프로세스·실제 DB 경쟁은 아래 across_processes)."""
+    from app import auth
     from app.db import Base
     from app.models import AuthSession, User
 
@@ -76,42 +78,38 @@ def test_initial_owner_setup_is_atomic(tmp_path: Path, monkeypatch: pytest.Monke
     Base.metadata.create_all(engine)
     Session = sessionmaker(engine)
     barrier = threading.Barrier(2)
-    real_hash = auth_api.hash_password
+    real_hash = auth.hash_password
 
-    def slow_hash(password: str) -> str:  # 두 요청이 모두 '계정 0개' 검사를 통과한 뒤 저장하게 만든다
+    def slow_hash(password: str) -> str:  # 두 쪽이 모두 '초기화 전' 검사를 통과한 뒤 저장하게 만든다
         barrier.wait(timeout=10)
         return real_hash(password)
 
-    monkeypatch.setattr(auth_api, "hash_password", slow_hash)
+    monkeypatch.setattr(auth, "hash_password", slow_hash)
     outcomes: list[Any] = []
 
     def attempt(name: str) -> None:
         with Session() as db:
             try:
-                body = auth_api.SetupIn(username=name, display_name=name, password="password-123")
-                auth_api.setup(body, Response(), db)
+                auth.create_owner(db, name, name, "password-123", reason="동시 초기화 시험")
                 outcomes.append(name)
-            except HTTPException as exc:
-                outcomes.append(exc.status_code)
+            except auth.SetupDone:
+                outcomes.append("done")
 
     threads = [threading.Thread(target=attempt, args=(n,)) for n in ("ownera", "ownerb")]
     for t in threads:
         t.start()
     for t in threads:
         t.join(30)
-    assert sorted(map(str, outcomes)) == sorted(["409", next(o for o in outcomes if isinstance(o, str))])
+    assert len(outcomes) == 2 and outcomes.count("done") == 1, outcomes
+    winner = next(o for o in outcomes if o != "done")
     with Session() as db:
         users = list(db.scalars(select(User)))
-        assert [u.role for u in users] == ["owner"]
-        sessions = list(db.scalars(select(AuthSession)))
-        assert sessions and all(s.user_id == users[0].id for s in sessions)
+        assert [(u.username, u.role) for u in users] == [(winner, "owner")]
+        assert list(db.scalars(select(AuthSession))) == []  # 초기화 명령은 세션을 만들지 않는다 (로그인은 따로)
     # 소유자가 있는 설치는 다시 열리지 않는다
     with Session() as db:
-        with pytest.raises(HTTPException) as info:
-            auth_api.setup(
-                auth_api.SetupIn(username="late", display_name="late", password="password-123"), Response(), db
-            )
-        assert info.value.status_code == 409
+        with pytest.raises(auth.SetupDone):
+            auth.create_owner(db, "late", "late", "password-123", reason="늦은 초기화")
         assert db.scalar(select(func.count(User.id))) == 1
 
 
@@ -373,32 +371,32 @@ def test_header_search_scope_is_bounded(tmp_path: Path) -> None:
 _SETUP_CHILD = r"""
 import json, os, sys, time
 from pathlib import Path
-from fastapi import HTTPException, Response
-from app import auth_api
+from app import auth
 from app.db import SessionLocal
 
 flag_dir, name = Path(sys.argv[1]), sys.argv[2]
-real_hash = auth_api.hash_password
+real_hash = auth.hash_password
 
-def gated_hash(password):  # '계정 0개' 검사를 통과한 뒤, 두 프로세스가 모두 여기 올 때까지 기다린다
+def gated_hash(password):  # '계정 0개' 검사를 통과한 뒤, 두 프로세스가 모두 여기 올 때까지 기다린다 (create_owner 안)
     (flag_dir / f"ready-{name}").touch()
     deadline = time.time() + 20
     while len(list(flag_dir.glob("ready-*"))) < 2 and time.time() < deadline:
         time.sleep(0.02)
     return real_hash(password)
 
-auth_api.hash_password = gated_hash
+auth.hash_password = gated_hash
 with SessionLocal() as db:
     try:
-        auth_api.setup(auth_api.SetupIn(username=name, display_name=name, password="password-123"), Response(), db)
+        auth.create_owner(db, name, name, "password-123", reason="동시 초기화 시험")
         print(json.dumps({"name": name, "result": "created"}))
-    except HTTPException as exc:
-        print(json.dumps({"name": name, "result": exc.status_code}))
+    except auth.SetupDone:
+        print(json.dumps({"name": name, "result": "done"}))
 """
 
 
 def test_initial_owner_race_across_processes(tmp_path: Path) -> None:
-    """④ 재검증: 별도 프로세스·별도 DB 연결의 동시 최초 설정에서도 소유자는 한 명, 진 쪽은 409·계정/세션 없음.
+    """④ 재검증: 별도 프로세스·별도 DB 연결의 동시 초기화(설치 명령이 부르는 create_owner)에서도 소유자는 한 명, 진 쪽은
+    SetupDone·계정/세션 없음.
     SQLite 실행은 새 데이터 폴더의 SQLite 파일, PostgreSQL 실행은 일회용 시험 서버의 새 DB로 한다."""
     import json
     import os
@@ -442,7 +440,7 @@ def test_initial_owner_race_across_processes(tmp_path: Path) -> None:
     outputs = [p.communicate(timeout=60) for p in procs]
     assert all(out.strip() for out, _ in outputs), [err[-500:] for _, err in outputs]
     results = [json.loads(out.strip().splitlines()[-1]) for out, _ in outputs]
-    assert sorted(str(r["result"]) for r in results) == ["409", "created"], results
+    assert sorted(str(r["result"]) for r in results) == ["created", "done"], results
     winner = next(r["name"] for r in results if r["result"] == "created")
     engine = create_engine(url.replace("postgresql://", "postgresql+psycopg://", 1))
     with engine.connect() as db:
@@ -452,7 +450,7 @@ def test_initial_owner_race_across_processes(tmp_path: Path) -> None:
     if POSTGRES:
         pg_database("race_owner", drop=True)
     assert [(u[1], u[2]) for u in users] == [(winner, "owner")]
-    assert sessions == [(users[0][0],)]
+    assert sessions == []  # 초기화 명령은 세션을 만들지 않는다 (로그인은 따로)
 
 
 def test_mapping_logs_do_not_contain_pii_column_names(caplog: pytest.LogCaptureFixture) -> None:

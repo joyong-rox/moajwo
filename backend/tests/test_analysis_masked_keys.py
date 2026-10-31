@@ -16,7 +16,7 @@ from app.analysis import POLICY
 from app.mapping_review import raw_mark
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_analysis import _body, _db, _file, _preview, _run, _upload, _xlsx
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 
 RAW = ["kim1@example.com", "kim2@example.com", "010-1234-5678", "010-9999-5678"]
 MAP = {"시도": "sido", "시군구": "sigungu", "인구수": "population"}
@@ -28,9 +28,7 @@ TWO = [HDR, ["서울특별시", "가팀 kim1@example.com", 10], ["부산광역�
 
 @pytest.fixture(scope="module")
 def mk(app_real_login, owner) -> TestClient:  # noqa: F811
-    res = owner.post("/users", json={"username": "mk-user1", "display_name": "MK-USER1", "status": "active",
-                                     "password": "pass-mk-user1"})  # fmt: skip
-    assert res.status_code == 201, res.text
+    _provision_user(owner, app_real_login, "mk-user1", "pass-mk-user1", "MK-USER1")
     return _client(app_real_login, "mk-user1", "pass-mk-user1")
 
 
@@ -285,9 +283,7 @@ def test_bins_classify_each_numbered_group_on_its_own(mk: TestClient) -> None:
 
 
 def test_owner_reads_the_same_numbers_and_other_users_get_nothing(app_real_login, owner, mk: TestClient) -> None:  # noqa: F811
-    res = owner.post("/users", json={"username": "mk-user2", "display_name": "MK-USER2", "status": "active",
-                                     "password": "pass-mk-user2"})  # fmt: skip
-    assert res.status_code == 201, res.text
+    _provision_user(owner, app_real_login, "mk-user2", "pass-mk-user2", "MK-USER2")
     other = _client(app_real_login, "mk-user2", "pass-mk-user2")
     fid = _file(mk, "f1_perm.xlsx", TWO, MAP)
     rid = _run(mk, _body([fid], group_by=["sigungu"]))["id"]

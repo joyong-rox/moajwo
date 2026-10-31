@@ -120,14 +120,18 @@ def overview(
 
 
 ACTION_LABEL = {
-    "setup": "최초 설정",
-    "signup": "가입 신청",
-    "create": "계정 추가",
+    "setup": "최초 설정(설치 초기화)",
+    "signup": "가입 신청(예전 공개 가입)",
+    "create": "계정 추가(예전 방식)",
+    "provision": "계정 발급(임시 비밀번호)",
     "approve": "가입 승인",
     "reject": "가입 반려",
     "suspend": "이용 중지",
     "resume": "이용 재개",
-    "password_reset": "비밀번호 초기화",
+    "password_reset": "임시 비밀번호 재발급",
+    "first_password_change": "본인 비밀번호 설정(최초 변경)",
+    "owner_renamed": "관리자 아이디 전환(admin)",
+    "admin_recover": "관리자 복구(설치 담당자)",
     "role_migrated": "역할 전환(관리자→일반)",
     "migration_check": "전환 확인 필요",
 }

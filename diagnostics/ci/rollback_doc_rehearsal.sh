@@ -181,7 +181,8 @@ check() {  # check <이름> <값> <있어야 하는 조각들...> — 모두 있
 git checkout -q --detach "$OLD"
 docker compose up -d --build --wait > "$OUT/old-up.log" 2>&1
 rc=$?; check old.up "exit=$rc · docker compose up -d --build --wait ($(git rev-parse --short HEAD))" "exit=0"
-res seed "$(python3 "$HERE/deploy_probe.py" seed http://127.0.0.1:8080 "$OUT/seed.json" 2>&1 | tail -1)" "최초 소유자·합성 CSV·매핑 확정·묶기 결과"
+docker compose exec -T backend python -m app.adminctl init --yes --password-stdin <<< "$PROBE_PW" > /dev/null 2>&1 || true  # 0022 이후 판용 (이전 판은 setup)
+res seed "$(python3 "$HERE/deploy_probe.py" seed http://127.0.0.1:8080 "$OUT/seed.json" 2>&1 | tail -1)" "소유자(설정 또는 admin 로그인)·합성 CSV·매핑 확정·묶기 결과"
 snapshot old
 OLD_B=$(img moajwo-backend:latest); OLD_F=$(img moajwo-frontend:latest)
 mkdir -p backups && chmod 777 backups

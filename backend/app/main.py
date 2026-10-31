@@ -29,7 +29,7 @@ from app import (
     review_api,
     validation_api,
 )
-from app.auth import current_user
+from app.auth import require_full_access
 from app.config import API_DOCS
 from app.db import db_failure, get_session
 from app.output_slot import OutputBusy
@@ -152,9 +152,11 @@ async def output_busy(_: Request, exc: OutputBusy) -> JSONResponse:
     return JSONResponse(body, status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers={"Retry-After": "10"})
 
 
-# 로그인 없이 열리는 것은 /health 와 로그인 API(/auth/status·setup·login·logout)뿐이다
+# 로그인 없이 열리는 것은 /health 와 로그인 API(/auth/status·login·logout — setup·signup은 종료돼 410)뿐이다.
+# 업무 라우터는 모두 본인 비밀번호로 로그인한 계정만 쓴다 — 임시 비밀번호 상태(발급 직후)는 auth 라우터의 비밀번호 변경·
+# 본인 조회·로그아웃만 할 수 있고 여기서는 403이다 (app/auth.py require_full_access)
 app.include_router(auth_api.router)
-LOGIN_REQUIRED = [Depends(current_user)]
+LOGIN_REQUIRED = [Depends(require_full_access)]
 for router in (
     auth_api.users_router,
     files.router,

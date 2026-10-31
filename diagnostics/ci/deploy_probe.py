@@ -51,7 +51,13 @@ class Client:
 
 def seed(base: str, out: str) -> dict:
     c, pw = Client(base), os.environ["PROBE_PW"]
-    s_setup, _ = c.call("POST", "/api/auth/setup", {"username": "rehearsal", "display_name": "리허설", "password": pw})
+    # 이전 판(공개 최초 설정이 열려 있던 코드)이면 설정으로 계정을 만들고, 0022 이후 판(410)이면 호출한 쪽이 먼저 설치 초기화
+    # 명령(app.adminctl init)으로 만든 admin으로 로그인한다. 어느 쪽 계정인지는 seed json에 남겨 check가 같은 계정으로 들어간다
+    username = "rehearsal"
+    s_setup, _ = c.call("POST", "/api/auth/setup", {"username": username, "display_name": "리허설", "password": pw})
+    if s_setup == 410:
+        username = "admin"
+        s_setup, _ = c.call("POST", "/api/auth/login", {"username": username, "password": pw})
     s, up = c.call("POST", "/api/files", csv=CSV)
     fid = up[0]["id"]
     pv = c.call("GET", f"/api/files/{fid}/preview")[1]
@@ -62,7 +68,7 @@ def seed(base: str, out: str) -> dict:
     plan = c.call("POST", "/api/bundle/plan", {"file_ids": [fid]})[1]
     s_run, run = c.call("POST", "/api/bundle/run", {"file_ids": [fid], "expected_basis": plan["basis"]})
     s_dl, raw = c.call("GET", f"/api/runs/{run['id']}/download")
-    info = {"setup": s_setup, "upload": s, "file_id": fid, "mapping": s_map, "bundle": s_run, "run_id": run["id"],
+    info = {"setup": s_setup, "username": username, "upload": s, "file_id": fid, "mapping": s_map, "bundle": s_run, "run_id": run["id"],
             "download": s_dl, "result_sha256": hashlib.sha256(raw).hexdigest() if isinstance(raw, bytes) else None}  # fmt: skip
     with open(out, "w", encoding="utf-8") as f:
         json.dump(info, f, ensure_ascii=False)
@@ -73,7 +79,7 @@ def check(base: str, seed_file: str, stage: str) -> dict:
     with open(seed_file, encoding="utf-8") as f:
         info = json.load(f)
     c = Client(base)
-    s_login, me = c.call("POST", "/api/auth/login", {"username": "rehearsal", "password": os.environ["PROBE_PW"]})
+    s_login, me = c.call("POST", "/api/auth/login", {"username": info.get("username", "rehearsal"), "password": os.environ["PROBE_PW"]})
     s_runs, runs = c.call("GET", "/api/runs")
     s_dl, raw = c.call("GET", f"/api/runs/{info['run_id']}/download")
     same = isinstance(raw, bytes) and hashlib.sha256(raw).hexdigest() == info["result_sha256"]

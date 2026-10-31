@@ -286,6 +286,13 @@ class User(Base):
     locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 임시 비밀번호 상태 (0022 — 관리자 발급·재발급·설치 담당자의 --generate): True이면 본인 비밀번호로 바꾸기 전까지
+    # 비밀번호
+    # 변경·본인 조회·로그아웃만 할 수 있고(제한된 로그인), temp_password_expires_at(UTC)이 지나면 로그인하지
+    # 못한다(재발급).
+    # 기존 계정은 False·NULL — 현재 비밀번호·상태 그대로
+    must_change_password: Mapped[bool] = mapped_column(default=False)
+    temp_password_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MappingAnalysis(Base):

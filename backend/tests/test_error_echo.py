@@ -28,13 +28,17 @@ def test_login_validation_error_does_not_echo_the_password(app_real_login) -> No
     assert "input" not in error
 
 
-def test_signup_validation_error_does_not_echo_personal_values(app_real_login) -> None:  # noqa: F811
-    c = TestClient(app_real_login)
+def test_provision_validation_error_does_not_echo_personal_values(app_real_login, owner) -> None:  # noqa: F811
     body = {"username": "A!", "password": SECRET, "display_name": "x", "email": EMAIL, "phone": PHONE}
-    res = c.post("/auth/signup", json=body)
+    res = owner.post("/users", json=body)  # 계정 발급은 아이디·표시 이름만 받는다 — 나머지는 extra_forbidden
     assert res.status_code == 422
     assert not [v for v in (SECRET, EMAIL, PHONE) if v in res.text], res.text
-    assert {tuple(e["loc"]) for e in res.json()["detail"]} >= {("body", "password_confirm"), ("body", "email")}
+    assert {tuple(e["loc"]) for e in res.json()["detail"]} >= {("body", "password"), ("body", "email")}
+    # 종료된 공개 가입·최초 설정(410)도 보낸 값을 되돌리지 않는다
+    anon = TestClient(app_real_login)
+    for path in ("/auth/signup", "/auth/setup"):
+        res = anon.post(path, json=body)
+        assert res.status_code == 410 and not [v for v in (SECRET, EMAIL, PHONE) if v in res.text], (path, res.text)
 
 
 def test_logged_in_validation_error_does_not_echo_the_body(owner) -> None:  # noqa: F811

@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from app import analysis
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_analysis import _file, _preview, _run
-from tests.test_auth import _client, app_real_login  # noqa: F401
+from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
 from tests.test_mail_statistics import evaluate
 
 COLS = ["통계일자", "기관코드", "조직코드", "조직 명", "발신Mail건수"]
@@ -65,9 +65,7 @@ TWO = [COLS, ["2026-10-20", 1250000, 1250370, "운영지원과", 680], ["2026-10
 
 @pytest.fixture(scope="module")
 def oc(app_real_login, owner) -> TestClient:  # noqa: F811
-    res = owner.post("/users", json={"username": "oc-user1", "display_name": "OC-USER1", "status": "active",
-                                     "password": "pass-oc-user1"})  # fmt: skip
-    assert res.status_code == 201, res.text
+    _provision_user(owner, app_real_login, "oc-user1", "pass-oc-user1", "OC-USER1")
     return _client(app_real_login, "oc-user1", "pass-oc-user1")
 
 

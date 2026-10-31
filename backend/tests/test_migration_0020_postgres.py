@@ -28,8 +28,8 @@ from app.db import Base
 from tests.conftest import PG_ADMIN, pg_database, pg_role_with_password
 from tests.test_migrations_postgres import BACKEND, _alembic, _engine, needs_admin
 
-HEAD, PREVIOUS = "0020_run_worker_lease", "0019_analysis_runs"  # 이 파일은 0020의 경계를 본다 (지금 head는 0021)
-TOP = "0021_run_request_key"
+HEAD, PREVIOUS = "0020_run_worker_lease", "0019_analysis_runs"  # 이 파일은 0020의 경계를 본다 (지금 head는 0022)
+TOP = "0022_temp_passwords"
 INSERT_RUN = (
     "INSERT INTO runs (status, trigger, input_file_count, file_ids, row_count, change_count, warning_count, summary"
     "{extra}) VALUES (:status, 'manual', 0, '[]', 0, 0, 0, '{{}}'{values}) RETURNING id"
