@@ -13,14 +13,14 @@
 **하지 않는 것**: 운영 볼륨 삭제, `docker compose down -v`, 자동 DB downgrade. backend는 일반 사용자(`app`)로 실행합니다
 (원본·결과 파일의 읽기 전용 보호는 root로 실행하면 효과가 없음).
 
-## 0. 현행 실행 기준 (2026-10-29 반영 뒤)
+## 0. 현행 실행 기준 (2026-10-31 반영 뒤)
 
 | 항목 | 값 |
 |---|---|
-| 지금 운영 | main `b12ba63` (PR #60 병합, 트리 `845f953a…`) · DB `0021_run_request_key` · backend `sha256:16b805ca3b3762c530e352bc6ef40c75e754e7712b2a2bfd19f76d260b9ce1ef` · frontend `sha256:bf25700f2d7423900b06bc34ac3e3ce450b228964350da7181ed67dde20ca593` (2026-10-29 20:51 반영, 기록 `backups/deploy-20261029-205119.log`; 그 전 2026-10-28 11:44 반영은 main `71f36eb`·backend `6874cec0…`·frontend `883f7fa5…`, 기록 `backups/deploy-20261028-114420.log`). 0022(관리자 발급·임시 비밀번호, 12장)는 main에 병합됐지만 **아직 운영에 반영하지 않았다** |
-| 다음 이미지 교체 명령 | `bash scripts/deploy.sh <승인 SHA> 0021_run_request_key` — 두 번째 인자는 **지금 운영 리비전 0021**입니다. 2026-10-28에 쓴 `… 0019_analysis_runs`는 그 반영의 출발점이라 다시 쓰지 않습니다 (운영이 0021이라 2단계에서 멈춤) |
+| 지금 운영 | main `5cddc0e` (PR #65 병합, 트리 `045f6c0d…`) · DB **`0022_temp_passwords`** · backend `sha256:c5f2a4c2f0df4f4e759439af4e4ecca0803ddde77cdcba72d59b45b4918e3d8a` · frontend `sha256:276195b7e4a8d5870a9cfbc18f6ba509ac30da768dcde6ff73afcefaa31ce17b` (2026-10-31 16:58 반영, 기록 `backups/deploy-20261031-165653.log`, 롤백 단위 `rollback-20261031-165653` + `backups/rollback-20261031-165653.compose.yml` + 반영 직전 백업 `moajwo-data-20261031-165653.tgz`; 그 전 2026-10-29 20:51 반영은 main `b12ba63`·backend `16b805ca…`·frontend `bf25700f…`, 기록 `backups/deploy-20261029-205119.log`). **관찰 기간**(2026-10-31 16:58 ~ 소유자의 종료 판정, [RECOVERY_RUNBOOK.md](RECOVERY_RUNBOOK.md) 8절) 동안은 운영 반영을 하지 않는다 |
+| 다음 이미지 교체 명령 | `bash scripts/deploy.sh <승인 SHA> 0022_temp_passwords` — 두 번째 인자는 **지금 운영 리비전 0022**입니다. 2026-10-31에 쓴 `… 0021_run_request_key`는 그 반영의 출발점이라 다시 쓰지 않습니다 (운영이 0022라 2단계에서 멈춤). 관찰 기간이 끝나기 전에는 실행하지 않고, 새 마이그레이션(0023~)은 관찰 종료 판정 뒤에 반영합니다 |
 | 3단계 (이 판부터) | 자원 확인 → 후보 태그로 하나씩 빌드 → 완성 이미지 목록 대조 + 격리 기동 점검 + 통과 기록 확인 (11장) → 백업 확인 뒤 5f에서 통과한 ID에만 latest를 옮기고(실제 ID로 확인) 6단계에서 다시 빌드하지 않고 전환 |
-| DB 변경이 없는 교체의 롤백 | 반영 직전에 실행 중이던 이미지(롤백 태그 — 지금 위의 backend·frontend) + 이전 포트 연결 + 리비전 0021 그대로. 4장 B 0단계 출력이 '리비전 0021_run_request_key → 0021_run_request_key'이면 3~5단계(정리·downgrade)를 건너뛰고 1·2·6·7단계만 합니다 |
+| DB 변경이 없는 교체의 롤백 | 반영 직전에 실행 중이던 이미지(롤백 태그 — 지금 위의 backend·frontend) + 이전 포트 연결 + 리비전 0022 그대로. 4장 B 0단계 출력이 '리비전 0022_temp_passwords → 0022_temp_passwords'이면 3~5단계(정리·downgrade)를 건너뛰고 1·2·6·7단계만 합니다. **지금 운영(0022)을 구판(0021)으로 되돌리는 것은 B′**(B 0~7 + P1, 12-4·런북 4절)로만 — 임시 상태 계정 0일 때 |
 | 2026-10-27 실행 기준 (PR #58, 0019 출발) | 이미 반영된 기록입니다 — 10장과 `backups/deploy-20261028/RECORD.md`. 8·9·10장의 '0019 출발'·'0020 출발' 설명은 그 반영에 대한 것입니다 |
 
 ## 1·2. 반영 실행: `scripts/deploy.sh` (준비 → 빌드 → 쓰기 중단 → 백업·검증 → 전환)
