@@ -1,0 +1,78 @@
+# 진단 전용: 통합 후보의 정적 검사 — backend ruff(위반·형식), 진단 폴더 ruff, frontend oxlint·tsc -b·vite build, 관찰 도구 고정 시각 시험(scripts/test_observe.sh).
+# 같은 명령을 main에도 돌려, 위반이 나오면 원래 있던 것인지 구분한다 (main 결과는 작업 성공·실패에 넣지 않음).
+# 'ci/static-*' 브랜치를 올릴 때만 돈다 — main·PR에는 영향이 없다. 운영·Render·Neon 서비스로 요청하지 않는다.
+# 이 파일은 저장소 사본이다(2026-10-31 7-2차부터 추적) — 진단 가지는 diagnostics/ci/README.md의 방식대로 후보 트리 + 이 파일로 만든다.
+name: static (diagnostic)
+
+on:
+  push:
+    branches: ["ci/static-**"]
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONIOENCODING: utf-8
+      MAIN_SHA: 1f50e0ef301000e2d7c9b98dbaa0692a4fd65f21  # 병합 전 main (2026-10-31 #66까지 병합)
+      # frontend/Dockerfile의 빌드 단계와 같은 기반 이미지
+      NODE_IMAGE: node:24-alpine
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: candidate
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.MAIN_SHA }}
+          path: main
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: ruff (the version pinned in backend/requirements-dev.txt) and the node image
+        run: |
+          python -m pip install "$(grep -E '^ruff==' candidate/backend/requirements-dev.txt)"
+          mkdir -p out
+          ruff --version | tee out/ruff-version.txt
+          docker pull -q "$NODE_IMAGE"
+          docker image inspect --format '{{index .RepoDigests 0}}' "$NODE_IMAGE" | tee out/node-image.txt
+          docker run --rm "$NODE_IMAGE" node --version | tee -a out/node-image.txt
+      - name: observe.sh fixed-time tests (synthetic DB and logs — no production, no Docker, no network)
+        run: |
+          bash -n candidate/scripts/observe.sh
+          bash candidate/scripts/test_observe.sh 2>&1 | tee out/observe-test.txt
+          exit "${PIPESTATUS[0]}"
+      - name: the same checks on the candidate and on main
+        run: |
+          check() {  # check <tree> <name> <dir> <command...> — 출력과 종료 코드를 남기고 계속한다
+            local tree=$1 name=$2 dir=$3; shift 3
+            local rc=0
+            (cd "$tree/$dir" && "$@") > "out/$tree-$name.txt" 2>&1 || rc=$?
+            echo "$rc" > "out/$tree-$name.exit"
+            printf '%-9s %-20s exit %s\n' "$tree" "$name" "$rc" | tee -a out/summary.txt
+          }
+          node_run() {  # node_run <script> — frontend 폴더를 붙인 node 컨테이너 안에서
+            docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -e CI=1 -v "$PWD:/app" -w /app "$NODE_IMAGE" sh -c "$1"
+          }
+          export -f node_run
+          for t in candidate main; do
+            git -C "$t" rev-parse HEAD | sed "s/^/$t /" | tee -a out/trees.txt
+            check "$t" backend-ruff-check backend ruff check .
+            check "$t" backend-ruff-format backend ruff format --check .
+            check "$t" diagnostics-ruff diagnostics ruff check .
+            check "$t" scripts-ruff scripts ruff check .
+            check "$t" frontend-npm-ci frontend bash -c 'node_run "npm ci --no-audit --no-fund"'
+            check "$t" frontend-oxlint frontend bash -c 'node_run "npm run lint"'
+            check "$t" frontend-tsc frontend bash -c 'node_run "npx tsc -b"'
+            check "$t" frontend-vite-build frontend bash -c 'node_run "npx vite build"'
+          done
+          # 작업의 성공·실패는 후보 결과만으로 정한다
+          ! grep -q -v '^0$' out/candidate-*.exit
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: static-check
+          path: out
+          retention-days: 30
