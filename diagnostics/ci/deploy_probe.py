@@ -212,7 +212,8 @@ def bprime(base: str, seed_file: str, stage: str, jar_file: str) -> dict:
     body = {"username": name, "display_name": "S", "password": "password-123", "password_confirm": "password-123"}
     s_signup, detail = fresh.call("POST", "/api/auth/signup", body)
     out["signup"] = s_signup
-    out["detail"] = (detail.get("detail") if isinstance(detail, dict) else str(detail))[:60] if detail is not None else None
+    d = detail.get("detail") if isinstance(detail, dict) else detail  # 201이면 사용자 객체라 detail이 없다
+    out["detail"] = str(d)[:60] if d is not None else None
     out["setup"] = fresh.call("POST", "/api/auth/setup", {"username": "x", "display_name": "x", "password": "password-123"})[0]
     s_direct, msg = Client(base).call("POST", "/auth/signup", {}, base=DIRECT_BACKEND)
     out["direct_backend"] = "refused" if s_direct == 0 else "reachable"

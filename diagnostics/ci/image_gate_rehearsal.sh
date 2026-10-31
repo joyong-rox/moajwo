@@ -229,8 +229,15 @@ if [ -f deploy/bprime/compose.bprime.yml ] && [ -f "$OUT/steps/stepP1.sh" ] && [
     '"logout": 204' '"session_me": 200' '"session_me_after": 200' '"setup": 409' '"direct_backend": "refused"'
   check bprime.ports "backend[$(ports_of backend)] frontend[$(ports_of frontend)] · 실행=이전 backend $(same "$OLD_B" "$(img_of backend)") frontend $(same "$OLD_F" "$(img_of frontend)") · $(rev)" \
     "backend[]" "frontend[8080/tcp -> 127.0.0.1:8080" "실행=이전 backend 같음 frontend 같음" "$OLD_REV (head)"
-  check bprime.conftest "$(grep -h 'syntax is ok\|test is successful' backups/bprime-*.conf.test 2>/dev/null | wc -l)줄 · 차단 블록 $(grep -c 'location = /api/auth/signup' backups/bprime-*.conf 2>/dev/null)개 · 원본 대비 $(diff <(grep -v 'B′\|location = /api/auth/signup\|default_type application/json\|return 410\|^    }$\|정확히 이 경로만' backups/bprime-*.conf) backups/bprime-*.conf.orig | wc -l)줄 차이" \
-    "2줄" "차단 블록 1개" "원본 대비 0줄 차이"
+  BPC=$(ls backups/bprime-*.conf 2>/dev/null | tail -1)
+  check bprime.conftest "nginx -t $(grep -h 'syntax is ok\|test is successful' "$BPC.test" 2>/dev/null | wc -l)줄 · 차단 블록 $(grep -c 'location = /api/auth/signup' "$BPC" 2>/dev/null)개 · $(python3 - deploy/bprime/signup-410.location "$BPC" <<'PY'
+import sys
+snip = open(sys.argv[1], encoding='utf-8').read()
+conf = open(sys.argv[2], encoding='utf-8').read()
+orig = open(sys.argv[2] + '.orig', encoding='utf-8').read()
+print('차단 블록을 빼면 원본과 같음' if snip in conf and conf.replace(snip, '', 1) == orig else '차단 블록을 빼도 원본과 다름')
+PY
+)" "nginx -t 2줄" "차단 블록 1개" "차단 블록을 빼면 원본과 같음"
   tick "P0 시작"
   check bprime.remove "$(run_box P0) · $(grep -h '^\[P0 완료\]' "$OUT/rollback-stepP0.log" | tail -1)" "done" "[P0 완료] B′ 해제"
   tick "P0 끝"
@@ -239,6 +246,7 @@ if [ -f deploy/bprime/compose.bprime.yml ] && [ -f "$OUT/steps/stepP1.sh" ] && [
     "backend[8000/tcp -> 127.0.0.1:8000" "frontend[8080/tcp -> 127.0.0.1:8080" "$OLD_REV (head)" '"login": 200' '"result_same": true'
   check bprime.secrets "비밀번호 $(grep -rcF "$PROBE_PW" "$OUT" | awk -F: '{s += $2} END {print s + 0}')회 · 쿠키 파일 $([ -e "$JAR" ] && echo 남음 || echo 없음) · 비밀 파일 $([ -e "$SECRET" ] && echo 남음 || echo 없음)" "비밀번호 0회" "쿠키 파일 없음" "비밀 파일 없음"
 fi
+rm -f "$JAR" "$SECRET"   # 점검이 실패해 남았더라도 결과 폴더 밖의 비밀 파일은 지운다
 docker compose logs --no-color > "$OUT/compose.log" 2>&1
 echo "== 결과: 통과 $PASS · 실패 $FAIL" | tee -a "$RES"
 [ "$FAIL" -eq 0 ]

@@ -493,7 +493,8 @@ echo "풀 백업: backups/$BK"
     || { echo "[중단] 구판 frontend 이미지의 nginx 설정을 읽지 못함 (아무것도 바꾸지 않음)"; exit 1; }
   awk -v blk="$(cat deploy/bprime/signup-410.location)" '!done && /^[[:space:]]*location \/api\/ \{/ { print blk; done = 1 } { print } END { exit done ? 0 : 1 }' "$CONF.orig" > "$CONF" \
     || { echo "[중단] 구판 nginx 설정에 'location /api/' 블록이 없어 차단 블록을 넣지 못함 — $CONF.orig 확인 (아무것도 바꾸지 않음)"; exit 1; }
-  docker run --rm -v "$HOSTDIR/$CONF:/etc/nginx/conf.d/default.conf:ro" --entrypoint nginx "moajwo-frontend:$TAG" -t > "$CONF.test" 2>&1 \
+  # 설정 검사는 단독 컨테이너라 compose 네트워크가 없다 — proxy_pass의 'backend' 이름 해석용으로만 주소를 준다(연결하지 않음)
+  docker run --rm --add-host backend:127.0.0.1 -v "$HOSTDIR/$CONF:/etc/nginx/conf.d/default.conf:ro" --entrypoint nginx "moajwo-frontend:$TAG" -t > "$CONF.test" 2>&1 \
     || { cat "$CONF.test"; echo "[중단] 만든 nginx 설정이 구판 이미지의 검사(nginx -t)를 통과하지 못함 (아무것도 바꾸지 않음)"; exit 1; }
   BPRIME_CONF="$HOSTDIR/$CONF" docker compose $RB -f deploy/bprime/compose.bprime.yml up -d --no-build --wait \
     || { echo "[중단] B′ 적용 기동 실패 — docker compose $RB -f deploy/bprime/compose.bprime.yml ps·logs 확인. 해제는 P0 상자"; exit 1; }
