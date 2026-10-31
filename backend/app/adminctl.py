@@ -42,6 +42,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
+from app.account_markers import GENERATED_TEMP_PASSWORD_NOTE
 from app.auth import (
     ADMIN_USERNAME,
     SETUP_KEY,
@@ -215,7 +216,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             owner = create_owner(
                 db, ADMIN_USERNAME, args.display_name, password,
                 reason="설치 초기화 명령(app.adminctl init) — 최고 관리자 계정"
-                + (" · 임시 비밀번호(첫 로그인에서 변경)" if generated else ""),
+                + (" · " + GENERATED_TEMP_PASSWORD_NOTE if generated else ""),
                 must_change=generated, expires_at=temp_password_expiry() if generated else None,
             )  # fmt: skip
         except AuthError as exc:
@@ -348,9 +349,10 @@ def cmd_recover(args: argparse.Namespace) -> int:
         )
         end_sessions(db, target.id)
         db.refresh(target)
+        # 생성 비밀번호면 사유 끝에 표식(app/account_markers.py 한 곳에서 정의) — 관찰 도구가 '발급'으로 세는 근거
         record_event(db, None, target, "admin_recover", target.status, target.status,
                      reason="설치 담당자의 복구 명령(app.adminctl recover) — 비밀번호 재설정 · 세션 종료"
-                     + (" · 임시 비밀번호(첫 로그인에서 변경)" if generated else ""),
+                     + (" · " + GENERATED_TEMP_PASSWORD_NOTE if generated else ""),
                      )  # fmt: skip
         db.commit()
         out(f"'{target.username}'의 비밀번호를 재설정하고 세션을 끝냈습니다 (번호·자료·이력 그대로).")

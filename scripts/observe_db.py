@@ -8,6 +8,8 @@
 #   그래서 비교는 모두 같은 형식의 UTC 문자열 한 기준으로 한다 — isoformat()의 'T'(공백보다 커서 같은 날짜의 값을 모두 과거로 만든다)나
 #   "KST일지도 모른다"는 완화(-9시간·두 기준 최댓값)는 쓰지 않는다.
 # 환경 변수: DB_PATH(기본 /data/moajwo.db) · START_UTC(관찰 시작, 필수) · NOW_UTC(고정 시각 — 시험용, 비우면 지금) · BASE_ROWS("rows <표> <n>;" 목록)
+#   OBS_MARKERS_PATH — 이력 사유 표식 모듈(backend/app/account_markers.py)의 경로. 표식 문자열은 그 파일 한 곳에서만 정의한다(앱·관찰 도구·시험 사례가 같이 씀).
+import importlib.util
 import json
 import os
 import re
@@ -15,6 +17,14 @@ import sqlite3
 from datetime import UTC, datetime
 
 FMT = "%Y-%m-%d %H:%M:%S"
+
+MARKERS = os.environ.get("OBS_MARKERS_PATH", "/app/app/account_markers.py")  # observe.sh가 넘긴다: 운영은 저장소 파일을 컨테이너에 ro로 붙인 경로, 시험은 저장소 경로
+_spec = importlib.util.spec_from_file_location("account_markers", MARKERS)
+if _spec is None or _spec.loader is None or not os.path.isfile(MARKERS):
+    raise SystemExit(f"[중단] 이력 표식 모듈을 읽을 수 없음: {MARKERS} (OBS_MARKERS_PATH)")
+_markers = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_markers)
+GENERATED_TEMP_PASSWORD_NOTE: str = _markers.GENERATED_TEMP_PASSWORD_NOTE
 
 
 def parse_utc(text: str) -> datetime:
@@ -76,10 +86,10 @@ out["temp_now"] = {
     "active": c.execute("select count(*) from users where must_change_password and status = ?", ("active",)).fetchone()[0],
     "other": c.execute("select count(*) from users where must_change_password and status != ?", ("active",)).fetchone()[0],
 }
-ISSUE_ACTIONS = ("provision", "password_reset", "admin_recover")
+ISSUE_ACTIONS = ("provision", "password_reset", "admin_recover", "setup")  # setup = 설치 초기화 명령(init --generate) — 설치 뒤에는 생기지 않지만 전수를 위해 둔다
 CLOSE_ACTIONS = ("first_password_change", "password_revoke")
 ev = c.execute(
-    "select target_id, action, created_at, coalesce(reason, '') from account_events where action in (?, ?, ?, ?, ?) and result = ? order by id",
+    "select target_id, action, created_at, coalesce(reason, '') from account_events where action in (?, ?, ?, ?, ?, ?) and result = ? order by id",
     (*ISSUE_ACTIONS, *CLOSE_ACTIONS, "ok"),
 ).fetchall()
 
@@ -87,11 +97,15 @@ ev = c.execute(
 def is_issue(action: str, reason: str) -> bool:
     if action in ("provision", "password_reset"):
         return True
-    return action == "admin_recover" and "임시 비밀번호" in reason  # 생성 비밀번호로 임시 상태가 된 경우만
+    # 설치 담당자 명령(init·recover)은 생성 비밀번호로 임시 상태가 된 경우만 — 표식은 account_markers.py 한 곳에서 정의
+    return action in ("admin_recover", "setup") and GENERATED_TEMP_PASSWORD_NOTE in reason
 
 
+# 열린 시간 계산(보수적): 발급 이력마다 같은 계정의 '다음' 닫는 이력(본인 변경·폐기)까지를 잰다. 본인 변경 없이 재발급이 이어지면 첫 발급의
+# 열린 시간은 그 뒤 닫는 이력까지로 재어 실제보다 길게 계산될 수 있다(과대 계산). 판정 로직은 그대로 둔다(7-3차 결정) — 발급이 겹치는 상황 자체가
+# 런북 8절의 원칙 위반이고, 과대 계산은 '통과'를 '실패'로 바꿀 뿐 그 반대는 없으므로 놓치는 쪽으로 틀리지 않는다.
 issues = []
-kinds = {"provision": 0, "password_reset": 0, "admin_recover": 0}
+kinds = {"provision": 0, "password_reset": 0, "admin_recover": 0, "setup": 0}
 for tid, action, created, reason in ev:
     t = ts(created)
     if t is None or not is_issue(action, reason) or t < start:

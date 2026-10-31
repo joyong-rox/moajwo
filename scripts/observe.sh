@@ -65,12 +65,14 @@ PY=${OBS_PY:-}
 if [ -n "${OBS_DB_PATH:-}" ]; then
   if [ -z "$PY" ]; then for cnd in python3 python; do "$cnd" -c 'import sqlite3' >/dev/null 2>&1 && { PY=$cnd; break; }; done; fi
   [ -n "$PY" ] || { say "[중단] 호스트 python을 찾지 못함 (OBS_PY=<python>으로 지정)"; exit 1; }
-  DB_PATH="$OBS_DB_PATH" START_UTC="$START_UTC" NOW_UTC="$NOW_UTC" BASE_ROWS="$BASE_ROWS" "$PY" -I -X utf8 "$PYROOT/scripts/observe_db.py" > "$DBJ" 2>"$OUT.dberr"
+  DB_PATH="$OBS_DB_PATH" START_UTC="$START_UTC" NOW_UTC="$NOW_UTC" BASE_ROWS="$BASE_ROWS" OBS_MARKERS_PATH="$PYROOT/backend/app/account_markers.py" \
+    "$PY" -I -X utf8 "$PYROOT/scripts/observe_db.py" > "$DBJ" 2>"$OUT.dberr"
   DBRC=$?
   j() { "$PY" -I -X utf8 -c "import json, sys; d = json.load(open(sys.argv[2], encoding='utf-8')); print(eval(sys.argv[1], {'d': d}))" "$1" "$DBJ" 2>/dev/null; }
 else
-  docker run --rm -i --entrypoint python -e START_UTC="$START_UTC" -e NOW_UTC="${OBS_NOW_UTC:-}" -e BASE_ROWS="$BASE_ROWS" \
-    -v "$VOLUME:/data:ro" "$RUN_B" - < "$ROOT/scripts/observe_db.py" > "$DBJ" 2>"$OUT.dberr"
+  # 이력 표식 모듈은 저장소 파일을 읽기 전용으로 붙여 넘긴다 — 실행 중인 이미지가 그 파일을 모르는 판이어도 같은 정의를 쓴다
+  docker run --rm -i --entrypoint python -e START_UTC="$START_UTC" -e NOW_UTC="${OBS_NOW_UTC:-}" -e BASE_ROWS="$BASE_ROWS" -e OBS_MARKERS_PATH=/markers/account_markers.py \
+    -v "$VOLUME:/data:ro" -v "$PYROOT/backend/app/account_markers.py:/markers/account_markers.py:ro" "$RUN_B" - < "$ROOT/scripts/observe_db.py" > "$DBJ" 2>"$OUT.dberr"
   DBRC=$?
   j() { docker run --rm -i --entrypoint python "$RUN_B" -c "import json, sys; d = json.load(sys.stdin); print(eval(sys.argv[1], {'d': d}))" "$1" < "$DBJ" 2>/dev/null; }
 fi
