@@ -30,7 +30,8 @@
 #      성공해야 '전환 완료'로 보고한다.
 #   롤백 단위 = 이전 이미지(롤백 태그) + 이전 컨테이너의 포트 연결(backups/rollback-<시각>.compose.yml) + 백업.
 #   이미지만 되돌리면 안 되는 반영(예: frontend 컨테이너 포트 80 → 8080)이 있어, 2단계에서 실행 중 컨테이너의 실제 포트
-#   연결을 Compose 덧붙임 파일(ports: !override)로 남긴다 — docs/DEPLOY.md 4장·8장.
+#   연결을 Compose 덧붙임 파일(ports: !override)로 남긴다 — docs/DEPLOY.md 4장·8장. B′(4장 — backend 호스트 포트를 닫은 덧붙임
+#   상태)에서 바로 반영하면 backend 포트 '없음'을 조회 실패와 구분해 빈 목록(ports: !override [])으로 기록한다.
 #
 # 격리 환경 검증용 환경변수 — 운영 반영에서는 하나라도 있으면 1단계에서 멈춘다. 격리 리허설은 DEPLOY_REHEARSAL=1을 함께 지정:
 #   DEPLOY_COMPOSE_ARGS  docker compose 인자 (예: "-f rehearsal/docker-compose.yml")
@@ -120,12 +121,21 @@ revision_in_volume() {  # 볼륨의 DB 리비전을 서버 없이 읽는다 (실
   [ -n "$out" ] || return 1
   printf '%s\n' "$out"
 }
-ports_of() {  # 컨테이너의 호스트 포트 연결 ('127.0.0.1:8080:80/tcp' 꼴, 공백 구분). 조회 실패·결과 없음이면 실패
+ports_of() {  # 컨테이너의 호스트 포트 연결 ('127.0.0.1:8080:80/tcp' 꼴, 공백 구분). 조회 실패면 실패. 조회가 성공했고 연결이 하나도
+  #           없으면 빈 줄을 찍고 성공 — B′(docs/DEPLOY.md 4장, backend 호스트 포트를 닫은 덧붙임 상태)에서 바로 반영할 때 backend가
+  #           그렇다. 연결 꼴(':' 두 개)이 아닌 값은 실패
   local out
   out=$(docker inspect "$1" --format \
     '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}:{{.HostPort}}:{{$p}} {{end}}{{end}}' 2>>"$LOG") || return 1
   out=$(printf '%s' "$out" | tr -s ' ' | sed 's/^ //; s/ $//')
-  case "$out" in *:*:*) printf '%s\n' "$out" ;; *) return 1 ;; esac
+  case "$out" in "") printf '\n' ;; *:*:*) printf '%s\n' "$out" ;; *) return 1 ;; esac
+}
+ports_yaml() {  # 서비스 하나의 ports 덧붙임(!override) — 연결이 없으면 빈 목록으로 적어 그 상태(B′의 backend)를 그대로 되돌리게 한다
+  local svc=$1 list=$2 p
+  echo "  $svc:"
+  if [ -z "$list" ]; then echo "    ports: !override []"; return 0; fi
+  echo "    ports: !override"
+  for p in $list; do echo "      - \"$p\""; done
 }
 wait_healthy() {  # backend healthy 대기 (최대 90초). 컨테이너 조회가 실패하면 실패
   local cid status
@@ -246,14 +256,10 @@ ROLLBACK_COMPOSE="$BACKUP_DIR/rollback-$TS.compose.yml"
   echo "# 반영 전($TS) 실행 중이던 컨테이너의 포트 연결 — 롤백 때 docker-compose.yml 뒤에 -f로 덧붙인다 (docs/DEPLOY.md 4장)"
   echo "# 롤백 태그: $TAG_REPO-backend:$TAG ${OLD_B:7:12} · $TAG_REPO-frontend:$TAG ${OLD_F:7:12}"
   echo "services:"
-  echo "  backend:"
-  echo "    ports: !override"
-  for p in $OLD_B_PORTS; do echo "      - \"$p\""; done
-  echo "  frontend:"
-  echo "    ports: !override"
-  for p in $OLD_F_PORTS; do echo "      - \"$p\""; done
+  ports_yaml backend "$OLD_B_PORTS"
+  ports_yaml frontend "$OLD_F_PORTS"
 } >"$ROLLBACK_COMPOSE" || fail "롤백용 포트 설정 파일을 쓸 수 없음: $ROLLBACK_COMPOSE"
-log "반영 전 포트 연결: backend $OLD_B_PORTS · frontend $OLD_F_PORTS → $ROLLBACK_COMPOSE"
+log "반영 전 포트 연결: backend ${OLD_B_PORTS:-(없음 — 호스트 포트를 닫은 덧붙임 상태, 빈 목록으로 기록)} · frontend ${OLD_F_PORTS:-(없음 — 빈 목록으로 기록)} → $ROLLBACK_COMPOSE"
 
 log "== 3. 후보 이미지 빌드와 반영 전 검증 (서비스 중단 없음 · latest 태그는 그대로)"
 image_name() {  # 서비스의 Compose 이미지 이름 — 설정(JSON)의 image, 없으면 Compose 기본 이름 <프로젝트>-<서비스>.

@@ -73,7 +73,7 @@ case "$1" in
     case "$*" in *PortBindings*)          # 포트 연결: 반영 전 frontend는 80, 전환 뒤는 8080
       [ "$S" = ports_fail ] && exit 1
       case "$2" in
-        *backend*) echo "127.0.0.1:8000:8000/tcp " ;;
+        *backend*) if [ "$S" = ports_none ] && ! switched; then echo ""; else echo "127.0.0.1:8000:8000/tcp "; fi ;;   # ports_none: B′처럼 backend 호스트 포트 없음(조회는 성공)
         *) if switched; then echo "127.0.0.1:8080:8080/tcp "; else echo "127.0.0.1:8080:80/tcp "; fi ;;
       esac
       exit 0 ;;
@@ -278,6 +278,10 @@ run_case() {  # 이름, 시나리오, 승인 SHA, 기대 종료 코드, 있어�
           && grep -qx '      - "127.0.0.1:8000:8000/tcp"' "$f"; } || { ok=0; why="$why 롤백용 포트 파일이 없거나 다름"; }
         grep -q "포트 연결: frontend 127.0.0.1:8080:80/tcp → 127.0.0.1:8080:8080/tcp" "$state/out" \
           || { ok=0; why="$why 전후 포트 연결 기록 없음"; } ;;
+      ROLLBACK_PORTS_NONE)  # B′(backend 호스트 포트 없음)에서 반영: backend는 빈 목록(!override []), frontend는 그대로 — 조회 실패와 구분
+        f=$(ls backups/rollback-*.compose.yml 2>/dev/null | head -1)
+        { [ -n "$f" ] && grep -qx '    ports: !override \[\]' "$f" && grep -qx '      - "127.0.0.1:8080:80/tcp"' "$f" \
+          && ! grep -q '8000' "$f"; } || { ok=0; why="$why backend 빈 포트 목록 기록이 없거나 다름"; } ;;
     esac
   done
   # 모든 사례 공통: 운영 볼륨은 읽기 전용으로만 마운트, 백업 DB 검사 컨테이너에는 운영 볼륨을 마운트하지 않음
@@ -300,6 +304,7 @@ run_case "정지후실행중서비스남음" ps_running      "$APPROVED"   1 "�
 run_case "두조회정상+빈결과"      ok              "$APPROVED"   0 "정지 확인 \\(두 조회 모두 성공"      DONE NO_START
 run_case "롤백단위에포트연결기록"  ok              "$APPROVED"   0 "이전 포트 backups/rollback-"          DONE ROLLBACK_PORTS
 run_case "포트조회실패"           ports_fail      "$APPROVED"   1 "frontend 컨테이너의 포트 연결을 확인할 수 없음|backend 컨테이너의 포트 연결을 확인할 수 없음" NO_STOP NO_BACKUP NO_SWITCH NO_START
+run_case "B′상태_backend포트없음_진행" ports_none    "$APPROVED"   0 "반영 전 포트 연결: backend \(없음 — 호스트 포트를 닫은 덧붙임 상태" DONE ROLLBACK_PORTS_NONE NO_START
 run_case "백업실패"               backup_fail     "$APPROVED"   1 "백업 생성·압축 검사 실패"            UNVERIFIED NO_SWITCH NO_DONE START
 run_case "전환후이미지조회실패"   post_image_fail "$APPROVED"   1 "전환 후 backend 이미지를 확인할 수 없음" NO_DONE
 run_case "전환후리비전조회실패"   post_rev_fail   "$APPROVED"   1 "전환 후 리비전을 확인할 수 없음"       NO_DONE

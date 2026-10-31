@@ -5,7 +5,8 @@
 - downgrade: 임시 비밀번호 상태인 계정이 **이용 중·이용 중지·만료와 관계없이** 하나라도 있으면 거절 — 리비전·새
   열·계정·업무 행 그대로. 이용 중지는 임시 상태를 풀지 않는다(중지된 임시 계정 하나만 남아도 거절). 실행 중인 결과
   실행(담당 있음)도 거절.
-- 모든 계정이 본인 비밀번호 변경을 끝낸 뒤에는 두 열만 지운다.
+- 모든 계정이 본인 비밀번호 변경을 끝낸 뒤에는 두 열만 지운다. 폐기된 중지 계정(임시 비밀번호 폐기 — 사용할 수 없는
+  비밀번호·must_change_password = false)은 세지 않으므로 그 계정이 있어도 내려간다.
 """
 
 from datetime import UTC, datetime
@@ -27,11 +28,11 @@ def _temp_columns(url: str) -> set[str]:
 
 
 def _user(url: str, name: str, *, role: str = "user", status: str = "active", active: bool = True,
-          must: bool = False, expires: datetime | None = None) -> int:  # fmt: skip
+          must: bool = False, expires: datetime | None = None, pw: str = "scrypt$synthetic") -> int:  # fmt: skip
     return _sql(url, "INSERT INTO users (username, display_name, password_hash, role, is_active, status, "
                      "failed_logins, auth_version, must_change_password, temp_password_expires_at) "
-                     "VALUES (:n, :n, 'scrypt$synthetic', :r, :a, :s, 0, 0, :m, :e) RETURNING id",
-                n=name, r=role, a=active, s=status, m=must, e=expires)[0][0]  # fmt: skip
+                     "VALUES (:n, :n, :p, :r, :a, :s, 0, 0, :m, :e) RETURNING id",
+                n=name, p=pw, r=role, a=active, s=status, m=must, e=expires)[0][0]  # fmt: skip
 
 
 def _snapshot(url: str) -> tuple:
@@ -65,6 +66,7 @@ def test_0022_refuses_downgrade_while_any_temp_password_account_exists_on_postgr
         _user(url, "t-susp", status="suspended", active=False, must=True, expires=FUTURE)
         _user(url, "t-expired", must=True, expires=PAST)
         _user(url, "done")
+        _user(url, "t-revoked", status="suspended", active=False, pw="!revoked")  # 폐기된 중지 계정 — 세지 않음
         run_id = _sql(url, INSERT_RUN.format(extra=", user_id", values=f", {rox}"), status="done")[0][0]
 
         def refused(*needles: str) -> None:
@@ -91,7 +93,7 @@ def test_0022_refuses_downgrade_while_any_temp_password_account_exists_on_postgr
         assert _sql(url, "SELECT username, password_hash, status FROM users ORDER BY id") == [
             ("rox", "scrypt$x", "active"), ("t-active", "scrypt$synthetic", "active"),
             ("t-susp", "scrypt$synthetic", "suspended"), ("t-expired", "scrypt$synthetic", "active"),
-            ("done", "scrypt$synthetic", "active"),
+            ("done", "scrypt$synthetic", "active"), ("t-revoked", "!revoked", "suspended"),
         ]  # fmt: skip
         assert _ok(_alembic(url, tmp_path, "upgrade", "head"))  # 다시 올리면 모두 False·NULL
         assert _sql(

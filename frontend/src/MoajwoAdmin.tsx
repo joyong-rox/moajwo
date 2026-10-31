@@ -8,12 +8,14 @@ import {
 } from "react";
 import {
   ACCOUNT_STATUS_LABEL,
+  ApiError,
   changeUserStatus,
   fetchAdminOverview,
   fetchAudit,
   listUsers,
   provisionUser,
   reissuePassword,
+  revokeTempPassword,
   type AccountStatus,
   type AdminOverview,
   type AuditEvent,
@@ -256,7 +258,14 @@ const STATUS_BADGE: Record<AccountStatus, string> = {
 
 type Pending =
   | { kind: "status"; user: UserAccount; action: StatusAction }
-  | { kind: "reissue"; user: UserAccount };
+  | { kind: "reissue"; user: UserAccount }
+  | { kind: "revoke"; user: UserAccount };
+
+/** 확인 패널·확정 버튼에 쓰는 작업 이름 */
+function pendingLabel(p: Pending): string {
+  if (p.kind === "status") return ACTION[p.action].label;
+  return p.kind === "reissue" ? "임시 비밀번호 재발급" : "임시 비밀번호 폐기";
+}
 
 const ACTION: Record<
   StatusAction,
@@ -292,6 +301,8 @@ function initialFilter(): AccountStatus | "all" {
 function passwordState(u: UserAccount): string {
   if (u.role === "owner") return "본인 비밀번호";
   if (u.status === "pending") return "예전 가입 신청 (승인 전)";
+  if (u.password_revoked)
+    return "임시 비밀번호 폐기됨 — 로그인 불가 (필요하면 재발급)";
   if (!u.must_change_password) return "본인 비밀번호";
   if (u.temp_password_expired) return "임시 비밀번호 만료 — 재발급 필요";
   return `임시 비밀번호 (${minute(u.temp_password_expires_at)}까지 · 첫 로그인에서 변경)`;
@@ -423,20 +434,38 @@ function UserAdmin() {
           `'${user.username}' ${ACTION[pending.action].label} 완료 — 현재 상태: ${updated.status_label}`,
         );
       } else {
-        // 목록에서 본 인증 버전을 함께 보낸다(서버는 이 값을 반드시 요구) — 그 사이 다른 재발급·상태 변경이 먼저 반영됐으면
-        // 서버가 409로 덮지 않는다. 확인값이 없는 화면은 보내지 않고 목록을 다시 읽어 대상을 확인하게 한다
+        // 목록에서 본 인증 버전을 함께 보낸다(서버는 이 값을 반드시 요구) — 그 사이 다른 재발급·폐기·상태 변경이 먼저
+        // 반영됐으면 서버가 409로 덮지 않는다. 확인값이 없는 화면은 보내지 않고 목록을 다시 읽어 대상을 확인하게 한다
         if (!Number.isInteger(user.auth_version)) {
           setPending(null);
-          setError("계정 목록의 확인값이 없어 재발급하지 않았습니다. 목록을 다시 읽었으니 대상을 확인한 뒤 다시 시도하세요.");
+          setError(
+            `계정 목록의 확인값이 없어 ${pendingLabel(pending)}하지 않았습니다. 목록을 다시 읽었으니 대상을 확인한 뒤 다시 시도하세요.`,
+          );
           return;
         }
-        const result = await reissuePassword(user.id, user.auth_version);
-        setIssued(result);
-        setNotice(null);
+        if (pending.kind === "reissue") {
+          const result = await reissuePassword(user.id, user.auth_version);
+          setIssued(result);
+          setNotice(null);
+        } else {
+          const updated = await revokeTempPassword(user.id, user.auth_version);
+          setNotice(
+            `'${user.username}' 임시 비밀번호 폐기 완료 — 현재 상태: ${updated.status_label}, 로그인 불가 (로그인하려면 재발급)`,
+          );
+        }
       }
       setPending(null);
     } catch (err) {
-      setError(message(err));
+      if (err instanceof ApiError && err.status === 409) {
+        // 그 사이 상태·인증 버전이 바뀜(다른 재발급·폐기·상태 변경이 먼저 반영) — 자동으로 다시 시도하지 않는다.
+        // 확인 패널을 닫고(오래된 확인값으로 다시 보내지 않게) 최신 목록을 다시 불러와 안내한다
+        setPending(null);
+        setError(
+          `${message(err)} — 자동으로 다시 시도하지 않았습니다. 최신 목록을 다시 불러왔으니 대상의 지금 상태를 확인한 뒤 필요하면 다시 선택하세요.`,
+        );
+      } else {
+        setError(message(err));
+      }
     } finally {
       // 성공·실패 모두 서버의 실제 상태로 목록을 다시 그린다 (중복 클릭·오래된 화면 대비)
       await load(applied);
@@ -451,7 +480,11 @@ function UserAdmin() {
         계정은 여기서 관리자가 발급합니다 (공개 회원가입은 받지 않습니다).
         발급하면 임시 비밀번호가 한 번 보이고, 사용자는 첫 로그인에서 본인
         비밀번호로 바꿔야 업무 화면을 쓸 수 있습니다. 비밀번호를 잊은 사용자에게는
-        '임시 비밀번호 재발급'을 합니다 (기존 로그인은 즉시 끊김). '승인 대기'는
+        '임시 비밀번호 재발급'을 합니다 (기존 로그인은 즉시 끊김). 이용 중지한
+        계정이 아직 임시 비밀번호 상태이면 '임시 비밀번호 폐기'로 그 비밀번호를
+        쓸 수 없게 합니다 (재개해도 로그인할 수 없고, 로그인하려면 재발급).
+        재발급·폐기가 '그 사이 바뀜'으로 거절되면 자동으로 다시 시도하지 않고
+        최신 목록을 다시 불러옵니다. '승인 대기'는
         공개 가입을 받던 때의 신청이며 승인하거나 반려할 수 있습니다. 가입
         반려(신청을 받지 않음)와 이용 중지(쓰던 계정을 멈춤)는 다른 상태이고,
         반려한 신청은 다시 승인할 수 없습니다. 최고 관리자(admin) 계정은 여기서
@@ -529,6 +562,17 @@ function UserAdmin() {
                 />
               </label>
             </>
+          ) : pending.kind === "revoke" ? (
+            <>
+              <h3>임시 비밀번호 폐기</h3>
+              <p>
+                대상: <strong>{pending.user.username}</strong> (
+                {pending.user.display_name}) · 이용 중지 상태의 임시 비밀번호를
+                폐기합니다. 비밀번호는 사용할 수 없는 값이 되고 임시 상태가
+                풀립니다. 계정 상태(이용 중지)는 바뀌지 않으며, 재개해도 로그인할
+                수 없고 로그인하려면 재발급이 필요합니다.
+              </p>
+            </>
           ) : (
             <>
               <h3>임시 비밀번호 재발급</h3>
@@ -552,7 +596,7 @@ function UserAdmin() {
             >
               {busy
                 ? "처리 중…"
-                : `'${pending.user.username}' ${pending.kind === "status" ? ACTION[pending.action].label : "임시 비밀번호 재발급"} 확정`}
+                : `'${pending.user.username}' ${pendingLabel(pending)} 확정`}
             </button>
             <button
               type="button"
@@ -642,6 +686,17 @@ function UserAdmin() {
                             onClick={() => open({ kind: "reissue", user: u })}
                           >
                             임시 비밀번호 재발급
+                          </button>
+                        )}
+                        {u.status === "suspended" && u.must_change_password && (
+                          <button
+                            type="button"
+                            className="mapping-confirm wk-danger"
+                            aria-label={`${u.username} 임시 비밀번호 폐기`}
+                            disabled={busy}
+                            onClick={() => open({ kind: "revoke", user: u })}
+                          >
+                            임시 비밀번호 폐기
                           </button>
                         )}
                         {u.status === "rejected" && (
@@ -771,7 +826,7 @@ function Audit() {
     <section className="admin admin-wide" aria-label="관리 이력">
       <h2>관리 이력</h2>
       <p className="upload-drop-hint">
-        계정 발급·임시 비밀번호 재발급·본인 비밀번호 설정·이용 중지·재개, 예전
+        계정 발급·임시 비밀번호 재발급·임시 비밀번호 폐기·본인 비밀번호 설정·이용 중지·재개, 예전
         가입 신청의 승인·반려, 관리자 아이디 전환·복구를 최신 순으로 최대 200건
         보여줍니다. '반영 안 됨'은 상태가 맞지
         않아(중복 클릭·이미 처리된 신청 등) 계정을 바꾸지 않은 요청입니다.

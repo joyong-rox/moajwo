@@ -884,7 +884,8 @@ export type UserAccount = {
   must_change_password: boolean // 임시 비밀번호 상태 (첫 로그인에서 본인 비밀번호로 바꿔야 함)
   temp_password_expires_at: string | null // 임시 비밀번호 만료(KST)
   temp_password_expired: boolean // 임시 상태인데 만료 — 재발급 필요
-  auth_version: number // 재발급 요청에 되돌려 보내는 값(그 사이 바뀌었으면 서버가 덮지 않음) — 화면에 표시하지 않는다
+  password_revoked: boolean // 임시 비밀번호가 폐기돼 어떤 비밀번호로도 로그인할 수 없음 — 로그인하려면 재발급
+  auth_version: number // 재발급·폐기 요청에 되돌려 보내는 값(그 사이 바뀌었으면 서버가 덮지 않음) — 화면에 표시하지 않는다
 }
 
 export async function listUsers(params: { q?: string; status?: AccountStatus } = {}): Promise<UserAccount[]> {
@@ -913,6 +914,17 @@ export type StatusAction = 'approve' | 'reject' | 'suspend' | 'resume'
 
 export async function changeUserStatus(id: number, action: StatusAction, reason: string | null): Promise<UserAccount> {
   return json(await apiFetch(`${API_BASE}/users/${id}/${action}`, { method: 'POST', ...jsonBody({ reason }) }))
+}
+
+/** 임시 비밀번호 폐기 — 이용 중지 상태의 임시 비밀번호 계정만. 비밀번호는 사용할 수 없는 값이 되고 임시 상태가 풀린다(재개해도 로그인 불가, 재발급 필요).
+ *  expectedAuthVersion은 목록에서 본 값(필수 — 없으면 422, 그 사이 재개·재발급·다른 폐기가 먼저면 409 — 화면은 자동으로 다시 시도하지 않는다). */
+export async function revokeTempPassword(id: number, expectedAuthVersion: number): Promise<UserAccount> {
+  return json(
+    await apiFetch(`${API_BASE}/users/${id}/password/revoke`, {
+      method: 'POST',
+      ...jsonBody({ expected_auth_version: expectedAuthVersion }),
+    }),
+  )
 }
 
 /** 임시 비밀번호 재발급 — 기존 비밀번호·세션은 즉시 효력을 잃는다. expectedAuthVersion은 목록에서 본 값(필수 — 없으면 서버가 422, 다른 재발급·상태 변경이 먼저면 409). */

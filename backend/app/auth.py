@@ -17,6 +17,9 @@
   계정(users.must_change_password)은 본인 비밀번호로 바꾸기 전까지 비밀번호 변경·본인 조회·로그아웃만 할 수
   있고(require_full_access — 업무 API는 403), 만료 시각(users.temp_password_expires_at, config.TEMP_PASSWORD_HOURS)이
   지나면 그 비밀번호로 로그인하지 못한다(재발급).
+- 임시 비밀번호 폐기(revoke_temp_password): 이용 중지 상태이면서 임시 비밀번호 상태인 계정만 — 비밀번호를 사용할 수
+  없는 값(UNUSABLE_PASSWORD_HASH)으로 바꾸고 임시 상태를 풀며 인증 버전을 올린다(같은 UPDATE, 관리 이력 1건). 재개해도
+  로그인할 수 없고 재발급해야 한다. 플래그만 지우는 경로는 없다 — 임시 상태 해제는 이 폐기와 본인 비밀번호 변경뿐이다.
 """
 
 from __future__ import annotations
@@ -70,6 +73,10 @@ TEMP_PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz2345678
 TEMP_PASSWORD_LENGTH = 14
 RESTRICTED_MESSAGE = "임시 비밀번호로 로그인한 상태입니다. 먼저 본인 비밀번호로 바꾼 뒤 다시 로그인하세요."
 TEMP_EXPIRED_MESSAGE = "임시 비밀번호의 유효 기간이 지났습니다. 관리자에게 재발급을 요청하세요."
+# 폐기된 비밀번호(관리자의 '임시 비밀번호 폐기'): scrypt 형식이 아니라 어떤 입력으로도 verify_password가 참이 되지
+# 않는다. 로그인하려면 재발급이 필요하다. 로그인은 이 값에도 가짜 해시를 한 번 계산해 응답 시간으로 폐기 여부를 드러내지
+# 않는다.
+UNUSABLE_PASSWORD_HASH = "!revoked"
 
 _SCRYPT = {"n": 2**14, "r": 8, "p": 1}
 
@@ -138,6 +145,12 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
+def password_usable(stored: str) -> bool:
+    """저장된 값이 로그인에 쓸 수 있는 해시인지 — 폐기된 비밀번호(UNUSABLE_PASSWORD_HASH 등 scrypt 형식이 아닌 값)는
+    False."""
+    return stored.startswith("scrypt$")
+
+
 def check_password_rule(password: str) -> None:
     if len(password) < MIN_PASSWORD:
         raise AuthError(f"비밀번호는 {MIN_PASSWORD}자 이상이어야 합니다.")
@@ -196,8 +209,9 @@ def login(db: Session, username: str, password: str) -> tuple[User, str]:
     version = user.auth_version if user is not None else None  # 비밀번호 해시와 같은 행에서 읽은 버전
     if user is not None and user.locked_until is not None and _aware(user.locked_until) > now:
         raise AuthError(f"로그인 실패가 반복되어 잠시 잠겼습니다. {LOCK_MINUTES}분 뒤에 다시 시도하세요.")
-    if user is None:
-        verify_password(password, _dummy_hash())  # 없는 아이디도 같은 시간이 걸리게 (아이디 추측 방지)
+    if user is None or not password_usable(user.password_hash):
+        # 없는 아이디·폐기된 비밀번호도 같은 시간이 걸리게 (아이디·폐기 여부 추측 방지)
+        verify_password(password, _dummy_hash())
     if user is None or not verify_password(password, user.password_hash):
         if user is not None:
             user.failed_logins += 1
@@ -478,3 +492,40 @@ def issue_temp_password(
     end_sessions(db, user.id)
     record_event(db, actor, user, action, user.status, user.status, reason=reason)
     return plain, expires
+
+
+def revoke_temp_password(
+    db: Session, actor: CurrentUser | None, user: User, *, expected_version: int, reason: str
+) -> bool:
+    """임시 비밀번호 폐기 — 이용 중지 상태이면서 임시 비밀번호 상태인 계정의 비밀번호를 사용할 수 없는 값으로 바꾸고
+    임시 상태를 푼다 (변경을 요청할 수 없는 중지 계정을 0022 downgrade 보호 조건 밖으로 내보내는 유일한 길).
+
+    한 UPDATE에서: 조건 = id + 인증 버전(expected_version, 화면·목록이 본 값, 필수) + 이용 중지 + 임시 상태. 그 사이
+    재개·재발급·다른 폐기가 먼저 반영됐으면 0행이라 False — 아무것도 바꾸지 않는다. 같은 문장에서 인증 버전을 올리고
+    세션을 끝낸다. 플래그만 지우는 경로는 없다: 임시 상태 해제는 비밀번호를 못 쓰게 바꾸는 이 문장에서만 일어난다.
+    상태(이용 중지)는 바꾸지 않는다 — 재개해도 로그인할 수 없고(가짜 해시로 같은 시간이 걸린 뒤 401) 로그인하려면
+    재발급이 필요하다. 커밋은 호출한 쪽.
+    """
+    changed = db.execute(
+        update(User)
+        .where(
+            User.id == user.id,
+            User.auth_version == expected_version,
+            User.status == "suspended",
+            User.must_change_password.is_(True),
+        )
+        .values(
+            password_hash=UNUSABLE_PASSWORD_HASH,
+            must_change_password=False,
+            temp_password_expires_at=None,
+            failed_logins=0,
+            locked_until=None,
+            auth_version=User.auth_version + 1,
+        )
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if changed != 1:
+        return False
+    end_sessions(db, user.id)
+    record_event(db, actor, user, "password_revoke", "suspended", "suspended", reason=reason)
+    return True
