@@ -78,10 +78,10 @@ B′의 차단 근거는 두 가지다: nginx가 `/api/auth/signup`을 410으로
 
 | 구간 | 측정 환경 | 값 | 기록 |
 |---|---|---|---|
-| ① `deploy.sh` 4단계(정지) → 6단계(전환 완료) — 0021 → 0022 반영 | 진단 CI 리허설(ubuntu-24.04, `image_gate_rehearsal.sh`) | 【R5_DEPLOY_STOP_TO_SWITCH】 | `backups/followup-20261030/round5/ci/…/out/deploy-ok.out`의 `[시각]` |
-| B′ B 1단계(정지) → 7단계(구판 기동 확인) — 3·4 정리·상태, 5 downgrade 포함 | 진단 CI 리허설 | 【R5_ROLLBACK_1_TO_7】 | `…/out/timeline.txt`, `rollback-step*.log` |
-| B′ P1(덧붙임 적용: 설정 생성·`nginx -t`·backend·frontend 재생성·확인) | 진단 CI 리허설 / 로컬(운영 이미지 태그, Docker Desktop) | 【R5_P1_CI】 / 【R5_P1_LOCAL】 | `…/out/timeline.txt` / `round5/bprime/bprime-local.json` |
-| P0(해제) | 진단 CI 리허설 / 로컬 | 【R5_P0_CI】 / 【R5_P0_LOCAL】 | 같음 |
+| ① `deploy.sh` 4단계(정지) → 6단계(전환 완료) — 0021 → 0022 반영 | 진단 CI 리허설(ubuntu-24.04, `image_gate_rehearsal.sh`, run 41171037333 — 49/49) | **9초** (05:05:07 정지 → 05:05:16 전환 완료; 3단계 빌드·검증은 정지 전 — 러너에서 deploy.sh 전체 25초) | `backups/followup-20261030/round5/ci/gate-r5c-25b78f5/out/deploy-ok.out`의 `[시각]` |
+| B′ B 1단계(정지) → 7단계(구판 기동 확인) — 3·4 정리·상태, 5 downgrade 포함 | 진단 CI 리허설 | **14초** (1단계 정지 → 2 백업·검증 → 3·4 정리·상태 → 5 downgrade(폐기된 중지 계정 있음) → 6 구판 기동 → 7 확인) | `…/out/timeline.txt`, `rollback-step*.log` |
+| B′ P1(덧붙임 적용: 설정 생성·`nginx -t`·backend·frontend 재생성·확인) | 진단 CI 리허설 / 로컬(운영 이미지 태그, Docker Desktop) | **8초** / **9.2초** (Docker Desktop, 운영 이미지 태그 `16b805ca…`·`bf25700f…`) | `…/out/timeline.txt` / `round5/bprime/bprime-local.json` |
+| P0(해제) | 진단 CI 리허설 / 로컬 | **7초** / **9.0초** | 같음 |
 | A(백업 풀기, 합성 자료 수 MB) | 4장 리허설 7차(2026-10-26) | 수 초(자료 크기에 비례 — 운영 볼륨은 백업 파일 크기로 가늠) | [DEPLOY.md](DEPLOY.md) 리허설 7차 |
 
 정지 중에는 화면이 열리지 않는다. 위 값에 사람이 확인하는 시간(4절 4번)은 들어 있지 않다.
