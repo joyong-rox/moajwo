@@ -102,5 +102,11 @@ B′의 차단 근거는 두 가지다: nginx가 `/api/auth/signup`을 410으로
   통합 완료 건수)를 적는다. 운영을 바꾸지 않는다(docker inspect·logs, 데이터 볼륨 읽기 전용 one-off, curl GET과 본문을 읽지 않는 가입·설정 410 경로만). 결과는
   `backups/followup-20261030/observation/observe-<시각>.txt`(+ `.db.json`, 건수·상태 코드·시각만 — 아이디·개인정보·비밀값 없음). 0일차 기준선은 2026-10-31 기록. 종료
   판정 전에 한 번 더 돌려 8차 기록에 붙인다.
+- **점검 도구 보완(2026-10-31 7-2차, PR #67):** 7번의 발급 이력에 설치 담당자 복구 명령(`app.adminctl recover`)의 **생성 비밀번호**(이력 `admin_recover`, 사유에 "임시 비밀번호")를
+  포함한다 — 임시 상태를 만드는 경로는 계정 발급(`provision`)·재발급(`password_reset`)·이 복구 명령 셋뿐(전수 표 `backups/followup-20261030/round7/observe-fix/PATHS.md`).
+  3번은 uvicorn `ERROR:` 머리말·`Traceback`·앱 실패 기록(`… failed: …`)·5xx·nginx error를 센다. 시각 비교는 DB·로그 모두 **UTC 한 기준**(저장 형식과 같은 문자열, 표별 확인
+  `TIMEZONES.md`)이며 "KST일지도 모른다"는 완화를 쓰지 않는다. 판정 논리는 고정 시각 시험 `bash scripts/test_observe.sh`(합성 DB·합성 로그, 운영·Docker 없음)로 확인하고
+  진단 CI(`static-cand.yml`)에서도 돈다. 7-2차 이전 기록의 "지금 유효 세션"·"잠긴 계정" 값은 같은 날짜의 값을 0으로 센 결함이 있었다(정정 메모
+  `backups/followup-20261030/observation/observe-20261031-205027.note.txt`).
 - **관찰 중 장애:** 1절부터 판단하되 실행 전에 멈추고 소유자에게 보고한다. 예외: 반영 실패 기준에 해당하고 이용 중 임시 계정이 0개이면 B′(4절)를 실행한 뒤 보고한다.
 - **종료 뒤:** 발급·재발급 허용 · 롤백 태그(`rollback-20261031-165653`)·`cand-*` 태그 정리 여부 · owner → admin 전환([DEPLOY.md](DEPLOY.md) 12-2) 시점을 소유자가 정한다.
