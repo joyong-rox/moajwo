@@ -47,7 +47,7 @@ ollama pull qwen2.5:7b    # 로컬 LLM (사전·유사도로 못 정한 열만)
 
 ```sh
 docker compose up -d --build
-curl http://localhost:8000/health   # {"status":"ok","database":"ok"}
+curl http://127.0.0.1:8080/api/health   # {"status":"ok","database":"ok"} — frontend 프록시 경유 (backend 호스트 포트를 닫은 B′ 상태에서도 같은 명령)
 # 웹 화면: http://localhost:8080
 ```
 

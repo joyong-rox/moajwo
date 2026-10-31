@@ -93,7 +93,7 @@ docker inspect moajwo-backend-1 --format '{{.Image}}'   # 로그의 새 backend 
 ```
 
 점검:
-1. `curl -s http://127.0.0.1:8000/health` → `{"status":"ok","database":"ok"}`
+1. `curl -s http://127.0.0.1:8080/api/health` → `{"status":"ok","database":"ok"}` (frontend 프록시 경유 — backend 호스트 포트를 닫은 B′ 상태에서도 같은 명령)
 2. 로그인 → 새로고침 후 로그인 유지 → 로그아웃
 3. 기존 파일의 열 매핑 분석(저장된 원본을 다시 읽음) · 기존 실행의 결과 다운로드
 4. 새 파일 업로드 → 매핑 → 사전 검토 → 검토 완료 → 통합 결과 만들기 → 내려받은 엑셀 열기
@@ -470,6 +470,9 @@ echo "풀 백업: backups/$BK"
 - P1은 설정 파일을 그 이미지에서 꺼내 만들고(`backups/bprime-<시각>.conf`), 구판 이미지의 `nginx -t`로 검사한 뒤 올립니다. backend 컨테이너가 다시 만들어지므로
   수 초(격리 리허설 측정값은 RECOVERY_RUNBOOK.md) 중단됩니다. 세션은 DB에 있어 유지됩니다.
 - 되돌린 동안 모든 `docker compose` 명령에 `$RB -f deploy/bprime/compose.bprime.yml`을 붙이고 `BPRIME_CONF=<호스트 절대 경로>/backups/bprime-<시각>.conf`를 함께 줍니다.
+- B′ 상태에서 P0 없이 바로 `scripts/deploy.sh`로 복귀할 때, 2단계는 backend 호스트 포트가 **없음**인 것을 조회 실패와 구분해 빈 목록(`ports: !override []`)으로
+  기록하고(그 반영의 롤백 단위는 B′의 포트 상태를 그대로 되돌림), 6단계 뒤 포트는 `docker-compose.yml`대로(8000·8080) 돌아옵니다 — 진단 CI 리허설 5절이 확인
+  (2026-10-31 6차, 명령 대역 시험 사례 `B′상태_backend포트없음_진행`).
 - 해제(**P0 상자**)는 덧붙임 없이 롤백 단위 그대로 다시 올립니다 — 되돌리기 쉬운 것이 조건입니다. 새 판으로 복귀할 때는 P0 없이 바로 `scripts/deploy.sh`
   (또는 '멈췄을 때' 6단계의 복귀 방법)로 갑니다.
 - 검증: 진단 CI 리허설(`diagnostics/ci/image_gate_rehearsal.sh` 4절)이 이 두 상자를 문서에서 그대로 꺼내 실행하고, 운영 이미지 태그(구판)로 돌린 격리 기록은
@@ -1050,7 +1053,8 @@ docker compose exec -T backend python -m app.adminctl transition --apply --yes  
 
 ### 12-3. 반영 후 점검 (운영 자료를 바꾸지 않는 것부터)
 
-1. `docker compose exec -T backend alembic current` → `0022_temp_passwords (head)`; `/health` 정상; backend 로그에 오류 없음.
+1. `docker compose exec -T backend alembic current` → `0022_temp_passwords (head)`; `curl -s http://127.0.0.1:8080/api/health` 정상(frontend 경유 — B′ 상태에서도
+   같은 명령); backend 로그에 오류 없음.
 2. 로그인 전 화면: 「회원가입」 없음·"계정은 관리자에게 요청" 안내; `POST /api/auth/setup`·`/signup` → 410 (본문 반환 없음); `GET /api/auth/status` →
    `setup_required: false`.
 3. 기존 소유자 로그인 → 「관리자 → 사용자 계정」에 발급 양식·'비밀번호' 열(기존 계정은 '본인 비밀번호'); 관리 이력의 새 작업 이름 표시.

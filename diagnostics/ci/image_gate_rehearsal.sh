@@ -17,6 +17,11 @@
 #   4) B′ (후보 트리에 deploy/bprime이 있을 때): 구판 상태에서 공개 가입이 열려 있음(201)과 소유자 세션 저장 → P1 상자(구판 이미지 자신의 nginx 설정 +
 #      차단 블록, backend 호스트 포트 없음) → 가입 410(JSON detail)·로그인·/auth/status·관리자 API·로그아웃 정상·저장한 세션 그대로·backend 직접 포트
 #      도달 불가 → P0 상자(해제) → 가입 201·포트 원상·세션 그대로
+#   5) B′ 상태에서 복귀 (4와 같은 조건): P1을 다시 적용한 구판(backend 호스트 포트 없음)에서 P0 없이 바로 scripts/deploy.sh <후보> <이전 리비전>
+#      (RECOVERY_RUNBOOK.md 4절 6번) → 2단계가 backend 포트 '없음'을 빈 목록(ports: !override [])으로 기록 · 전환 뒤 후보 리비전·포트 원상(8000·8080) ·
+#      가입은 새 앱의 410 · 같은 계정 로그인·이전 결과 그대로
+#   deploy.ids: '이전 backend와 같음/다름'의 기대값은 backend 빌드 입력(그 트리의 backend/ 폴더)이 바뀌었는지로 정한다 — 입력이 같으면 캐시된 같은 층이라
+#      같은 ID(후보 = 이전), 바뀌었으면 달라야 한다(후보 ≠ 이전). 판정 근거(두 트리의 해시)를 notes.txt와 결과 값에 함께 남긴다
 # 사용법: bash image_gate_rehearsal.sh <결과 폴더> <이전 SHA> <후보 SHA>   (deploy_probe.py가 이 스크립트와 같은 폴더에 있어야 함)
 #   결과 폴더는 저장소 밖에 둔다 — deploy.sh 1단계가 저장소의 추적하지 않는 파일을 막는다. 비밀 파일·쿠키 파일은 결과 폴더의 상위에 두고 지운다
 # 러너 맞춤: 백업 컨테이너(uid 1000)가 쓸 수 있게 backups/ 권한. (deploy.sh는 'pwd -W'가 없으면 pwd를 쓰고, 내보낸 셸 함수가 있으면 멈춘다)
@@ -145,8 +150,14 @@ LOG=$(find backups -name 'deploy-*.log' | sort | tail -1)
 CB=$(sed -n 's/.*후보 이미지: backend \(sha256:[0-9a-f]*\) · frontend .*/\1/p' "$LOG" | tail -1)
 CF=$(sed -n 's/.*후보 이미지: backend sha256:[0-9a-f]* · frontend \(sha256:[0-9a-f]*\) .*/\1/p' "$LOG" | tail -1)
 echo "후보 이미지 backend $CB · frontend $CF" | tee -a "$OUT/notes.txt"
-check deploy.ids "후보=실행 backend $(same "$CB" "$(img_of backend)") frontend $(same "$CF" "$(img_of frontend)") · 후보=latest backend $(same "$CB" "$(latest backend)") frontend $(same "$CF" "$(latest frontend)") · 이전 backend와 $(same "$CB" "$OLD_B")" \
-  "후보=실행 backend 같음 frontend 같음" "후보=latest backend 같음 frontend 같음" "이전 backend와 다름"
+# 이전 backend와 같은지의 기대값은 backend 빌드 입력(그 트리의 backend/ 폴더 — Dockerfile·requirements 포함)이 바뀌었는지로 정한다:
+# 입력이 같으면 캐시된 같은 층으로 같은 ID가 나오고(후보 = 이전), 바뀌었으면 달라야 한다(후보 ≠ 이전). 판정 근거(두 트리의 해시)를 함께 남긴다
+OLD_BT=$(git rev-parse "$OLD:backend")
+NEW_BT=$(git rev-parse "$NEW:backend")
+if [ -n "$OLD_BT" ] && [ "$OLD_BT" = "$NEW_BT" ]; then B_EXPECT="이전 backend와 같음"; B_WHY="backend 입력 같음"; else B_EXPECT="이전 backend와 다름"; B_WHY="backend 입력 다름"; fi
+echo "deploy.ids 근거: backend 트리 이전 ${OLD_BT:0:12} · 후보 ${NEW_BT:0:12} → $B_WHY → 기대 '$B_EXPECT'" | tee -a "$OUT/notes.txt"
+check deploy.ids "후보=실행 backend $(same "$CB" "$(img_of backend)") frontend $(same "$CF" "$(img_of frontend)") · 후보=latest backend $(same "$CB" "$(latest backend)") frontend $(same "$CF" "$(latest frontend)") · 이전 backend와 $(same "$CB" "$OLD_B") (근거: backend 트리 이전 ${OLD_BT:0:12} · 후보 ${NEW_BT:0:12} → $B_WHY)" \
+  "후보=실행 backend 같음 frontend 같음" "후보=latest backend 같음 frontend 같음" "$B_EXPECT"
 check deploy.gate "$(grep -h '\[검증 통과\]' "$LOG" | tail -1)" "완성 이미지 목록 = 검증한 목록" "격리 기동 점검 통과"
 check deploy.lines "$(grep -c -e '이미지 검증 통과:' -e '실행 중 이미지 = 3단계에서 검증한 이미지' -e '이미지 연결:' -e '배포 단위:' "$LOG")줄" "4줄"
 check deploy.build "$(grep -h 'image: moajwo-backend:cand-' "$(find backups -name 'candidate-*.compose.yml' | sort | tail -1)")" "image: moajwo-backend:cand-"
@@ -245,6 +256,30 @@ PY
   check bprime.portsback "backend[$(ports_of backend)] frontend[$(ports_of frontend)] · $(rev) · $(probe after-bprime)" \
     "backend[8000/tcp -> 127.0.0.1:8000" "frontend[8080/tcp -> 127.0.0.1:8080" "$OLD_REV (head)" '"login": 200' '"result_same": true'
   check bprime.secrets "비밀번호 $(grep -rcF "$PROBE_PW" "$OUT" | awk -F: '{s += $2} END {print s + 0}')회 · 쿠키 파일 $([ -e "$JAR" ] && echo 남음 || echo 없음) · 비밀 파일 $([ -e "$SECRET" ] && echo 남음 || echo 없음)" "비밀번호 0회" "쿠키 파일 없음" "비밀 파일 없음"
+fi
+# ---------------------------------------------------------------- 5) B′ 상태에서 복귀 — P1을 다시 적용한 구판(backend 호스트 포트 없음)에서 P0 없이 바로 deploy.sh
+# (docs/RECOVERY_RUNBOOK.md 4절 6번). deploy.sh 2단계는 backend 포트 '없음'을 조회 실패와 구분해 빈 목록으로 기록해야 하고, 6단계 뒤 포트는 docker-compose.yml대로
+if [ -f deploy/bprime/compose.bprime.yml ] && [ -f "$OUT/steps/stepP1.sh" ] && [ -f "$OUT/steps/stepP0.sh" ]; then
+  check return.p1again "$(run_box P1) · $(grep -h '^\[P1 완료\]' "$OUT/rollback-stepP1.log" | tail -1) · backend[$(ports_of backend)]" "done" "[P1 완료] 공개 가입 410" "backend[]"
+  tick "B′ 상태에서 deploy.sh 시작"
+  bash scripts/deploy.sh "$NEW" "$OLD_REV" > "$OUT/deploy-from-bprime.out" 2>&1
+  RC=$?
+  tick "B′ 상태에서 deploy.sh 끝 (exit=$RC)"
+  check return.exit "exit=$RC ·" "exit=0 ·"
+  LOG2=$(find backups -name 'deploy-*.log' | sort | tail -1)
+  RBF2=$(sed -n 's/.*이전 포트 \(backups\/rollback-[0-9-]*\.compose\.yml\).*/\1/p' "$LOG2" | tail -1)
+  check return.ports_record "$(grep -h '반영 전 포트 연결:' "$LOG2" | tail -1 | sed 's/^\[[0-9:]*\] //') · 파일 backend $(awk '/^  backend:$/ {f = 1; next} f {sub(/^ +/, ""); print; exit}' "$RBF2" 2>&1)" \
+    "반영 전 포트 연결: backend (없음" "frontend 127.0.0.1:8080:8080/tcp" "파일 backend ports: !override []"
+  CB2=$(sed -n 's/.*후보 이미지: backend \(sha256:[0-9a-f]*\) · frontend .*/\1/p' "$LOG2" | tail -1)
+  CF2=$(sed -n 's/.*후보 이미지: backend sha256:[0-9a-f]* · frontend \(sha256:[0-9a-f]*\) .*/\1/p' "$LOG2" | tail -1)
+  check return.ids "후보=실행 backend $(same "$CB2" "$(img_of backend)") frontend $(same "$CF2" "$(img_of frontend)") · 첫 반영의 후보와 backend $(same "$CB2" "$CB") frontend $(same "$CF2" "$CF") · $(rev)" \
+    "후보=실행 backend 같음 frontend 같음" "첫 반영의 후보와 backend 같음 frontend 같음" "$NEW_REV (head)"
+  check return.ports "backend[$(ports_of backend)] frontend[$(ports_of frontend)]" "backend[8000/tcp -> 127.0.0.1:8000" "frontend[8080/tcp -> 127.0.0.1:8080"
+  SIGNUP2=$(curl -s -o "$OUT/return-signup.body" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/api/auth/signup)
+  check return.signup "$SIGNUP2 $(head -c 120 "$OUT/return-signup.body") · 직접 $(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8000/auth/signup)" \
+    '410 {"detail":"공개 회원가입은 종료되었습니다' "직접 410"
+  check return.api "$(probe after-return)" '"login": 200' '"result_same": true' '"original_preview": 200'
+  check return.leftover "$(leftover)" "컨테이너 0 ·" "볼륨 0 ·" "네트워크 0 ·"
 fi
 rm -f "$JAR" "$SECRET"   # 점검이 실패해 남았더라도 결과 폴더 밖의 비밀 파일은 지운다
 docker compose logs --no-color > "$OUT/compose.log" 2>&1
