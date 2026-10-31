@@ -13,11 +13,11 @@
 **하지 않는 것**: 운영 볼륨 삭제, `docker compose down -v`, 자동 DB downgrade. backend는 일반 사용자(`app`)로 실행합니다
 (원본·결과 파일의 읽기 전용 보호는 root로 실행하면 효과가 없음).
 
-## 0. 현행 실행 기준 (2026-10-28 반영 뒤)
+## 0. 현행 실행 기준 (2026-10-29 반영 뒤)
 
 | 항목 | 값 |
 |---|---|
-| 지금 운영 | main `71f36eb` (PR #58 병합, 트리 `69d6f100…`) · DB `0021_run_request_key` · backend `sha256:6874cec0c9a043809198c19952428d4c89dbe40a74226a844618cf2312b25560` · frontend `sha256:883f7fa5b785ad7e9b318b5af58e60c042fab2d8aa53f58190e1f02e560dc81b` (2026-10-28 11:44 반영, 기록 `backups/deploy-20261028-114420.log`) |
+| 지금 운영 | main `b12ba63` (PR #60 병합, 트리 `845f953a…`) · DB `0021_run_request_key` · backend `sha256:16b805ca3b3762c530e352bc6ef40c75e754e7712b2a2bfd19f76d260b9ce1ef` · frontend `sha256:bf25700f2d7423900b06bc34ac3e3ce450b228964350da7181ed67dde20ca593` (2026-10-29 20:51 반영, 기록 `backups/deploy-20261029-205119.log`; 그 전 2026-10-28 11:44 반영은 main `71f36eb`·backend `6874cec0…`·frontend `883f7fa5…`, 기록 `backups/deploy-20261028-114420.log`). 0022(관리자 발급·임시 비밀번호, 12장)는 main에 병합됐지만 **아직 운영에 반영하지 않았다** |
 | 다음 이미지 교체 명령 | `bash scripts/deploy.sh <승인 SHA> 0021_run_request_key` — 두 번째 인자는 **지금 운영 리비전 0021**입니다. 2026-10-28에 쓴 `… 0019_analysis_runs`는 그 반영의 출발점이라 다시 쓰지 않습니다 (운영이 0021이라 2단계에서 멈춤) |
 | 3단계 (이 판부터) | 자원 확인 → 후보 태그로 하나씩 빌드 → 완성 이미지 목록 대조 + 격리 기동 점검 + 통과 기록 확인 (11장) → 백업 확인 뒤 5f에서 통과한 ID에만 latest를 옮기고(실제 ID로 확인) 6단계에서 다시 빌드하지 않고 전환 |
 | DB 변경이 없는 교체의 롤백 | 반영 직전에 실행 중이던 이미지(롤백 태그 — 지금 위의 backend·frontend) + 이전 포트 연결 + 리비전 0021 그대로. 4장 B 0단계 출력이 '리비전 0021_run_request_key → 0021_run_request_key'이면 3~5단계(정리·downgrade)를 건너뛰고 1·2·6·7단계만 합니다 |
@@ -114,6 +114,10 @@ docker inspect moajwo-backend-1 --format '{{.Image}}'   # 로그의 새 backend 
   이 파일이 없는 예전 반영은 `git show <이전 main SHA>:docker-compose.yml`로 이전 설정을 꺼내 씁니다.
 - `down -v`, 자동 downgrade, 운영 데이터 삭제, '결과 확인 필요' 실행의 일괄 실패 처리는 하지 않습니다.
 - 두 가지 길: **B(기본) 자료를 지키며 되돌리기** — 반영 뒤 생긴 업로드·실행 기록을 그대로 두고 이전 코드가 읽습니다. **A 배포 전 백업으로 복원** — 반영 뒤 생긴 자료가 활성 데이터에서 빠지므로(지우지 않고 옮겨 둠) 빠질 범위를 사용자에게 알리고 **별도 승인**을 받은 뒤 씁니다.
+- **B′ — 구판으로 되돌린 동안 공개 가입 차단 (0022 이후 판의 롤백, 2026-10-31 소유자 결정 D2):** 구판(0021 이하) 앱은 공개 회원가입을 다시 연다(정책
+  회귀). 되돌린 뒤 **P1 상자**로 덧붙임 설정(`deploy/bprime/`)만 적용해 `POST /api/auth/signup`을 nginx에서 410으로 끝내고 backend 호스트 포트 공개를
+  없앤다 — 구판 이미지는 고치지 않는다. 해제는 **P0 상자**. 0022 이후 판의 B는 P1까지 해야 끝난다(12-4). 조건·중단 시간·판단은
+  [RECOVERY_RUNBOOK.md](RECOVERY_RUNBOOK.md).
 
 ### B. 자료를 지키며 되돌리기 — 단계별 명령 (8장 통합 후보·9장 0020·10장 0021 롤백은 모두 이 절차)
 
@@ -368,6 +372,9 @@ docker compose run --rm --no-deps backend python -m app.recovery resolve <실행
 | A, 백업 확인 | 없음 | '이 반영의 백업이 아님'이면 `RESTORE_BACKUP`을 확인 (창에 남은 다른 반영의 값 등 — 반영 직전 백업이면 입력하지 않음). 그 밖에는 검증 기록(반영 직전 백업은 요약 `verified yes`·sha256, 2단계 백업은 `.sha256`)이 있는 백업으로 다시 |
 | A, 옮긴 뒤 풀기 | 지금 자료는 볼륨의 `_pre_rollback_<시각>/`에 있음, `/data`는 비었거나 일부만 풀림 | 보존 폴더를 지우거나 A를 다시 돌리지 않음(보존 폴더가 있으면 A가 거절 — 덮지 않게). 원인을 고친 뒤 보존 폴더를 볼륨 안에서 다른 이름으로 옮기고 A를 다시, 또는 보존 폴더의 자료를 `/data`로 되돌려 놓고 지금 판 재개 |
 | R | 없음 — 서비스·DB·`latest` 그대로 (빌드에서 멈췄으면 롤백 태그가 하나만 생겼을 수 있음) | 출력의 원인(커밋 없음 → `git fetch`, 꺼낼 폴더가 이미 있음 → 확인 뒤 옮김, 빌드 실패)을 고친 뒤 R을 다시. 하나만 생긴 태그는 R이 거절하지 않고 둘 다 다시 만듦 |
+| P1 (B′ 적용), 기동 전 확인 (deploy/bprime 파일·DB 리비전·롤백 태그 이미지·설정 생성·`nginx -t`) | 없음 — 구판 서비스 그대로 (`backups/bprime-<시각>.conf*` 파일만 생겼을 수 있음) | 원인(0022 이후 판의 저장소가 아님 · B 6·7단계 미완 · 구판 설정에 `location /api/` 없음 · 설정 검사 실패)을 고친 뒤 P1을 다시 |
+| P1, 기동·확인 (up 실패 · 가입 요청이 410이 아님 · status/health 실패 · backend 포트 남음) | frontend·backend 컨테이너가 B′ 설정으로 다시 만들어졌을 수 있음, DB·자료 그대로 | `docker compose $RB -f deploy/bprime/compose.bprime.yml ps`·`logs`로 원인 확인. 되돌리려면 P0 상자(덧붙임 없이 롤백 단위 그대로) |
+| P0 (B′ 해제) | 컨테이너가 롤백 단위 설정으로 다시 만들어졌을 수 있음, DB·자료 그대로 | 포트·가입 응답이 기대와 다르면 `docker compose $RB ps`·`docker port moajwo-backend-1`로 확인한 뒤 P0을 다시 |
 
 ### R. 롤백 태그 이미지가 없을 때 — 이전 커밋으로 다시 만들기
 
@@ -451,6 +458,77 @@ echo "풀 백업: backups/$BK"
 
 - **유실되는 것**: 백업 이후 반영된 버전에서 생긴 모든 변경(새 업로드 원본, 통합 결과, 매핑 확정·학습, 검토·실행 기록, 계정·설정·용어사전 변경). 지워지지 않고 볼륨의 `_pre_rollback_<시각>/`에 남으므로 필요하면 수동으로 옮겨옵니다.
 - 각 downgrade는 그 리비전이 넣은 데이터만 지우고 사용자 별칭이 가리키는 기본 항목은 남깁니다 (0015는 `owner_setup` 표시 한 행만).
+
+### B′. 구판으로 되돌린 동안 공개 가입 차단 — 덧붙임 설정만 (0022 이후 판의 롤백, B 7단계 뒤)
+
+0022 이후 판에서 구판(0021 이하)으로 되돌리면 구판 앱은 공개 회원가입(`POST /auth/signup`)을 다시 받습니다(계정 정책 회귀, 12-4). 소유자 결정(2026-10-31, D2)에
+따라 구판 복귀는 **B′** — B 0~7단계 뒤에 아래 **P1 상자**로 덧붙임 설정을 적용한 상태 — 로만 허용합니다. 구판 이미지는 고치지 않습니다.
+
+- `deploy/bprime/compose.bprime.yml`: frontend에 **그 구판 이미지 자신의** nginx 설정에 차단 블록(`deploy/bprime/signup-410.location` — `location = /api/auth/signup`
+  → 410, JSON `detail`)을 끼운 파일을 읽기 전용으로 덮어 씌우고, backend의 호스트 포트 공개(`127.0.0.1:8000`)를 없앱니다(`ports: !override []`) — 프록시를
+  우회해 backend `/auth/signup`에 닿는 길을 막습니다. 컨테이너끼리의 `backend:8000`은 그대로라 프록시·health는 정상입니다.
+- P1은 설정 파일을 그 이미지에서 꺼내 만들고(`backups/bprime-<시각>.conf`), 구판 이미지의 `nginx -t`로 검사한 뒤 올립니다. backend 컨테이너가 다시 만들어지므로
+  수 초(격리 리허설 측정값은 RECOVERY_RUNBOOK.md) 중단됩니다. 세션은 DB에 있어 유지됩니다.
+- 되돌린 동안 모든 `docker compose` 명령에 `$RB -f deploy/bprime/compose.bprime.yml`을 붙이고 `BPRIME_CONF=<호스트 절대 경로>/backups/bprime-<시각>.conf`를 함께 줍니다.
+- 해제(**P0 상자**)는 덧붙임 없이 롤백 단위 그대로 다시 올립니다 — 되돌리기 쉬운 것이 조건입니다. 새 판으로 복귀할 때는 P0 없이 바로 `scripts/deploy.sh`
+  (또는 '멈췄을 때' 6단계의 복귀 방법)로 갑니다.
+- 검증: 진단 CI 리허설(`diagnostics/ci/image_gate_rehearsal.sh` 4절)이 이 두 상자를 문서에서 그대로 꺼내 실행하고, 운영 이미지 태그(구판)로 돌린 격리 기록은
+  `backups/followup-20261030/round5/`.
+
+<!-- rollback-step:P1 -->
+```bash
+# P1) B′ — 구판(반영 전 리비전)으로 되돌린 상태에서 공개 가입을 막는 덧붙임 설정 적용 (구판 이미지는 그대로). 해제는 P0 상자
+( set -euo pipefail
+  [ -n "$TS" ] && [ -n "$PREV" ] || { echo "[중단] 배포 단위를 읽지 못함 — 0단계 출력 확인 (아무것도 바꾸지 않음)"; exit 1; }
+  [ -f deploy/bprime/compose.bprime.yml ] && [ -f deploy/bprime/signup-410.location ] \
+    || { echo "[중단] deploy/bprime 파일이 없음 — B′는 이 파일이 있는 판(0022 이후 main)의 저장소에서만 (아무것도 바꾸지 않음)"; exit 1; }
+  rev=$(dbrev) || { echo "[중단] DB 리비전을 읽지 못함 (아무것도 바꾸지 않음)"; exit 1; }
+  [ "$rev" = "$PREV" ] || { echo "[중단] DB 리비전이 $rev (기대 $PREV) — B′는 B 7단계까지 끝난 구판 상태에서만 (아무것도 바꾸지 않음)"; exit 1; }
+  for s in backend frontend; do
+    [ "$(docker inspect "moajwo-$s-1" --format '{{.Image}}')" = "$(docker image inspect "moajwo-$s:$TAG" --format '{{.Id}}')" ] \
+      || { echo "[중단] $s 컨테이너가 롤백 태그 $TAG 이미지가 아님 — B 6·7단계 확인 (아무것도 바꾸지 않음)"; exit 1; }
+  done
+  CONF="backups/bprime-$TS.conf"
+  docker run --rm --entrypoint cat "moajwo-frontend:$TAG" /etc/nginx/conf.d/default.conf > "$CONF.orig" \
+    || { echo "[중단] 구판 frontend 이미지의 nginx 설정을 읽지 못함 (아무것도 바꾸지 않음)"; exit 1; }
+  awk -v blk="$(cat deploy/bprime/signup-410.location)" '!done && /^[[:space:]]*location \/api\/ \{/ { print blk; done = 1 } { print } END { exit done ? 0 : 1 }' "$CONF.orig" > "$CONF" \
+    || { echo "[중단] 구판 nginx 설정에 'location /api/' 블록이 없어 차단 블록을 넣지 못함 — $CONF.orig 확인 (아무것도 바꾸지 않음)"; exit 1; }
+  docker run --rm -v "$HOSTDIR/$CONF:/etc/nginx/conf.d/default.conf:ro" --entrypoint nginx "moajwo-frontend:$TAG" -t > "$CONF.test" 2>&1 \
+    || { cat "$CONF.test"; echo "[중단] 만든 nginx 설정이 구판 이미지의 검사(nginx -t)를 통과하지 못함 (아무것도 바꾸지 않음)"; exit 1; }
+  BPRIME_CONF="$HOSTDIR/$CONF" docker compose $RB -f deploy/bprime/compose.bprime.yml up -d --no-build --wait \
+    || { echo "[중단] B′ 적용 기동 실패 — docker compose $RB -f deploy/bprime/compose.bprime.yml ps·logs 확인. 해제는 P0 상자"; exit 1; }
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/api/auth/signup) || code=실패
+  [ "$code" = 410 ] || { echo "[중단] 가입 요청이 410이 아님($code) — 차단 설정이 적용되지 않음. P0 상자로 해제하고 확인"; exit 1; }
+  curl -sf http://127.0.0.1:8080/api/auth/status > /dev/null || { echo "[중단] /api/auth/status 실패 — P0 상자로 해제하고 확인"; exit 1; }
+  curl -sf http://127.0.0.1:8080/api/health | grep -q '"status":"ok"' || { echo "[중단] /api/health가 ok가 아님 — P0 상자로 해제하고 확인"; exit 1; }
+  direct=$(docker port moajwo-backend-1 | tr '\n' ' ')
+  [ -z "$direct" ] || { echo "[중단] backend 호스트 포트가 아직 열려 있음($direct) — 프록시 우회 경로가 남음. P0 상자로 해제하고 확인"; exit 1; }
+  echo "[P1 완료] 공개 가입 410(nginx, 구판 이미지 그대로) · backend 호스트 포트 없음 · /api/auth/status·health 정상 · 설정 $CONF"
+  echo "되돌린 동안 모든 docker compose 명령에 '$RB -f deploy/bprime/compose.bprime.yml'을 붙이고 BPRIME_CONF=$HOSTDIR/$CONF 를 함께 준다. 해제는 P0 상자"
+)
+```
+
+<!-- rollback-step:P0 -->
+```bash
+# P0) B′ 해제 — 덧붙임 설정 없이 롤백 단위 그대로(이전 이미지 + 이전 포트) 다시 올린다. DB·자료는 바꾸지 않음
+( set -euo pipefail
+  [ -n "$TS" ] && [ -n "$PREV" ] || { echo "[중단] 배포 단위를 읽지 못함 — 0단계 출력 확인 (아무것도 바꾸지 않음)"; exit 1; }
+  rev=$(dbrev) || { echo "[중단] DB 리비전을 읽지 못함 (아무것도 바꾸지 않음)"; exit 1; }
+  [ "$rev" = "$PREV" ] || { echo "[중단] DB 리비전이 $rev (기대 $PREV) — 이 상자는 구판 상태에서만 (아무것도 바꾸지 않음)"; exit 1; }
+  docker compose $RB up -d --no-build --wait \
+    || { echo "[중단] 해제 기동 실패 — docker compose $RB ps·logs 확인"; exit 1; }
+  want=$(awk '/^  [a-z]+:$/ {s = $1; sub(":", "", s)} /^      - "/ {p = $2; gsub("\"", "", p); print s, p}' "$RBF" | sort)
+  got=$(for s in backend frontend; do
+          docker inspect "moajwo-$s-1" --format '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}:{{.HostPort}}:{{$p}} {{end}}{{end}}' \
+            | tr ' ' '\n' | sed "/^$/d; s/^/$s /" || exit 1
+        done | sort) || { echo "[중단] 실제 포트 연결을 조회하지 못함 — docker compose $RB ps 확인"; exit 1; }
+  [ "$want" = "$got" ] || { echo "[중단] 해제 뒤 포트 연결($got)이 이전 포트 파일($want)과 다름"; exit 1; }
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:8080/api/auth/signup) || code=실패
+  [ "$code" != 410 ] || { echo "[중단] 가입 요청이 아직 410 — frontend 컨테이너가 B′ 설정으로 남아 있음. docker compose $RB ps 확인"; exit 1; }
+  curl -sf http://127.0.0.1:8080/api/health | grep -q '"status":"ok"' || { echo "[중단] /api/health가 ok가 아님"; exit 1; }
+  echo "[P0 완료] B′ 해제 — 포트 $(echo $got) · 가입 요청 응답 $code(backend에 닿음 — 구판은 공개 가입이 열려 있음) · health ok"
+)
+```
 
 ## 5. 0016·0017 반영 (회원가입 승인·역할 단순화·인증 버전) — 추가 확인과 롤백 제한
 
@@ -979,37 +1057,60 @@ docker compose exec -T backend python -m app.adminctl transition --apply --yes  
    갈음하고 운영 보고에는 '미검증'으로 적는다.
 5. 소유자가 정한 시점에 12-2 전환 → admin으로 재로그인 → 파일 목록·기존 결과 내려받기 그대로.
 
-### 12-4. 롤백 제한 — 자료 복구와 계정 정책 복구는 다른 문제다
+### 12-4. 롤백 제한과 복구 정책 — 자료 복구와 계정 정책 복구는 다른 문제다 (소유자 결정 2026-10-31, D2·D3)
 
 - **이전 이미지(0021까지 아는 코드)는 0022 DB에서 뜨지 않는다** — 기동 때 `alembic upgrade head`가 모르는 리비전(0022)에서 실패한다. 이미지만 이전 판으로
   바꾸는 것은 복구가 아니다.
 - **0022 downgrade의 보호:** 임시 비밀번호 상태(`users.must_change_password`)인 계정이 **이용 중·이용 중지·만료와 관계없이** 하나라도 있으면 거절한다
   (아무것도 바꾸지 않음). 이용 중지·만료는 임시 상태를 풀지 않는다 — 구판에서 그 계정이 재개되면 임시 비밀번호가 일반 비밀번호처럼 쓰이기 때문이다.
-  내릴 수 있는 조건은 **모든 임시 상태 계정이 본인 비밀번호 변경을 끝낸 것**뿐이다. 변경을 끝내지 않은 계정이나 변경을 요청할 수 없는 중지 계정(퇴사 등)이
-  있으면 이 경로의 downgrade는 쓸 수 없다. 거절을 피하려고 DB에서 플래그를 지우거나 중지 계정을 검사에서 빼지 않는다. 실행 중인 결과 실행(담당 있음)이
-  있어도 0020·0021과 같은 이유로 거절한다(9·10장의 정리 절차 뒤 다시) — 어느 거절이든 리비전·새 열·계정·업무 자료는 그대로다.
-- **복구 경로와 그 영향 (모두 별도 승인·결정 대상 — 자동 실행하지 않는다):**
+  거절을 피하려고 DB에서 플래그를 지우거나 중지 계정을 검사에서 빼지 않는다. 실행 중인 결과 실행(담당 있음)이 있어도 0020·0021과 같은 이유로 거절한다
+  (9·10장의 정리 절차 뒤 다시) — 어느 거절이든 리비전·새 열·계정·업무 자료는 그대로다.
+- **임시 상태 계정이 남아 있을 때의 처리 순서 (D3):** ① **이용 중** 임시 계정 — 본인 비밀번호 변경을 기다린다. 폐기 대상이 아니고, downgrade를 통과시키려고
+  중지시키거나 상태를 강제로 바꾸지 않는다. 기다릴 수 없으면 ②·③ 경로의 downgrade는 쓸 수 없다고 안내한다(①로). ② **이용 중지** 임시 계정 —
+  관리자가 「임시 비밀번호 폐기」(12-6)를 한다: 비밀번호가 사용할 수 없는 값이 되고 임시 상태가 풀려 보호 조건 밖으로 나간다(플래그만 지우는 경로가
+  아니라 비밀번호를 못 쓰게 바꾼 결과). 폐기된 계정은 구판에서도 로그인할 수 없고, 복귀 뒤 재개하려면 재발급한다.
+- **복구 경로 (D2):**
 
-| 경로 | 조건 | 자료 | 계정 정책(관리자 발급 전용) |
-|---|---|---|---|
-| ① 0022를 유지한 수정판/호환판으로 정상화 (**우선 검토**) | 그 이미지의 기동·계정·자료 검증이 있어야 실행 가능한 복구안 — 지금은 준비된 이미지가 없음 | 유지 | **유지** |
-| ② B: 새 이미지로 `downgrade 0021` → 이전 이미지 | 임시 상태 계정 0 · 실행 중 실행 0 | 유지(두 열만 제거) | **회귀** — 공개 회원가입·(계정 0개면) 최초 설정이 다시 열림 |
-| ③ A: 반영 전 백업 복원 → 이전 이미지 | 백업 시점 이후의 변경을 잃어도 된다는 결정 | **손실** — 반영 뒤 발급한 계정·비밀번호 변경·상태·업무 자료가 활성 DB에서 빠짐 | **회귀** — 위와 같음 |
+| 경로 | 쓰는 때 | 자료 | 계정 정책(관리자 발급 전용) | 절차 |
+|---|---|---|---|---|
+| **① 0022를 유지한 수정판(fix-forward)** | **표준** — 장애 원인을 고친 후보를 평소 반영 경로(PR → 진단 CI → `bash scripts/deploy.sh <SHA> 0022_temp_passwords`)로 올린다 | 유지 | **유지** | [RECOVERY_RUNBOOK.md](RECOVERY_RUNBOOK.md) ① |
+| **② B′ = B(0~7) + P1** | 비상시에만 — ①을 기다릴 수 없을 때. 임시 상태 계정 0(위 처리 순서) · 실행 중 실행 0 | 유지(두 열만 제거) | **유지** — 구판 이미지는 그대로 두고 덧붙임 설정(P1, `deploy/bprime/`)이 `POST /api/auth/signup`을 nginx 410으로 막고 backend 호스트 포트를 닫는다 | 4장 B 0~7 → P1, 해제 P0 |
+| ② B (P1 없이) | **허용하지 않음** | — | 회귀(공개 가입이 다시 열림) | — |
+| **③ A + P1** | 자료 손상으로 자료 복구가 필요할 때만 — 백업 이후 변경을 잃어도 된다는 결정 | **손실**(반영 뒤 발급 계정·변경·업무 자료가 활성 DB에서 빠짐 — 보존 폴더로) | **유지**(P1) | 4장 B 0·1 → A → 6·7 → P1 |
 
-- 지금 상태는 **"안전한 자동 롤백 준비 미완"**이다: 새 계정 정책을 유지하는 실제 복구 경로(①)가 아직 검증되지 않았다. 반영 뒤 장애가 나면 서비스를 멈추고
-  현재 DB·파일·이미지를 보존한 뒤 복구 방향(①~③)을 정한다. 사용자 계정 상태를 강제로 바꿔 downgrade를 통과시키지 않는다.
-- ②·③으로 구판에 돌아가야 한다면 **공개 가입 재개를 허용하는 별도 정책 예외**가 필요하거나, 가입 차단이 유지되는 **검증된** 호환 구성이 있어야 한다.
-  프런트에서 가입 버튼만 숨기는 것은 API 차단 근거가 아니고, 프록시만 막는 안은 직접 backend 접근 경로까지 포함해 실제 노출을 검증해야 한다. 되돌린 동안
-  들어온 가입 신청은 승인 대기로만 남고(승인 전 접근 없음), 복귀 뒤 관리자가 반려·처리한다.
+- 어느 경로도 자동으로 실행하지 않는다 — 소유자 승인 뒤 사람이 상자를 하나씩 붙여 넣는다. B′ 동안에는 가입 신청이 생기지 않는다(nginx가 410으로 끝내
+  backend에 닿지 않음).
+- 구판 화면의 안내 문구는 구판 것이다 — 로그인 화면에 「회원가입」 버튼이 보이지만 누르면 서버 응답 410의 문구("공개 회원가입은 종료되었습니다. 계정은
+  관리자에게 요청해 주세요.")가 그 화면의 오류 자리에 보인다(격리 리허설에서 기록, `backups/followup-20261030/round5/`). 버튼을 숨기는 것이 차단 근거가 아니라
+  nginx 410과 backend 포트 차단이 근거다.
+- "안전한 롤백 준비" 판정과 각 경로의 선행 조건·예상 중단 시간·판단 기준·단계·중단점은 [RECOVERY_RUNBOOK.md](RECOVERY_RUNBOOK.md).
 - 전환(12-2) 뒤의 롤백: 아이디는 `admin`으로 남는다(이전 코드도 그 이름으로 로그인됨 — 이전 판은 `admin`을 예약하지 않으므로 문제 없음). 전환 이력은 보존.
-- 격리 리허설 결과: `backups/followup-20261030/round3/rollback/`(12-5). 리허설에서 본 '가입 201'은 복구 명령(②)의 동작 확인이지, 관리자 발급 전용 정책을
-  보존하는 복구 성공이 아니다.
+- 격리 리허설 결과: `backups/followup-20261030/round3/rollback/`·`round4/rollback/`(②의 동작 확인 — '가입 201'은 정책 회귀의 확인이지 성공이 아님),
+  `round5/`(폐기 경계·B′, 12-5).
 
 ### 12-5. 격리 리허설 (합성 자료, 운영 분리 — 결과는 round3 폴더)
 
 새 이미지로 빈 DB 기동 → `init` → 발급(임시 상태 1) → `downgrade 0021` 거절 확인 → 최초 변경 완료(임시 상태 0) → `downgrade 0021` 성공·두 열 제거 → 이전
 이미지(main `b12ba63`, 0021)로 기동·같은 계정 로그인·**공개 가입이 다시 열림(정책 회귀)** 확인 → 새 이미지로 `upgrade head` → 계정·비밀번호 그대로. 실제
 수치·시각은 round3 기록에. 중지된 임시 계정이 있을 때의 거절은 시험(`tests/test_migrations.py`·`test_migration_0022_postgres.py`)으로 확인한다.
+
+5차(2026-10-31, `backups/followup-20261030/round5/`): 진단 CI 리허설(`diagnostics/ci/image_gate_rehearsal.sh`)에 폐기 경계 — 발급·중지한 임시 계정이
+있으면 서버가 뜬 채 one-off downgrade 거절(리비전 그대로) → 「임시 비밀번호 폐기」 → 그 계정을 둔 채 4장 B 5단계 downgrade 통과 — 와 B′(P1 적용 →
+가입 410·로그인·status·관리자 API·저장한 세션 유지·backend 직접 포트 도달 불가 → P0 해제 → 원상)를 넣었다. 운영 이미지 태그(구판) 자체로 B′를 돌린
+격리 기록(화면 문구 포함)도 거기에 있다.
+
+### 12-6. 임시 비밀번호 폐기 (관리자 작업, D3)
+
+- 대상: **이용 중지** 상태이면서 임시 비밀번호 상태인 계정만. 「관리자 → 사용자 계정」의 '임시 비밀번호 폐기' 또는 `POST /users/{id}/password/revoke`
+  (`expected_auth_version` 필수 — 재발급과 같은 계약: 없거나 정수가 아니면 422, 그 사이 재개·재발급·다른 폐기가 먼저 반영됐으면 409, 화면은 자동으로
+  다시 시도하지 않고 최신 목록을 다시 불러온다).
+- 동작(한 UPDATE): 비밀번호를 사용할 수 없는 값으로, `must_change_password` 해제·만료 시각 제거, `auth_version` +1, 세션 종료, 관리 이력 `password_revoke`.
+  상태(이용 중지)는 그대로. 재개해도 로그인할 수 없고(일반 401 — 폐기 여부를 알리지 않음), 로그인하려면 재발급한다. 이용 중(임시 포함)·임시 상태가 아닌
+  중지·승인 대기·반려·최고 관리자는 409이고 아무것도 바꾸지 않는다(거절 이력만).
+- 동시 요청: 폐기↔재개·폐기↔재발급·같은 버전 폐기 2건은 하나만 반영된다 — 상태 변경(승인·반려·중지·재개)도 요청이 읽은 인증 버전을 조건으로 한다.
+  시험: `backend/tests/test_password_revoke.py`(실제 요청 경로·barrier, SQLite·PostgreSQL 모두).
+- downgrade 보호는 그대로다 — 폐기된 계정은 임시 상태가 아니므로 세지 않는다(플래그만 지우는 경로는 여전히 없다). 폐기는 이용 중지된 계정에만 하므로
+  downgrade를 위해 이용 중 계정을 중지시키는 일은 하지 않는다(12-4 처리 순서).
 
 ## 리허설 결과
 

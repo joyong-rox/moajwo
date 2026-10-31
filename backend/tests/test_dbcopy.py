@@ -84,7 +84,16 @@ def test_report_path_that_is_the_source_is_refused_before_touching_it(
         try:
             os.symlink(src, report)
         except OSError:
-            pytest.skip("이 환경에서 심볼릭 링크를 만들 권한이 없음")
+            # Windows에서 심볼릭 링크 권한(개발자 모드·SeCreateSymbolicLinkPrivilege)이 없으면 권한이 필요 없는 디렉터리
+            # 정션으로 원천 폴더를 가리켜 같은 파일을 다른 경로로 만든다 — 검사 대상(링크를 거친 같은 파일 거절)은 같다
+            if os.name != "nt":
+                raise
+            import _winapi
+
+            link_dir = tmp_path / "linkdir"
+            _winapi.CreateJunction(str(src.parent), str(link_dir))
+            report = link_dir / src.name
+            assert os.path.samefile(report, src)  # 정션을 거친 경로가 원천과 같은 파일
     else:
         report = {
             "same": src,

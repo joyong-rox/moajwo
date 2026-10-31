@@ -1,0 +1,6 @@
+    # B′ — 구판으로 되돌린 동안 공개 회원가입 차단 (deploy/bprime, docs/DEPLOY.md 4장 B′). add_header를 쓰지 않아 server 블록의 보안 헤더를 그대로 물려받는다.
+    # 정확히 이 경로만(location =) 410 — 다른 /api/ 요청은 아래 프록시 블록으로 간다. 본문은 구판 화면이 그대로 보여 주는 detail 문구다.
+    location = /api/auth/signup {
+        default_type application/json;
+        return 410 '{"detail":"공개 회원가입은 종료되었습니다. 계정은 관리자에게 요청해 주세요."}';
+    }

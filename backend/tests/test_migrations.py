@@ -773,7 +773,8 @@ def test_0022_temp_password_columns_default_false_and_downgrade_guard(tmp_path: 
     """0022: 기존 계정은 임시 비밀번호 상태가 아니다(False·NULL — 비밀번호·상태 그대로). downgrade는 **이용 중·이용
     중지·만료와 관계없이** 임시 비밀번호 상태인 계정이 하나라도 있으면 거절하고(리비전·열·계정·업무 행 그대로), 실행
     중인 결과 실행(담당 있음)이 있어도 거절한다. 모든 계정이 본인 비밀번호 변경을 끝낸(must_change_password = 0)
-    뒤에만 두 열을 지운다 — 이용 중지는 임시 상태를 풀지 않는다."""
+    뒤에만 두 열을 지운다 — 이용 중지는 임시 상태를 풀지 않는다. 폐기된 중지 계정(임시 비밀번호 폐기: 사용할 수 없는
+    비밀번호·must_change_password = 0)은 세지 않으므로 그 계정이 있어도 내려간다."""
     _alembic(tmp_path, "upgrade", "0021_run_request_key")
     db = tmp_path / "moajwo.db"
     with sqlite3.connect(db) as con:
@@ -800,6 +801,12 @@ def test_0022_temp_password_columns_default_false_and_downgrade_guard(tmp_path: 
                 "values (?, ?, 'scrypt$y', 'user', ?, ?, 0, 0, ?, ?)",
                 (name, name.upper(), active, status_, must, exp),
             )
+        # 폐기된 중지 계정 — 임시 비밀번호 폐기의 결과(비밀번호 사용 불가·임시 상태 아님). 보호 조건이 세지 않는다
+        con.execute(
+            "insert into users (username, display_name, password_hash, role, is_active, status, auth_version, "
+            "failed_logins, must_change_password, temp_password_expires_at) "
+            "values ('t-revoked', 'T-REVOKED', '!revoked', 'user', 0, 'suspended', 3, 0, 0, null)"
+        )
         con.execute(RUN_SQL, (1, 1, "done", "{}"))
 
     def snapshot() -> tuple:
@@ -846,4 +853,5 @@ def test_0022_temp_password_columns_default_false_and_downgrade_guard(tmp_path: 
         assert con.execute("select username, password_hash, status from users order by id").fetchall() == [
             ("rox", "scrypt$x", "active"), ("t-active", "scrypt$y", "active"), ("t-susp", "scrypt$y", "suspended"),
             ("t-expired", "scrypt$y", "active"), ("done", "scrypt$y", "active"),
+            ("t-revoked", "!revoked", "suspended"),  # 폐기된 중지 계정은 그대로 남고 내려가는 것을 막지 않는다
         ]  # fmt: skip

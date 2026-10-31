@@ -12,7 +12,13 @@
 - 비밀번호 초기화(`POST /users/{id}/password`)도 임시 비밀번호 재발급이다: 기존 비밀번호·기존 임시 비밀번호·세션은 그
   즉시 효력을 잃는다(인증 버전). 이용 중지 계정은 재발급으로 활성화되지 않는다. 화면이 본 인증
   버전(expected_auth_version)이 지금 값과 다르면 (다른 재발급·상태 변경이 먼저 반영됨) 덮지 않고 409.
-- 계정 관리(예전 공개 가입 신청의 승인·반려, 이용 중지·재개, 발급·재발급)는 최고 관리자만 한다. 모든 변경은
+- 임시 비밀번호 폐기(`POST /users/{id}/password/revoke`): 이용 중지 상태이면서 임시 비밀번호 상태인 계정만 — 비밀번호를
+  사용할 수 없는 값으로 바꾸고 임시 상태를 풀며 인증 버전을 올린다(관리 이력 password_revoke). 재개해도 로그인할 수 없고
+  재발급해야 한다. expected_auth_version 필수(재발급과 같은 계약) — 다르거나 대상이 아니면(이용 중·임시 상태 아님·승인
+  대기·반려·최고 관리자) 409이고 아무것도 바꾸지 않는다(거절 이력만).
+- 상태 변경(승인·반려·이용 중지·재개)도 요청이 읽은 인증 버전·현재 상태를 조건으로 한 번만 반영한다 — 그 사이 재발급·
+  폐기·비밀번호 변경이 먼저 반영됐으면 409(폐기와 재개가 동시에 와도 하나만 반영).
+- 계정 관리(예전 공개 가입 신청의 승인·반려, 이용 중지·재개, 발급·재발급·폐기)는 최고 관리자만 한다. 모든 변경은
   account_events에 남긴다 (같은 트랜잭션). 비밀번호·해시·쿠키·토큰은 발급 응답 외 어디에도 넣지 않는다.
 """
 
@@ -48,7 +54,9 @@ from app.auth import (
     issue_temp_password,
     login,
     logout,
+    password_usable,
     record_event,
+    revoke_temp_password,
     role_label,
     set_status,
     temp_password_expired,
@@ -274,7 +282,9 @@ class UserOut(BaseModel):
     must_change_password: bool  # 임시 비밀번호 상태 (첫 로그인에서 본인 비밀번호로 바꿔야 함)
     temp_password_expires_at: datetime | None  # 임시 비밀번호 만료(KST)
     temp_password_expired: bool  # 임시 상태인데 만료 시각이 지남 — 재발급 필요
-    auth_version: int  # 화면이 재발급 요청에 되돌려 보내는 값 (그 사이 바뀌었으면 덮지 않음) — 화면에 표시하지 않는다
+    password_revoked: bool  # 임시 비밀번호가 폐기돼 어떤 비밀번호로도 로그인할 수 없음 — 로그인하려면 재발급
+    # 화면이 재발급·폐기 요청에 되돌려 보내는 값 (그 사이 바뀌었으면 덮지 않음) — 화면에 표시하지 않는다
+    auth_version: int
 
 
 def user_out(u: User, activity: dict[int, datetime] | None = None) -> UserOut:
@@ -295,6 +305,7 @@ def user_out(u: User, activity: dict[int, datetime] | None = None) -> UserOut:
         must_change_password=u.must_change_password,
         temp_password_expires_at=utc_to_kst(u.temp_password_expires_at),
         temp_password_expired=temp_password_expired(u),
+        password_revoked=not password_usable(u.password_hash),
         auth_version=u.auth_version,
     )
 
@@ -470,10 +481,12 @@ def _change_status(db: Session, actor: CurrentUser, user_id: int, action: str, r
     if user.id == actor.id or user.role == "owner":
         raise _deny(db, actor, user, action, "최고 관리자 계정의 상태는 바꿀 수 없습니다.")
     reason = reason.strip() if reason and reason.strip() else None
-    # 조건부 갱신: 그 사이 다른 요청이 상태를 바꿨으면 0행 → 반영하지 않음 (중복·동시 요청에도 한 번만 반영)
+    version = user.auth_version  # 이 요청이 읽은 인증 버전 — 그 사이 재발급·폐기·비밀번호 변경이 끼어들면 반영 안 함
+    # 조건부 갱신: 그 사이 다른 요청이 상태나 인증 버전을 바꿨으면 0행 → 반영하지 않음 (중복·동시 요청에도 한 번만
+    # 반영 — 폐기와 재개가 동시에 와도 둘 중 하나만)
     changed = db.execute(
         update(User)
-        .where(User.id == user.id, User.status == expected)
+        .where(User.id == user.id, User.status == expected, User.auth_version == version)
         .values(
             status=after,
             is_active=after == "active",
@@ -488,6 +501,12 @@ def _change_status(db: Session, actor: CurrentUser, user_id: int, action: str, r
         db.rollback()
         db.refresh(user)
         current = STATUS_LABEL.get(user.status, user.status)
+        if user.status == expected:  # 상태는 그대로인데 인증 버전이 바뀜 — 재발급·폐기·비밀번호 변경이 먼저 반영됨
+            raise _deny(
+                db, actor, user, action,
+                f"{label}을(를) 반영하지 않았습니다: 그 사이 계정 정보가 바뀌었습니다 (재발급·임시 비밀번호 폐기·"
+                "비밀번호 변경이 먼저 반영됨). 목록을 새로 고친 뒤 대상을 다시 확인하세요.",
+            )  # fmt: skip
         raise _deny(
             db, actor, user, action,
             f"{label}할 수 없습니다: 지금 상태가 '{current}'입니다 ('{STATUS_LABEL[expected]}' 상태에서만 가능).",
@@ -572,3 +591,48 @@ def reissue_password(
     db.refresh(user)
     _no_store(response)
     return _provision_out(user, *issued)
+
+
+class RevokeIn(BaseModel):
+    """임시 비밀번호 폐기: 재발급과 같은 계약 — expected_auth_version(목록이 본 인증 버전) **필수**(0 이상의 정수).
+    본문·버전이 없거나 정수가 아니면 422, 지금 값과 다르면 409. 조건 없는 폐기 경로는 없다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_auth_version: StrictInt = Field(ge=0)
+
+
+REVOKE_REASON = (
+    "임시 비밀번호 폐기 — 비밀번호를 사용할 수 없는 값으로 바꾸고 임시 상태 해제 (이용 중지 그대로 · 재개해도 로그인 "
+    "불가 · 로그인하려면 재발급)"
+)
+
+
+@users_router.post("/{user_id}/password/revoke", response_model=UserOut)
+def revoke_password(
+    user_id: int, actor: OwnerDep, db: Annotated[Session, Depends(get_session)], body: RevokeIn
+) -> UserOut:
+    """임시 비밀번호 폐기 — '이용 중지' 상태이면서 임시 비밀번호 상태인 계정만. 비밀번호를 사용할 수 없는 값으로 바꾸고
+    임시 상태를 풀며 인증 버전을 올린다(관리 이력 1건). 상태는 바꾸지 않는다 — 재개해도 로그인할 수 없고 재발급해야
+    한다.
+    대상이 아니거나(이용 중·임시 상태 아님·승인 대기·반려·최고 관리자) 버전이 다르면 409이고 아무것도 바꾸지 않는다(거절
+    이력만). 이용 중인 임시 계정은 폐기 대상이 아니다 — 본인 비밀번호 변경을 기다린다."""
+    user = _target(db, user_id)
+    if user.id == actor.id or user.role == "owner":
+        raise _deny(db, actor, user, "password_revoke", "최고 관리자 계정의 비밀번호는 폐기하지 않습니다.")
+    if user.status != "suspended" or not user.must_change_password:
+        current = STATUS_LABEL.get(user.status, user.status)
+        why = f"지금 상태가 '{current}'" + ("" if user.must_change_password else "이고 임시 비밀번호 상태가 아닙니다")
+        raise _deny(
+            db, actor, user, "password_revoke",
+            f"임시 비밀번호 폐기는 '이용 중지' 상태이면서 임시 비밀번호 상태인 계정에만 합니다: {why}. "
+            "이용 중인 임시 계정은 본인 비밀번호 변경을 기다립니다(폐기 대상 아님).",
+        )  # fmt: skip
+    if not revoke_temp_password(db, actor, user, expected_version=body.expected_auth_version, reason=REVOKE_REASON):
+        raise _deny(db, actor, user, "password_revoke",
+                    "계정 정보가 그 사이 바뀌었습니다 (재개·재발급·다른 폐기가 먼저 반영됨). "
+                    "목록을 새로 고친 뒤 대상을 다시 확인하세요.",
+                    )  # fmt: skip
+    db.commit()
+    db.refresh(user)
+    return user_out(user, last_activity(db))

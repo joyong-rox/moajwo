@@ -129,6 +129,7 @@ ACTION_LABEL = {
     "suspend": "이용 중지",
     "resume": "이용 재개",
     "password_reset": "임시 비밀번호 재발급",
+    "password_revoke": "임시 비밀번호 폐기",
     "first_password_change": "본인 비밀번호 설정(최초 변경)",
     "owner_renamed": "관리자 아이디 전환(admin)",
     "admin_recover": "관리자 복구(설치 담당자)",
