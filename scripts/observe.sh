@@ -73,12 +73,13 @@ out["rows_changed_vs_baseline"] = {n: [base.get(n), rows[n]] for n in rows if ba
 owner_login = c.execute("select last_login_at from users where role = ? order by last_login_at desc limit 1", ("owner",)).fetchone()
 out["owner_login_since_start"] = bool(owner_login and owner_login[0] and ts(owner_login[0]) >= start - timedelta(hours=9))
 out["sessions_since_start"] = since("auth_sessions", "created_at")
-out["sessions_active_now"] = c.execute("select count(*) from auth_sessions where expires_at > ?", (now.isoformat(),)).fetchone()[0]
+# "지금" 비교(유효 세션·잠긴 계정)는 since()와 같은 strftime 형식으로 — SQLite에 저장된 값은 "YYYY-MM-DD HH:MM:SS…"(공백)라서 isoformat()의 T와 문자열 비교하면 같은 날짜의 값이 모두 과거로 취급돼 0으로 집계됐다(2026-10-31 20:50 기록의 유효 세션 0 = 실제 1)
+out["sessions_active_now"] = c.execute("select count(*) from auth_sessions where expires_at > ?", (now.strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()[0]
 out["flow_since_start"] = {"uploads": since("source_files", "uploaded_at"), "mapping_decisions": since("mapping_decisions", "decided_at"),
                            "review_sessions": since("review_sessions", "created_at"), "runs_created": since("runs", "created_at"),
                            "runs_done": since("runs", "created_at", "status = \"done\""), "analysis_runs": since("analysis_runs", "created_at")}
 # 5 로그인 실패 재료
-out["locked_accounts_now"] = c.execute("select count(*) from users where locked_until is not null and locked_until > ?", (now.isoformat(),)).fetchone()[0]
+out["locked_accounts_now"] = c.execute("select count(*) from users where locked_until is not null and locked_until > ?", (now.strftime("%Y-%m-%d %H:%M:%S"),)).fetchone()[0]
 out["failed_logins_counter_sum"] = c.execute("select coalesce(sum(failed_logins), 0) from users").fetchone()[0]
 # 7 임시 상태 계정 — 지금 상태와 관찰 중 이력(발급·재발급 → 본인 변경·폐기까지 24시간 넘었는지)
 out["temp_now"] = {"active": c.execute("select count(*) from users where must_change_password and status = ?", ("active",)).fetchone()[0],
