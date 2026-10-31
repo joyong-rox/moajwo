@@ -16,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from app.account_markers import GENERATED_TEMP_PASSWORD_NOTE
+
 BACKEND = Path(__file__).resolve().parents[1]
 PW = "Install-pass-123!"
 
@@ -254,6 +256,10 @@ def test_recover_resets_only_the_admin_password_and_sessions(tmp_path: Path) -> 
     assert _q(data, "select action, target_name, actor_id from account_events where action = 'admin_recover'") == [
         ("admin_recover", "admin", None)
     ]
+    # 담당자가 고른 비밀번호 → 임시 상태가 아니므로 사유에 관찰 도구의 '발급' 표식이 없다
+    reasons_sql = "select reason from account_events where action = 'admin_recover' order by id"
+    reasons = [reason for (reason,) in _q(data, reasons_sql)]
+    assert len(reasons) == 1 and GENERATED_TEMP_PASSWORD_NOTE not in reasons[0], reasons
     assert _verify(data, "bob", "legacy-pass-1")  # 다른 계정은 그대로
     # 임시 비밀번호로 복구 → 첫 로그인에서 변경
     r = _run(data, "recover", "--yes", "--generate")
@@ -263,9 +269,40 @@ def test_recover_resets_only_the_admin_password_and_sessions(tmp_path: Path) -> 
     assert _verify(data, "admin", shown) and _q(
         data, "select must_change_password from users where id = ?", admin_id
     ) == [(1,)]
+    # 생성 비밀번호 → 사유 끝에 표식 — 관찰 도구(scripts/observe_db.py)가 이 표식으로 '발급'을 센다
+    reasons = [reason for (reason,) in _q(data, reasons_sql)]
+    assert len(reasons) == 2 and reasons[1].endswith(" · " + GENERATED_TEMP_PASSWORD_NOTE), reasons
     # owner가 아닌 아이디는 복구하지 않는다
     r = _run(data, "recover", "--yes", "--username", "bob", "--password-stdin", stdin=new + "\n")
     assert r.returncode == 2 and "owner 역할 계정이 아닙니다" in r.stdout and _verify(data, "bob", "legacy-pass-1")
+
+
+def test_recover_temp_note_is_defined_once_and_shared_with_the_observe_tool() -> None:
+    """복구 명령의 '임시 비밀번호' 사유 표식은 app/account_markers.py 한 곳에서만 정의한다.
+
+    관찰 도구(scripts/observe_db.py)와 그 시험 사례(scripts/test_observe_cases.py)는
+    그 파일을 경로로 읽고, 문자열을 따로 적지 않는다."""
+    root = BACKEND.parent
+    assert "임시 비밀번호" in GENERATED_TEMP_PASSWORD_NOTE  # 7-2차까지 관찰 도구가 찾던 부분 문자열을 포함한다
+    for rel in ("scripts/observe_db.py", "scripts/test_observe_cases.py"):
+        src = (root / rel).read_text(encoding="utf-8")
+        assert "account_markers" in src and "GENERATED_TEMP_PASSWORD_NOTE" in src, rel
+        assert GENERATED_TEMP_PASSWORD_NOTE not in src, f"{rel}: 표식 문자열을 따로 정의하지 말 것"
+    adminctl_src = (BACKEND / "app" / "adminctl.py").read_text(encoding="utf-8")
+    assert "GENERATED_TEMP_PASSWORD_NOTE" in adminctl_src and GENERATED_TEMP_PASSWORD_NOTE not in adminctl_src
+
+
+def test_init_with_generated_password_marks_the_setup_event(tmp_path: Path) -> None:
+    """초기화 명령의 생성 비밀번호도 같은 표식.
+
+    설치 뒤에는 다시 생기지 않지만 관찰 도구가 setup 이력을 같은 규칙으로 센다."""
+    data = tmp_path / "data"
+    _migrate(data)
+    r = _run(data, "init", "--yes", "--generate")
+    assert r.returncode == 0, r.stdout + r.stderr[-300:]
+    (reason,) = _q(data, "select reason from account_events where action = 'setup'")[0]
+    assert reason.endswith(" · " + GENERATED_TEMP_PASSWORD_NOTE), reason
+    assert _q(data, "select must_change_password from users where username = 'admin'") == [(1,)]
 
 
 @pytest.mark.skipif(not os.environ.get("MOAJWO_TEST_PG_ADMIN_URL"), reason="빈 PostgreSQL DB를 만들 관리자 주소가 없음")

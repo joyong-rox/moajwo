@@ -1,5 +1,6 @@
 # scripts/test_observe.sh의 사례 — 합성 SQLite(관찰 도구가 읽는 표·열만)·합성 로그(docker logs -t 형식)·합성 반영 기록·기준선과 기대 문구를 사례 폴더에 만든다.
 # 사용: python test_observe_cases.py <사례 이름|list> <폴더>   (운영·Docker·네트워크 없음. 값은 모두 합성.)
+import importlib.util
 import json
 import sqlite3
 import sys
@@ -7,8 +8,12 @@ from pathlib import Path
 
 START = "2026-10-31 07:58:32"  # 관찰 시작(UTC) — observe.sh 기본값과 같다
 DEPLOY_LINE = "[16:58:32] 전환 완료: 리비전 0022_temp_passwords (head) · backend c5f2a4c2f0df · frontend 276195b7e4a8 · 중단 40초"
-RECOVER_TEMP = "설치 담당자의 복구 명령(app.adminctl recover) — 비밀번호 재설정 · 세션 종료 · 임시 비밀번호(첫 로그인에서 변경)"
+# 복구 명령의 사유 표식은 backend/app/account_markers.py 한 곳에서만 정의한다 — 시험 사례도 그 파일을 경로로 읽는다
+_spec = importlib.util.spec_from_file_location("account_markers", Path(__file__).resolve().parents[1] / "backend" / "app" / "account_markers.py")
+_markers = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_markers)
 RECOVER_CHOSEN = "설치 담당자의 복구 명령(app.adminctl recover) — 비밀번호 재설정 · 세션 종료"
+RECOVER_TEMP = RECOVER_CHOSEN + " · " + _markers.GENERATED_TEMP_PASSWORD_NOTE
 INFO = 'INFO:     172.19.0.3:50000 - "GET /health HTTP/1.1" 200 OK'
 LOGIN200 = 'INFO:     172.19.0.3:50001 - "POST /auth/login HTTP/1.1" 200 OK'
 LOGIN401 = 'INFO:     172.19.0.3:50002 - "POST /auth/login HTTP/1.1" 401 Unauthorized'
