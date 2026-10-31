@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # scripts/observe.sh 고정 시각 시험 (7-2차) — 합성 SQLite·합성 로그(docker logs -t 형식)·합성 반영 기록으로 판정 논리만 확인한다.
 # 운영·Docker·네트워크를 쓰지 않는다(OBS_LIVE=0). 사례는 scripts/test_observe_cases.py: 같은 날 과거·미래, 자정 경계, 24시간 경계(23:59·24:00·24:01),
-# 만료 세션·잠금 해제 직전/직후, admin_recover 발급(생성/고른 비밀번호/닫힘), 반영 전 로그인 제외, 시작·지금 경계, ERROR:·Traceback·앱 실패 기록 줄, 최근 24시간 401 19/20건, 업무 흐름·행 수 추이.
+# 만료 세션·잠금 해제 직전/직후, admin_recover 발급(생성/고른 비밀번호/닫힘), 반영 전 로그인 제외, 시작·지금 경계, ERROR:·Traceback·앱 실패 기록 줄, 최근 24시간 401 19/20건, 업무 흐름·행 수 추이,
+# 표식 일치/불일치/없음(합성 이미지 앱 폴더 — 7-4차).
 # 사용: bash scripts/test_observe.sh  (Git Bash 또는 리눅스; python3 또는 python 필요) — 사례별 기대 문구가 모두 기록에 있으면 통과, 하나라도 없으면 종료 1.
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,7 +22,7 @@ for name in $CASES; do
   NOW=$(head -1 "$D/now.txt" | tr -d '\r')
   mkdir -p "$D/out"
   OBS_LIVE=0 OBS_NOW_UTC="$NOW" OBS_DB_PATH="$D/synthetic.db" OBS_BLOG_FILE="$D/backend.log" OBS_FLOG_FILE="$D/frontend.log" \
-    DEPLOY_LOG="$D/deploy.log" BASELINE="$D/baseline.txt" OBS_DIR="$D/out" OBS_PY="$PY" bash "$ROOT/scripts/observe.sh" > "$D/console.txt" 2>&1
+    DEPLOY_LOG="$D/deploy.log" BASELINE="$D/baseline.txt" OBS_DIR="$D/out" OBS_PY="$PY" OBS_IMAGE_APP_DIR="$D/image_app" bash "$ROOT/scripts/observe.sh" > "$D/console.txt" 2>&1
   RC=$?
   OUTF=$(ls "$D/out"/observe-*.txt 2>/dev/null | head -1); DBJ=$(ls "$D/out"/observe-*.db.json 2>/dev/null | head -1)
   ok=1

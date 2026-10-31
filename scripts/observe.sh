@@ -8,7 +8,9 @@
 # 시각 기준(7-2차): DB의 시각 열은 시각대 없는 UTC 문자열(표별 확인 — observe_db.py 머리글), docker logs -t의 시각은 UTC(Z). 비교는 모두 같은 형식의 문자열 한 기준
 #   (관찰 시작 ≤ 시각 ≤ 지금, 최근 24시간 = 지금 - 86400초)으로 한다 — "KST일지도 모른다"는 완화는 쓰지 않는다.
 # 시험 모드(scripts/test_observe.sh — 운영·Docker·네트워크 없음): OBS_LIVE=0 OBS_NOW_UTC=<고정 시각 Z> OBS_DB_PATH=<합성 DB> OBS_BLOG_FILE/OBS_FLOG_FILE=<docker logs -t 형식의
-#   합성 로그> DEPLOY_LOG/BASELINE=<합성 반영 기록·기준선> OBS_DIR=<임시 폴더>. 운영 조회가 필요한 4·8번은 '건너뜀'으로 적는다(통과·실패에 넣지 않음).
+#   합성 로그> DEPLOY_LOG/BASELINE=<합성 반영 기록·기준선> OBS_DIR=<임시 폴더> OBS_IMAGE_APP_DIR=<합성 이미지 앱 폴더(표식 일치 확인)>. 운영 조회가 필요한 4·8번은 '건너뜀'으로 적는다.
+# 표식 일치(7-4차): 실행 중 backend 이미지의 app/account_markers.py(없으면 app/adminctl.py)에 저장소 표식(backend/app/account_markers.py)이 있는지 one-off 컨테이너로 읽어 확인하고,
+#   다르면 7번을 '주의'로 낸다(이미지의 사유 문자열이 다르면 생성 비밀번호 이력을 발급으로 세지 못한다).
 set -uo pipefail
 export MSYS_NO_PATHCONV=1 PYTHONIOENCODING=utf-8
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -115,11 +117,23 @@ INT=$(j "d['integrity']"); REV=$(j "d['revision']")
 if [ "$INT" = ok ] && [ "$REV" = "$DEP_REV" ]; then verdict "6 DB 무결성" 통과 "integrity_check ok · 리비전 $REV · 반영 직전 대비 행 수가 바뀐 표: $(j "d['rows_changed_vs_baseline']")"
 else verdict "6 DB 무결성" 실패 "integrity $INT · 리비전 $REV (배포 단위 $DEP_REV)"; fi
 
-# ---------------------------------------------------------------- 7 임시 상태 계정 — 발급(provision)·재발급(password_reset)·설치 담당자 복구 명령의 생성 비밀번호(admin_recover) 모두
+# ---------------------------------------------------------------- 표식 일치(7-4차) — 실행 중 backend 이미지의 app/account_markers.py(또는 app/adminctl.py)에 저장소 표식이 있는지 (읽기 전용)
+if [ "$LIVE" = 1 ]; then
+  MARK=$(docker run --rm -i --entrypoint python -e IMAGE_APP_DIR=/app/app -e OBS_MARKERS_PATH=/markers/account_markers.py \
+    -v "$PYROOT/backend/app/account_markers.py:/markers/account_markers.py:ro" "$RUN_B" - < "$ROOT/scripts/observe_marker.py" 2>/dev/null)
+else
+  MARK=$(IMAGE_APP_DIR="${OBS_IMAGE_APP_DIR:-}" OBS_MARKERS_PATH="$PYROOT/backend/app/account_markers.py" "$PY" -I -X utf8 "$PYROOT/scripts/observe_marker.py" 2>/dev/null)
+fi
+MARK=$(printf '%s' "${MARK:-error 결과 없음}" | head -1 | tr -d '\r')
+case "$MARK" in match*) MARK_OK=1; MARK_TXT="표식 일치(이미지 ${MARK#match })" ;; *) MARK_OK=0; MARK_TXT="운영 이미지와 저장소 표식 불일치 — 발급 이력을 놓칠 수 있음 ($MARK)" ;; esac
+
+# ---------------------------------------------------------------- 7 임시 상태 계정 — 발급(provision)·재발급(password_reset)·설치 담당자 명령의 생성 비밀번호(admin_recover·setup) 모두
 TA=$(j "d['temp_now']['active']"); TO=$(j "d['temp_now']['other']"); IC=$(j "d['issues_since_start']['count']"); IO=$(j "d['issues_since_start']['over_24h']"); IS=$(j "d['issues_since_start']['still_open']")
 KINDS="발급 $(j "d['issues_since_start']['kinds']['provision']") · 재발급 $(j "d['issues_since_start']['kinds']['password_reset']") · 복구 명령 임시 $(j "d['issues_since_start']['kinds']['admin_recover']")"
-if [ "$TA" = 0 ] && [ "$TO" = 0 ] && [ "$IO" = 0 ]; then verdict "7 임시 상태 계정" 통과 "지금 이용 중 임시 $TA · 그 밖(중지 등) 임시 $TO · 관찰 중 발급·재발급 $IC건($KINDS; 미변경 $IS, 24시간 초과 $IO) · 관찰 중 계정 이력 $(j "d['events_since_start']")"
-else verdict "7 임시 상태 계정" $([ "$IO" = 0 ] && [ "$TA" = 0 ] && echo 주의 || echo 실패) "지금 이용 중 임시 $TA · 그 밖 임시 $TO · 발급·재발급 $IC건($KINDS; 미변경 $IS, 24시간 초과 $IO) — 런북 8절(원칙 금지·당일 변경 확인)"; fi
+if [ "$TA" = 0 ] && [ "$TO" = 0 ] && [ "$IO" = 0 ]; then
+  if [ "$MARK_OK" = 1 ]; then verdict "7 임시 상태 계정" 통과 "지금 이용 중 임시 $TA · 그 밖(중지 등) 임시 $TO · 관찰 중 발급·재발급 $IC건($KINDS; 미변경 $IS, 24시간 초과 $IO) · 관찰 중 계정 이력 $(j "d['events_since_start']") · $MARK_TXT"
+  else verdict "7 임시 상태 계정" 주의 "$MARK_TXT · 지금 이용 중 임시 $TA · 그 밖 임시 $TO · 발급·재발급 $IC건($KINDS; 미변경 $IS, 24시간 초과 $IO) — 이미지의 표식이 다르면 생성 비밀번호 이력(admin_recover·setup)을 발급으로 세지 못한다"; fi
+else verdict "7 임시 상태 계정" $([ "$IO" = 0 ] && [ "$TA" = 0 ] && echo 주의 || echo 실패) "지금 이용 중 임시 $TA · 그 밖 임시 $TO · 발급·재발급 $IC건($KINDS; 미변경 $IS, 24시간 초과 $IO) — 런북 8절(원칙 금지·당일 변경 확인) · $MARK_TXT"; fi
 
 # ---------------------------------------------------------------- 8 복구 사건 0
 if [ "$LIVE" = 1 ]; then

@@ -12,8 +12,9 @@ DEPLOY_LINE = "[16:58:32] 전환 완료: 리비전 0022_temp_passwords (head) ·
 _spec = importlib.util.spec_from_file_location("account_markers", Path(__file__).resolve().parents[1] / "backend" / "app" / "account_markers.py")
 _markers = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_markers)
+NOTE = _markers.GENERATED_TEMP_PASSWORD_NOTE
 RECOVER_CHOSEN = "설치 담당자의 복구 명령(app.adminctl recover) — 비밀번호 재설정 · 세션 종료"
-RECOVER_TEMP = RECOVER_CHOSEN + " · " + _markers.GENERATED_TEMP_PASSWORD_NOTE
+RECOVER_TEMP = RECOVER_CHOSEN + " · " + NOTE
 INFO = 'INFO:     172.19.0.3:50000 - "GET /health HTTP/1.1" 200 OK'
 LOGIN200 = 'INFO:     172.19.0.3:50001 - "POST /auth/login HTTP/1.1" 200 OK'
 LOGIN401 = 'INFO:     172.19.0.3:50002 - "POST /auth/login HTTP/1.1" 401 Unauthorized'
@@ -215,6 +216,39 @@ CASES = {
             "반영 직전 대비 행 수가 바뀐 표: {'mapping_decisions': [0, 3], 'review_sessions': [0, 1], 'runs': [1, 2], 'source_files': [0, 1]}",
         ],
     ),
+    # 표식 일치 — 새 판 모양(이미지에 account_markers.py가 있고 같은 문자열) → 통과, 근거에 '표식 일치(이미지 account_markers.py)'
+    "marker_match_module": dict(
+        now="2026-10-31T12:00:00Z",
+        users=[owner("2026-10-31 11:49:06")],
+        image="match_module",
+        expect=["7 임시 상태 계정 | 통과 |", "표식 일치(이미지 account_markers.py)", "== 자동 판정: 통과 4 · 주의 0 · 실패 0 · 건너뜀 2"],
+    ),
+    # 표식 불일치 — 이미지의 사유 문자열이 저장소 표식과 다름 → 7번 '주의'(발급 이력을 놓칠 수 있음), 다른 항목은 그대로
+    "marker_mismatch": dict(
+        now="2026-10-31T12:00:00Z",
+        users=[owner("2026-10-31 11:49:06")],
+        image="mismatch",
+        expect=[
+            "7 임시 상태 계정 | 주의 | 운영 이미지와 저장소 표식 불일치 — 발급 이력을 놓칠 수 있음 (mismatch adminctl.py)",
+            "== 자동 판정: 통과 3 · 주의 1 · 실패 0 · 건너뜀 2",
+        ],
+    ),
+    # 표식 파일 없음(이미지 앱 폴더에 두 파일 모두 없음) → '주의' (missing)
+    "marker_missing": dict(
+        now="2026-10-31T12:00:00Z",
+        users=[owner("2026-10-31 11:49:06")],
+        image="missing",
+        expect=["7 임시 상태 계정 | 주의 | 운영 이미지와 저장소 표식 불일치 — 발급 이력을 놓칠 수 있음 (missing)", "== 자동 판정: 통과 3 · 주의 1 · 실패 0 · 건너뜀 2"],
+    ),
+    # 불일치 + 실패 조건(판정 시점 임시 1) → 실패가 우선이고 표식 불일치는 근거에 덧붙는다
+    "marker_mismatch_with_open_issue": dict(
+        now="2026-10-31T12:00:00Z",
+        users=[owner("2026-10-31 11:49:06"), user(temp=True)],
+        events=[ev("password_reset", "2026-10-31 10:00:00")],
+        image="mismatch",
+        expect=["7 임시 상태 계정 | 실패 | 지금 이용 중 임시 1", "운영 이미지와 저장소 표식 불일치 — 발급 이력을 놓칠 수 있음 (mismatch adminctl.py)"],
+        exit_nonzero=True,
+    ),
 }
 
 SCHEMA = """
@@ -270,6 +304,21 @@ def build(name: str, folder: Path) -> None:
     write(folder / "backend.log", "\n".join(case.get("logs_b", [tlog("2026-10-31T08:00:00.000000000", INFO)])) + "\n")
     write(folder / "frontend.log", "\n".join(case.get("logs_f", [])) + ("\n" if case.get("logs_f") else ""))
     write(folder / "deploy.log", DEPLOY_LINE + "\n")
+    # 합성 '실행 중 이미지'의 앱 폴더 — 표식 일치 확인(observe_marker.py): 기본은 옛 판처럼 adminctl.py 안에 표식 리터럴이 있는 모양
+    image = case.get("image", "match")
+    app_dir = folder / "image_app"
+    app_dir.mkdir(exist_ok=True)
+    for stale in ("account_markers.py", "adminctl.py"):
+        if (app_dir / stale).exists():
+            (app_dir / stale).unlink()
+    if image == "match":
+        write(app_dir / "adminctl.py", '# 합성 adminctl.py (옛 판 모양)\nREASON = "설치 담당자의 복구 명령 · ' + NOTE + '"\n')
+    elif image == "match_module":
+        write(app_dir / "account_markers.py", 'GENERATED_TEMP_PASSWORD_NOTE = "' + NOTE + '"\n')
+        write(app_dir / "adminctl.py", "from app.account_markers import GENERATED_TEMP_PASSWORD_NOTE\n")
+    elif image == "mismatch":
+        write(app_dir / "adminctl.py", '# 합성 adminctl.py (표식이 다른 판)\nREASON = "설치 담당자의 복구 명령 · ' + NOTE.replace("변경", "바꾸기") + '"\n')
+    # image == "missing": 파일 없음
     base = case.get("baseline")
     if base is None:  # 기본 기준선 = 지금 행 수 그대로(바뀐 표 없음)
         c = sqlite3.connect(db)
