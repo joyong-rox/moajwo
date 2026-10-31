@@ -46,7 +46,7 @@ class Client:
         try:
             with self.op.open(req, timeout=120) as r:
                 raw = r.read()
-                return r.status, (json.loads(raw) if raw[:1] in b"[{" else raw)
+                return r.status, (json.loads(raw) if raw[:1] in (b"[", b"{") else raw)  # 빈 본문(204)은 그대로
         except urllib.error.HTTPError as e:
             raw = e.read()
             try:
