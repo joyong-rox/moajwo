@@ -82,7 +82,7 @@
 - **Windows는 권한을 검사하지 않으므로** 두 파일을 사용자 프로필 폴더(`%APPDATA%\postgresql`)에 두고 본인만 읽게 줄입니다 (서비스 파일 `.pg_service.conf`도 같게):
   - cmd: `icacls "%APPDATA%\postgresql\pgpass.conf" /inheritance:r /grant:r "%USERNAME%:F"`
   - PowerShell: `icacls "$env:APPDATA\postgresql\pgpass.conf" /inheritance:r /grant:r "${env:USERNAME}:F"` — PowerShell은 `%APPDATA%`를 펼치지 않아 cmd 형태를 그대로 쓰면 경로를 찾지 못합니다 (종료 3).
-- 비밀번호 파일은 한 줄에 `호스트:포트:DB:계정:비밀번호` — 앞 네 칸은 `*`(아무 값)도 되고, 칸 안의 `:`와 `\`는 `\`로 이스케이프합니다. 맞는 첫 줄의 비밀번호를 씁니다.
+- 비밀번호 파일은 한 줄에 `호스트:포트:DB:계정:비밀번호` — 앞 네 칸은 `*`(아무 값)도 되고, 칸 안의 `:`와 `\`는 `\`로 이스케이프합니다. 맞는 첫 줄의 비밀번호를 씁니다. **권장 형식(2026-11-01 실제 작성에서 확인):** 호스트·포트·DB 칸은 `*`로 두고 계정 칸만 적은 `*:*:*:<계정>:<비밀번호>` 한 줄이 가장 틀리기 어렵습니다(편집기로 적다가 앞 네 칸을 빠뜨려 칸이 1개·3개인 줄이 두 번 나왔고, 그때 libpq는 비밀번호를 찾지 못합니다). 비밀번호 안의 `_`·`-` 같은 글자는 이스케이프하지 않아도 되고, `\` 뒤 글자는 그대로 읽힙니다. **비밀번호 줄이 맞지 않을 때의 libpq 오류 문구**(`fe_sendauth: no password supplied` 등)에는 **호스트 이름과 IP가 그대로 들어갑니다** — 점검 스크립트·보고는 오류 문구를 그대로 출력·기록하지 말고 호스트·IP를 가린 뒤 남깁니다(2026-11-01 한 번 노출돼 정정).
 - 서비스 파일은 `[이름]` 아래 `키=값` 줄입니다 (`=` 앞뒤에 공백 없이, 주석은 `#`로 시작하는 줄만). 연결 문자열에 직접 준 값(예: `postgresql:///다른DB?service=이름`의 DB 이름)이 서비스 파일 값보다 앞섭니다.
 
 예 — 값의 모양만 적었습니다 (실제 호스트·계정은 소유자가 Neon 콘솔에서 확인):
@@ -215,7 +215,7 @@ https://neon.com/docs/connect/connect-securely — 2026-10-27 확인)
 
 `channel_binding=require`는 SCRAM 인증일 때 TLS 위에서 서버를 한 번 더 인증합니다(SCRAM-SHA-256-PLUS) — 서버 인증서·이름 검증과는
 별개의 보완이며, 그것을 이유로 `verify-full`을 낮추는 근거가 아닙니다. 직접 연결에서는 확인됐고(격리 매트릭스), **풀러 주소에서
-지원되는지는 실제 Neon에서 확인해야 합니다**. 기본은 두 주소 모두 `channel_binding=require`입니다.
+지원되는지는 실제 Neon에서 확인해야 합니다**. 기본은 두 주소 모두 `channel_binding=require`입니다. → **2026-11-01 실제 Neon(PostgreSQL 17.11, 지역 ap-southeast-1)에서 직접 주소(소유 계정)·풀러 주소(앱 계정) 모두 `channel_binding=require`로 접속 성공**(아래 '전환 때 실제 확인' 보완).
 
 **전환 때 연결이 실패하면 — 먼저 원인을 구분하고, 자동으로 낮추지 않습니다** (2026-10-27 2차):
 
@@ -248,6 +248,11 @@ https://neon.com/docs/connect/connect-securely — 2026-10-27 확인)
 **전환 때 실제 확인(승인 뒤, 8-3 단계 안에서):** 사용자 PC에서 서비스 파일로 `psql "service=moajwo-migrate" -c "SELECT ssl,
 version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid()"` → `ssl = t`와 TLS 판을 적고, Render의 backend는 배포 뒤
 `/health`(`database: ok`)와 로그의 접속 성공으로 확인합니다. 비밀번호·주소는 어디에도 적지 않습니다.
+
+**Neon에서 실제로 확인한 것(2026-11-01, PostgreSQL 17.11, 지역 ap-southeast-1):** Neon은 프록시가 TLS를 끝내고 뒤의 PostgreSQL에 넘기므로 **서버 쪽 `pg_stat_ssl`은 `ssl = f`로 보이는 것이 정상**입니다 —
+위 `psql … pg_stat_ssl` 명령으로는 TLS를 증명하지 못합니다. 확인은 **클라이언트 쪽**으로 합니다: psql `\conninfo`(SSL 프로토콜·암호 모음 표시), psycopg `conn.pgconn.ssl_in_use`(True), 그리고 서비스 파일의
+`sslmode=verify-full`·`channel_binding=require`(둘 다 libpq가 강제 — 맞지 않으면 연결 자체가 실패). 직접 주소(소유 계정)와 풀러 주소(앱 계정) 모두 `channel_binding=require`로 접속됐고(SCRAM-SHA-256-PLUS), `app.dbcheck`도
+풀러·직접 두 주소로 `result: same`(Neon 식별자 포함 7항목)을 돌려줬습니다. 승인 묶음 8-5 12번의 'TLS 확인 출력'은 `pg_stat_ssl` 대신 이 클라이언트 쪽 확인 결과(`\conninfo`·`ssl_in_use`)로 적습니다.
 
 ### 3-3. 소유자가 할 최소 동작과 담당자가 준비한 것 (2026-10-30)
 
@@ -304,6 +309,8 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO moajwo_app;
 ```
 
 - **앱 계정 비밀번호는 평문 SQL로 보내지 않습니다.** `CREATE/ALTER ROLE … PASSWORD '평문'`은 서버 설정(`log_statement`, 실패한 문장 기록)에 따라 서버 로그에 평문이 남을 수 있습니다 (PostgreSQL `CREATE ROLE` 문서의 주의). psql에서 `\password moajwo_app`을 쓰면 psql이 클라이언트에서 암호화한 값(SCRAM 검증자)을 보냅니다 — 비밀번호는 묻는 창에 넣고 명령 인자·셸 기록에 넣지 않습니다. **Neon 콘솔·API·CLI의 '역할 만들기'로는 만들지 않습니다 (2026-10-30 정정 — 이전 문장은 이를 대안으로 적었음):** 그렇게 만든 역할은 `neon_superuser`의 멤버가 되어(Neon 문서 Manage roles, 2026-10-30 확인) 데이터 전용 앱 계정의 최소 권한이 아닙니다. `moajwo_app`은 소유 계정의 **직접 연결**에서 위 SQL로만 만듭니다. 시험 스크립트·시험도 같은 방식(클라이언트에서 만든 검증자)으로 보냅니다.
+- **Neon은 검증자 비밀번호를 받지 않습니다 (2026-11-01 확인):** `CREATE ROLE … PASSWORD 'SCRAM-SHA-256$…'`(검증자)를 보내면 Neon 제어면이 HTTP 400 "Neon only supports being given plaintext passwords"로 거절합니다 — psql `\password`도 검증자를 보내므로 같습니다(Neon이 콘솔·연결 문자열 기능을 위해 비밀번호를 받아 두기 때문). 그래서 Neon에서는 ① **TLS 세션 안의 SQL로 평문을 한 번만** 보내되 출력·기록·명령 인자·환경 변수·셸 기록에는 남기지 않고(값은 실행 때 만들어 비밀번호 파일에만 적음), ② 보낸 뒤 **문장 통계를 확인·정리**합니다 — Neon은 `pg_stat_statements`를 미리 적재(`track_utility = on`)하므로 소유 계정으로 확장을 만들어 `CREATE/ALTER ROLE … PASSWORD` 항목의 **건수만** 보고(본문은 출력하지 않음) 남아 있으면 `pg_stat_statements_reset()`을 시도한 뒤 확장을 지웁니다(2026-11-01: 컴퓨트가 5분 무활동으로 멈췄다 깨어나면서 통계가 초기화돼 두 DB 모두 0건 — 통계는 컴퓨트 재시작을 넘겨 남지 않았음).
+  또는 ③ 역할은 SQL로 만들고 **비밀번호는 Neon 콘솔에서 재설정**합니다(콘솔의 '역할 만들기'가 아니라 기존 역할의 비밀번호 재설정 — 멤버십은 바뀌지 않음). **전환 때 원칙(소유자 결정 2026-11-01):** 검증 단계에서 SQL로 만든 비밀번호는 시험용으로 보고, 전환 직전에 소유자가 콘솔에서 재설정한 새 값을 비밀번호 파일과 Render 환경 변수에 씁니다 — 담당자는 재설정 뒤 연결 확인만 합니다.
 - **만든 뒤 확인 (소유 계정으로 — 모두 기대값일 때만 전환 묶음에 넣음):**
 
 ```sql
@@ -476,7 +483,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 - 환경 그룹을 고치면 자동 배포가 켜진 연결 서비스가 모두 재배포됩니다 — 이 변수들은 서비스 자체의 환경 변수로 둡니다.
 - **같은 DB 확인(`app.dbcheck`)이 보는 것:** 두 주소 각각으로 읽기 전용 트랜잭션에서 `current_database()`·DB OID·`pg_postmaster_start_time()`·`server_version_num`·`alembic_version`·Neon 식별자(`neon.tenant_id`·`neon.timeline_id` — 설정이 있을 때)를 읽어 비교합니다. 한쪽이 읽지 못한 항목은 비교에서 빼고 `not_compared`에 적습니다. 출력(JSON)에 주소·호스트·비밀번호가 없습니다 (계정 이름은 있음). 종료 0 같음 · 1 다름 · 2 확인 못 함(주소 없음·연결 실패). 서버 시작 시각만 다르면 그 사이 서버가 다시 시작됐을 수 있으니 다시 실행합니다.
   - 로컬 PostgreSQL 17.11에서 시험: 같은 DB를 서로 다른 두 계정으로(하나는 서비스 주소) → 같음, 같은 서버의 다른 DB → 다름, 닿지 않는 주소 → 2.
-  - **연결 풀러(PgBouncer·Neon 풀러)를 거친 동작과 실제 Neon 식별자 값은 확인하지 못했습니다** — 로컬에는 풀러와 Neon이 없습니다.
+  - **연결 풀러(PgBouncer·Neon 풀러)를 거친 동작과 실제 Neon 식별자 값은 확인하지 못했습니다** — 로컬에는 풀러와 Neon이 없습니다. → **2026-11-01 실제 Neon(17.11)에서 확인:** 풀러 주소(앱 계정)와 직접 주소(소유 계정)로 `result: same` — 비교 7항목(`database`·OID·`postmaster_start_time`·`server_version_num`·`alembic_version`·`neon_tenant_id`·`neon_timeline_id`), `not_compared` 0.
 
 ### Render 서비스 — 현재값(2026-10-25 조회)과 제안값
 
@@ -514,6 +521,11 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 | `moajwo-test-api` | `main` | `703fdcbda6ec3600fbdab8c0ab01b9398562bc07` | `dep-dbc44ion74is73fakco0` |
 
 세 서비스 모두 free·Auto-Deploy off·HTTP health 경로 비어 있음. 연결 브랜치가 `main`이어도 실행 중인 배포 커밋은 위와 같이 다릅니다. `live`는 배포 관리 상태이며 로그인·DB 내용·HTTP 응답 정상을 확인한 것은 아닙니다. **API 배포 커밋 `703fdcb`의 `backend/requirements.txt`에는 psycopg가 없습니다**(그 커밋의 소스 확인 — 실행 컨테이너의 패키지를 조사한 것은 아님) → 지금 배포에 외부 DB 주소만 넣어 계정 보존이 된다고 가정하지 않고, 전환안은 PostgreSQL을 지원하는 검증된 새 앱 배포(0021 이상, 8-4)를 포함합니다. 실제 전환 직전에 다시 조회합니다.
+
+**2026-11-01 소유자 조회 전달값**(대시보드 읽기 — 설정·배포 변경 없음): 세 서비스 모두 Singapore·Free·Auto-Deploy Off·HTTP health 경로 비어 있음·Root Directory 없음·**Deploy Hook 있음(값 미기록)**. 연결 브랜치·Dockerfile/문맥·live 배포 커밋은 위 10-25·10-27·10-30 값과 같음
+(`moajwo-test` `test/render-20261021`·`frontend/Dockerfile.render-test`·60bcae8 2026-10-21 17:37, 10-21 21:19 정지 → 10-22 00:48 재개 기록 / `moajwo-test-api` `main`·`backend/Dockerfile`·703fdcb 2026-10-21 13:43 / `moajwo-test-web` `main`·`frontend/Dockerfile.render`·66405ef 2026-10-21 21:11).
+환경 변수 이름은 `moajwo-test-api`에 `MOAJWO_COOKIE_SECURE`만 있고 프런트 둘은 없음. **연결 브랜치가 `main`인 서비스는 수동 배포 때 그 시점의 main HEAD를 빌드합니다** — 승인 릴리스(2026-11-01 소유자 승인 `eeb27f1`)를 고정하려면 전환 설정에서 연결 브랜치를
+릴리스 가지 **`release/render-eeb27f1`**(승인 묶음 작성 때 `eeb27f1`에서 만들고 움직이지 않음, 새 릴리스는 새 가지)로 바꿉니다. 이 문서 PR은 문서만 바꾸며 릴리스 SHA를 바꾸지 않습니다.
 
 - **제안하는 readiness 경로(전환 때 설정, 지금은 바꾸지 않음):** API `moajwo-test-api`는 **`/health`**(이 저장소의 실제 경로 — DB에 `SELECT 1`,
   실패면 503), 프런트는 **`/api/health`**(nginx가 API로 프록시 — 프런트 자체에는 전용 health location이 없고 `/`는 정적 index라 API 상태를 담지
