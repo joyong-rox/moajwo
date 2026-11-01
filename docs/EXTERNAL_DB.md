@@ -374,6 +374,15 @@ psql --no-password "service=moajwo-restore-test" -c "SELECT count(*) FROM users"
 - 격리 확인 (2026-10-25, 로컬 PostgreSQL 17.11, 합성 계정): `PGSERVICE`로 백업(85KB) → `--dbname=service=…`로 다른 빈 DB에 복원 → psql(서비스)로 users 5행 → 그 DB로 띄운 앱에 같은 계정 로그인, 계정 수 원본과 같음, 원본 DB 그대로 (`diagnostics/scripts/external_db_check.py` 8단계).
 - 로컬 확인 (2026-10-30 2차, 포터블 PostgreSQL 17.11, 합성 계정): 같은 실행(`pgrole-check.json` 7a~7f)에서 `pg_dump`(`PGSERVICE`, `--format=custom --no-owner --no-privileges`, 81KB) → 소유 계정이 만든 빈 `rv_restore`에 `pg_restore --dbname=service=…` → **권한 재적용 전 앱 계정 조회 42501** → 5장 GRANT·기본 권한 재적용 → 앱 계정 조회 users 1 = 원본 → 복원 DB로 띄운 앱(앱 계정 주소·빈 파일 폴더)에서 `setup_required: false`·같은 계정 로그인 200·`/auth/me` 200·최초 설정 재요청 409 → 원본 DB users 1 그대로. 실제 Neon이 아닙니다.
 
+**운영 도구(2026-11-01 12차 — 저장소 `scripts/`, 비밀값 없음, 접속 정보는 3-1의 서비스 파일·비밀번호 파일에서만):**
+
+| 도구 | 하는 일 | 주기 |
+|---|---|---|
+| `scripts/backup_external_db.ps1 [-Service moajwo-migrate] [-PgBin <pg_dump 폴더>] [-PreDeploy] [-KeepWeeks 8]` | `psql`로 리비전·users 수만 읽고 `pg_dump`(PGSERVICE, custom, `--no-owner --no-privileges`) → `backups/external-db/<yyyyMMdd-HHmmss>/neondb-<시각>.dump` + `.sha256` + `BACKUP-NOTE.md`(시각·리비전·건수). `-PreDeploy`는 반영 직전 백업 표지(`PRE-DEPLOY`, 보존 예외). 보존 기간(기본 8주)을 넘긴 정기 백업은 **목록만 출력하고 지우지 않는다**. 오류 문구의 호스트·IP는 가린다 | **매주 1회 + 계정 발급·반영 직전(`-PreDeploy`)** · 보존 최근 8주분 + 반영 직전 백업(승인 묶음 v2 10항) · **복원 확인 분기 1회**(위 7장 절차 — 빈 `moajwo_restore_test`에 복원 → 권한 재적용 → 앱 계정 로그인) |
+| `scripts/wake_render.ps1 [-Front …] [-Api …]` | 프런트 `/` → **API `/health`(직접 — API를 먼저 깨움)** → 프런트 `/api/health`(프록시 확인) → API `/auth/status` 순서로 GET만 보내 응답 시간을 재고 기록(`backups/external-db/wake/wake-<시각>.md`). 재시도·중단 규칙은 계획 9단계(프런트 60초×1 · health 30초×3 · status 10초×3 · 실패하면 멈춤). 로그인·쿠키·설정 변경 없음. 2026-11-01 1회 실행: 프런트 콜드 스타트 13.5초 · API 33.5초 · **API가 잠든 동안 프런트 경유 `/api/health`는 429로 즉시 거절**(직접 `/health`가 깨운 뒤 200) — 그래서 직접 호출을 앞에 둔다 | 시연·발표처럼 정해진 시각에 쓰기 전 **T-30분·T-10분·T-3분**(Render 15분 휴면·Neon 5분 정지 대비). 외부 핑 서비스·상시 깨우기·유료 전환은 쓰지 않음 |
+
+PowerShell 5.1에서 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\backup_external_db.ps1 …`로 실행한다. `pg_dump`·`psql` 17이 PATH에 없으면 `-PgBin`으로 폴더를 준다(2026-11-01 1회 실행 확인: 포터블 PostgreSQL 17 클라이언트).
+
 ## 8. 전환 — 기존 계정 이관(A) 또는 새 계정 등록(B)
 
 ### 8-0. 경로를 먼저 정한다 (소유자 결정, 전환 전)
@@ -539,15 +548,15 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 - **무료 웹 서비스** (https://render.com/docs/free, 2026-10-26 확인): 15분 동안 들어오는 요청(HTTP·WebSocket)이 없으면 멈추고 다시 깨는 데 약 1분 걸립니다. 작업 공간마다 한 달 750시간이며, 다 쓰면 그달 남은 기간 무료 웹 서비스가 정지됩니다. Render의 health 확인 자체가 '들어오는 요청'으로 세어지는지는 문서에 없습니다 (**미확인**).
 - 계정 보존은 API 서비스의 `DATABASE_URL` 등(3장)으로만 이뤄집니다. 프런트 서비스에 DB 환경 변수를 넣어도 계정이 보존되지 않습니다.
 
-**2026-11-01 전환 뒤 현재값(소유자 실행·보고, 에이전트 점검 — 경로 B 전환 완료):**
+**2026-11-01 전환 뒤 현재값(경로 B 전환 완료 — 수행 주체: 환경 변수 값 입력·관리자 생성·사용자 발급은 소유자, Render 설정 저장·수동 배포·`moajwo-test-web` Suspend는 소유자 승인 뒤 Claude가 소유자 계정의 내장 브라우저로, 배포 로그 확인은 Claude, 연결 확인·점검·백업은 작업 에이전트 — 12차 정정):**
 
 | 서비스 | 연결 브랜치 | Dockerfile / 문맥 | HTTP health 경로 | Auto-Deploy | live 배포 |
 |---|---|---|---|---|---|
 | `moajwo-test` | `release/render-eeb27f1` | `frontend/Dockerfile.render` / `frontend` | `/` | Off | `eeb27f1` 2026-11-01 19:54 KST(`dep-dbjhjovlk1mc739946qg`) |
 | `moajwo-test-api` | `release/render-eeb27f1` | `backend/Dockerfile` / `backend` | `/health` | Off | `eeb27f1` 2026-11-01 19:55 KST(`dep-dbjhks0u01pc73fgc9rg`) — 배포 로그에 `Running upgrade` 없음(0022 head 확인만) |
-| `moajwo-test-web` | (설정 그대로) | | | Off | **Suspended** 2026-11-01 19:57경(소유자 결정 — 삭제 아님) |
+| `moajwo-test-web` | (설정 그대로) | | | Off | **Suspended** 2026-11-01 19:57경(소유자 결정 — 삭제 아님, **삭제 여부는 2026-11-15에 다시 결정**) |
 
-전환 뒤 점검(19:59, 쓰기 없음): 프런트 `/` 200 · 프런트 `/api/health`·API `/health` `database: ok` · `/auth/status` `setup_required: true` → 관리자 생성·사용자 1명 발급 뒤 `false`(20:11 쓰기 재개) · setup/signup 410 · 첫 백업(7장) 완료. 릴리스 가지 `release/render-eeb27f1`(= `eeb27f1`)은 움직이지 않으며 새 릴리스는 새 가지로(Auto-Deploy Off·수동 배포). 세부 기록은 Git 밖 `backups/followup-20261030/round11/`과 승인 묶음 `round10/APPROVAL-RENDER-20261101.md`.
+전환 뒤 점검(19:59, 쓰기 없음): 프런트 `/` 200 · 프런트 `/api/health`·API `/health` `database: ok` · `/auth/status` `setup_required: true` → 관리자 생성·사용자 1명 발급 뒤 `false`(20:11 쓰기 재개) · setup/signup 410 · 첫 백업(7장) 완료. 릴리스 가지 `release/render-eeb27f1`(= `eeb27f1`)은 움직이지 않으며 새 릴리스는 새 가지로(Auto-Deploy Off·수동 배포). 세부 기록은 Git 밖 `backups/followup-20261030/round11/`과 승인 묶음 `round10/APPROVAL-RENDER-20261101.md`. 가지 `test/render-20261021`(옛 프런트 시험 가지, 60bcae8)은 어느 서비스도 가리키지 않게 된 뒤 2026-11-01 12차에 bundle로 보존하고 삭제했다(`deploy/render-preview-20261021`은 PR #19 기록으로 보존).
 
 **제안값 (승인 묶음 8-5에 넣어 한 번에 적용 — 이번 작업에서는 저장하지 않음):**
 
@@ -583,7 +592,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 
 아래를 한 묶음으로 만들어 소유자가 한 번 검토·승인한 뒤 8-3의 전환 단계(9~13)를 진행합니다. 묶음에 비밀번호·주소를 넣지 않습니다. 이 저장소 작업에서는 이 묶음을 만들거나 그 안의 단계를 실행하지 않았습니다.
 
-**2026-11-01 실행:** 승인 묶음 **v2**(경로 B · 최소 권한 — Render에 소유 계정 주소 없음 · `moajwo-test-web` Suspend · 릴리스 `eeb27f1`/가지 `release/render-eeb27f1`)를 소유자가 승인하고 당일 전환했습니다(9~13단계 + 관리자 생성·사용자 1명 발급, 첫 백업). 묶음과 전환 기록은 Git 밖 `backups/followup-20261030/round10/APPROVAL-RENDER-20261101.md`·`round11/`. 12번 TLS 확인은 3-2의 클라이언트 쪽 확인(직접·풀러 모두 `verify-full`+`channel_binding=require`)으로 적었습니다.
+**2026-11-01 실행:** 승인 묶음 **v2**(경로 B · 최소 권한 — Render에 소유 계정 주소 없음 · `moajwo-test-web` Suspend · 릴리스 `eeb27f1`/가지 `release/render-eeb27f1`)를 소유자가 승인하고 당일 전환했습니다(9~13단계 + 관리자 생성·사용자 1명 발급, 첫 백업). 묶음과 전환 기록은 Git 밖 `backups/followup-20261030/round10/APPROVAL-RENDER-20261101.md`·`round11/`. 12번 TLS 확인은 3-2의 클라이언트 쪽 확인(직접·풀러 모두 `verify-full`+`channel_binding=require`)으로 적었습니다. **수행 주체(12차 정정):** 환경 변수 값 입력(B-1)·관리자 생성·사용자 발급(E)은 소유자, Render 설정 저장·수동 배포·`moajwo-test-web` Suspend(B-2·B-3·C·D)는 소유자 승인 뒤 Claude가 소유자 계정의 내장 브라우저로 수행, API 배포 로그의 `Running upgrade` 없음 확인은 Claude(배포 `dep-dbjhks0u01pc73fgc9rg`), 연결 확인·쓰기 없는 점검·첫 백업은 작업 에이전트.
 
 1. 경로 결정 — (A) 기존 계정 이관 / (B) 새 계정 등록, 그 이유
 2. Neon 프로젝트(`moajwo-test`)·지역·PostgreSQL 판(17), 무료 조건을 확인한 날짜(2장)
