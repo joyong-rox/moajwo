@@ -55,8 +55,8 @@
 | 변수 | 값 | 설명 |
 |---|---|---|
 | `MOAJWO_DB_MODE` | `external` | 외부 DB 모드. 이 값이면 `DATABASE_URL`이 없거나 PostgreSQL이 아닐 때 **기동하지 않는다** (빈 SQLite로 대신 열지 않음) |
-| `DATABASE_URL` | `postgresql://moajwo_app:…@ep-…-pooler…/neondb?sslmode=verify-full&sslrootcert=system&channel_binding=require` | **앱: 연결 풀러 주소 + 앱 계정**(데이터 읽기·쓰기만). `postgres://`·`postgresql://`는 psycopg 3 드라이버로 바뀐다 |
-| `MOAJWO_MIGRATION_DATABASE_URL` | `postgresql://neondb_owner:…@ep-…(풀러 아님)…/neondb?sslmode=verify-full&sslrootcert=system&channel_binding=require` | **마이그레이션: 직접 연결 + 소유 계정**(스키마를 바꿀 권한). 이관 도구(`app.dbcopy`)도 같은 직접 연결·소유 계정을 쓴다. 비우면 `DATABASE_URL` |
+| `DATABASE_URL` | `postgresql://moajwo_app:…@ep-…-pooler…/neondb?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt&channel_binding=require` | **앱: 연결 풀러 주소 + 앱 계정**(데이터 읽기·쓰기만). `postgres://`·`postgresql://`는 psycopg 3 드라이버로 바뀐다 |
+| `MOAJWO_MIGRATION_DATABASE_URL` | `postgresql://moajwo_app:…@ep-…(풀러 아님)…/neondb?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt&channel_binding=require` | **마이그레이션 주소: 직접 연결 + 앱 계정 — 최소 권한(소유자 결정 2026-11-01)**: Render에는 소유 계정 주소를 두지 않는다. 기동 때 `alembic upgrade head`는 head 확인만 통과하고(변경 없음) 앱 계정은 스키마를 바꾸지 못한다(DDL 42501). **새 마이그레이션(0023~)은 소유자 PC에서 `moajwo-migrate`(소유 계정·직접 연결)로 먼저 적용한 뒤 배포한다**(순서를 지키지 않으면 새 코드가 옛 스키마에서 기동 실패 → 이전 릴리스 가지로 되돌림). 스키마 변경·이관(`app.dbcopy`)은 소유자 PC의 소유 계정으로만. 이관 도구(`app.dbcopy`)도 같은 직접 연결·소유 계정을 쓴다. 비우면 `DATABASE_URL` |
 | `MOAJWO_DB_POOL_SIZE` · `…_MAX_OVERFLOW` | 3 · 2 | 무료 인스턴스 1개 기준의 작은 풀 |
 | `MOAJWO_DB_POOL_TIMEOUT_S` | 10 | 풀에서 연결을 기다리는 최대 시간 — 넘으면 503 '바쁨' |
 | `MOAJWO_DB_POOL_RECYCLE_S` | 240 | Neon 휴면(5분)보다 짧게 연결을 새로 맺음 |
@@ -64,6 +64,8 @@
 | `MOAJWO_MIGRATION_LOCK_TIMEOUT_S` | 60 | 기동 때 마이그레이션이 잠금(다른 인스턴스·이관 도구)과 표 잠금을 기다리는 최대 시간 — 넘으면 기동 실패 |
 
 - 두 주소(풀러·앱 계정 / 직접 연결·소유 계정)가 **같은 DB**를 가리키는지 전환 전에 `python -m app.dbcheck`로 확인합니다 (8-3 5단계).
+- **TLS 신뢰 저장소(2026-11-01 실제 이미지에서 확인):** backend 이미지의 psycopg-binary는 번들 OpenSSL을 쓰므로 `sslrootcert=system`으로는 Debian의 OS 묶음을 찾지 못해 `certificate verify failed`로 기동하지 못합니다(격리 앱 확인). 주소에 **`sslrootcert=/etc/ssl/certs/ca-certificates.crt`**(이미지의 Mozilla 묶음, ISRG Root X1 포함)를 적습니다 — 직접·풀러 모두 `verify-full`+`channel_binding=require`로 통과. 대안: 환경 변수 `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`를 두면 `system`도 통과합니다.
+- **2026-11-01 전환 뒤 Render `moajwo-test-api`의 변수(이름):** `MOAJWO_DB_MODE`·`DATABASE_URL`·`MOAJWO_MIGRATION_DATABASE_URL`·`MOAJWO_COOKIE_SECURE`(값은 Render에만). 풀 변수는 기본값.
 - 비밀번호에 `@ : / ? # %` 같은 문자가 있으면 주소 안에서 퍼센트 인코딩합니다 (`@` → `%40`). 시험에서 이런 문자를 넣은 비밀번호로 확인했습니다.
 - 주소는 서버(Render 서비스)의 비밀 환경 변수에만 둡니다. 저장소·화면 번들·문서·캡처에 넣지 않습니다. 앱은 주소·비밀번호·SQL·매개변수를 응답·로그·오류 문구에 쓰지 않습니다 (엔진 `hide_parameters`, 오류 기록은 종류·SQLSTATE만).
 - 파일 읽기 한도(`MOAJWO_MAX_…`)는 `docs/MEMORY.md`(PR #31)의 Render 값으로 낮춥니다.
@@ -202,7 +204,7 @@ https://neon.com/docs/connect/connect-securely — 2026-10-27 확인)
 
 | 어디서 | 설정 | 신뢰 저장소 | 비고 |
 |---|---|---|---|
-| Render의 backend(`DATABASE_URL`·`MOAJWO_MIGRATION_DATABASE_URL`) | `sslmode=verify-full&sslrootcert=system&channel_binding=require` | 이미지의 OS 저장소(Debian `ca-certificates` — Mozilla 묶음, ISRG Root X1 포함; PR #50이 빌드 때 보안 갱신) | `sslrootcert=system`은 libpq 16+ (psycopg-binary 3.3.6의 libpq 18). system이면 verify-full보다 약한 sslmode는 **오류**(libpq 문서) — 실수로 낮추지 못함 |
+| Render의 backend(`DATABASE_URL`·`MOAJWO_MIGRATION_DATABASE_URL`) | `sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt&channel_binding=require` (**2026-11-01 정정** — 이전 기본안 `sslrootcert=system`) | 이미지의 OS 저장소(Debian `ca-certificates` — Mozilla 묶음, ISRG Root X1 포함; PR #50이 빌드 때 보안 갱신)를 **파일 경로로 지정** | psycopg-binary(libpq 18)의 번들 OpenSSL은 `system`의 기본 경로에서 OS 묶음을 찾지 못해 verify 실패(2026-11-01 격리 앱 확인) → 파일 경로 또는 `SSL_CERT_FILE`. verify-full보다 약한 sslmode는 쓰지 않음 |
 | 사용자 PC(Windows)의 psql·pg_dump·`app.dbcopy` (3-1 서비스 파일) | `sslmode=verify-full` + `sslrootcert=<파일>` | Windows에는 드라이버가 쓸 OS root 파일이 없음(Neon 문서) → Let's Encrypt의 ISRG Root X1(`https://letsencrypt.org/certs/isrgrootx1.pem`, 2030-06-04까지)을 받아 `%APPDATA%\postgresql\isrgrootx1.pem`에 둠 | 받은 파일은 `openssl x509 -in isrgrootx1.pem -noout -subject -enddate`로 `CN = ISRG Root X1`·`notAfter=Jun  4 … 2030`을 확인. Neon이 CA를 바꾸면 이 파일도 바꿔야 함 |
 | 앱 코드 | 바꾸지 않음 — `config._database`는 주소의 연결 옵션을 그대로 전달(시험 `test_postgres_url_keeps_verify_full_and_system_root_options`) | | |
 
@@ -537,17 +539,27 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 - **무료 웹 서비스** (https://render.com/docs/free, 2026-10-26 확인): 15분 동안 들어오는 요청(HTTP·WebSocket)이 없으면 멈추고 다시 깨는 데 약 1분 걸립니다. 작업 공간마다 한 달 750시간이며, 다 쓰면 그달 남은 기간 무료 웹 서비스가 정지됩니다. Render의 health 확인 자체가 '들어오는 요청'으로 세어지는지는 문서에 없습니다 (**미확인**).
 - 계정 보존은 API 서비스의 `DATABASE_URL` 등(3장)으로만 이뤄집니다. 프런트 서비스에 DB 환경 변수를 넣어도 계정이 보존되지 않습니다.
 
+**2026-11-01 전환 뒤 현재값(소유자 실행·보고, 에이전트 점검 — 경로 B 전환 완료):**
+
+| 서비스 | 연결 브랜치 | Dockerfile / 문맥 | HTTP health 경로 | Auto-Deploy | live 배포 |
+|---|---|---|---|---|---|
+| `moajwo-test` | `release/render-eeb27f1` | `frontend/Dockerfile.render` / `frontend` | `/` | Off | `eeb27f1` 2026-11-01 19:54 KST(`dep-dbjhjovlk1mc739946qg`) |
+| `moajwo-test-api` | `release/render-eeb27f1` | `backend/Dockerfile` / `backend` | `/health` | Off | `eeb27f1` 2026-11-01 19:55 KST(`dep-dbjhks0u01pc73fgc9rg`) — 배포 로그에 `Running upgrade` 없음(0022 head 확인만) |
+| `moajwo-test-web` | (설정 그대로) | | | Off | **Suspended** 2026-11-01 19:57경(소유자 결정 — 삭제 아님) |
+
+전환 뒤 점검(19:59, 쓰기 없음): 프런트 `/` 200 · 프런트 `/api/health`·API `/health` `database: ok` · `/auth/status` `setup_required: true` → 관리자 생성·사용자 1명 발급 뒤 `false`(20:11 쓰기 재개) · setup/signup 410 · 첫 백업(7장) 완료. 릴리스 가지 `release/render-eeb27f1`(= `eeb27f1`)은 움직이지 않으며 새 릴리스는 새 가지로(Auto-Deploy Off·수동 배포). 세부 기록은 Git 밖 `backups/followup-20261030/round11/`과 승인 묶음 `round10/APPROVAL-RENDER-20261101.md`.
+
 **제안값 (승인 묶음 8-5에 넣어 한 번에 적용 — 이번 작업에서는 저장하지 않음):**
 
 | 서비스 | 항목 | 현재 | 제안 | 영향 |
 |---|---|---|---|---|
-| `moajwo-test` | 연결 브랜치 | `test/render-20261021` | 승인된 릴리스(main 병합 뒤 main) | 이 서비스가 승인된 코드를 따름. Auto-Deploy Off 그대로면 수동 배포만 |
+| `moajwo-test` | 연결 브랜치 | `test/render-20261021` | 승인된 릴리스 가지 `release/render-eeb27f1`(적용 2026-11-01) | 이 서비스가 승인된 코드를 따름. Auto-Deploy Off 그대로면 수동 배포만 |
 | `moajwo-test` | Dockerfile / 문맥 | `frontend/Dockerfile.render-test` / `frontend` | `frontend/Dockerfile.render` / `frontend` (Docker Command는 비움 — 이미지 CMD) | nginx 1.30(brotli-libs 수정판)·비루트(uid 101)·컨테이너 포트 80 → 8080(Render가 열린 포트를 찾음 — 못 찾으면 `PORT=8080`)·보안 헤더 4종·접근 기록에 쿼리 값 없음. 공개 주소는 그대로 |
 | `moajwo-test` | HTTP health 경로 | 비어 있음 | `/api/health` (nginx → API `/health`) — 또는 `/`(소유자 결정) | `/api/health`: 새 프런트가 API·DB 응답을 받아야 트래픽을 받음(API가 깨는 약 1분은 배포 대기). 대신 프런트 가용성이 API에 묶임 — API가 15초 넘게 답하지 못하면 프런트(정적 화면 포함)로도 트래픽이 끊기고 60초면 프런트가 다시 시작됨. 프런트가 떠 있는 동안 확인마다 API 공개 주소로 실제 요청이 가 API도 멈추지 않음. `/`: 프런트만 확인(정적 화면은 API와 무관) |
 | `moajwo-test-api` | 연결 브랜치 · Dockerfile / 문맥 | `main` · `backend/Dockerfile` / `backend` | 그대로 (승인된 릴리스) | — |
 | `moajwo-test-api` | HTTP health 경로 | 비어 있음 | `/health` (DB `SELECT 1`, 실패하면 503) | DB에 닿지 못하면 새 배포가 트래픽을 받지 않음(이전 인스턴스 유지). 실행 중에 DB가 15초 넘게 답하지 못하면 API로 트래픽이 끊김. Neon 휴면 복귀 시간과 검사마다 5초 제한의 관계는 실제 연결 시험에서 확인 (**미검증**) |
 | `moajwo-test-api` | 환경 변수 | SQLite (외부 DB 변수 없음) | 3장 변수를 "Save only"로 (전환 10단계) | 다음 배포부터 외부 DB |
-| `moajwo-test-web` | 모두 | `main` · `frontend/Dockerfile.render` | **바꾸지 않음** — 중복으로 보인다는 이유만으로 삭제·중지하지 않음 | 사용 여부·정리는 별도 과제 |
+| `moajwo-test-web` | 모두 | `main` · `frontend/Dockerfile.render` | 설정은 바꾸지 않고 **Suspend**(삭제 아님 — 소유자 결정 2026-11-01, 전환 때 실행) | 사용 여부·정리는 별도 과제 |
 
 - **health 경로를 넣은 뒤 확인:** 요청 없이 15~30분 둔 뒤 프런트·API가 멈추는지(대시보드 이벤트)와 무료 시간 사용량을 봅니다. 멈추지 않으면(확인이 요청으로 세어지는 경우 — 세 서비스가 늘 떠 있으면 750시간을 넘음) health 경로를 비워 되돌립니다. 상시 기동을 위한 요청은 넣지 않습니다.
 - 제안 프런트 이미지(`frontend/Dockerfile.render`)는 격리 러너에서 실제 Render 대신 같은 이름(`moajwo-test-api.onrender.com`)의 HTTPS 대역 API를 두고 확인합니다: nginx 설정 검사, 비루트·8080, `/api/`가 그 이름으로 TLS 연결해 backend까지 가는지, 프록시를 거친 로그인·쿠키 속성·업로드·내려받기, `/`·`/api/health`의 보안 헤더, 상류 인증서 검증 (`diagnostics/ci/image_check.sh`). 대역 API의 인증서는 시험 CA(뿌리 → 중간 → 서버)가 서명하고 앞단에는 그 뿌리만 신뢰 묶음으로 주어, 신뢰하지 않는 CA·만료·이름 불일치·중간 누락이 502로 끝나고 정상 체인으로 복구되는지까지 봅니다. 실제 Render 주소·인증서 체인으로는 확인하지 않았습니다.
@@ -570,6 +582,8 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 ### 8-5. 최종 전환 승인 묶음 (소유자가 한 번 검토·승인)
 
 아래를 한 묶음으로 만들어 소유자가 한 번 검토·승인한 뒤 8-3의 전환 단계(9~13)를 진행합니다. 묶음에 비밀번호·주소를 넣지 않습니다. 이 저장소 작업에서는 이 묶음을 만들거나 그 안의 단계를 실행하지 않았습니다.
+
+**2026-11-01 실행:** 승인 묶음 **v2**(경로 B · 최소 권한 — Render에 소유 계정 주소 없음 · `moajwo-test-web` Suspend · 릴리스 `eeb27f1`/가지 `release/render-eeb27f1`)를 소유자가 승인하고 당일 전환했습니다(9~13단계 + 관리자 생성·사용자 1명 발급, 첫 백업). 묶음과 전환 기록은 Git 밖 `backups/followup-20261030/round10/APPROVAL-RENDER-20261101.md`·`round11/`. 12번 TLS 확인은 3-2의 클라이언트 쪽 확인(직접·풀러 모두 `verify-full`+`channel_binding=require`)으로 적었습니다.
 
 1. 경로 결정 — (A) 기존 계정 이관 / (B) 새 계정 등록, 그 이유
 2. Neon 프로젝트(`moajwo-test`)·지역·PostgreSQL 판(17), 무료 조건을 확인한 날짜(2장)
