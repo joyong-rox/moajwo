@@ -86,6 +86,7 @@
   - PowerShell: `icacls "$env:APPDATA\postgresql\pgpass.conf" /inheritance:r /grant:r "${env:USERNAME}:F"` — PowerShell은 `%APPDATA%`를 펼치지 않아 cmd 형태를 그대로 쓰면 경로를 찾지 못합니다 (종료 3).
 - 비밀번호 파일은 한 줄에 `호스트:포트:DB:계정:비밀번호` — 앞 네 칸은 `*`(아무 값)도 되고, 칸 안의 `:`와 `\`는 `\`로 이스케이프합니다. 맞는 첫 줄의 비밀번호를 씁니다. **권장 형식(2026-11-01 실제 작성에서 확인):** 호스트·포트·DB 칸은 `*`로 두고 계정 칸만 적은 `*:*:*:<계정>:<비밀번호>` 한 줄이 가장 틀리기 어렵습니다(편집기로 적다가 앞 네 칸을 빠뜨려 칸이 1개·3개인 줄이 두 번 나왔고, 그때 libpq는 비밀번호를 찾지 못합니다). 비밀번호 안의 `_`·`-` 같은 글자는 이스케이프하지 않아도 되고, `\` 뒤 글자는 그대로 읽힙니다. **비밀번호 줄이 맞지 않을 때의 libpq 오류 문구**(`fe_sendauth: no password supplied` 등)에는 **호스트 이름과 IP가 그대로 들어갑니다** — 점검 스크립트·보고는 오류 문구를 그대로 출력·기록하지 말고 호스트·IP를 가린 뒤 남깁니다(2026-11-01 한 번 노출돼 정정).
 - 서비스 파일은 `[이름]` 아래 `키=값` 줄입니다 (`=` 앞뒤에 공백 없이, 주석은 `#`로 시작하는 줄만). 연결 문자열에 직접 준 값(예: `postgresql:///다른DB?service=이름`의 DB 이름)이 서비스 파일 값보다 앞섭니다.
+- **컨테이너용 사본 `pg_service.docker.conf`(2026-11-02):** 7장의 `scripts/pg_docker.ps1`이 서비스 파일에서 `sslrootcert` 값만 컨테이너 경로(`/run/pg/ca.pem`)로 바꾼 사본을 같은 폴더에 **매번 다시 만들고** 본인만 읽게(icacls) 제한합니다. 손으로 고치지 않습니다(다음 실행 때 덮어씀) — 원본 `.pg_service.conf`를 고치면 됩니다. 사본에도 비밀번호는 없습니다(비밀번호 파일은 그대로 읽기 전용 마운트).
 
 예 — 값의 모양만 적었습니다 (실제 호스트·계정은 소유자가 Neon 콘솔에서 확인):
 
@@ -358,7 +359,7 @@ SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relname
 
 ## 7. 백업·복원 (무료 플랜의 자동 복구에만 기대지 않음)
 
-PostgreSQL 클라이언트 도구(서버와 같은 주 판 이상, 17)를 사용자 PC에 두고, **직접 연결·소유 계정**의 서비스(3-1의 `moajwo-migrate`)로 받습니다. 비밀번호는 비밀번호 파일에서만 읽고 명령 인자·셸 기록에 남기지 않습니다.
+PostgreSQL 클라이언트 도구(서버와 같은 주 판, 17)는 **고정 판 Docker 이미지에서 실행하는 것을 표준**으로 합니다(2026-11-02 13차 — `scripts/pg_docker.ps1`, 아래 「운영 도구」; 사용자 PC에 설치한 클라이언트를 PATH·`-PgBin`으로 쓰는 것도 됩니다). 어느 쪽이든 **직접 연결·소유 계정**의 서비스(3-1의 `moajwo-migrate`)로 받고, 비밀번호는 비밀번호 파일에서만 읽어 명령 인자·셸 기록에 남기지 않습니다.
 
 ```sh
 PGSERVICE=moajwo-migrate pg_dump --no-password --format=custom --no-owner --no-privileges --file=moajwo-YYYYMMDD.dump
@@ -368,20 +369,37 @@ pg_restore --no-password --no-owner --no-privileges --exit-on-error --dbname="se
 psql --no-password "service=moajwo-restore-test" -c "SELECT count(*) FROM users"
 ```
 
+Docker 방식(표준, 2026-11-02 — PowerShell 프롬프트, 저장소 뿌리에서; 접속은 서비스 이름뿐):
+
+```powershell
+# 백업(매주 1회는 예약 작업이 함) · 반영 직전은 -PreDeploy
+.\scripts\backup_external_db.ps1 -UseDocker
+# 분기 복원 확인(1회차 2026-11-02, 다음 2027-02-01경) — 빈 moajwo_restore_test 에 복원 → 권한 재적용(5장) → 앱 계정 확인 → 복원 DB 비우기. 원본 neondb 는 읽기만
+.\scripts\pg_docker.ps1 -Tool pg_restore -InDir backups\external-db\<시각> -ToolArgs '--no-password','--no-owner','--no-privileges','--exit-on-error','--dbname=service=moajwo-restore-test','/in/neondb-<시각>.dump'
+.\scripts\pg_docker.ps1 -Tool psql -ToolArgs '--no-password','service=moajwo-app-restore-test','-At','-c','select count(*) from users'   # 재적용 전: 42501 이어야 함
+.\scripts\pg_docker.ps1 -Tool psql -ToolArgs '--no-password','service=moajwo-restore-test','-v','ON_ERROR_STOP=1','-c','GRANT USAGE ON SCHEMA public TO moajwo_app','-c','ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO moajwo_app','-c','ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO moajwo_app','-c','GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO moajwo_app','-c','GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO moajwo_app'
+.\scripts\pg_docker.ps1 -Tool psql -ToolArgs '--no-password','service=moajwo-app-restore-test','-At','-c','select current_user, count(*) from users'   # 재적용 뒤: moajwo_app · 건수 = 원본 (5장 확인 SQL의 '빠진 권한' 0행도 본다)
+# 복원 DB로 앱을 띄워 setup_required false 를 보는 것까지는 13차 드라이버(backups/followup-20261030/round13/restore_check_r13.py)가 한다 — 같은 계정 로그인은 소유자 비밀번호가 필요
+.\scripts\pg_docker.ps1 -Tool psql -ToolArgs '--no-password','service=moajwo-restore-test','-v','ON_ERROR_STOP=1','-c','DROP SCHEMA public CASCADE','-c','CREATE SCHEMA public','-c','GRANT USAGE ON SCHEMA public TO moajwo_app'   # 비우기(표 0 확인)
+```
+
 - PowerShell: `$env:PGSERVICE = "moajwo-migrate"` 뒤 같은 pg_dump 명령(끝나면 `Remove-Item Env:PGSERVICE`), 해시는 `Get-FileHash -Algorithm SHA256 moajwo-YYYYMMDD.dump`.
 - **복구를 증명합니다** — 백업 파일이 있다는 것만으로 완료로 보지 않습니다: 다른 빈 DB로 복원(`--no-owner --no-privileges`라 소유자·권한은 함께 복원되지 않음) → **복원 대상 DB에서** 앱 계정 권한을 다시 적용(5장의 `GRANT USAGE ON SCHEMA`·`GRANT … ON ALL TABLES/SEQUENCES`·`ALTER DEFAULT PRIVILEGES` — 기본 권한은 DB마다 따로이며, 적용 전에는 앱 계정의 조회가 `42501`로 거절됨) → **앱 계정 서비스(`moajwo-app-restore-test`)로 띄운 앱**에 같은 계정으로 로그인(`setup_required: false` — 최초 설정이 다시 열리지 않음) → 역할·상태·소유 관계(남의 자료 404)·표별 건수·내용 해시가 원본과 같음 → 원본 DB는 그대로. 소유 계정의 `SELECT count(*)` 성공만으로 복원 완료라고 하지 않습니다 (2026-10-30).
 - 백업 파일에는 계정·비밀번호 해시·업무 기록이 들어 있습니다. 2장 백업 위치에 두고 Render 디스크·Git·공유 폴더에 두지 않습니다.
 - 격리 확인 (2026-10-25, 로컬 PostgreSQL 17.11, 합성 계정): `PGSERVICE`로 백업(85KB) → `--dbname=service=…`로 다른 빈 DB에 복원 → psql(서비스)로 users 5행 → 그 DB로 띄운 앱에 같은 계정 로그인, 계정 수 원본과 같음, 원본 DB 그대로 (`diagnostics/scripts/external_db_check.py` 8단계).
 - 로컬 확인 (2026-10-30 2차, 포터블 PostgreSQL 17.11, 합성 계정): 같은 실행(`pgrole-check.json` 7a~7f)에서 `pg_dump`(`PGSERVICE`, `--format=custom --no-owner --no-privileges`, 81KB) → 소유 계정이 만든 빈 `rv_restore`에 `pg_restore --dbname=service=…` → **권한 재적용 전 앱 계정 조회 42501** → 5장 GRANT·기본 권한 재적용 → 앱 계정 조회 users 1 = 원본 → 복원 DB로 띄운 앱(앱 계정 주소·빈 파일 폴더)에서 `setup_required: false`·같은 계정 로그인 200·`/auth/me` 200·최초 설정 재요청 409 → 원본 DB users 1 그대로. 실제 Neon이 아닙니다.
+- **실제 Neon 복원 확인 1회차 (2026-11-02 13차 — 첫 분기 복원 확인, 위 Docker 방식):** 그날의 Docker 방식 백업(custom, 21표)을 `pg_docker.ps1 -Tool pg_restore`로 빈 `moajwo_restore_test`에 복원(22초, head 같음) → **재적용 전 앱 계정 조회 42501** → 5장 GRANT 5문(psql in Docker) → 5장 확인 SQL 빠진 권한 0행(표 21·시퀀스 19) → 앱 계정 접속(`moajwo_app`·`moajwo_restore_test`·클라이언트 TLS 사용·`CREATE TABLE` 42501) → **표 21개의 건수·내용 해시가 모두 원본과 같음(416행)** → 복원 DB로 띄운 앱(앱 계정 서비스) `/health` ok·`setup_required: false`·`/auth/me` 401·공개 setup 410 → 복원 DB 비우기(표 0, 앱 계정 접속은 유지) → 원본 neondb head·users 그대로. 11/11 통과. **같은 계정으로의 실제 로그인은 소유자 비밀번호가 필요해 하지 않았습니다(미수행).** 기록은 Git 밖 `backups/followup-20261030/round13/`. **다음 복원 확인: 2027-02-01경.**
 
-**운영 도구(2026-11-01 12차 — 저장소 `scripts/`, 비밀값 없음, 접속 정보는 3-1의 서비스 파일·비밀번호 파일에서만):**
+**운영 도구(2026-11-01 12차 · 2026-11-02 13차 — 저장소 `scripts/`, 비밀값 없음, 접속 정보는 3-1의 서비스 파일·비밀번호 파일에서만):**
 
 | 도구 | 하는 일 | 주기 |
 |---|---|---|
-| `scripts/backup_external_db.ps1 [-Service moajwo-migrate] [-PgBin <pg_dump 폴더>] [-PreDeploy] [-KeepWeeks 8]` | `psql`로 리비전·users 수만 읽고 `pg_dump`(PGSERVICE, custom, `--no-owner --no-privileges`) → `backups/external-db/<yyyyMMdd-HHmmss>/neondb-<시각>.dump` + `.sha256` + `BACKUP-NOTE.md`(시각·리비전·건수). `-PreDeploy`는 반영 직전 백업 표지(`PRE-DEPLOY`, 보존 예외). 보존 기간(기본 8주)을 넘긴 정기 백업은 **목록만 출력하고 지우지 않는다**. 오류 문구의 호스트·IP는 가린다 | **매주 1회 + 계정 발급·반영 직전(`-PreDeploy`)** · 보존 최근 8주분 + 반영 직전 백업(승인 묶음 v2 10항) · **복원 확인 분기 1회**(위 7장 절차 — 빈 `moajwo_restore_test`에 복원 → 권한 재적용 → 앱 계정 로그인) |
+| `scripts/pg_docker.ps1 -Tool psql\|pg_dump\|pg_restore [-ToolArgs <배열>] [-OutDir <폴더>] [-InDir <폴더>] [-Image <태그@digest>] [-WaitDaemonSeconds 180] [-PassThru]` | **고정 판 이미지** `postgres:17.11@sha256:3b0cda93be7c8dba2ed484d19393d93845dc3dafb88973e248ba8e6d99d784e1`(2026-11-02 pull, 클라이언트 `pg_dump (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2)`)에서 도구 하나를 실행한다. 서비스 파일·비밀번호 파일·CA 파일(서비스 파일의 `sslrootcert`)을 **읽기 전용으로 마운트**하고 컨테이너 안 tmpfs(`/run/pg`, 0700)에 복사해 0600으로 맞춘 뒤 실행한다(Docker Desktop 바인드 마운트는 파일이 0777로 보여 libpq가 비밀번호 파일을 무시함 — 2026-11-02 확인; 본인만 읽게 제한한 파일도 마운트로 읽힘). 컨테이너용 서비스 파일 사본 `%APPDATA%\postgresql\pg_service.docker.conf`(`sslrootcert`만 `/run/pg/ca.pem`)를 매번 다시 만들고 본인만 읽게(icacls) 둔다. **쓰기 마운트는 `-OutDir`(→`/out`) 하나**, `-InDir`(→`/in`)는 읽기 전용. 컨테이너는 `--rm`. Docker 엔진이 없으면 180초 기다린 뒤 종료 2. 오류 문구의 호스트·IP는 가린다 | 백업·복원 확인 도구가 부른다. 직접 쓸 때는 PowerShell 프롬프트에서 배열 문법(`-ToolArgs '--no-password','service=moajwo-migrate','-At','-c','select 1'`) |
+| `scripts/backup_external_db.ps1 -UseDocker [-Log] [-Service moajwo-migrate] [-PreDeploy] [-KeepWeeks 8]` (`-UseDocker` 없이 `-PgBin <폴더>`/PATH 클라이언트도 됨) | `psql`로 리비전·users 수만 읽고 `pg_dump`(`--dbname=service=…`, custom, `--no-owner --no-privileges`) → `backups/external-db/<yyyyMMdd-HHmmss>/neondb-<시각>.dump` + `.sha256` + `BACKUP-NOTE.md`(시각·리비전·건수·실행 방식·클라이언트 판). `-Log`는 `backups/external-db/logs/backup-<시각>.log`(Start-Transcript — 예약 작업이 씀). `-PreDeploy`는 반영 직전 백업 표지(`PRE-DEPLOY`, 보존 예외). 보존 기간(기본 8주)을 넘긴 정기 백업은 **목록만 출력하고 지우지 않는다**. 오류 문구의 호스트·IP는 가린다 | **매주 1회(예약 작업) + 계정 발급·반영 직전(`-PreDeploy`, 손으로)** · 보존 최근 8주분 + 반영 직전 백업(승인 묶음 v2 10항) · **복원 확인 분기 1회**(1회차 2026-11-02 → 다음 2027-02-01경, 위 Docker 방식 절차) |
+| `scripts/register_weekly_backup.ps1 [-RunNow]` · `-Status` · `-Remove` | Windows 작업 스케줄러에 **`moajwo-weekly-backup`** 등록: 매주 **일요일 21:00**(PC 시간대 — 이 PC는 Korea Standard Time), 실행 계정 = 등록한 현재 사용자, **로그온 세션에서만**(LogonType Interactive — 비밀번호 저장 없음), **관리자 권한 없음**(RunLevel Limited, 등록도 관리자 권한 없이 됨), 놓친 실행은 PC가 켜지고 로그인하면 바로(StartWhenAvailable), 실패하면 10분 간격 최대 3회 재시도, 1시간 제한, 겹치면 새 실행 무시, 배터리에서도 실행. 동작 = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File <저장소>\scripts\backup_external_db.ps1 -UseDocker -Log`(작업 정의에 비밀값 없음). `-Status`는 등록 내용·마지막 결과(0 = 성공, 267009 = 실행 중)·다음 실행, `-RunNow`는 등록 뒤 지금 한 번 실행해 끝까지 기다림(시험), `-Remove`는 해제(= `Unregister-ScheduledTask -TaskName moajwo-weekly-backup`). 2026-11-02 등록·`-RunNow` 시험 1회 성공(결과 0, 백업·기록 파일 생성) | 매주 자동. **소유자가 PC에 로그인해 있을 때만 돈다**(Docker Desktop도 사용자 세션에서 뜸) — 일요일 21:00에 꺼져 있었거나 로그아웃 상태였으면 다음 로그인 뒤 바로 실행. 저장소 폴더를 옮기면 `-Remove` 뒤 다시 등록 |
 | `scripts/wake_render.ps1 [-Front …] [-Api …]` | 프런트 `/` → **API `/health`(직접 — API를 먼저 깨움)** → 프런트 `/api/health`(프록시 확인) → API `/auth/status` 순서로 GET만 보내 응답 시간을 재고 기록(`backups/external-db/wake/wake-<시각>.md`). 재시도·중단 규칙은 계획 9단계(프런트 60초×1 · health 30초×3 · status 10초×3 · 실패하면 멈춤). 로그인·쿠키·설정 변경 없음. 2026-11-01 1회 실행: 프런트 콜드 스타트 13.5초 · API 33.5초 · **API가 잠든 동안 프런트 경유 `/api/health`는 429로 즉시 거절**(직접 `/health`가 깨운 뒤 200) — 그래서 직접 호출을 앞에 둔다 | 시연·발표처럼 정해진 시각에 쓰기 전 **T-30분·T-10분·T-3분**(Render 15분 휴면·Neon 5분 정지 대비). 외부 핑 서비스·상시 깨우기·유료 전환은 쓰지 않음 |
 
-PowerShell 5.1에서 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\backup_external_db.ps1 …`로 실행한다. `pg_dump`·`psql` 17이 PATH에 없으면 `-PgBin`으로 폴더를 준다(2026-11-01 1회 실행 확인: 포터블 PostgreSQL 17 클라이언트).
+PowerShell 5.1에서 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\<도구>.ps1 …`(또는 PowerShell 프롬프트에서 `.\scripts\<도구>.ps1 …`)로 실행한다. **표준은 `-UseDocker`** — Docker Desktop이 떠 있어야 한다(이 PC의 로컬 운영이 Docker Desktop에서 돌므로 평소 떠 있음). **Docker 방식을 고른 이유(2026-11-02 13차):** 12차 1회 실행이 세션 임시 폴더의 포터블 클라이언트(`-PgBin`)에 기대고 있었는데, 이 PC에는 Docker Desktop이 이미 있고, 이미지는 digest로 판이 고정되며(클라이언트 판 기록이 자동으로 남음), 접속 파일은 읽기 전용 마운트로만 넘기고 쓰기는 출력 폴더뿐이라 설치·경로 관리 없이 재현 가능하기 때문이다. 고정 위치 설치(대안)는 설치 파일의 출처·판·해시를 따로 관리해야 하고 Windows 업데이트·경로 이동에 약하다. 클라이언트를 설치했으면 `-PgBin`/PATH로도 된다(12차 2026-11-01 1회는 포터블 클라이언트). Docker 엔진이 꺼져 있으면 도구가 180초 기다린 뒤 종료 2로 끝나고 예약 작업은 10분 뒤 다시 시도한다.
 
 ## 8. 전환 — 기존 계정 이관(A) 또는 새 계정 등록(B)
 
