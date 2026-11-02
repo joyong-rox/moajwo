@@ -29,7 +29,7 @@ def test_0023_creates_keyjoin_jobs_and_downgrade_removes_only_that_table_on_post
                         "failed_logins, auth_version, must_change_password) "
                         "VALUES ('u1', 'U1', 'scrypt$synthetic', 'user', true, 'active', 0, 0, false) RETURNING id",
                    )[0][0]  # fmt: skip
-        _sql(url, INSERT_RUN, status="running", worker="w-1")  # 실행 중인 결과 실행이 있어도 이 표와 무관
+        _sql(url, INSERT_RUN.format(extra=", worker", values=", 'w-1'"), status="running")  # 실행 중 행은 이 표와 무관
         assert _columns(url) == set()
         assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
         assert _revision(url) == HEAD and _columns(url) == COLUMNS

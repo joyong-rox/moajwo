@@ -57,7 +57,7 @@ def test_0022_refuses_downgrade_while_any_temp_password_account_exists_on_postgr
                         "failed_logins, auth_version) "
                         "VALUES ('rox', 'R', 'scrypt$x', 'owner', true, 'active', 0, 0) RETURNING id",
                         )[0][0]  # fmt: skip
-        assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
+        assert _ok(_alembic(url, tmp_path, "upgrade", HEAD))
         assert _revision(url) == HEAD and _temp_columns(url) == TEMP_COLUMNS
         assert _sql(url, "SELECT must_change_password, temp_password_expires_at, password_hash FROM users") == [
             (False, None, "scrypt$x")
@@ -95,7 +95,7 @@ def test_0022_refuses_downgrade_while_any_temp_password_account_exists_on_postgr
             ("t-susp", "scrypt$synthetic", "suspended"), ("t-expired", "scrypt$synthetic", "active"),
             ("done", "scrypt$synthetic", "active"), ("t-revoked", "!revoked", "suspended"),
         ]  # fmt: skip
-        assert _ok(_alembic(url, tmp_path, "upgrade", "head"))  # 다시 올리면 모두 False·NULL
+        assert _ok(_alembic(url, tmp_path, "upgrade", HEAD))  # 다시 올리면 모두 False·NULL
         assert _sql(
             url, "SELECT count(*) FROM users WHERE must_change_password OR temp_password_expires_at IS NOT NULL"
         ) == [(0,)]
