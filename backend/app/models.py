@@ -257,6 +257,27 @@ class Automation(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class KeyJoinJob(Base):
+    """공통 key 연결의 '저장한 작업'(설정 재사용, 0023): 입력 역할마다 시트·열 대응 기준(이름·열 문자·위치), key
+    열과 복합 key 순서, 가져올 열·결과 이름·순서, 기준 입력·범위, key 결과 이름, (다음 단계) key별 집계 설정을
+    JSON(spec)으로 둔다(app/keyjoin_jobs.py). 파일 자체·파일 번호·추정 행의 포함/제외 결정·개인정보 확인·요청 번호·
+    확인 결과(basis)는 저장하지 않는다 — 새 파일마다 연결 확인을 다시 거친다. 소유자(owner_id)만 조회·수정·삭제·
+    실행하고(다른 사용자는 최고 관리자라도 404), 같은 소유자 안에서 이름이 고유하다. 표준 통합 자동화(automations)와
+    별개다.
+    """
+
+    __tablename__ = "keyjoin_jobs"
+    __table_args__ = (UniqueConstraint("owner_id", "name", name="uq_keyjoin_jobs_owner_name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(100))
+    version: Mapped[int] = mapped_column(default=1)  # 설정을 바꿀 때마다 1씩 오른다 (적용한 판을 화면이 표시)
+    spec: Mapped[str] = mapped_column(Text)  # JSON — 형식·필드는 app/keyjoin_jobs.py (SPEC_FORMAT)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class User(Base):
     """사용자 계정. role: owner(최고 관리자·소유자) / user(일반 사용자)
 

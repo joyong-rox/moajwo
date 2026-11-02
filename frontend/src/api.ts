@@ -1865,3 +1865,113 @@ export async function runKeyJoin(
   const run = await analysisJson<IntegrationRun>(res)
   return { run, created: res.status === 201 }
 }
+
+// ---------------------------------------------------------------- 저장한 작업 (공통 key 연결 설정 재사용 — /keyjoin/jobs)
+// 파일 번호가 아니라 입력 역할·시트·열 이름(위치)으로 저장하고, 새 파일에 맞춰(match/apply) 요청(KeyJoinRequest)을 다시 만든다.
+// 소유자만 본다 (다른 사용자는 404). 이름은 가린 표시.
+
+export type KeyJoinJobColumn = { name: string; letter: string; out_name: string | null }
+export type KeyJoinJobInput = {
+  role: number // 1부터 — 요청의 입력 순서
+  file_name: string // 저장 때 파일 이름 (가림 — 맞추기의 보조 근거일 뿐)
+  sheet: { name: string; tab: number }
+  key_columns: { name: string; letter: string }[]
+  columns: KeyJoinJobColumn[]
+  is_base: boolean
+  key_kinds: { text: number; int: number }[] | null // 저장 때 key 열의 자료형 분포 (변화 알림용)
+}
+export type KeyJoinJob = {
+  id: number
+  name: string
+  owner_id: number
+  version: number
+  scope: KeyJoinScope
+  scope_label: string
+  input_count: number
+  key_columns: number
+  inputs: KeyJoinJobInput[]
+  key_names: string[] | null
+  aggregate: unknown | null
+  created_at: string
+  updated_at: string | null
+}
+// 저장한 열 하나를 새 시트의 열에 맞춘 결과. same/moved는 정해짐, ambiguous(같은 이름 여럿)·missing(이름 없음)은 사용자가 고른다
+export type KeyJoinJobColumnMatch = {
+  kind: 'key' | 'pick'
+  position: number
+  saved: { name: string; letter: string }
+  out_name: string | null
+  column_id: string | null
+  status: 'same' | 'moved' | 'ambiguous' | 'missing'
+  candidates: { column_id: string; name: string; letter: string }[]
+  note: string | null
+}
+export type KeyJoinJobRole = {
+  role: number
+  status: 'assigned' | 'ambiguous' | 'unassigned'
+  file_id: number | null
+  sheet_id: string | null
+  candidates: { file_id: number; sheet_id: string; file_name: string; sheet_name: string; tab: number; score: number }[]
+  columns: KeyJoinJobColumnMatch[]
+  notes: string[]
+}
+export type KeyJoinJobMatch = {
+  job: KeyJoinJob
+  roles: KeyJoinJobRole[]
+  unused_files: number[]
+  ready: boolean
+  request: KeyJoinRequest | null
+  notes: string[] // 변경·예외 (파일 이름·시트·열 위치 변경, 안 쓰는 파일)
+  blocked: string[] // 정하지 못한 역할·열 — 고른 뒤 apply
+  expected_key_kinds: Record<string, { text: number; int: number }[] | null>
+}
+// 역할마다 파일·시트와, 자동으로 정하지 못한 열의 선택 ('k0'·'p1' → column_id, 가져올 열은 null = 이번에는 뺌)
+export type KeyJoinJobAssignment = { role: number; file_id: number; sheet_id: string; columns: Record<string, string | null> }
+
+export async function listKeyJoinJobs(signal?: AbortSignal): Promise<KeyJoinJob[]> {
+  return json(await apiFetch(`${API_BASE}/keyjoin/jobs`, { signal }))
+}
+
+/** 지금 설정을 저장한 작업으로 저장한다 (서버가 연결 확인을 한 번 거친다 — 만들 수 없는 구성·같은 이름은 409 AnalysisProblemError) */
+export async function createKeyJoinJob(name: string, request: KeyJoinRequest): Promise<KeyJoinJob> {
+  const res = await apiFetch(`${API_BASE}/keyjoin/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, request }),
+  })
+  return analysisJson<KeyJoinJob>(res)
+}
+
+export async function updateKeyJoinJob(id: number, body: { name?: string; request?: KeyJoinRequest }): Promise<KeyJoinJob> {
+  const res = await apiFetch(`${API_BASE}/keyjoin/jobs/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  return analysisJson<KeyJoinJob>(res)
+}
+
+export async function deleteKeyJoinJob(id: number): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/keyjoin/jobs/${id}`, { method: 'DELETE' })
+  if (!res.ok) await json(res)
+}
+
+/** 새 파일들을 저장한 작업의 입력에 맞춘다 (읽기 전용). ready면 request를 그대로 연결 확인에 쓴다 */
+export async function matchKeyJoinJob(id: number, fileIds: number[], signal?: AbortSignal): Promise<KeyJoinJobMatch> {
+  const res = await apiFetch(`${API_BASE}/keyjoin/jobs/${id}/match`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file_ids: fileIds }),
+    signal,
+  })
+  return json(res)
+}
+
+export async function applyKeyJoinJob(id: number, assignments: KeyJoinJobAssignment[]): Promise<KeyJoinJobMatch> {
+  const res = await apiFetch(`${API_BASE}/keyjoin/jobs/${id}/apply`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assignments }),
+  })
+  return json(res)
+}

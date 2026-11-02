@@ -1,14 +1,23 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import {
   AnalysisProblemError,
+  applyKeyJoinJob,
+  createKeyJoinJob,
+  deleteKeyJoinJob,
   fetchPreview,
+  listKeyJoinJobs,
+  matchKeyJoinJob,
   outcomeText,
   outcomeUnknown,
   planKeyJoin,
   runKeyJoin,
+  updateKeyJoinJob,
   type Cell,
   type IntegrationRun,
   type KeyJoinInput,
+  type KeyJoinJob,
+  type KeyJoinJobAssignment,
+  type KeyJoinJobMatch,
   type KeyJoinKinds,
   type KeyJoinPlan,
   type KeyJoinPlanInput,
@@ -235,6 +244,49 @@ function buildRequest(
 const without = <T,>(record: Record<number, T>, fid: number): Record<number, T> =>
   Object.fromEntries(Object.entries(record).filter(([k]) => Number(k) !== fid))
 
+/** 저장한 작업을 새 파일에 맞춘 요청 → 화면 초안 (행 포함/제외 결정은 비운다 — 새 파일마다 다시 정한다) */
+function draftFromRequest(req: KeyJoinRequest): Draft {
+  const sheets: Record<string, string> = {}
+  const inputs: Record<string, InputDraft> = {}
+  for (const i of req.inputs) {
+    sheets[String(i.file_id)] = i.sheet_id
+    inputs[`${i.file_id}:${i.sheet_id}`] = {
+      key_columns: i.key_columns,
+      columns: i.columns.map((c) => ({ column_id: c.column_id, out_name_input: c.out_name ?? '' })),
+      compound: i.key_columns.length > 1,
+    }
+  }
+  return {
+    sheets,
+    inputs,
+    scope: req.scope,
+    base: `${req.base.file_id}:${req.base.sheet_id}`,
+    key_names_input: req.key_names ?? undefined,
+    rows: {},
+  }
+}
+
+type AppliedJob = { job: KeyJoinJob; notes: string[]; kinds: KeyJoinJobMatch['expected_key_kinds'] }
+
+/** 저장 때 key 열의 자료형 분포(글자·정수)와 이번 확인 결과를 비교 — 서버(app/keyjoin_jobs.py kind_changes)와 같은 규칙 */
+function kindChangeNotes(expected: AppliedJob['kinds'], plan: KeyJoinPlan): string[] {
+  const out: string[] = []
+  plan.inputs.forEach((ip, i) => {
+    const saved = expected[String(i + 1)]
+    if (!saved) return
+    ip.key_columns.forEach((k, pos) => {
+      const was = saved[pos]
+      const now = k.kinds
+      if (!was || !now) return
+      if ((was.int === 0 && now.int > 0) || (was.text === 0 && now.text > 0))
+        out.push(
+          `입력 ${i + 1} key ${pos + 1}: key 자료형이 저장 때(글자 ${was.text}·정수 ${was.int})와 다릅니다 (이번 글자 ${now.text}·정수 ${now.int}) — 확인 결과를 보고 판단하세요.`,
+        )
+    })
+  })
+  return out
+}
+
 /** 공통 key로 연결하기: 고른 파일 → (취합 방식: 공통 key 연결) → 파일·시트 → key 열 → 가져올 열 → 범위 → 연결 확인 → 만들기 → 실행 기록.
  * 입력 요소는 항상 그리고(확인 결과로 사라지지 않음) 확인 결과 영역만 마지막으로 받은 결과(view)로 그린다. 만들기는 지금 설정으로
  * 받은 확인 결과(fresh의 basis)가 있고 고칠 입력이 없을 때만 된다. 설정이 바뀌면 다시 확인해야 하고, 늦게 온 확인 응답은 버린다
@@ -268,6 +320,19 @@ function KeyJoin() {
   const planAbort = useRef<AbortController | null>(null)
   const filesLegendRef = useRef<HTMLLegendElement | null>(null) // 파일을 빼면 사라진 단추 대신 1단계 제목이 초점을 받는다
   const ids = useId()
+  // 저장한 작업(설정 재사용): 목록 → 이번 파일에 맞추기(match) → 확실하지 않은 것은 골라 적용(apply) → 초안에 넣기
+  const [jobs, setJobs] = useState<KeyJoinJob[] | null>(null)
+  const [jobsError, setJobsError] = useState<string | null>(null)
+  const [jobId, setJobId] = useState<number | null>(null)
+  const [jobMatch, setJobMatch] = useState<KeyJoinJobMatch | null>(null) // 자동으로 정하지 못한 배정·열 (사용자가 고른다)
+  const [rolePicks, setRolePicks] = useState<Record<number, string>>({}) // 역할 → '파일:시트'
+  const [colPicks, setColPicks] = useState<Record<string, string>>({}) // '역할:k0' → column_id ('' = 가져올 열을 뺌)
+  const [jobBusy, setJobBusy] = useState<'match' | 'apply' | 'save' | 'delete' | null>(null)
+  const [jobNote, setJobNote] = useState<string | null>(null) // 저장한 작업 적용 구역의 상태 알림
+  const [saveNote, setSaveNote] = useState<string | null>(null) // 6단계 저장 구역의 상태 알림 (목록이 비어 있어도 보인다)
+  const [applied, setApplied] = useState<AppliedJob | null>(null) // 이번 초안을 만든 저장한 작업 (변경·예외 안내)
+  const [saveName, setSaveName] = useState('')
+  const [askDelete, setAskDelete] = useState(false)
 
   const { request, invalid, refs, baseKey } = buildRequest(files, draft, meta, metaError)
   const reqKey = JSON.stringify(request)
@@ -289,6 +354,19 @@ function KeyJoin() {
     saveDraft(filesKey, draft)
   }, [filesKey, draft])
   useEffect(() => () => planAbort.current?.abort(), [])
+  useEffect(() => {
+    const controller = new AbortController()
+    listKeyJoinJobs(controller.signal)
+      .then((list) => {
+        if (controller.signal.aborted) return
+        setJobs(list)
+        setJobId((cur) => (cur !== null && list.some((j) => j.id === cur) ? cur : (list[0]?.id ?? null)))
+      })
+      .catch((err: unknown) => {
+        if (!controller.signal.aborted) setJobsError(`저장한 작업 목록을 읽지 못했습니다: ${errorText(err)}`)
+      })
+    return () => controller.abort()
+  }, [])
 
   // 파일마다 시트·열 목록을 읽는다 (고른 시트가 바뀌면 그 파일만 다시). 응답이 오기 전에 바뀐 요청은 취소한다
   const sheetsKey = files.map((fid) => `${fid}:${draft.sheets[String(fid)] ?? ''}`).join(',')
@@ -495,6 +573,136 @@ function KeyJoin() {
     if (recheck) void check()
   }
 
+  function reloadJobs(keep: number | null) {
+    listKeyJoinJobs()
+      .then((list) => {
+        setJobs(list)
+        setJobId(keep !== null && list.some((j) => j.id === keep) ? keep : (list[0]?.id ?? null))
+      })
+      .catch((err: unknown) => setJobsError(`저장한 작업 목록을 읽지 못했습니다: ${errorText(err)}`))
+  }
+
+  /** 맞춘 요청을 초안으로 — 입력 순서(역할 순)가 주소의 파일 순서가 되도록 주소를 고친다. 행 결정·확인 결과는 새로 시작 */
+  function adoptMatch(m: KeyJoinJobMatch) {
+    if (!m.request) return
+    const req = m.request
+    const d = draftFromRequest(req)
+    const order = [...req.inputs.map((i) => i.file_id), ...files.filter((f) => !req.inputs.some((i) => i.file_id === f))]
+    const key = order.join(',')
+    setFailure(null)
+    setChecked(null)
+    setCheckError(null)
+    setNote(null)
+    setJobMatch(null)
+    setApplied({ job: m.job, notes: m.notes, kinds: m.expected_key_kinds })
+    setJobNote(`저장한 작업 '${m.job.name}' (v${m.job.version})을 이번 파일에 맞춰 넣었습니다 — 변경·예외 ${m.notes.length}건. 5단계에서 연결을 확인하세요.`)
+    if (key !== filesKey) {
+      saveDraft(key, d)
+      replaceSearch(`?files=${key}`)
+    } else {
+      setDraft(d)
+    }
+  }
+
+  /** 저장한 작업을 이번 파일들에 맞춘다 (읽기 전용). 모두 확실하면 바로 초안에 넣고, 아니면 고를 것을 보인다 */
+  async function matchJob() {
+    if (jobId === null || jobBusy !== null) return
+    setJobBusy('match')
+    setJobNote(null)
+    setJobsError(null)
+    try {
+      const m = await matchKeyJoinJob(jobId, files)
+      if (m.ready) adoptMatch(m)
+      else {
+        setJobMatch(m)
+        setRolePicks(Object.fromEntries(m.roles.map((r) => [r.role, r.file_id !== null ? `${r.file_id}:${r.sheet_id}` : ''])))
+        setColPicks({})
+        setJobNote(`자동으로 정하지 못한 것이 있습니다 — 아래에서 고른 뒤 '고른 대로 적용'을 누르세요 (${m.blocked.length}건).`)
+      }
+    } catch (err) {
+      setJobsError(`맞추지 못했습니다: ${errorText(err)}`)
+    } finally {
+      setJobBusy(null)
+    }
+  }
+
+  /** 사용자가 고른 배정·열로 적용한다 */
+  async function applyPicks() {
+    if (!jobMatch || jobBusy !== null) return
+    const assignments: KeyJoinJobAssignment[] = []
+    for (const r of jobMatch.roles) {
+      const pick = rolePicks[r.role] ?? ''
+      if (!pick) {
+        setJobsError(`입력 ${r.role}의 파일을 고르세요.`)
+        return
+      }
+      const [fidText, sid] = pick.split(':')
+      const columns: Record<string, string | null> = {}
+      for (const [k, v] of Object.entries(colPicks)) {
+        const [roleText, tag] = k.split(':')
+        if (Number(roleText) === r.role) columns[tag] = v === '' ? null : v
+      }
+      assignments.push({ role: r.role, file_id: Number(fidText), sheet_id: sid, columns })
+    }
+    setJobBusy('apply')
+    setJobsError(null)
+    try {
+      const m = await applyKeyJoinJob(jobMatch.job.id, assignments)
+      if (m.ready) adoptMatch(m)
+      else {
+        setJobMatch(m)
+        setJobNote(`아직 정하지 못한 것이 있습니다 (${m.blocked.length}건) — 아래 목록을 보고 고르세요.`)
+      }
+    } catch (err) {
+      setJobsError(`적용하지 못했습니다: ${errorText(err)}`)
+    } finally {
+      setJobBusy(null)
+    }
+  }
+
+  /** 지금 설정을 저장한 작업으로 저장(새 이름) 또는 적용했던 작업을 갱신(버전 +1). 서버가 연결 확인을 한 번 거친다 */
+  async function saveJob(update: boolean) {
+    if (jobBusy !== null || invalid.length || files.length < MIN_INPUTS) return
+    const name = saveName.trim()
+    if (!update && !name) {
+      setSaveNote('저장할 작업 이름을 적으세요.')
+      return
+    }
+    setJobBusy('save')
+    setSaveNote(null)
+    try {
+      const job = update && applied ? await updateKeyJoinJob(applied.job.id, { request }) : await createKeyJoinJob(name, request)
+      setSaveNote(`저장한 작업 '${job.name}' (v${job.version})${update ? '으로 갱신' : '으로 저장'}했습니다 — 다음 자료는 위 '저장한 작업 적용'에서 맞춰 쓰세요.`)
+      if (update && applied) setApplied({ ...applied, job })
+      setSaveName('')
+      reloadJobs(job.id)
+    } catch (err) {
+      const text =
+        err instanceof AnalysisProblemError && err.problems.length ? `${err.message} ${err.problems.join(' / ')}` : errorText(err)
+      setSaveNote(`저장하지 못했습니다: ${text}`)
+    } finally {
+      setJobBusy(null)
+    }
+  }
+
+  async function removeJob() {
+    if (jobId === null || jobBusy !== null) return
+    setJobBusy('delete')
+    setJobsError(null)
+    try {
+      await deleteKeyJoinJob(jobId)
+      setAskDelete(false)
+      setJobMatch(null)
+      setJobNote('저장한 작업을 지웠습니다 (실행 기록·결과 파일은 그대로).')
+      if (applied?.job.id === jobId) setApplied(null)
+      reloadJobs(null)
+    } catch (err) {
+      setJobsError(`지우지 못했습니다: ${errorText(err)}`)
+    } finally {
+      setJobBusy(null)
+    }
+  }
+
   const metaOf = (r: InputRef) => {
     const m = meta[r.fid]
     return m && m.sheet_id === r.sid ? m : undefined
@@ -512,6 +720,10 @@ function KeyJoin() {
   const keyNameIds = keyNameProblems.map((_, n) => `${ids}-kn-${n}`)
   const baseRef = refs.find((r) => r.key === baseKey)
   const baseMeta = baseRef ? metaOf(baseRef) : undefined
+
+  const kindNotes = applied && fresh ? kindChangeNotes(applied.kinds, fresh) : []
+  const canSave = files.length >= MIN_INPUTS && invalid.length === 0 && jobBusy === null
+  const fileLabel = (fid: number) => `#${fid} ${meta[fid]?.original_name ?? ''}`.trim()
 
   let why: string | null = null
   if (!files.length) why = '고른 파일이 없습니다 — 홈에서 파일을 고르세요.'
@@ -583,6 +795,182 @@ function KeyJoin() {
             홈의 파일 목록에서 파일을 {MIN_INPUTS}개 이상 고르고 결과 형태로 &lsquo;공통 key로 연결하기&rsquo;를 고르세요.{' '}
             <NavLink href="/">홈으로</NavLink>
           </p>
+        </Banner>
+      )}
+
+      {files.length > 0 && jobs !== null && jobs.length > 0 && (
+        <fieldset className="an-step bd-step" aria-busy={jobBusy === 'match' || jobBusy === 'apply'}>
+          <legend>저장한 작업 적용 (선택)</legend>
+          <p className="mw-muted">
+            이전에 저장한 연결 설정을 이번 파일들에 맞춥니다 — 파일 이름이 아니라 시트·열 구조(key 열·가져올 열 이름)로 맞추고, 확실하지
+            않은 것(맞는 파일이 둘 이상·같은 이름의 열·없는 열)은 묻습니다. 적용한 뒤에도 5단계 연결 확인을 거쳐야 만들 수 있습니다 (행
+            포함/제외·개인정보 확인은 새 파일 기준으로 다시).
+          </p>
+          <label className="kj-row">
+            저장한 작업
+            <select
+              className="kj-select"
+              aria-label="저장한 작업"
+              value={jobId ?? ''}
+              onChange={(e) => {
+                setJobId(e.target.value ? Number(e.target.value) : null)
+                setJobMatch(null)
+                setAskDelete(false)
+              }}
+            >
+              {jobs.map((j) => (
+                <option key={j.id} value={j.id}>
+                  {j.name} (v{j.version} · 입력 {j.input_count}개 · key 열 {j.key_columns}개 · {j.scope_label})
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="admin-actions kj-actions">
+            <button type="button" className="mapping-run" aria-disabled={jobId === null || jobBusy !== null} onClick={() => void matchJob()}>
+              {jobBusy === 'match' ? '맞추는 중…' : '이 파일들에 맞추기'}
+            </button>
+            {!askDelete ? (
+              <button type="button" className="login-link" aria-disabled={jobId === null || jobBusy !== null} onClick={() => setAskDelete(true)}>
+                이 작업 삭제
+              </button>
+            ) : (
+              <>
+                <button type="button" className="mapping-confirm" aria-disabled={jobBusy !== null} onClick={() => void removeJob()}>
+                  {jobBusy === 'delete' ? '지우는 중…' : '정말 삭제 (실행 기록·결과는 남음)'}
+                </button>
+                <button type="button" className="login-link" onClick={() => setAskDelete(false)}>
+                  취소
+                </button>
+              </>
+            )}
+          </div>
+          <p role="status" className="mw-muted kj-jobnote">
+            {jobNote ?? ''}
+          </p>
+          {jobsError && (
+            <p className="upload-error" role="alert">
+              {jobsError}
+            </p>
+          )}
+          {jobMatch && !jobMatch.ready && (
+            <div className="kj-input">
+              <p className="kj-input-title">
+                저장한 작업 &lsquo;{jobMatch.job.name}&rsquo; (v{jobMatch.job.version}) — 입력마다 쓸 파일과 열을 정하세요
+              </p>
+              {jobMatch.blocked.length > 0 && (
+                <ul className="an-problems">
+                  {jobMatch.blocked.map((b) => (
+                    <li key={b}>{b}</li>
+                  ))}
+                </ul>
+              )}
+              {jobMatch.roles.map((r) => {
+                const saved = jobMatch.job.inputs[r.role - 1]
+                const options = r.status === 'assigned' ? r.candidates : files.map((fid) => ({ fid }))
+                return (
+                  <div key={r.role} className="kj-input">
+                    <p className="kj-input-title">
+                      입력 {r.role} — 저장 때 &lsquo;{saved?.file_name}&rsquo; / {saved?.sheet.name} ({(saved?.sheet.tab ?? 0) + 1}번째 시트) · key{' '}
+                      {saved?.key_columns.map((k) => `${k.letter}열 ${k.name}`).join(' + ')} · 가져올 열 {saved?.columns.length ?? 0}개
+                      {saved?.is_base && ' · 기준'}
+                    </p>
+                    <label className="kj-row">
+                      이번 파일
+                      <select
+                        className="kj-select"
+                        aria-label={`입력 ${r.role} 이번 파일`}
+                        value={rolePicks[r.role] ?? ''}
+                        onChange={(e) => setRolePicks((p) => ({ ...p, [r.role]: e.target.value }))}
+                      >
+                        <option value="">파일을 고르세요</option>
+                        {r.status === 'assigned'
+                          ? r.candidates.map((c) => (
+                              <option key={`${c.file_id}:${c.sheet_id}`} value={`${c.file_id}:${c.sheet_id}`}>
+                                #{c.file_id} {c.file_name} / {c.sheet_name} ({c.tab + 1}번째 시트)
+                              </option>
+                            ))
+                          : options.map((o) =>
+                              'file_id' in o ? null : (
+                                <option key={o.fid} value={`${o.fid}:${draft.sheets[String(o.fid)] ?? 's0'}`}>
+                                  {fileLabel(o.fid)}
+                                  {r.candidates.some((c) => c.file_id === o.fid) ? ' — 후보' : ''}
+                                </option>
+                              ),
+                            )}
+                      </select>
+                    </label>
+                    {r.status !== 'assigned' && r.candidates.length > 0 && (
+                      <p className="mw-muted">
+                        후보 {r.candidates.length}개 (점수 같음): {r.candidates.map((c) => `#${c.file_id} ${c.file_name}`).join(', ')}
+                      </p>
+                    )}
+                    {r.status === 'unassigned' && <p className="mw-muted">key 열이 같은 이름으로 있는 파일이 없습니다 — 파일을 고르면 열을 다시 맞춥니다.</p>}
+                    {r.columns
+                      .filter((c) => c.status === 'ambiguous' || c.status === 'missing')
+                      .map((c) => {
+                        const tag = `${c.kind === 'key' ? 'k' : 'p'}${c.position}`
+                        const pickKey = `${r.role}:${tag}`
+                        return (
+                          <label key={pickKey} className="kj-row">
+                            {c.kind === 'key' ? `key ${c.position + 1}` : `가져올 열 ${c.position + 1}`} ({c.saved.letter}열 {c.saved.name}) — {c.note}
+                            <select
+                              className="kj-select"
+                              aria-label={`입력 ${r.role} ${c.kind === 'key' ? `key ${c.position + 1}` : `가져올 열 ${c.position + 1}`} 이번 열`}
+                              value={colPicks[pickKey] ?? (c.kind === 'pick' && pickKey in colPicks ? '' : '__')}
+                              onChange={(e) => setColPicks((p) => ({ ...p, [pickKey]: e.target.value === '__' ? '' : e.target.value }))}
+                            >
+                              <option value="__">열을 고르세요</option>
+                              {c.candidates.map((cand) => (
+                                <option key={cand.column_id} value={cand.column_id}>
+                                  {cand.letter}열 {cand.name}
+                                </option>
+                              ))}
+                              {(meta[Number((rolePicks[r.role] ?? '').split(':')[0])]?.columns ?? [])
+                                .filter((col) => !c.candidates.some((cand) => cand.column_id === col.column_id))
+                                .map((col) => (
+                                  <option key={col.column_id} value={col.column_id}>
+                                    {col.letter}열 {col.name}
+                                  </option>
+                                ))}
+                              {c.kind === 'pick' && <option value="">이번 작업에서 빼기</option>}
+                            </select>
+                          </label>
+                        )
+                      })}
+                    {r.notes.map((n) => (
+                      <p key={n} className="mw-muted">
+                        {n}
+                      </p>
+                    ))}
+                  </div>
+                )
+              })}
+              <div className="admin-actions kj-actions">
+                <button type="button" className="mapping-run" aria-disabled={jobBusy !== null} onClick={() => void applyPicks()}>
+                  {jobBusy === 'apply' ? '적용 중…' : '고른 대로 적용'}
+                </button>
+              </div>
+            </div>
+          )}
+        </fieldset>
+      )}
+
+      {files.length > 0 && applied && (
+        <Banner
+          tone={applied.notes.length + kindNotes.length ? 'warn' : 'info'}
+          icon={applied.notes.length + kindNotes.length ? 'alert' : 'info'}
+          title={`저장한 작업 '${applied.job.name}' (v${applied.job.version}) 적용 — 변경·예외 ${applied.notes.length + kindNotes.length}건`}
+        >
+          {applied.notes.length + kindNotes.length === 0 ? (
+            <p>저장 때와 같은 구조입니다 — 5단계에서 연결을 확인한 뒤 만드세요 (새 파일의 key·행은 다시 검증합니다).</p>
+          ) : (
+            <ul>
+              {[...applied.notes, ...kindNotes].map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+          )}
+          {!fresh && applied.kinds && <p className="mw-muted">key 자료형 변화는 5단계 연결 확인 뒤에 함께 보입니다.</p>}
         </Banner>
       )}
 
@@ -1181,6 +1569,41 @@ function KeyJoin() {
               )}
             </div>
           )}
+          <div className="kj-input">
+            <p className="kj-input-title">이 설정을 저장한 작업으로 저장 — 다음 자료에 같은 규칙을 맞춰 씁니다</p>
+            <p className="mw-muted">
+              저장하는 것: 입력마다 시트·열 대응 기준(이름·위치), key 열과 복합 key 순서, 가져올 열·결과 이름·순서, 기준 입력·범위.
+              저장하지 않는 것: 파일 자체·행 포함/제외 결정·개인정보 확인·요청 번호·확인 결과. 저장할 때 서버가 연결 확인을 한 번
+              거칩니다 (파일은 만들지 않음). 저장한 작업은 본인만 봅니다.
+            </p>
+            <label className="kj-row">
+              작업 이름
+              <input
+                type="text"
+                className="bd-input"
+                aria-label="저장할 작업 이름"
+                maxLength={100}
+                value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+              />
+            </label>
+            <div className="admin-actions kj-actions">
+              <button type="button" className="mapping-confirm" aria-disabled={!canSave || !saveName.trim()} onClick={() => void saveJob(false)}>
+                {jobBusy === 'save' ? '저장 중…' : '저장한 작업으로 저장'}
+              </button>
+              {applied && (
+                <button type="button" className="mapping-confirm" aria-disabled={!canSave} onClick={() => void saveJob(true)}>
+                  작업 &lsquo;{applied.job.name}&rsquo; 갱신 (v{applied.job.version + 1})
+                </button>
+              )}
+            </div>
+            <p role="status" className="mw-muted kj-jobnote">
+              {saveNote ?? ''}
+            </p>
+            {!canSave && jobBusy === null && files.length > 0 && (
+              <p className="mw-muted">고칠 입력이 없을 때 저장할 수 있습니다 (2·3단계의 &lsquo;고칠 것&rsquo;을 먼저 해결).</p>
+            )}
+          </div>
         </fieldset>
       )}
 
