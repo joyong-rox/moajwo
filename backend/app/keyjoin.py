@@ -72,7 +72,8 @@ from app.xmltext import has_illegal, printable
 logger = logging.getLogger(__name__)
 
 POLICY = (
-    "keyjoin-policy-2"  # key 정규형·범위·출력 규칙이 바뀌면 올린다 (basis·실행 기록에 남음) — 2: 추정 행 포함/제외 확인
+    "keyjoin-policy-3"  # key 정규형·범위·출력 규칙이 바뀌면 올린다 (basis·실행 기록에 남음)
+    # 2: 추정 행 포함/제외 확인 · 3: key별 집계 후 연결(행 수·값 있는 수·합계·최댓값)
 )
 MODE = "keyjoin"
 MODE_LABEL = "공통 key 연결"
@@ -90,7 +91,7 @@ EXCLUDED_LISTED = 50  # 연결 요약 시트에 적는 제외 행 번호 수
 OUT_NAME_MAX = 255  # 결과 열 이름 길이
 INDEX_WEIGHT = 1.0  # key 인덱스 칸 하나를 결과 칸 몇 개로 셈하는지 (측정 뒤 조정 — docs/MEMORY.md)
 TEXT_WEIGHT = 2  # 글자 추정치에 곱하는 안전 계수 (측정 뒤 완화 — docs/MEMORY.md)
-REQUEST_HASH_VERSION = 1  # 요청 내용 정규형이 바뀌면 올린다 (해시에 들어감)
+REQUEST_HASH_VERSION = 2  # 요청 내용 정규형이 바뀌면 올린다 (해시에 들어감) — 2: 입력의 aggregate(집계) 필드
 SUMMARY_LINES = 40  # 연결 요약 시트의 고정 줄 수 추정 (칸 예산)
 SUMMARY_PER_INPUT = 16  # 연결 요약 시트에서 입력 하나가 차지하는 칸 수 추정
 RESULT_SHEET, SOURCE_SHEET, SUMMARY_SHEET = "연결 결과", "출처", "연결 요약"
@@ -181,6 +182,32 @@ class RowDecisionsIn(BaseModel):
     exclude: list[Annotated[int, Field(ge=1, le=10_000_000)]] = Field(default_factory=list, max_length=ROW_REVIEW_MAX)
 
 
+AggFunc = Literal["count_rows", "count_values", "sum", "max"]
+AGG_LABEL: dict[str, str] = {"count_rows": "행 수", "count_values": "값 있는 수", "sum": "합계", "max": "최댓값"}
+AGG_TYPE, AGG_MIXED = "KEYJOIN_AGG_TYPE", "KEYJOIN_AGG_MIXED"
+AGG_SOURCE_LISTED = 50  # 출처 시트에 적는 집계 입력의 원본 행 번호 수 (넘으면 '외 n행')
+
+
+class AggItemIn(BaseModel):
+    """key별 집계 항목: count_rows(열 없음)·count_values(그 열에 값이 있는 행 수)·sum(숫자 합)·max(숫자끼리/날짜끼리
+    최댓값). out_name None = 서버 기본('열 이름 합계'·'행 수')."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    func: AggFunc
+    column_id: str | None = Field(default=None, pattern=r"^c\d{1,4}$")
+    out_name: str | None = None
+
+
+class AggregateIn(BaseModel):
+    """이 입력은 key마다 여러 행을 허용하고(중복 차단 안 함) 선택한 규칙으로 집계한 값만 결과에 넣는다 — 첫 행을
+    고르거나 자동으로 합치지 않는다. 가져올 열(columns)과 함께 쓰지 못한다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[AggItemIn] = Field(min_length=1, max_length=MAX_PICK_COLUMNS)
+
+
 class InputIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -189,6 +216,7 @@ class InputIn(BaseModel):
     key_columns: list[Annotated[str, Field(pattern=r"^c\d{1,4}$")]] = Field(min_length=1, max_length=MAX_KEY_COLUMNS)
     columns: list[ColumnIn] = Field(default_factory=list, max_length=MAX_PICK_COLUMNS)
     rows: RowDecisionsIn | None = None  # 추정 행의 포함/제외 결정 (없으면 모두 '확인 필요')
+    aggregate: AggregateIn | None = None  # key별 집계 후 연결 (사용자가 명시적으로 고른 입력만)
 
 
 class BaseRef(BaseModel):
@@ -275,6 +303,29 @@ def check_request(req: KeyJoinIn) -> None:
             if c.out_name is not None and (code := _name_code(c.out_name)):
                 raise _bad(f"입력 {n} {c.column_id}: 결과 열 이름{NAME_TEXT[code]}. [{code}]")
         total += len(ids)
+        if ip.aggregate is not None:
+            if ids:
+                raise _bad(
+                    f"입력 {n}: key별 집계와 가져올 열을 함께 쓸 수 없습니다 — 집계 입력은 집계한 값만 결과에 "
+                    "넣습니다. [KEYJOIN_AGG_WITH_COLUMNS]"
+                )
+            seen_items: set[tuple[str, str | None]] = set()
+            for m, item in enumerate(ip.aggregate.items, start=1):
+                if item.func == "count_rows" and item.column_id is not None:
+                    raise _bad(f"입력 {n} 집계 {m}: 행 수에는 열을 고르지 않습니다. [KEYJOIN_AGG_COLUMN]")
+                if item.func != "count_rows" and item.column_id is None:
+                    raise _bad(f"입력 {n} 집계 {m}: {AGG_LABEL[item.func]}에는 열이 필요합니다. [KEYJOIN_AGG_COLUMN]")
+                if item.column_id is not None and item.column_id in ip.key_columns:
+                    raise _bad(
+                        f"입력 {n} 집계 {m}: key 열은 집계하지 않습니다 (결과에 이미 들어감). [KEYJOIN_AGG_KEY_COLUMN]"
+                    )
+                tag = (item.func, item.column_id)
+                if tag in seen_items:
+                    raise _bad(f"입력 {n} 집계 {m}: 같은 집계를 두 번 넣었습니다. [KEYJOIN_AGG_DUPLICATE]")
+                seen_items.add(tag)
+                if item.out_name is not None and (code := _name_code(item.out_name)):
+                    raise _bad(f"입력 {n} 집계 {m}: 결과 열 이름{NAME_TEXT[code]}. [{code}]")
+            total += len(ip.aggregate.items)
     if (req.base.file_id, req.base.sheet_id) not in seen:
         raise _bad(f"기준 입력(#{req.base.file_id} {req.base.sheet_id})이 입력 목록에 없습니다. [KEYJOIN_BASE_INVALID]")
     if req.key_names is not None:
@@ -418,6 +469,91 @@ def _row_code(codes: list[tuple[str, int]], parts: int) -> tuple[str, int]:
 Key = tuple[str, ...]
 
 
+def _blank(value: Any) -> bool:
+    """집계에서 '값 없음': 빈 칸, 공백만, 결측 표기('-'·'N/A' 등), 결과값 없는 수식 칸. 0은 값이다."""
+    if value is None or value is GAP:
+        return True
+    if isinstance(value, str):
+        s = value.strip()
+        return s == "" or s in MISSING_MARKERS
+    return False
+
+
+def _agg_kind(value: Any) -> str | None:
+    """합계·최댓값에 쓸 수 있는 값의 종류: 'num'(정수·실수)·'date'(날짜·시각). 참거짓·글자·시각(time)·그 밖은
+    None(차단)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return "num" if math.isfinite(value) else None
+    if isinstance(value, datetime | date):
+        return "date"
+    return None
+
+
+def _as_datetime(value: Any) -> datetime:
+    return value if isinstance(value, datetime) else datetime(value.year, value.month, value.day)
+
+
+class _AggState:
+    """key별 집계 누적기. items: (func, 가져올 열 위치 j 또는 None). 값은 가져올 열 값 목록(pick 순)에서 pos_of[j]로
+    읽는다.
+    - count_rows: key의 행 수 · count_values: 값이 있는 행 수(_blank 아님) · sum: 숫자 합(값 없으면 None) ·
+      max: 숫자끼리 또는 날짜끼리 최댓값(값 없으면 None). 숫자·날짜가 아닌 값은 problems(차단), 숫자·날짜가 섞이면
+      mixed(차단).
+    """
+
+    def __init__(self, items: list[tuple[str, int | None]], pos_of: dict[int, int]) -> None:
+        self.items = items
+        self.pos_of = pos_of
+        self.count: dict[Key, int] = {}
+        self.acc: dict[Key, list[Any]] = {}
+        self.problems: dict[int, _Rows] = {}  # 항목 번호 → 쓸 수 없는 값의 행
+        self.mixed: dict[int, _Rows] = {}  # 항목 번호 → 숫자·날짜가 섞인 행
+        self.kind: dict[int, str] = {}  # 항목 번호 → 처음 본 값의 종류
+
+    def add(self, key: Key, row: int, values: list[Any]) -> None:
+        self.count[key] = self.count.get(key, 0) + 1
+        acc = self.acc.get(key)
+        if acc is None:
+            acc = self.acc[key] = [0 if f == "count_values" else None for f, _ in self.items]
+        for n, (func, j) in enumerate(self.items):
+            if func == "count_rows" or j is None:
+                continue
+            v = values[self.pos_of[j]]
+            if _blank(v):
+                continue
+            if func == "count_values":
+                acc[n] += 1
+                continue
+            kind = _agg_kind(v)
+            if kind is None or (func == "sum" and kind != "num"):
+                self.problems.setdefault(n, _Rows()).add(row, j)
+                continue
+            seen = self.kind.get(n)
+            if seen is None:
+                self.kind[n] = kind
+            elif seen != kind:
+                self.mixed.setdefault(n, _Rows()).add(row, j)
+                continue
+            if func == "sum":
+                acc[n] = v if acc[n] is None else acc[n] + v
+            elif acc[n] is None:
+                acc[n] = v
+            elif kind == "date":
+                acc[n] = v if _as_datetime(v) > _as_datetime(acc[n]) else acc[n]
+            elif v > acc[n]:
+                acc[n] = v
+
+    def values_for(self, key: Key) -> list[Any]:
+        acc = self.acc[key]
+        return [self.count[key] if func == "count_rows" else acc[n] for n, (func, _) in enumerate(self.items)]
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self.problems or self.mixed)
+
+
 @dataclass
 class KeyIndex:
     rows: dict[Key, int] = field(default_factory=dict)  # key → 원본 행 번호 (처음 나온 행)
@@ -445,6 +581,11 @@ class KeyIndex:
     stale: list[int] = field(default_factory=list)  # 결정이 가리키지만 추정 행이 아닌 번호 (처음 몇 개)
     stale_count: int = 0
 
+    agg: _AggState | None = None  # key별 집계 입력이면 누적기 (중복 key를 dups에 넣지 않고 여기에 더한다)
+    agg_rows: dict[Key, list[int]] = field(
+        default_factory=dict
+    )  # 집계 입력: key → 기여한 원본 행 번호 모두 (출처 시트)
+
     @property
     def unsupported(self) -> int:
         return sum(r.count for c, r in self.rejects.items() if c not in (KEY_EMPTY, KEY_PARTIAL))
@@ -466,6 +607,7 @@ def analyze_input(
     keep_keys: set[Key] | None = None,
     keep_first: int = 0,
     decisions: tuple[set[int], set[int]] | None = None,
+    agg: _AggState | None = None,
 ) -> KeyIndex:
     """데이터 행과 사용자가 포함한 추정 행을 key 인덱스로 만든다. 파서가 소계·주석으로 분류한 행 가운데 key 칸이
     모두 있는 행은 '추정 행'으로 목록에 두고(자동으로 빼지 않음) 결정(decisions = 포함 행 번호 집합, 제외 행 번호
@@ -530,18 +672,27 @@ def analyze_input(
             continue
         key = tuple(parts)
         if key in ix.rows:
-            ix.dups.setdefault(key, [ix.rows[key]]).append(row)
-            continue
-        ix.rows[key] = row
-        ix.order.append(key)
-        if numeric:
-            ix.int_keys.add(key)
-        stripped = tuple(p.strip() for p in key)
-        if stripped != key:
-            ws_map.setdefault(stripped, set()).add(key)
+            if agg is None:
+                ix.dups.setdefault(key, [ix.rows[key]]).append(row)
+                continue
+        else:
+            ix.rows[key] = row
+            ix.order.append(key)
+            if numeric:
+                ix.int_keys.add(key)
+            stripped = tuple(p.strip() for p in key)
+            if stripped != key:
+                ws_map.setdefault(stripped, set()).add(key)
         values = _row_values(entry, pick_ids, source, formulas, ix)
+        if agg is not None:  # key별 집계: 같은 key의 행을 모두 누적한다 (첫 행을 고르지 않음)
+            ix.agg_rows.setdefault(key, []).append(row)
+            agg.add(key, row, values)
+            continue
         if keep_all or len(ix.order) <= keep_first or (keep_keys is not None and key in keep_keys):
             ix.values[key] = values
+    if agg is not None:
+        ix.agg = agg
+        ix.values = {k: agg.values_for(k) for k in ix.order}  # 집계 값은 key마다 한 줄이라 모두 둔다
     stale = sorted(
         (include | exclude) - decided
     )  # 지금 추정 행이 아닌 번호를 가리키는 결정 — 다른 행에 적용하지 않는다
@@ -592,9 +743,12 @@ class InputPlan:
     pii: str  # none / acknowledged / needs_ack
     pii_summary: dict[str, Any] | None = None  # 파일 목록과 같은 형식 (가린 값)
     key_ids: list[int] = field(default_factory=list)
-    pick_ids: list[int] = field(default_factory=list)
-    out_names: list[str] = field(default_factory=list)  # 가져올 열의 최종 결과 이름
+    pick_ids: list[int] = field(default_factory=list)  # 읽을 열 (집계 입력은 집계 항목의 원본 열 — 중복 없이)
+    out_names: list[str] = field(default_factory=list)  # 결과 열의 최종 이름 (가져올 열 또는 집계 항목 순)
     default_name: list[bool] = field(default_factory=list)
+    out_specs: list[tuple[str | None, str]] = field(default_factory=list)  # 결과 열마다 (사용자 이름, 기본 이름)
+    agg_items: list[tuple[str, int | None]] = field(default_factory=list)  # 집계 입력: (func, 원본 열 번호|None)
+    agg_stats: list[dict[str, Any]] | None = None  # 집계 입력의 검산값 (분석 뒤)
     problems: list[Problem] = field(default_factory=list)
     ix: KeyIndex | None = None
     linked: int = 0
@@ -604,6 +758,43 @@ class InputPlan:
     @property
     def file_id(self) -> int:
         return self.req.file_id
+
+    @property
+    def aggregated(self) -> bool:
+        return self.req.aggregate is not None
+
+    @property
+    def n_out(self) -> int:
+        """이 입력이 결과에 넣는 열 수 (가져올 열 수 또는 집계 항목 수)."""
+        return len(self.agg_items) if self.aggregated else len(self.pick_ids)
+
+    def agg_out(self) -> dict[str, Any] | None:
+        if not self.aggregated or self.req.aggregate is None:
+            return None
+        s = self.sheet
+        items = []
+        for n, (a, (func, j)) in enumerate(zip(self.req.aggregate.items, self.agg_items, strict=True)):
+            stat = self.agg_stats[n] if self.agg_stats else {}
+            items.append(
+                {
+                    "func": func,
+                    "label": AGG_LABEL[func],
+                    "column_id": a.column_id,
+                    "column": {"letter": self.letter(j), "name": mask_text(s.column_names[j])}
+                    if j is not None and s is not None
+                    else None,
+                    "out_name": mask_text(self.out_names[n]) if self.out_names else None,
+                    "total": stat.get("total"),
+                    "blank_keys": stat.get("blank_keys"),
+                    "zero_keys": stat.get("zero_keys"),
+                }
+            )
+        ix = self.ix
+        return {
+            "items": items,
+            "source_rows": (ix.data_rows + ix.included_rows) if ix is not None else None,
+            "keys_after": len(ix.rows) if ix is not None else None,
+        }
 
     @property
     def sheet_index(self) -> int:
@@ -678,7 +869,7 @@ class InputPlan:
                 }
             )
         picked = []
-        for pos, j in enumerate(self.pick_ids):
+        for pos, j in enumerate([] if self.aggregated else self.pick_ids):  # 집계 입력의 열은 aggregate에 (picked 없음)
             picked.append(
                 {
                     "column_id": self.req.columns[pos].column_id,
@@ -714,6 +905,7 @@ class InputPlan:
             "pii_summary": self.pii_summary,
             "key_columns": key_columns,
             "picked": picked,
+            "aggregate": self.agg_out(),
             "rows": dict(s.kinds) if s is not None else None,
             "row_review": self.row_review(),
             "keys": keys,
@@ -825,11 +1017,24 @@ def _cheap_checks(db: Session, user: CurrentUser, req: KeyJoinIn) -> tuple[list[
             raise _bad(f"입력 {n + 1}: #{fid} 파일에 없는 시트입니다: {item.sheet_id} [KEYJOIN_SHEET_UNKNOWN]")
         ip.sheet = info.sheets[ip.sheet_index]
         width = len(ip.sheet.column_names)
-        for cid in [*item.key_columns, *(c.column_id for c in item.columns)]:
+        agg_items = item.aggregate.items if item.aggregate is not None else []
+        agg_cids = [a.column_id for a in agg_items if a.column_id is not None]
+        for cid in [*item.key_columns, *(c.column_id for c in item.columns), *agg_cids]:
             if int(cid[1:]) >= width:
                 raise _bad(f"{ip.where()}: 없는 열입니다: {cid} [KEYJOIN_COLUMN_UNKNOWN]")
         ip.key_ids = [int(cid[1:]) for cid in item.key_columns]
-        ip.pick_ids = [int(c.column_id[1:]) for c in item.columns]
+        if item.aggregate is not None:
+            ip.agg_items = [(a.func, int(a.column_id[1:]) if a.column_id is not None else None) for a in agg_items]
+            ip.pick_ids = list(dict.fromkeys(j for _, j in ip.agg_items if j is not None))  # 읽을 열 (중복 없이)
+            ip.out_specs = [
+                (a.out_name, "행 수" if j is None else f"{ip.sheet.column_names[j]} {AGG_LABEL[func]}")
+                for a, (func, j) in zip(agg_items, ip.agg_items, strict=True)
+            ]
+        else:
+            ip.pick_ids = [int(c.column_id[1:]) for c in item.columns]
+            ip.out_specs = [
+                (c.out_name, ip.sheet.column_names[j]) for c, j in zip(item.columns, ip.pick_ids, strict=True)
+            ]
         used = [*ip.key_ids, *ip.pick_ids]
         bad = [j for j in used if has_illegal(ip.sheet.column_names[j])]
         if bad or has_illegal(info.name) or has_illegal(ip.sheet.name):
@@ -860,23 +1065,28 @@ def _header(req: KeyJoinIn, inputs: list[InputPlan], base: InputPlan, problems: 
             problems.append(_block("KEYJOIN_OUT_NAME_DUPLICATE", text))
         chosen.setdefault(name, f"key 결과 이름 {i + 1}")
     for ip in inputs:
-        for pos, c in enumerate(ip.req.columns):
-            if c.out_name is None:
+        for pos, (user_name, _default) in enumerate(ip.out_specs):
+            if user_name is None:
                 continue
-            where = ip.where(ip.pick_ids[pos] if ip.pick_ids else None)
-            if c.out_name in chosen:
-                text = f"{where}: 적은 결과 이름이 {chosen[c.out_name]}과(와) 같습니다 — 다른 이름을 적으세요."
+            j = ip.agg_items[pos][1] if ip.aggregated else (ip.pick_ids[pos] if ip.pick_ids else None)
+            where = ip.where(j)
+            if user_name in chosen:
+                text = f"{where}: 적은 결과 이름이 {chosen[user_name]}과(와) 같습니다 — 다른 이름을 적으세요."
                 problems.append(ip.add(_block("KEYJOIN_OUT_NAME_DUPLICATE", text)))
-            chosen.setdefault(c.out_name, f"{where}의 결과 이름")
+            chosen.setdefault(user_name, f"{where}의 결과 이름")
     used = set(chosen)
     header = list(key_names)
     for ip in inputs:
         ip.out_names, ip.default_name = [], []
-        for pos, c in enumerate(ip.req.columns):
-            if c.out_name is not None:
-                name = c.out_name
+        if not ip.out_specs and ip.sheet is None:  # 시트를 읽지 못한 입력 — 열 ID로 자리만 채운다
+            ip.out_specs = [(c.out_name, c.column_id) for c in ip.req.columns]
+            if ip.req.aggregate is not None:
+                ip.out_specs = [(a.out_name, a.column_id or "행 수") for a in ip.req.aggregate.items]
+        for user_name, default in ip.out_specs:
+            if user_name is not None:
+                name = user_name
             else:
-                name = ip.sheet.column_names[ip.pick_ids[pos]] if ip.sheet is not None else c.column_id
+                name = default
                 if name in used:  # 같은 이름의 열은 출처를 붙여 구분한다 (뒤 것에)
                     name = f"{name} (입력 {ip.index + 1} · #{ip.file_id})"
                     k = 2
@@ -885,7 +1095,7 @@ def _header(req: KeyJoinIn, inputs: list[InputPlan], base: InputPlan, problems: 
                         k += 1
                 used.add(name)
             ip.out_names.append(name)
-            ip.default_name.append(c.out_name is None)
+            ip.default_name.append(user_name is None)
             header.append(name)
     return header
 
@@ -900,7 +1110,7 @@ def _budget_checks(
     rows = {ip.index: sum(ip.sheet.kinds.get(k, 0) for k in ("data", "subtotal", "note")) for ip in ready}
     rows_total = sum(rows.values())
     drive_rows = rows_total if req.scope == "all" else rows.get(base.index, 0)
-    picked = sum(len(ip.pick_ids) for ip in inputs)
+    picked = sum(ip.n_out for ip in inputs)
     indexed = [ip for ip in ready if req.scope == "all" or ip is not base]
     index_cells = sum(rows[ip.index] * (k + len(ip.pick_ids)) for ip in indexed)
     out_cells = drive_rows * (k + picked + 1 + n) + SUMMARY_LINES + SUMMARY_PER_INPUT * n
@@ -999,9 +1209,11 @@ def _analyze(db: Session, plan: Plan, keep_values: bool) -> None:
             first = PREVIEW_POOL if ip is base else keep_first
             rows = ip.req.rows
             decisions = (set(rows.include), set(rows.exclude)) if rows is not None else None
+            pos_of = {j: p for p, j in enumerate(ip.pick_ids)}
+            agg = _AggState(ip.agg_items, pos_of) if ip.aggregated else None
             ip.ix = analyze_input(
                 sheet, ip.key_ids, ip.pick_ids, formulas.get(sheet.name, set()), ws_map,
-                keep_all=keep_values, keep_keys=pool, keep_first=first, decisions=decisions,
+                keep_all=keep_values, keep_keys=pool, keep_first=first, decisions=decisions, agg=agg,
             )  # fmt: skip
             if not keep_values:
                 pool.update(ip.ix.order[:first])
@@ -1050,11 +1262,12 @@ def _analyze(db: Session, plan: Plan, keep_values: bool) -> None:
         "excluded": excluded,
     }
     plan.out_keys = out_keys
+    _agg_stats(plan)
     _input_problems(plan, ws_map)
     _link_problems(plan, excluded)
     # 인덱스 뒤 정확한 칸 수 (줄어들 수만 있다 — 글자는 추정치 그대로)
     n, k = len(inputs), len(plan.key_names)
-    picked = sum(len(ip.pick_ids) for ip in inputs)
+    picked = sum(ip.n_out for ip in inputs)
     indexed = inputs if req.scope == "all" else others
     index_cells = sum(len(ip.ix.rows) * (k + len(ip.pick_ids)) for ip in indexed)
     out_cells = len(out_keys) * (k + picked + 1 + n) + SUMMARY_LINES + SUMMARY_PER_INPUT * n
@@ -1066,11 +1279,73 @@ def _analyze(db: Session, plan: Plan, keep_values: bool) -> None:
         plan.preview = _preview(plan, numbers)
 
 
+def _agg_stats(plan: Plan) -> None:
+    """집계 입력의 검산값 — 결과 행(out_keys) 가운데 이 입력에 있는 key로: 행 수·값 있는 수·합계는 합, 최댓값은 전체
+    최댓값. 값 없는 key 수(빈 칸으로 두는 key — 미연결 빈 칸과 구분)와 실제 0인 key 수도 센다."""
+    assert plan.out_keys is not None
+    for ip in plan.inputs:
+        ix = ip.ix
+        if not ip.aggregated or ix is None:
+            continue
+        stats: list[dict[str, Any]] = []
+        for n, (func, _j) in enumerate(ip.agg_items):
+            total: Any = None
+            blank = zero = 0
+            for key in plan.out_keys:
+                vals = ix.values.get(key)
+                if vals is None:
+                    continue  # 이 입력에 없는 key — 미연결(빈 칸)
+                v = vals[n]
+                if v is None:
+                    blank += 1
+                    continue
+                if v == 0:
+                    zero += 1
+                if func == "max":
+                    if total is None or (
+                        _as_datetime(v) > _as_datetime(total) if _agg_kind(v) == "date" else v > total
+                    ):
+                        total = v
+                else:
+                    total = v if total is None else total + v
+            if isinstance(total, datetime | date):
+                total = total.isoformat()
+            stats.append({"total": total, "blank_keys": blank, "zero_keys": zero})
+        ip.agg_stats = stats
+
+
 def _input_problems(plan: Plan, ws_map: dict[Key, set[Key]]) -> None:
-    """입력마다 key 문제(차단)와 연결하지 않은 행·섞인 자료형·미연결(경고)."""
+    """입력마다 key 문제(차단)와 연결하지 않은 행·섞인 자료형·미연결(경고). 집계 입력은 쓸 수 없는 값(차단)과
+    집계 안내(참고)."""
     for ip in plan.inputs:
         ix = ip.ix
         assert ix is not None
+        if ix.agg is not None:
+            for n, r in sorted(ix.agg.problems.items()):
+                func, j = ip.agg_items[n]
+                what = "숫자" if func == "sum" else "숫자·날짜"
+                text = (
+                    f"{ip.where(j)}: 집계 항목 {n + 1}({AGG_LABEL[func]})의 열에 {what}가 아닌 값이 {r.count}칸"
+                    f"({_rows_text(r.first)}) 있습니다 — 자동으로 해석하지 않습니다. 원본에서 고치거나 다른 집계를 "
+                    "고르세요."
+                )
+                col = ip.letter(j) if j is not None else None
+                plan.problems.append(ip.add(_block(AGG_TYPE, text, column=col, rows=list(r.first), count=r.count)))
+            for n, r in sorted(ix.agg.mixed.items()):
+                func, j = ip.agg_items[n]
+                text = (
+                    f"{ip.where(j)}: 집계 항목 {n + 1}({AGG_LABEL[func]})의 열에 숫자와 날짜가 섞여 있습니다 "
+                    f"({r.count}칸, {_rows_text(r.first)}) — 섞인 열의 최댓값은 만들지 않습니다."
+                )
+                col = ip.letter(j) if j is not None else None
+                plan.problems.append(ip.add(_block(AGG_MIXED, text, column=col, rows=list(r.first), count=r.count)))
+            merged = sum(len(rows) for rows in ix.agg_rows.values() if len(rows) > 1)
+            text = (
+                f"{ip.where()}: 선택한 규칙으로 key마다 집계한 뒤 연결합니다 — 원본 "
+                f"{ix.data_rows + ix.included_rows:,}행 → key {len(ix.rows):,}개 (같은 key가 여러 행인 key의 행 "
+                f"{merged:,}행을 합침). 값이 없는 key의 합계·최댓값은 빈 칸(0 아님)입니다."
+            )
+            plan.problems.append(ip.add(_warn("KEYJOIN_AGGREGATED", text, count=len(ix.rows))))
         if ix.dups:
             rows = sorted(r for v in ix.dups.values() for r in v)[:PROBLEM_ROWS]
             total = sum(len(v) for v in ix.dups.values())
@@ -1269,7 +1544,7 @@ def _preview(plan: Plan, numbers: dict[Key, int]) -> dict[str, Any]:
             ix = ip.ix
             mask = mask_rrn_number if ix.rrn else mask_cell
             vals = ix.values.get(k)
-            cells.extend([None] * len(ip.pick_ids) if vals is None else [_shown(v, mask) for v in vals])
+            cells.extend([None] * ip.n_out if vals is None else [_shown(v, mask) for v in vals])
             if k in ix.rows:
                 sources.append({"input": ip.index, "row": ix.rows[k]})
         rows.append({"key": key, "cells": cells, "sources": sources})
@@ -1283,6 +1558,11 @@ def _basis(plan: Plan) -> str:
     한도. key 값·행 수는 넣지 않는다 (내용은 sha256이 대표)."""
     files = {ip.file_id: ip.record for ip in plan.inputs}
     picks = [[c.column_id, c.out_name] for ip in plan.inputs for c in ip.req.columns]
+    aggs = [  # 집계 설정이 바뀌면 확인 결과가 무효가 되게 (입력 번호·항목 순서·함수·열·이름)
+        [ip.index, [[a.func, a.column_id, a.out_name] for a in ip.req.aggregate.items]]
+        for ip in plan.inputs
+        if ip.req.aggregate is not None
+    ]
     inputs = [
         [ip.index, ip.file_id, ip.sheet_index, list(ip.req.key_columns), len(ip.req.columns)] for ip in plan.inputs
     ]
@@ -1300,6 +1580,7 @@ def _basis(plan: Plan) -> str:
         plan.header,
         [[ip.index, sorted(ip.req.rows.include), sorted(ip.req.rows.exclude)] for ip in plan.inputs if ip.req.rows],
         [*limits, MAX_OUTPUT_TEXT_CHARS, INDEX_WEIGHT, TEXT_WEIGHT],
+        aggs,
     ]
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, default=str).encode()).hexdigest()
 
@@ -1326,7 +1607,7 @@ def _write_result(ws: Any, plan: Plan) -> None:
         col = k + 1
         for ip in plan.inputs:
             vals = ip.ix.values.get(key)
-            for pos in range(len(ip.pick_ids)):
+            for pos in range(ip.n_out):
                 v = None if vals is None else vals[pos]
                 if v is GAP:
                     c = _put(ws, r, col, None)
@@ -1356,10 +1637,20 @@ def _write_sources(ws: Any, plan: Plan) -> None:
     for r, key in enumerate(plan.out_keys, start=2):
         _put(ws, r, 1, r - 1)
         for j, ip in enumerate(plan.inputs, start=2):
-            _put(ws, r, j, ip.ix.rows.get(key))
+            if ip.aggregated:  # 집계 입력: 기여한 원본 행을 모두 적는다 (집계 결과를 한 행으로 보이지 않음)
+                rows = ip.ix.agg_rows.get(key)
+                if rows is None:
+                    _put(ws, r, j, None)
+                    continue
+                shown = "·".join(str(x) for x in rows[:AGG_SOURCE_LISTED])
+                more = f" 외 {len(rows) - AGG_SOURCE_LISTED}행" if len(rows) > AGG_SOURCE_LISTED else ""
+                c = _put(ws, r, j, f"{shown}{more} ({len(rows)}행)")
+                c.data_type = "s"
+            else:
+                _put(ws, r, j, ip.ix.rows.get(key))
     ws.column_dimensions["A"].width = 10
-    for j in range(2, len(plan.inputs) + 2):
-        ws.column_dimensions[get_column_letter(j)].width = 30
+    for j, ip in enumerate(plan.inputs, start=2):
+        ws.column_dimensions[get_column_letter(j)].width = 40 if ip.aggregated else 30
 
 
 def _write_summary(ws: Any, plan: Plan, run_id: int, processed_at: str) -> None:
@@ -1389,9 +1680,16 @@ def _write_summary(ws: Any, plan: Plan, run_id: int, processed_at: str) -> None:
     for ip in plan.inputs:
         ix, s = ip.ix, ip.sheet
         keys = ", ".join(f"{mask_text(s.column_names[j])}({ip.letter(j)})" for j in ip.key_ids)
-        picked = ", ".join(
-            f"{mask_text(s.column_names[j])} → {mask_text(ip.out_names[p])}" for p, j in enumerate(ip.pick_ids)
-        )
+        if ip.aggregated:
+            picked = "집계: " + ", ".join(
+                (AGG_LABEL[func] if j is None else f"{mask_text(s.column_names[j])}({ip.letter(j)}) {AGG_LABEL[func]}")
+                + f" → {mask_text(ip.out_names[p])}"
+                for p, (func, j) in enumerate(ip.agg_items)
+            )
+        else:
+            picked = ", ".join(
+                f"{mask_text(s.column_names[j])} → {mask_text(ip.out_names[p])}" for p, j in enumerate(ip.pick_ids)
+            )
         skipped = sum(r.count for r in ix.skipped.values())
         review = len(ix.review) + ix.review_overflow
         reviewed = f"{review} ({ix.included_rows}/{ix.excluded_rows})"
@@ -1407,6 +1705,31 @@ def _write_summary(ws: Any, plan: Plan, run_id: int, processed_at: str) -> None:
                 else ""
             )
             line("제외한 행", f"입력 {ip.index + 1}", f"{shown}{more}")
+    for ip in plan.inputs:
+        if (
+            ip.aggregated and ip.ix is not None
+        ):  # 집계 입력: 규칙·원본 행 → key 수·항목별 검산값 (값 없는 key·0인 key 구분)
+            ix = ip.ix
+            line(
+                "집계",
+                f"입력 {ip.index + 1}",
+                f"선택한 규칙으로 집계한 뒤 연결 — 원본 {ix.data_rows + ix.included_rows}행 → key {len(ix.rows)}개",
+            )
+            for p, (func, j) in enumerate(ip.agg_items):
+                stat = ip.agg_stats[p] if ip.agg_stats else {}
+                src = (
+                    AGG_LABEL[func]
+                    if j is None
+                    else f"{mask_text(ip.sheet.column_names[j])}({ip.letter(j)}) {AGG_LABEL[func]}"
+                )
+                line(
+                    "집계 검산",
+                    f"입력 {ip.index + 1}",
+                    f"{src} → {mask_text(ip.out_names[p])}",
+                    f"검산값 {stat.get('total')}",
+                    f"값 없는 key {stat.get('blank_keys')}",
+                    f"0인 key {stat.get('zero_keys')}",
+                )
     row += 1
     res = plan.result
     line("결과 행", res["rows"])
@@ -1423,6 +1746,9 @@ def _write_summary(ws: Any, plan: Plan, run_id: int, processed_at: str) -> None:
         "미연결·원본 빈 칸은 빈 칸입니다 (0 아님). 실제 0은 0입니다. 가져온 열의 병합 칸은 앱이 읽은 대로 "
         "위(왼쪽) 칸의 값을 채웠습니다 (칸 수는 '주의' 줄).",
         "'='로 시작하는 글자와 '#N/A' 같은 오류 코드 모양의 글자는 수식·오류 칸이 아니라 글자 그대로입니다.",
+        "집계 입력(위 표의 '집계')은 key마다 행 수·값 있는 수·합계·최댓값을 선택한 규칙으로 만든 값입니다 — "
+        "첫 행을 고르거나 자동으로 합치지 않았습니다. 값이 없는 key의 합계·최댓값은 빈 칸(0 아님)이고, 출처 시트에는 "
+        "기여한 원본 행을 모두 적었습니다.",
         f"{EXCEL_DIGITS + 1}자리 이상 정수 값은 자릿수를 지키려고 글자로 씁니다.",
         "선택하지 않은 열은 어느 시트에도 넣지 않습니다.",
         "key 원문·셀 값은 이 시트에 없습니다 (연결 결과 시트에만).",
@@ -1465,6 +1791,17 @@ def _done_summary(plan: Plan, run: IntegrationRun, request_id: str, processed_at
                     {"column_id": c.column_id, "out_name": mask_text(ip.out_names[p])}
                     for p, c in enumerate(ip.req.columns)
                 ],
+                "aggregate": [
+                    {
+                        "func": a.func,
+                        "column_id": a.column_id,
+                        "out_name": mask_text(ip.out_names[p]),
+                        **(ip.agg_stats[p] if ip.agg_stats else {}),
+                    }
+                    for p, a in enumerate(ip.req.aggregate.items)
+                ]
+                if ip.req.aggregate is not None
+                else None,  # fmt: skip
                 "data_rows": ix.data_rows,
                 "skipped_rows": sum(r.count for r in ix.skipped.values()),
                 "review_rows": len(ix.review) + ix.review_overflow,
