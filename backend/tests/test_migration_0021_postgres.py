@@ -22,7 +22,7 @@ from tests.conftest import pg_database
 from tests.test_migration_0020_postgres import INSERT_RUN, _diff, _engine, _ok, _revision, _sql
 from tests.test_migrations_postgres import _alembic, needs_admin
 
-PREVIOUS, HEAD = "0020_run_worker_lease", "0022_temp_passwords"  # head(0022)에서도 0021의 열·색인은 그대로
+PREVIOUS, HEAD = "0020_run_worker_lease", "0023_keyjoin_jobs"  # head(0023)에서도 0021의 열·색인은 그대로
 RID1, RID2 = "a" * 32, "b" * 32
 REQUEST_COLUMNS = {"request_kind", "request_id", "request_hash"}
 

@@ -479,7 +479,7 @@ def test_0019_analysis_runs_up_down_and_up_again(tmp_path: Path) -> None:
     db.close()
 
 
-HEAD = "0022_temp_passwords"  # 지금 head — 바뀌면 여기와 docs/DEPLOY.md를 함께
+HEAD = "0023_keyjoin_jobs"  # 지금 head — 바뀌면 여기와 docs/DEPLOY.md·README를 함께
 REQUEST_COLUMNS = {"request_kind", "request_id", "request_hash"}
 
 
@@ -788,7 +788,7 @@ def test_0022_temp_password_columns_default_false_and_downgrade_guard(tmp_path: 
         cols = {r[1] for r in con.execute("pragma table_info(users)")}
         assert {"must_change_password", "temp_password_expires_at"} <= cols
         assert con.execute("select must_change_password, temp_password_expires_at from users").fetchall() == [(0, None)]
-        assert con.execute("select version_num from alembic_version").fetchone() == ("0022_temp_passwords",)
+        assert con.execute("select version_num from alembic_version").fetchone() == (HEAD,)
         # 임시 상태 세 가지(이용 중·이용 중지·만료) + 변경 완료 하나, 업무 행 하나
         future, past = "2099-01-01 00:00:00.000000", "2020-01-01 00:00:00.000000"
         for name, active, status_, must, exp in (
