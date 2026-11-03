@@ -12,8 +12,10 @@ import {
   planKeyJoin,
   runKeyJoin,
   updateKeyJoinJob,
+  KEYJOIN_AGG_LABEL,
   type Cell,
   type IntegrationRun,
+  type KeyJoinAggFunc,
   type KeyJoinInput,
   type KeyJoinJob,
   type KeyJoinJobAssignment,
@@ -57,8 +59,18 @@ const SCOPE_HELP: Record<KeyJoinScope, string> = {
 
 // 입력란은 사용자가 친 글자 그대로(…_input) 두고, 서버에는 보낼 수 있는 값만 보낸다 (buildRequest)
 type ColumnDraft = { column_id: string; out_name_input?: string }
+// key별 집계 항목 (agg_on일 때만 요청에 들어간다): 행 수는 열이 없다
+type AggDraft = { func: KeyJoinAggFunc; column_id: string | null; out_name_input?: string }
 // compound: 복합 key 편집 모드 (화면 상태 — 요청에는 key_columns의 개수만 남는다)
-type InputDraft = { key_columns: string[]; columns: ColumnDraft[]; compound?: boolean }
+// agg_on: 이 입력은 key별로 집계한 뒤 연결 (켜면 가져올 열 대신 aggregate 항목을 보낸다)
+type InputDraft = { key_columns: string[]; columns: ColumnDraft[]; compound?: boolean; agg_on?: boolean; aggregate?: AggDraft[] }
+const AGG_FUNCS: KeyJoinAggFunc[] = ['count_rows', 'count_values', 'sum', 'max']
+const AGG_HELP: Record<KeyJoinAggFunc, string> = {
+  count_rows: 'key의 행 수 (열 없음)',
+  count_values: '그 열에 값이 있는 행 수 — 빈 칸·결측 표기는 세지 않음',
+  sum: '숫자 합 — 값이 없는 key는 빈 칸(0 아님), 숫자가 아닌 값이 있으면 만들지 않음',
+  max: '숫자끼리 또는 날짜끼리 최댓값 — 섞이거나 글자면 만들지 않음',
+}
 type Draft = {
   sheets: Record<string, string> // 파일 번호 → 고른 시트 ID (시트가 하나인 파일은 비워 두면 s0)
   inputs: Record<string, InputDraft> // '파일:시트' → key 열·가져올 열
@@ -69,7 +81,8 @@ type Draft = {
 }
 type InputRef = { fid: number; sid: string; key: string; draft: InputDraft }
 // key: 입력('파일:시트')·파일('파일') 또는 전체(null). about: 전체 항목 중 어느 입력란의 문제인지 (그 입력란 옆에 보임)
-type Invalid = { key: string | null; text: string; about?: 'key_names' }
+// agg: key별 집계 항목의 문제 (item = 항목 번호 0부터, 항목이 없을 때는 null · field = 고칠 칸) — 3단계 집계 구역에 보이고 그 칸에 연결한다
+type Invalid = { key: string | null; text: string; about?: 'key_names'; agg?: { item: number | null; field: 'func' | 'column' | 'name' } }
 type Busy = 'plan' | 'run' | null
 type Failure = { message: string; problems: string[]; code: string | null; runId: number | null; unknown: boolean }
 type Made = { key: string; run: IntegrationRun; created: boolean }
@@ -208,6 +221,25 @@ function buildRequest(
       })
     if (r.draft.columns.some((c) => (c.out_name_input ?? '').trim().length > OUT_NAME_MAX))
       invalid.push({ key: r.key, text: `${where}: 결과 이름은 ${OUT_NAME_MAX}자까지입니다.` })
+    if (r.draft.agg_on) {
+      const items = r.draft.aggregate ?? []
+      if (!items.length)
+        invalid.push({ key: r.key, text: `${where}: 집계 항목을 하나 이상 추가하세요 (행 수·값 있는 수·합계·최댓값).`, agg: { item: null, field: 'func' } })
+      const seen = new Set<string>()
+      items.forEach((a, n) => {
+        const cid = a.func === 'count_rows' ? null : a.column_id
+        const col = { item: n, field: 'column' } as const
+        if (a.func !== 'count_rows' && !cid) invalid.push({ key: r.key, text: `${where}: 집계 항목 ${n + 1}의 열을 고르세요.`, agg: col })
+        if (cid && r.draft.key_columns.includes(cid))
+          invalid.push({ key: r.key, text: `${where}: 집계 항목 ${n + 1}은 key 열입니다 — 다른 열을 고르세요.`, agg: col })
+        const tag = `${a.func}:${cid ?? ''}`
+        if (seen.has(tag))
+          invalid.push({ key: r.key, text: `${where}: 같은 집계(항목 ${n + 1})를 두 번 넣었습니다.`, agg: { item: n, field: a.func === 'count_rows' ? 'func' : 'column' } })
+        seen.add(tag)
+        if ((a.out_name_input ?? '').trim().length > OUT_NAME_MAX)
+          invalid.push({ key: r.key, text: `${where}: 집계 항목 ${n + 1}의 결과 이름은 ${OUT_NAME_MAX}자까지입니다.`, agg: { item: n, field: 'name' } })
+      })
+    }
   })
   const names = Array.from({ length: k }, (_, i) => (draft.key_names_input?.[i] ?? '').trim())
   const filled = names.filter(Boolean).length
@@ -222,14 +254,26 @@ function buildRequest(
   const inputs: KeyJoinInput[] = refs.map((r) => {
     const decided = draft.rows?.[r.key]
     const rows = decided && (decided.include.length || decided.exclude.length) ? { include: [...decided.include].sort((a, b) => a - b), exclude: [...decided.exclude].sort((a, b) => a - b) } : undefined
+    const aggregate = r.draft.agg_on
+      ? {
+          items: (r.draft.aggregate ?? []).map((a) => ({
+            func: a.func,
+            column_id: a.func === 'count_rows' ? null : a.column_id,
+            out_name: nameOf(a.out_name_input),
+          })),
+        }
+      : null
     return {
       file_id: r.fid,
       sheet_id: r.sid,
       key_columns: r.draft.key_columns,
-      columns: r.draft.columns
-        .filter((c) => !r.draft.key_columns.includes(c.column_id)) // key 열은 결과에 이미 들어간다
-        .map((c) => ({ column_id: c.column_id, out_name: nameOf(c.out_name_input) })),
+      columns: aggregate
+        ? [] // 집계 입력은 집계한 값만 결과에 넣는다 (가져올 열 없음)
+        : r.draft.columns
+            .filter((c) => !r.draft.key_columns.includes(c.column_id)) // key 열은 결과에 이미 들어간다
+            .map((c) => ({ column_id: c.column_id, out_name: nameOf(c.out_name_input) })),
       ...(rows ? { rows } : {}),
+      ...(aggregate ? { aggregate } : {}),
     }
   })
   const request: KeyJoinRequest = {
@@ -254,6 +298,9 @@ function draftFromRequest(req: KeyJoinRequest): Draft {
       key_columns: i.key_columns,
       columns: i.columns.map((c) => ({ column_id: c.column_id, out_name_input: c.out_name ?? '' })),
       compound: i.key_columns.length > 1,
+      ...(i.aggregate
+        ? { agg_on: true, aggregate: i.aggregate.items.map((a) => ({ func: a.func, column_id: a.column_id, out_name_input: a.out_name ?? '' })) }
+        : {}),
     }
   }
   return {
@@ -319,6 +366,7 @@ function KeyJoin() {
   const busyRef = useRef<Busy>(null)
   const planAbort = useRef<AbortController | null>(null)
   const filesLegendRef = useRef<HTMLLegendElement | null>(null) // 파일을 빼면 사라진 단추 대신 1단계 제목이 초점을 받는다
+  const aggAddRefs = useRef<Record<string, HTMLButtonElement | null>>({}) // 집계 항목을 빼면 사라진 '빼기' 대신 그 입력의 '집계 항목 추가'가 초점을 받는다
   const ids = useId()
   // 저장한 작업(설정 재사용): 목록 → 이번 파일에 맞추기(match) → 확실하지 않은 것은 골라 적용(apply) → 초안에 넣기
   const [jobs, setJobs] = useState<KeyJoinJob[] | null>(null)
@@ -451,6 +499,25 @@ function KeyJoin() {
       ;[next[index], next[j]] = [next[j], next[index]]
       return { ...i, columns: next }
     })
+  }
+
+  /** key별 집계 후 연결 켜기/끄기 — 켜면 가져올 열 대신 집계 항목을 보낸다 (처음 켤 때 '행 수' 항목 하나를 둔다) */
+  function setAggOn(r: InputRef, on: boolean) {
+    setInput(r.key, (i) => ({ ...i, agg_on: on, aggregate: on && !(i.aggregate ?? []).length ? [{ func: 'count_rows', column_id: null }] : i.aggregate }))
+  }
+
+  function addAggItem(r: InputRef) {
+    setInput(r.key, (i) => ({ ...i, aggregate: [...(i.aggregate ?? []), { func: 'sum', column_id: null }] }))
+  }
+
+  function updateAggItem(r: InputRef, index: number, patch: Partial<AggDraft>) {
+    setInput(r.key, (i) => ({ ...i, aggregate: (i.aggregate ?? []).map((a, n) => (n === index ? { ...a, ...patch } : a)) }))
+  }
+
+  function removeAggItem(r: InputRef, index: number) {
+    setInput(r.key, (i) => ({ ...i, aggregate: (i.aggregate ?? []).filter((_, n) => n !== index) }))
+    // 누른 '빼기'는 곧 사라지므로 초점이 body로 떨어지지 않게, 집계를 켠 동안 늘 있는 같은 입력의 '집계 항목 추가'로 바로 옮긴다
+    aggAddRefs.current[r.key]?.focus()
   }
 
   /** 추정 행의 결정: 한 행(또는 여러 행)을 포함/제외/미결정으로. 결정은 요청의 일부라 바꾸면 다시 확인해야 한다 */
@@ -1060,7 +1127,7 @@ function KeyJoin() {
             const cols = m?.columns ?? []
             const vin = viewInput(r)
             const compound = Boolean(r.draft.compound) || r.draft.key_columns.length > 1
-            const problems = invalid.filter((x) => x.key === r.key)
+            const problems = invalid.filter((x) => x.key === r.key && !x.agg) // 집계 항목의 문제는 3단계 집계 구역에서 그 칸에 연결한다
             const noteIds = problems.map((_, n) => `${ids}-fix-${i}-${n}`) // 고칠 것 문구 ↔ key 선택란 (aria-describedby)
             const describedBy = noteIds.length ? noteIds.join(' ') : undefined
             return (
@@ -1182,9 +1249,107 @@ function KeyJoin() {
             const m = metaOf(r)
             const label = inputLabel(r, i)
             const cols = m?.columns ?? []
+            // 집계 항목의 고칠 것: 이 구역에 보이고, 문제가 있는 칸에 aria-invalid·aria-describedby로 연결한다
+            const aggProblems = r.draft.agg_on ? invalid.filter((x) => x.key === r.key && x.agg) : []
+            const aggNoteId = (k: number) => `${ids}-agg-${i}-${k}`
+            const aggField = (item: number | null, field: 'func' | 'column' | 'name') => {
+              const hits = aggProblems.flatMap((p, k) => (p.agg?.item === item && p.agg?.field === field ? [aggNoteId(k)] : []))
+              return hits.length ? { 'aria-invalid': true, 'aria-describedby': hits.join(' ') } : {}
+            }
             return (
               <div key={r.key} className="kj-input">
                 <p className="kj-input-title">{label}</p>
+                <Toggle
+                  size="md"
+                  label="key별로 집계한 뒤 연결 (같은 key의 여러 행 허용)"
+                  aria-label={`${label} key별로 집계한 뒤 연결`}
+                  checked={Boolean(r.draft.agg_on)}
+                  onChange={(e) => setAggOn(r, e.target.checked)}
+                />
+                {r.draft.agg_on && (
+                  <div className="kj-input">
+                    <p className="mw-muted">
+                      이 입력은 선택한 규칙으로 key마다 집계한 뒤 연결합니다 — 첫 행을 고르거나 자동으로 합치지 않습니다. 행 수와 값 있는 수는
+                      다르며(빈 칸·결측 표기는 세지 않음), 합계·최댓값은 값이 없으면 빈 칸(0 아님)이고 숫자·날짜가 아닌 값이 섞이면 만들지
+                      않습니다. 결과 이름을 비우면 &lsquo;열 이름 합계&rsquo;처럼 서버가 붙입니다.
+                    </p>
+                    <ol className="kj-list" aria-label={`${label} 집계 항목`}>
+                      {(r.draft.aggregate ?? []).map((a, n) => {
+                        const col = cols.find((x) => x.column_id === a.column_id)
+                        return (
+                          <li key={n}>
+                            <span className="kj-name">{n + 1}.</span>
+                            <select
+                              className="kj-select"
+                              aria-label={`${label} 집계 항목 ${n + 1} 방식`}
+                              {...aggField(n, 'func')}
+                              value={a.func}
+                              onChange={(e) => updateAggItem(r, n, { func: e.target.value as KeyJoinAggFunc, ...(e.target.value === 'count_rows' ? { column_id: null } : {}) })}
+                            >
+                              {AGG_FUNCS.map((f) => (
+                                <option key={f} value={f}>
+                                  {KEYJOIN_AGG_LABEL[f]}
+                                </option>
+                              ))}
+                            </select>
+                            {a.func !== 'count_rows' && (
+                              <select
+                                className="kj-select"
+                                aria-label={`${label} 집계 항목 ${n + 1} 열`}
+                                {...aggField(n, 'column')}
+                                value={a.column_id ?? ''}
+                                onChange={(e) => updateAggItem(r, n, { column_id: e.target.value || null })}
+                              >
+                                <option value="">열 고르기</option>
+                                {cols
+                                  .filter((c) => !r.draft.key_columns.includes(c.column_id))
+                                  .map((c) => (
+                                    <option key={c.column_id} value={c.column_id}>
+                                      {colText(c)}
+                                    </option>
+                                  ))}
+                              </select>
+                            )}
+                            <input
+                              type="text"
+                              className="bd-input"
+                              aria-label={`${label} 집계 항목 ${n + 1} 결과 이름`}
+                              {...aggField(n, 'name')}
+                              placeholder={a.func === 'count_rows' ? '행 수' : col ? `${col.name} ${KEYJOIN_AGG_LABEL[a.func]}` : '결과 이름'}
+                              maxLength={OUT_NAME_MAX}
+                              value={a.out_name_input ?? ''}
+                              onChange={(e) => updateAggItem(r, n, { out_name_input: e.target.value })}
+                            />
+                            <span className="mw-muted">{AGG_HELP[a.func]}</span>
+                            <button type="button" className="login-link" aria-label={`${label} 집계 항목 ${n + 1} 빼기`} onClick={() => removeAggItem(r, n)}>
+                              빼기
+                            </button>
+                          </li>
+                        )
+                      })}
+                    </ol>
+                    {aggProblems.map((p, k) => (
+                      <p key={p.text} id={aggNoteId(k)} className="wk-why" role="note" aria-live="polite">
+                        <strong>고칠 것</strong> {p.text}
+                      </p>
+                    ))}
+                    <div className="admin-actions kj-actions">
+                      <button
+                        type="button"
+                        className="mapping-confirm"
+                        aria-label={`${label} 집계 항목 추가`}
+                        ref={(el) => {
+                          aggAddRefs.current[r.key] = el
+                        }}
+                        aria-describedby={aggField(null, 'func')['aria-describedby']}
+                        onClick={() => addAggItem(r)}
+                      >
+                        집계 항목 추가
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {!r.draft.agg_on && (
                 <div className="kj-cols" role="group" aria-label={`${label} 가져올 열`}>
                   {cols.map((c) => {
                     const isKey = r.draft.key_columns.includes(c.column_id)
@@ -1207,7 +1372,8 @@ function KeyJoin() {
                   })}
                   {!m && <p className="mw-muted">열 목록을 읽는 중…</p>}
                 </div>
-                {r.draft.columns.length > 0 && (
+                )}
+                {!r.draft.agg_on && r.draft.columns.length > 0 && (
                   <ol className="kj-list" aria-label={`${label} 결과 열 순서·이름`}>
                     {r.draft.columns.map((c, n) => {
                       const col = cols.find((x) => x.column_id === c.column_id)
@@ -1392,7 +1558,13 @@ function KeyJoin() {
                             {i.pii === 'needs_ack' && ' · 개인정보 확인 필요'}
                           </th>
                           <td>{i.key_columns.map((k) => `${k.letter}열 ${k.name}`).join(' + ') || '-'}</td>
-                          <td>{i.picked.length ? i.picked.map((c) => `${c.letter}열 ${c.name} → ${c.out_name}`).join(', ') : '없음'}</td>
+                          <td>
+                            {i.aggregate
+                              ? `집계 후 연결: ${i.aggregate.items.map((a) => `${a.column ? `${a.column.letter}열 ${a.column.name} ` : ''}${a.label} → ${a.out_name}`).join(', ')}`
+                              : i.picked.length
+                                ? i.picked.map((c) => `${c.letter}열 ${c.name} → ${c.out_name}`).join(', ')
+                                : '없음'}
+                          </td>
                           <td>
                             {i.rows
                               ? `${i.rows.data.toLocaleString('ko-KR')}${
@@ -1400,7 +1572,13 @@ function KeyJoin() {
                                 }`
                               : '-'}
                           </td>
-                          <td>{i.keys ? i.keys.indexed.toLocaleString('ko-KR') : '분석 전'}</td>
+                          <td>
+                            {i.keys
+                              ? i.aggregate && i.aggregate.source_rows !== null
+                                ? `${i.aggregate.source_rows.toLocaleString('ko-KR')}행 → key ${i.keys.indexed.toLocaleString('ko-KR')}개`
+                                : i.keys.indexed.toLocaleString('ko-KR')
+                              : '분석 전'}
+                          </td>
                           <td>{i.keys ? i.keys.linked.toLocaleString('ko-KR') : '-'}</td>
                           <td>{i.keys ? i.keys.unlinked.toLocaleString('ko-KR') : '-'}</td>
                           <td>{i.problems.length ? `차단 ${blocks} · 참고 ${warns}` : '없음'}</td>
@@ -1410,6 +1588,45 @@ function KeyJoin() {
                   </tbody>
                 </table>
               </TableRegion>
+              {view.inputs.some((i) => i.aggregate) && (
+                <div className="kj-input">
+                  <p className="kj-input-title">집계 검토 정보 — 선택한 규칙으로 집계한 뒤 연결했습니다</p>
+                  <p className="mw-muted">
+                    집계 전 원본 행·집계 후 key 수는 위 표의 &lsquo;key 수&rsquo; 칸에 있습니다. 검산값은 결과 파일의 그 열을 모두 더한(최댓값은 전체
+                    최댓값) 값이라 Excel에서 같은 수식으로 확인하는 기준이 됩니다 — 원본에서 따로 센 값과 비교해야 독립 검산입니다. &lsquo;값 없는
+                    key&rsquo;는 그 key에 값이 하나도 없어 빈 칸으로 둔 수(미연결 빈 칸과 구분), &lsquo;0인 key&rsquo;는 실제 0인 수입니다.
+                  </p>
+                  <TableRegion label="집계 검토 정보 표 (가로 스크롤)">
+                    <table className="upload-table kj-table" aria-label="집계 검토 정보">
+                      <thead>
+                        <tr>
+                          <th scope="col">입력</th>
+                          <th scope="col">집계 항목 → 결과 이름</th>
+                          <th scope="col">검산값</th>
+                          <th scope="col">값 없는 key</th>
+                          <th scope="col">0인 key</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {view.inputs.flatMap((i) =>
+                          (i.aggregate?.items ?? []).map((a, n) => (
+                            <tr key={`${i.file_id}:${i.sheet_id}:${n}`}>
+                              <th scope="row">입력 {i.index + 1}</th>
+                              <td>
+                                {a.column ? `${a.column.letter}열 ${a.column.name} ` : ''}
+                                {a.label} → {a.out_name}
+                              </td>
+                              <td>{a.total === null ? '분석 전' : typeof a.total === 'number' ? a.total.toLocaleString('ko-KR') : a.total}</td>
+                              <td>{a.blank_keys === null ? '-' : a.blank_keys.toLocaleString('ko-KR')}</td>
+                              <td>{a.zero_keys === null ? '-' : a.zero_keys.toLocaleString('ko-KR')}</td>
+                            </tr>
+                          )),
+                        )}
+                      </tbody>
+                    </table>
+                  </TableRegion>
+                </div>
+              )}
               {view.inputs.some((i) => i.row_review && i.row_review.total > 0) && (
                 <p className="mw-muted">
                   행 수 (입력별 원본 행 · 연결 대상 · 제외 · 미해결):{' '}
@@ -1501,7 +1718,8 @@ function KeyJoin() {
               return (
                 <dd key={r.key}>
                   {inputLabel(r, i)}
-                  {r.key === baseKey && ' · 기준'} — key {keys} · 가져올 열 {r.draft.columns.length}개
+                  {r.key === baseKey && ' · 기준'} — key {keys} ·{' '}
+                  {r.draft.agg_on ? `key별 집계 ${(r.draft.aggregate ?? []).length}항목 (집계한 뒤 연결)` : `가져올 열 ${r.draft.columns.length}개`}
                 </dd>
               )
             })}

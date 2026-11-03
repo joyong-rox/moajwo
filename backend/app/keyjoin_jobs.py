@@ -15,6 +15,8 @@
   알린다. 이름이 다른 열은 위치가 같아도 자동으로 쓰지 않는다(사용자가 고른 뒤에만).
 - 소유자만 목록·조회·수정·삭제·맞추기를 한다(다른 사용자는 최고 관리자라도 404). 표준 통합 자동화
   (app/automation.py)와 그 화면·표·API는 그대로다.
+- key별 집계 후 연결(aggregate) 설정도 입력마다 저장하고(함수·열 이름·위치·결과 이름), 새 파일에서는 집계 열을 가져올
+  열과 같은 규칙으로 맞춘다 (행 수는 열이 없어 맞출 것이 없다).
 - 응답에는 가린 이름(mask_text)만, 문구에는 위치·개수·코드만 넣는다. key 원문·셀 값은 어디에도 없다.
 """
 
@@ -40,6 +42,8 @@ from app.integration import KST
 from app.keyjoin import (
     MAX_INPUTS,
     SCOPE_LABEL,
+    AggItemIn,
+    AggregateIn,
     BaseRef,
     ColumnIn,
     InputIn,
@@ -65,6 +69,8 @@ MAX_MATCH_FILES = 50  # 맞추기에 보내는 파일 수 한도
 NOT_FOUND = "저장한 작업을 찾을 수 없습니다."
 # 맞추기 점수 (높을수록 먼저 배정): key 열은 모두 같은 이름으로 있어야 후보다 — 파일 이름·시트 이름은 보조 근거일 뿐이다
 SCORE_KEY, SCORE_PICK, SCORE_FILE_NAME, SCORE_SHEET_NAME, SCORE_TAB = 10, 2, 3, 2, 1
+KIND_TEXT = {"key": "key", "pick": "가져올 열", "agg": "집계 항목"}
+KIND_TAG = {"key": "k", "pick": "p", "agg": "a"}  # apply의 columns 선택 태그 접두어
 
 
 # ---------------------------------------------------------------- 요청·응답 형식
@@ -100,7 +106,7 @@ class AssignmentIn(BaseModel):
     file_id: int = Field(ge=1, le=2**63 - 1)
     sheet_id: str = Field(pattern=r"^s\d{1,3}$")
     columns: dict[
-        Annotated[str, Field(pattern=r"^[kp]\d{1,3}$")], Annotated[str, Field(pattern=r"^c\d{1,4}$")] | None
+        Annotated[str, Field(pattern=r"^[kpa]\d{1,3}$")], Annotated[str, Field(pattern=r"^c\d{1,4}$")] | None
     ] = Field(default_factory=dict, max_length=60)
 
 
@@ -128,11 +134,29 @@ def spec_from_plan(plan: Plan) -> dict[str, Any]:
         s, ix = ip.sheet, ip.ix
         assert s is not None
         keys = [{"name": s.column_names[j], "letter": ip.letter(j), "index": j} for j in ip.key_ids]
-        cols = [
-            {"name": s.column_names[j], "letter": ip.letter(j), "index": j, "out_name": ip.req.columns[p].out_name}
-            for p, j in enumerate(ip.pick_ids)
-        ]
+        cols = (
+            []  # 집계 입력은 가져올 열이 없다 (pick_ids는 집계 항목이 읽는 열)
+            if ip.aggregated
+            else [
+                {"name": s.column_names[j], "letter": ip.letter(j), "index": j, "out_name": ip.req.columns[p].out_name}
+                for p, j in enumerate(ip.pick_ids)
+            ]
+        )
         kinds = [{"text": k["text"], "int": k["int"]} for k in ix.kinds] if ix is not None else None
+        aggs = (
+            [
+                {
+                    "func": func,
+                    "name": s.column_names[j] if j is not None else None,
+                    "letter": ip.letter(j) if j is not None else None,
+                    "index": j,
+                    "out_name": a.out_name,
+                }
+                for a, (func, j) in zip(ip.req.aggregate.items, ip.agg_items, strict=True)
+            ]
+            if ip.req.aggregate is not None
+            else None
+        )
         inputs.append(
             {
                 "role": ip.index + 1,
@@ -140,6 +164,7 @@ def spec_from_plan(plan: Plan) -> dict[str, Any]:
                 "sheet": {"name": s.name, "tab": s.tab, "index": ip.sheet_index},
                 "key_columns": keys,
                 "columns": cols,
+                "aggregate": aggs,  # key별 집계 후 연결 설정 (없으면 None)
                 "is_base": ip is plan.base,
                 "key_kinds": kinds,
             }
@@ -173,6 +198,7 @@ def _load_spec(job: KeyJoinJob) -> dict[str, Any]:
     spec.setdefault("key_names", None)
     for ip in spec["inputs"]:
         ip.setdefault("key_kinds", None)
+        ip.setdefault("aggregate", None)
     return spec
 
 
@@ -195,6 +221,17 @@ def job_out(job: KeyJoinJob) -> dict[str, Any]:
                     }
                     for c in ip["columns"]
                 ],
+                "aggregate": [
+                    {
+                        "func": a["func"],
+                        "name": mask_text(a["name"]) if a.get("name") is not None else None,
+                        "letter": a.get("letter"),
+                        "out_name": mask_text(a["out_name"]) if a.get("out_name") is not None else None,
+                    }
+                    for a in ip["aggregate"]
+                ]
+                if ip.get("aggregate")
+                else None,
                 "is_base": ip["is_base"],
                 "key_kinds": ip.get("key_kinds"),
             }
@@ -261,6 +298,9 @@ def resolve_column(sheet: SheetInfo, saved: dict[str, Any], kind: str, pos: int)
 def resolve_input(sheet: SheetInfo, saved: dict[str, Any]) -> list[dict[str, Any]]:
     out = [resolve_column(sheet, c, "key", n) for n, c in enumerate(saved["key_columns"])]
     out += [resolve_column(sheet, c, "pick", n) for n, c in enumerate(saved["columns"])]
+    # 집계 항목의 열 (행 수는 열이 없어 맞출 것이 없다) — 열 선택 태그는 'a{n}'
+    aggs = saved.get("aggregate") or []
+    out += [resolve_column(sheet, a, "agg", n) for n, a in enumerate(aggs) if a.get("index") is not None]
     return out
 
 
@@ -277,7 +317,7 @@ def _score(saved: dict[str, Any], info: FileInfo, sheet: SheetInfo, columns: lis
     keys = [c for c in columns if c["kind"] == "key"]
     if any(c["column_id"] is None for c in keys):
         return None
-    picks = [c for c in columns if c["kind"] == "pick" and c["column_id"] is not None]
+    picks = [c for c in columns if c["kind"] in ("pick", "agg") and c["column_id"] is not None]
     score = SCORE_KEY * len(keys) + SCORE_PICK * len(picks)
     if info.name == saved["file_name"]:
         score += SCORE_FILE_NAME
@@ -391,7 +431,7 @@ def _role_out(
             )
         for c in cand.columns:
             if c["note"]:
-                what = f"key {c['position'] + 1}" if c["kind"] == "key" else f"가져올 열 {c['position'] + 1}"
+                what = KIND_TEXT[c["kind"]] + f" {c['position'] + 1}"
                 notes.append(f"입력 {role} {what} ({c['saved']['name']}): {c['note']}")
     return {
         "role": spec_input["role"],
@@ -419,27 +459,50 @@ def _build_request(
         chosen = overrides.get(n, {})
         keys: list[str] = []
         cols: list[ColumnIn] = []
+        agg_cids: dict[int, str] = {}
         blocked_before = len(blocked)
         for c in role["columns"]:
-            tag = f"{'k' if c['kind'] == 'key' else 'p'}{c['position']}"
+            tag = f"{KIND_TAG[c['kind']]}{c['position']}"
             cid = c["column_id"]
             if tag in chosen:
                 cid = chosen[tag]
-                if cid is None and c["kind"] == "key":
-                    blocked.append(f"입력 {n} key {c['position'] + 1}: key 열은 뺄 수 없습니다 — 쓸 열을 고르세요.")
+                if cid is None and c["kind"] != "pick":
+                    what = "key 열" if c["kind"] == "key" else "집계 항목의 열"
+                    blocked.append(
+                        f"입력 {n} {KIND_TEXT[c['kind']]} {c['position'] + 1}: {what}은 뺄 수 없습니다 — "
+                        "쓸 열을 고르세요."
+                    )
                     continue
             elif cid is None:
-                what = f"key {c['position'] + 1}" if c["kind"] == "key" else f"가져올 열 {c['position'] + 1}"
+                what = KIND_TEXT[c["kind"]] + f" {c['position'] + 1}"
                 blocked.append(f"입력 {n} {what}: {c['note']}")
                 continue
             if c["kind"] == "key":
                 keys.append(cid)
+            elif c["kind"] == "agg":
+                agg_cids[c["position"]] = cid
             elif cid is not None:
                 saved = spec_input["columns"][c["position"]]
                 cols.append(ColumnIn(column_id=cid, out_name=saved["out_name"]))
         if len(blocked) > blocked_before:  # 정하지 못한 열이 있는 입력은 요청을 만들지 않는다 (막힌 이유만 돌려준다)
             continue
-        inputs.append(InputIn(file_id=role["file_id"], sheet_id=role["sheet_id"], key_columns=keys, columns=cols))
+        aggregate = None
+        if spec_input.get("aggregate"):
+            aggregate = AggregateIn(
+                items=[
+                    AggItemIn(
+                        func=a["func"],
+                        column_id=agg_cids.get(m) if a["index"] is not None else None,
+                        out_name=a["out_name"],
+                    )
+                    for m, a in enumerate(spec_input["aggregate"])
+                ]
+            )
+        inputs.append(
+            InputIn(
+                file_id=role["file_id"], sheet_id=role["sheet_id"], key_columns=keys, columns=cols, aggregate=aggregate
+            )
+        )
         if spec_input["is_base"]:
             base = BaseRef(file_id=role["file_id"], sheet_id=role["sheet_id"])
     if blocked or base is None:

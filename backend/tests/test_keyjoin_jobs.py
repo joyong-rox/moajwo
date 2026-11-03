@@ -158,6 +158,7 @@ def test_match_new_files_with_changed_ids_names_and_column_order(kj, ab) -> None
         "key_columns": ["c0"],
         "columns": [{"column_id": "c1", "out_name": None}],
         "rows": None,
+        "aggregate": None,
     }
     assert req["inputs"][1]["key_columns"] == ["c2"]  # 이름이 같은 열을 새 위치에서 찾았다
     assert req["inputs"][1]["columns"] == [{"column_id": "c1", "out_name": "교육건수"}] and req["scope"] == "base"

@@ -252,7 +252,7 @@ def abcd(kj) -> dict[str, Any]:
 def test_6_1_base_scope_matches_the_constants_cell_by_cell(kj, abcd) -> None:
     u = kj["kj-user1"]
     plan = _plan(u, abcd["body"])
-    assert plan["ready"] and plan["mode"] == "keyjoin" and plan["policy"] == "keyjoin-policy-2"  # 2: 행 포함 정책
+    assert plan["ready"] and plan["mode"] == "keyjoin" and plan["policy"] == "keyjoin-policy-3"  # 2: 행 포함 정책
     assert plan["scope"] == "base" and plan["base"] == {"file_id": abcd["fids"][0], "sheet_id": "s0", "index": 0}
     assert plan["header"] == EXPECTED_HEADER
     assert plan["result"] == {"rows": 3, "key_columns": 1, "columns": 5, "union": 6, "intersection": 1, "excluded": 0}
@@ -302,7 +302,7 @@ def test_6_1_base_scope_matches_the_constants_cell_by_cell(kj, abcd) -> None:
     assert "key 열은 글자 형식" in text and "0 아님" in text and "선택하지 않은 열" in text
     # 실행 기록
     s = run["summary"]
-    assert s["mode"] == "keyjoin" and s["mode_label"] == "공통 key 연결" and s["policy"] == "keyjoin-policy-2"
+    assert s["mode"] == "keyjoin" and s["mode_label"] == "공통 key 연결" and s["policy"] == "keyjoin-policy-3"
     assert (
         s["scope"] == "base" and s["input_count"] == 4 and len(s["inputs"]) == 4 and s["basis"] == plan_basis(u, abcd)
     )
@@ -610,7 +610,7 @@ def test_merged_key_cells_block_and_subtotal_note_rows_need_a_decision(kj) -> No
     summary = _grid(wb["연결 요약"])
     assert any(r[0] == "제외한 행" and r[1] == "입력 1" and r[2] == "4·5" for r in summary if r and len(r) > 2)
     assert run["summary"]["inputs"][0]["skipped_rows"] == 1 and run["summary"]["inputs"][0]["excluded_rows"] == 2
-    assert run["summary"]["inputs"][0]["review_rows"] == 2 and run["summary"]["policy"] == "keyjoin-policy-2"
+    assert run["summary"]["inputs"][0]["review_rows"] == 2 and run["summary"]["policy"] == "keyjoin-policy-3"
 
 
 def test_no_common_users_and_partial_presence(kj) -> None:

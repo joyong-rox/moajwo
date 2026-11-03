@@ -1738,7 +1738,23 @@ export type KeyJoinColumnIn = { column_id: string; out_name: string | null } // 
 // key_columns: 순서 있음, 모든 입력이 같은 개수 (복합 key의 i번째끼리 대응). columns에 key 열은 넣지 않는다
 // rows: 소계·주석으로 추정된(key는 있는) 행의 포함/제외 — 원본 행 번호. 없으면 모두 '확인 필요'(서버가 차단)
 export type KeyJoinRowDecisions = { include: number[]; exclude: number[] }
-export type KeyJoinInput = KeyJoinSheetRef & { key_columns: string[]; columns: KeyJoinColumnIn[]; rows?: KeyJoinRowDecisions }
+// key별 집계 후 연결: 그 입력은 key마다 여러 행을 허용하고 집계한 값만 결과에 넣는다 (가져올 열 columns와 함께 쓰지 않음).
+// count_rows: key의 행 수(열 없음) · count_values: 그 열에 값이 있는 행 수 · sum: 숫자 합(값 없으면 빈 칸) · max: 숫자끼리/날짜끼리 최댓값
+export type KeyJoinAggFunc = 'count_rows' | 'count_values' | 'sum' | 'max'
+export type KeyJoinAggItemIn = { func: KeyJoinAggFunc; column_id: string | null; out_name: string | null }
+export type KeyJoinAggregateIn = { items: KeyJoinAggItemIn[] }
+export type KeyJoinInput = KeyJoinSheetRef & {
+  key_columns: string[]
+  columns: KeyJoinColumnIn[]
+  rows?: KeyJoinRowDecisions
+  aggregate?: KeyJoinAggregateIn | null
+}
+export const KEYJOIN_AGG_LABEL: Record<KeyJoinAggFunc, string> = {
+  count_rows: '행 수',
+  count_values: '값 있는 수',
+  sum: '합계',
+  max: '최댓값',
+}
 // key_names null = 기준 입력의 key 열 이름. base는 inputs 중 하나 (모든 범위에서 필수 — 출력 순서의 기준)
 export type KeyJoinRequest = { inputs: KeyJoinInput[]; scope: KeyJoinScope; base: KeyJoinSheetRef; key_names: string[] | null }
 
@@ -1782,6 +1798,21 @@ export type KeyJoinPlanInput = {
   pii_summary: PiiSummary | null
   key_columns: { column_id: string; name: string; letter: string; kinds: KeyJoinKinds | null }[]
   picked: { column_id: string; name: string; letter: string; out_name: string; default_name: boolean }[]
+  // key별 집계 후 연결(요청에 aggregate가 있는 입력): 항목·검산값. 분석 전(차단)이면 total·blank_keys·zero_keys는 null
+  aggregate: {
+    items: {
+      func: KeyJoinAggFunc
+      label: string // '행 수' · '값 있는 수' · '합계' · '최댓값'
+      column_id: string | null
+      column: { letter: string; name: string } | null
+      out_name: string
+      total: number | string | null // 대표 검산값: 행 수·값 있는 수·합계는 모든 key의 합, 최댓값은 전체 최댓값
+      blank_keys: number | null // 값이 하나도 없어 빈 칸으로 둔 key 수 (미연결 빈 칸과 구분)
+      zero_keys: number | null // 집계 결과가 실제 0인 key 수
+    }[]
+    source_rows: number | null // 집계 전 원본 행(데이터 행 + 포함한 행)
+    keys_after: number | null // 집계 후 key 수
+  } | null
   rows: { data: number; subtotal: number; note: number; empty: number } | null
   // 확인이 필요한 행(소계·주석 추정 + key 있음): 위치·근거·결정만 (칸 값 없음). items는 listed개까지
   row_review: {
@@ -1877,6 +1908,8 @@ export type KeyJoinJobInput = {
   sheet: { name: string; tab: number }
   key_columns: { name: string; letter: string }[]
   columns: KeyJoinJobColumn[]
+  // key별 집계 후 연결 설정 (없으면 null): 함수·열(행 수는 열 없음)·결과 이름
+  aggregate: { func: KeyJoinAggFunc; name: string | null; letter: string | null; out_name: string | null }[] | null
   is_base: boolean
   key_kinds: { text: number; int: number }[] | null // 저장 때 key 열의 자료형 분포 (변화 알림용)
 }
@@ -1897,7 +1930,7 @@ export type KeyJoinJob = {
 }
 // 저장한 열 하나를 새 시트의 열에 맞춘 결과. same/moved는 정해짐, ambiguous(같은 이름 여럿)·missing(이름 없음)은 사용자가 고른다
 export type KeyJoinJobColumnMatch = {
-  kind: 'key' | 'pick'
+  kind: 'key' | 'pick' | 'agg' // agg: 집계 항목의 열 (행 수는 열이 없어 맞출 것이 없음)
   position: number
   saved: { name: string; letter: string }
   out_name: string | null
