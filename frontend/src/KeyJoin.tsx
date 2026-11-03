@@ -81,7 +81,8 @@ type Draft = {
 }
 type InputRef = { fid: number; sid: string; key: string; draft: InputDraft }
 // key: 입력('파일:시트')·파일('파일') 또는 전체(null). about: 전체 항목 중 어느 입력란의 문제인지 (그 입력란 옆에 보임)
-type Invalid = { key: string | null; text: string; about?: 'key_names' }
+// agg: key별 집계 항목의 문제 (item = 항목 번호 0부터, 항목이 없을 때는 null · field = 고칠 칸) — 3단계 집계 구역에 보이고 그 칸에 연결한다
+type Invalid = { key: string | null; text: string; about?: 'key_names'; agg?: { item: number | null; field: 'func' | 'column' | 'name' } }
 type Busy = 'plan' | 'run' | null
 type Failure = { message: string; problems: string[]; code: string | null; runId: number | null; unknown: boolean }
 type Made = { key: string; run: IntegrationRun; created: boolean }
@@ -222,16 +223,21 @@ function buildRequest(
       invalid.push({ key: r.key, text: `${where}: 결과 이름은 ${OUT_NAME_MAX}자까지입니다.` })
     if (r.draft.agg_on) {
       const items = r.draft.aggregate ?? []
-      if (!items.length) invalid.push({ key: r.key, text: `${where}: 집계 항목을 하나 이상 추가하세요 (행 수·값 있는 수·합계·최댓값).` })
+      if (!items.length)
+        invalid.push({ key: r.key, text: `${where}: 집계 항목을 하나 이상 추가하세요 (행 수·값 있는 수·합계·최댓값).`, agg: { item: null, field: 'func' } })
       const seen = new Set<string>()
       items.forEach((a, n) => {
         const cid = a.func === 'count_rows' ? null : a.column_id
-        if (a.func !== 'count_rows' && !cid) invalid.push({ key: r.key, text: `${where}: 집계 항목 ${n + 1}의 열을 고르세요.` })
-        if (cid && r.draft.key_columns.includes(cid)) invalid.push({ key: r.key, text: `${where}: 집계 항목 ${n + 1}은 key 열입니다 — 다른 열을 고르세요.` })
+        const col = { item: n, field: 'column' } as const
+        if (a.func !== 'count_rows' && !cid) invalid.push({ key: r.key, text: `${where}: 집계 항목 ${n + 1}의 열을 고르세요.`, agg: col })
+        if (cid && r.draft.key_columns.includes(cid))
+          invalid.push({ key: r.key, text: `${where}: 집계 항목 ${n + 1}은 key 열입니다 — 다른 열을 고르세요.`, agg: col })
         const tag = `${a.func}:${cid ?? ''}`
-        if (seen.has(tag)) invalid.push({ key: r.key, text: `${where}: 같은 집계(항목 ${n + 1})를 두 번 넣었습니다.` })
+        if (seen.has(tag))
+          invalid.push({ key: r.key, text: `${where}: 같은 집계(항목 ${n + 1})를 두 번 넣었습니다.`, agg: { item: n, field: a.func === 'count_rows' ? 'func' : 'column' } })
         seen.add(tag)
-        if ((a.out_name_input ?? '').trim().length > OUT_NAME_MAX) invalid.push({ key: r.key, text: `${where}: 결과 이름은 ${OUT_NAME_MAX}자까지입니다.` })
+        if ((a.out_name_input ?? '').trim().length > OUT_NAME_MAX)
+          invalid.push({ key: r.key, text: `${where}: 집계 항목 ${n + 1}의 결과 이름은 ${OUT_NAME_MAX}자까지입니다.`, agg: { item: n, field: 'name' } })
       })
     }
   })
@@ -360,6 +366,7 @@ function KeyJoin() {
   const busyRef = useRef<Busy>(null)
   const planAbort = useRef<AbortController | null>(null)
   const filesLegendRef = useRef<HTMLLegendElement | null>(null) // 파일을 빼면 사라진 단추 대신 1단계 제목이 초점을 받는다
+  const aggAddRefs = useRef<Record<string, HTMLButtonElement | null>>({}) // 집계 항목을 빼면 사라진 '빼기' 대신 그 입력의 '집계 항목 추가'가 초점을 받는다
   const ids = useId()
   // 저장한 작업(설정 재사용): 목록 → 이번 파일에 맞추기(match) → 확실하지 않은 것은 골라 적용(apply) → 초안에 넣기
   const [jobs, setJobs] = useState<KeyJoinJob[] | null>(null)
@@ -509,6 +516,8 @@ function KeyJoin() {
 
   function removeAggItem(r: InputRef, index: number) {
     setInput(r.key, (i) => ({ ...i, aggregate: (i.aggregate ?? []).filter((_, n) => n !== index) }))
+    // 누른 '빼기'는 곧 사라지므로 초점이 body로 떨어지지 않게, 집계를 켠 동안 늘 있는 같은 입력의 '집계 항목 추가'로 바로 옮긴다
+    aggAddRefs.current[r.key]?.focus()
   }
 
   /** 추정 행의 결정: 한 행(또는 여러 행)을 포함/제외/미결정으로. 결정은 요청의 일부라 바꾸면 다시 확인해야 한다 */
@@ -1118,7 +1127,7 @@ function KeyJoin() {
             const cols = m?.columns ?? []
             const vin = viewInput(r)
             const compound = Boolean(r.draft.compound) || r.draft.key_columns.length > 1
-            const problems = invalid.filter((x) => x.key === r.key)
+            const problems = invalid.filter((x) => x.key === r.key && !x.agg) // 집계 항목의 문제는 3단계 집계 구역에서 그 칸에 연결한다
             const noteIds = problems.map((_, n) => `${ids}-fix-${i}-${n}`) // 고칠 것 문구 ↔ key 선택란 (aria-describedby)
             const describedBy = noteIds.length ? noteIds.join(' ') : undefined
             return (
@@ -1240,6 +1249,13 @@ function KeyJoin() {
             const m = metaOf(r)
             const label = inputLabel(r, i)
             const cols = m?.columns ?? []
+            // 집계 항목의 고칠 것: 이 구역에 보이고, 문제가 있는 칸에 aria-invalid·aria-describedby로 연결한다
+            const aggProblems = r.draft.agg_on ? invalid.filter((x) => x.key === r.key && x.agg) : []
+            const aggNoteId = (k: number) => `${ids}-agg-${i}-${k}`
+            const aggField = (item: number | null, field: 'func' | 'column' | 'name') => {
+              const hits = aggProblems.flatMap((p, k) => (p.agg?.item === item && p.agg?.field === field ? [aggNoteId(k)] : []))
+              return hits.length ? { 'aria-invalid': true, 'aria-describedby': hits.join(' ') } : {}
+            }
             return (
               <div key={r.key} className="kj-input">
                 <p className="kj-input-title">{label}</p>
@@ -1266,6 +1282,7 @@ function KeyJoin() {
                             <select
                               className="kj-select"
                               aria-label={`${label} 집계 항목 ${n + 1} 방식`}
+                              {...aggField(n, 'func')}
                               value={a.func}
                               onChange={(e) => updateAggItem(r, n, { func: e.target.value as KeyJoinAggFunc, ...(e.target.value === 'count_rows' ? { column_id: null } : {}) })}
                             >
@@ -1279,6 +1296,7 @@ function KeyJoin() {
                               <select
                                 className="kj-select"
                                 aria-label={`${label} 집계 항목 ${n + 1} 열`}
+                                {...aggField(n, 'column')}
                                 value={a.column_id ?? ''}
                                 onChange={(e) => updateAggItem(r, n, { column_id: e.target.value || null })}
                               >
@@ -1296,6 +1314,7 @@ function KeyJoin() {
                               type="text"
                               className="bd-input"
                               aria-label={`${label} 집계 항목 ${n + 1} 결과 이름`}
+                              {...aggField(n, 'name')}
                               placeholder={a.func === 'count_rows' ? '행 수' : col ? `${col.name} ${KEYJOIN_AGG_LABEL[a.func]}` : '결과 이름'}
                               maxLength={OUT_NAME_MAX}
                               value={a.out_name_input ?? ''}
@@ -1309,8 +1328,22 @@ function KeyJoin() {
                         )
                       })}
                     </ol>
+                    {aggProblems.map((p, k) => (
+                      <p key={p.text} id={aggNoteId(k)} className="wk-why" role="note" aria-live="polite">
+                        <strong>고칠 것</strong> {p.text}
+                      </p>
+                    ))}
                     <div className="admin-actions kj-actions">
-                      <button type="button" className="mapping-confirm" aria-label={`${label} 집계 항목 추가`} onClick={() => addAggItem(r)}>
+                      <button
+                        type="button"
+                        className="mapping-confirm"
+                        aria-label={`${label} 집계 항목 추가`}
+                        ref={(el) => {
+                          aggAddRefs.current[r.key] = el
+                        }}
+                        aria-describedby={aggField(null, 'func')['aria-describedby']}
+                        onClick={() => addAggItem(r)}
+                      >
                         집계 항목 추가
                       </button>
                     </div>
