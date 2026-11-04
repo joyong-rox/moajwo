@@ -83,7 +83,7 @@ curl http://127.0.0.1:8080/api/health   # {"status":"ok","database":"ok"} — fr
 ### 기본 Seed 데이터 (마이그레이션)
 
 - 백엔드 컨테이너는 **기동할 때마다 `alembic upgrade head`를 자동 실행**하므로, 새 버전을 받아 `docker compose up -d --build`만 하면 기본 데이터까지 적용됩니다. 기존 DB(볼륨)도 그대로 두고 빠진 단계만 적용합니다.
-- 적용 확인: `docker compose exec backend alembic current` → `0023_keyjoin_jobs (head)` (지금 head — 운영에 실제로 적용된 리비전은 이 명령으로 확인합니다. 0023은 공통 key 연결의 저장한 작업 표 `keyjoin_jobs`만 추가 — docs/KEYJOIN.md)
+- 적용 확인: `docker compose exec backend alembic current` → `0024_keyjoin_job_ids (head)` (지금 head — 운영에 실제로 적용된 리비전은 이 명령으로 확인합니다. 0023은 공통 key 연결의 저장한 작업 표 `keyjoin_jobs`만 추가, 0024는 그 표의 번호를 다시 쓰지 않게 함 — docs/KEYJOIN.md)
 - 컨테이너 없이 개발할 때: `cd backend && alembic upgrade head`
 - 기본 데이터는 사용자가 이미 올린 항목(같은 7자리 코드·같은 이름의 현행 항목)을 덮어쓰지 않고, 해석 순서에서도 사용자 별칭·항목이 먼저입니다. 목록은 아래 「DB 마이그레이션」.
 - SQLite DB와 업로드 파일은 `moajwo-data` 볼륨(`/app/data`)에 저장됩니다.

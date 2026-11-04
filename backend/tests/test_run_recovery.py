@@ -47,7 +47,7 @@ TEST_PG = os.environ.get("MOAJWO_TEST_DATABASE_URL", "").strip()
 TEST_PG_ADMIN = os.environ.get("MOAJWO_TEST_PG_ADMIN_URL", "").strip()
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 HEAD = ["시도", "시군구", "인구수"]
-CURRENT_REVISION = "0023_keyjoin_jobs"  # alembic head (tests/test_migrations.HEAD와 함께 올린다)
+CURRENT_REVISION = "0024_keyjoin_job_ids"  # alembic head (tests/test_migrations.HEAD와 함께 올린다)
 MAP = {"시도": "sido", "시군구": "sigungu", "인구수": "population"}
 PASSWORD = "Rec-pass-2026!"
 

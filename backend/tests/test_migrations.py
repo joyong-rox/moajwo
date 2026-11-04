@@ -479,7 +479,7 @@ def test_0019_analysis_runs_up_down_and_up_again(tmp_path: Path) -> None:
     db.close()
 
 
-HEAD = "0023_keyjoin_jobs"  # 지금 head — 바뀌면 여기와 docs/DEPLOY.md·README를 함께
+HEAD = "0024_keyjoin_job_ids"  # 지금 head — 바뀌면 여기와 docs/DEPLOY.md·README를 함께
 REQUEST_COLUMNS = {"request_kind", "request_id", "request_hash"}
 
 

@@ -30,7 +30,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -664,10 +664,13 @@ def update_job(
 
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_job(job_id: int, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep) -> Response:
-    """저장한 작업만 지운다 — 실행 기록·결과 파일·원본은 그대로."""
-    job = _get(db, job_id, user)
-    db.delete(job)
+    """저장한 작업만 지운다 — 실행 기록·결과 파일·원본은 그대로. 번호와 소유자를 한 문장(DELETE … WHERE)으로 확인하며
+    지운다(조회와 삭제 사이에 다른 요청이 끼지 않음). 번호는 다시 쓰지 않으므로(0024) 옛 화면이 보낸 번호는 그 뒤 새로
+    저장한 작업을 가리키지 않고 404가 된다 — 남의 작업도 있는지조차 알리지 않는 404."""
+    gone = db.execute(delete(KeyJoinJob).where(KeyJoinJob.id == job_id, KeyJoinJob.owner_id == user.id)).rowcount
     db.commit()
+    if not gone:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
