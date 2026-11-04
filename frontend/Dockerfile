@@ -16,10 +16,11 @@ RUN npm run build
 FROM nginx:1.30-alpine@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee17884204677702951
 # 아래 apk 단계는 빌드할 때 저장소에서 받으므로 기반을 고정해도 빌드 시점에 따라 판이 달라질 수 있다 — 반영 전 완성 이미지 목록 대조가 잡는다.
 # 기반 이미지에 아직 든 취약 판만 같은 Alpine 안정 저장소의 수정판으로 올린다 — brotli-libs 1.2.0-r1
-# (CVE-2026-111497, 수정 1.2.1-r0), curl·libcurl 8.22.0-r0 (CVE-2026-92392, 수정 8.23.0-r0). 다른 패키지는 올리지 않고,
+# (CVE-2026-111497, 수정 1.2.1-r0), curl·libcurl 8.22.0-r0 (CVE-2026-92392, 수정 8.23.0-r0), libexpat 2.9.0-r0
+# (CVE-2026-117610·CVE-2026-118370 외 2건, 수정 2.10.0-r0 — Alpine v3.24 secdb, 2026-11-04 확인: 그날의 nginx:1.30-alpine도 2.9.0-r0). 다른 패키지는 올리지 않고,
 # 기반 이미지가 수정판을 담으면 아무것도 바꾸지 않는다. OS 신뢰 저장소(ca-certificates·ca-certificates-bundle)도 최신으로 올린다
 # (2026-10 eMudhra 인증서 사고 대응, docs/SECURITY-CA-20261026.md — 로컬 앞단은 backend에 http로 붙어 상류 검증은 쓰지 않음).
-RUN apk upgrade --no-cache brotli-libs curl libcurl ca-certificates ca-certificates-bundle
+RUN apk upgrade --no-cache brotli-libs curl libcurl libexpat ca-certificates ca-certificates-bundle
 # 비루트(이미지의 nginx 사용자, uid 101)로 실행한다: 1024 아래 포트를 쓰지 않고(8080), pid·임시 파일은 nginx가 쓸 수 있는
 # 곳에 둔다. 'user' 지시어는 root로 시작할 때만 뜻이 있어 지운다. 기반 이미지의 시작 스크립트는 비루트에서도 그대로 돈다
 # (설정 파일을 고치지 못하면 건너뜀).
