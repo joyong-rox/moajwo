@@ -425,7 +425,8 @@ function KeyJoin() {
     const active = document.activeElement
     if (active && active !== document.body && !jobsAreaRef.current?.contains(active)) return
     const target = { cancel: cancelDeleteRef, ask: askDeleteRef, select: jobSelectRef, legend: jobsLegendRef }[jobFocus.to].current
-    target?.focus({ preventScroll: true })
+    // 스크롤을 막지 않는다 — 지운 뒤의 선택 상자·제목은 확대(200%)·좁은 화면에서 화면 위쪽 밖에 있을 수 있어, 초점이 보이도록 필요한 만큼만 옮긴다
+    target?.focus()
   }, [jobFocus])
   useEffect(() => {
     const controller = new AbortController()
