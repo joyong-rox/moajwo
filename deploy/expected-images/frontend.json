@@ -3,8 +3,8 @@
  "kind": "frontend",
  "verified": {
   "what": "이 목록은 CI에서 검증한 완성 이미지의 실행 환경이다. scripts/image_gate.sh가 반영 전 후보 이미지의 목록을 이 파일의 실행 환경 항목과 비교한다 (docs/DEPLOY.md 11장)",
-  "ci_run": "joyong-rox/moajwo Actions run 40640464774 (image-gate, ubuntu-24.04)",
-  "commit": "d659332f6d9ddc7db96eaa5739d84f9abfcc6eb2",
+  "ci_run": "joyong-rox/moajwo Actions run 41745107282 (image-gate, ubuntu-24.04)",
+  "commit": "616c83d152f7e26ba041decb6b979bc2317e34fa",
   "docker": [
    "docker 28.0.4",
    "Docker Compose version v2.38.2"
@@ -14,13 +14,13 @@
    "docker.io/library/nginx:1.30-alpine@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee17884204677702951"
   ],
   "smoke": "scripts/image_smoke.py 22/22 통과 (backend·frontend 함께)",
-  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-10-28T01:21:08Z — 결과는 그 run의 산출물",
-  "collected_at": "2026-10-28T05:52:40Z"
+  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-11-03T19:16:30Z — 결과는 그 run의 산출물",
+  "collected_at": "2026-11-04T00:13:20Z"
  },
  "image": {
-  "id": "sha256:f91625e9bda3f7f39d5694eb36c582cb9e6a2f1716d2aa5cfe1e0540f11afb04",
+  "id": "sha256:d2593ca538ff78b5876c337406a83a4b9336f1b1e746614353debd087d8e5edc",
   "id_meaning": "config digest (기존 저장소)",
-  "created": "2026-10-28T05:52:38.082033707Z",
+  "created": "2026-11-04T00:13:19.664960113Z",
   "diff_ids": [
    "sha256:75c137aedfb2760f88629236cb7b797630aed0c3d91d626d1d1bb694878fc2ba",
    "sha256:5b91dba2fc11b3e6dab4d25e913db11e6e701065af717028e060dfb5ab8532e4",
@@ -30,10 +30,10 @@
    "sha256:2ba21653acee34632d9eab26da39a5ff0cac12021817e6a5e9efac9507628575",
    "sha256:3212502c73d1691bd2b186efdda493ca750fc99795b6b0b85741af01b4e79aa4",
    "sha256:8ff2a17964b4a163c6ba0fa456ebd70ed12823a74324ba3b6f49d87bc25c1456",
-   "sha256:be5b5705e722fda115030698264802306e56fe4fad551d40dc5e00e72aa86a15",
-   "sha256:44363ddfbe20bf2db7a9d3c6049e80b943aaa835855da6aa62e2cdbb7ec8a6fb",
-   "sha256:60c09d895842f8d3d32e70e76aa1f11e5ba4c3b77d937026cf718fb698a56b36",
-   "sha256:c48d73b3660f57bb8df24f18e854baa73c37896c396eaf325e1f2c615b960e61"
+   "sha256:34894db902cec9621438775bccf2d282590137ca16dde424909b5fd4f86e1114",
+   "sha256:afc04093350cdf017759ba3bf47b4707ddd0fb8bba5fda8ef4eff95b16534dd4",
+   "sha256:ab2f4610efb662480979880a646d4a295326a5b154bc39a9e3bb12507e6bf5b6",
+   "sha256:32ad44d94ce37fddf20e7f11fa2d1e97fabddfe13a50476b59c6697947c3444d"
   ]
  },
  "platform": {
@@ -73,7 +73,7 @@
   "libcurl": "8.23.0-r0",
   "libdav1d": "1.5.3-r0",
   "libedit": "20260508.3.1-r1",
-  "libexpat": "2.9.0-r0",
+  "libexpat": "2.10.0-r0",
   "libgcc": "15.2.0-r5",
   "libgd": "2.3.3-r10",
   "libice": "1.1.2-r0",
