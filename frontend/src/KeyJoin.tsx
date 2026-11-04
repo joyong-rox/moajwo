@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import {
   AnalysisProblemError,
+  ApiError,
   applyKeyJoinJob,
   createKeyJoinJob,
   deleteKeyJoinJob,
@@ -786,17 +787,57 @@ function KeyJoin() {
     setJobBusy('save')
     setSaveNote(null)
     try {
-      const job = update && applied ? await updateKeyJoinJob(applied.job.id, { request }) : await createKeyJoinJob(name, request)
+      const job =
+        update && applied
+          ? await updateKeyJoinJob(applied.job.id, { expected_version: applied.job.version, request })
+          : await createKeyJoinJob(name, request)
       setSaveNote(`저장한 작업 '${job.name}' (v${job.version})${update ? '으로 갱신' : '으로 저장'}했습니다 — 다음 자료는 위 '저장한 작업 적용'에서 맞춰 쓰세요.`)
       if (update && applied) setApplied({ ...applied, job })
       setSaveName('')
       reloadJobs(job.id)
     } catch (err) {
+      const stale = err instanceof AnalysisProblemError && err.code === 'KEYJOIN_JOB_VERSION_CHANGED'
+      const gone = err instanceof ApiError && err.status === 404
+      if (update && applied && (stale || gone)) {
+        await showLatestJob(applied) // 다시 보내지 않는다 — 최신 목록을 읽어 알릴 뿐
+        return
+      }
       const text =
         err instanceof AnalysisProblemError && err.problems.length ? `${err.message} ${err.problems.join(' / ')}` : errorText(err)
       setSaveNote(`저장하지 못했습니다: ${text}`)
     } finally {
       setJobBusy(null)
+    }
+  }
+
+  /** 갱신이 거절됨(409: 그 사이 다른 곳에서 먼저 갱신 · 404: 지워짐) — 서버는 아무것도 바꾸지 않았다. 자동으로 다시 보내지
+   *  않고 최신 목록을 다시 읽어, 이 화면이 본 판과 지금 판을 알린다. 지금 판을 기준으로 다시 누를지는 사용자가 정한다
+   *  (재발급의 expected_auth_version과 같은 흐름). 더 나중에 보낸 목록 요청이 있으면 이 응답은 버린다 */
+  async function showLatestJob(seen: AppliedJob) {
+    const n = ++jobsSeq.current
+    try {
+      const list = await listKeyJoinJobs()
+      if (!mountedRef.current || n !== jobsSeq.current) return
+      setJobs(list)
+      setJobId((cur) => (cur !== null && list.some((j) => j.id === cur) ? cur : (list[0]?.id ?? null)))
+      const latest = list.find((j) => j.id === seen.job.id)
+      if (!latest) {
+        setApplied(null)
+        if (list.length === 0) setJobsEmptied(true)
+        setSaveNote(
+          `갱신하지 않았습니다 — 작업 '${seen.job.name}': 그 사이 지워져 목록에 없습니다. 이 화면의 설정은 새 이름으로 저장할 수 있습니다.`,
+        )
+        return
+      }
+      setApplied({ ...seen, job: latest })
+      setSaveNote(
+        `갱신하지 않았습니다 — 작업 '${latest.name}': 그 사이 다른 곳에서 먼저 바뀌었습니다 (이 화면이 본 판 v${seen.job.version}, 지금 v${latest.version}). ` +
+          `최신 목록을 다시 읽었습니다. 지금 저장된 설정을 보려면 위 '저장한 작업 적용'에서 다시 맞추고, ` +
+          `이 화면의 설정으로 지금 판(v${latest.version})을 덮으려면 갱신을 다시 누르세요.`,
+      )
+    } catch (err) {
+      if (mountedRef.current && n === jobsSeq.current)
+        setSaveNote(`갱신하지 않았습니다 — 그 사이 다른 곳에서 바뀌었거나 지워졌습니다. 최신 목록을 읽지 못했습니다: ${errorText(err)}`)
     }
   }
 

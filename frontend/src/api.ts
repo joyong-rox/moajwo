@@ -1975,7 +1975,12 @@ export async function createKeyJoinJob(name: string, request: KeyJoinRequest): P
   return analysisJson<KeyJoinJob>(res)
 }
 
-export async function updateKeyJoinJob(id: number, body: { name?: string; request?: KeyJoinRequest }): Promise<KeyJoinJob> {
+/** 저장한 작업 갱신 — expected_version(이 화면이 본 버전)은 필수. 그 사이 다른 곳에서 먼저 바뀌었으면 409
+ *  AnalysisProblemError(code KEYJOIN_JOB_VERSION_CHANGED)이고 서버는 아무것도 바꾸지 않는다 — 다시 보내지 않는다 */
+export async function updateKeyJoinJob(
+  id: number,
+  body: { expected_version: number; name?: string; request?: KeyJoinRequest },
+): Promise<KeyJoinJob> {
   const res = await apiFetch(`${API_BASE}/keyjoin/jobs/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },

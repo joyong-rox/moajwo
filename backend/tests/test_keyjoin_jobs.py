@@ -4,15 +4,20 @@
 합성 자료만 쓴다(실제 기관 자료 아님). 거절·맞추기는 실행 기록·결과 파일을 남기지 않는다(_state로 단언)."""
 
 import io
+import threading
 from typing import Any
 
 import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
+from app import keyjoin_jobs
 from app.keyjoin_jobs import kind_changes
+from tests.conftest import db_rows
 from tests.test_accounts import owner  # noqa: F401
 from tests.test_auth import _client, _provision_user, app_real_login  # noqa: F401
+from tests.test_auth_races_api import _checked_out, _record
+from tests.test_auth_races_api import _run as _run_threads
 from tests.test_keyjoin import (  # noqa: F401
     A_ROWS,
     B_ROWS,
@@ -113,7 +118,7 @@ def test_save_list_get_update_delete_and_only_the_owner_sees_it(kj, ab) -> None:
     assert other.get("/keyjoin/jobs").json() == [] and manager.get("/keyjoin/jobs").json() == []
     for c in (other, manager):
         assert c.get(f"/keyjoin/jobs/{job['id']}").status_code == 404
-        assert c.put(f"/keyjoin/jobs/{job['id']}", json={"name": "x"}).status_code == 404
+        assert c.put(f"/keyjoin/jobs/{job['id']}", json={"expected_version": 1, "name": "x"}).status_code == 404
         assert c.delete(f"/keyjoin/jobs/{job['id']}").status_code == 404
         assert c.post(f"/keyjoin/jobs/{job['id']}/match", json={"file_ids": [ab["a"]]}).status_code == 404
     # 같은 이름 409 · 빈 이름 422 · 만들 수 없는 구성(한 입력 안의 key 중복)은 저장하지 않음 409
@@ -125,12 +130,12 @@ def test_save_list_get_update_delete_and_only_the_owner_sees_it(kj, ab) -> None:
     assert bad.status_code == 409 and bad.json()["detail"]["code"] == "KEYJOIN_JOB_NOT_READY"
     assert any("KEYJOIN_KEY_DUPLICATE" in p for p in bad.json()["detail"]["problems"])
     # 갱신: 이름만 → 버전 그대로, 설정 → 버전 +1
-    renamed = u.put(f"/keyjoin/jobs/{job['id']}", json={"name": "월간 교육"}).json()
+    renamed = u.put(f"/keyjoin/jobs/{job['id']}", json={"expected_version": 1, "name": "월간 교육"}).json()
     assert renamed["name"] == "월간 교육" and renamed["version"] == 1 and renamed["updated_at"] is not None
     body2 = _body([_input(ab["a"], cols=("c1",)), _input(ab["b"], cols=("c1",), names={"c1": "교육 수"})])
-    changed = u.put(f"/keyjoin/jobs/{job['id']}", json={"request": body2}).json()
+    changed = u.put(f"/keyjoin/jobs/{job['id']}", json={"expected_version": 1, "request": body2}).json()
     assert changed["version"] == 2 and changed["inputs"][1]["columns"][0]["out_name"] == "교육 수"
-    assert u.put(f"/keyjoin/jobs/{job['id']}", json={}).status_code == 422
+    assert u.put(f"/keyjoin/jobs/{job['id']}", json={"expected_version": 2}).status_code == 422  # 바꿀 것 없음
     assert u.delete(f"/keyjoin/jobs/{job['id']}").status_code == 204
     assert u.get(f"/keyjoin/jobs/{job['id']}").status_code == 404 and u.get("/keyjoin/jobs").json() == []
     assert _state() == before  # 저장·맞추기·삭제는 실행 기록·결과 파일을 만들지 않는다
@@ -148,7 +153,8 @@ def test_a_deleted_job_number_is_never_given_to_a_new_job(kj, ab) -> None:  # no
     again = _job(u, "번호 재사용 시험", ab["body"])  # 같은 소유자·같은 이름·같은 버전으로 다시 저장
     assert again["version"] == old["version"] == 1 and again["id"] != old["id"]
     assert u.delete(f"/keyjoin/jobs/{old['id']}").status_code == 404  # 옛 화면의 확인이 보낸 삭제
-    assert u.put(f"/keyjoin/jobs/{old['id']}", json={"name": "덮기"}).status_code == 404  # 옛 화면의 갱신
+    stale_put = u.put(f"/keyjoin/jobs/{old['id']}", json={"expected_version": 1, "name": "덮기"})  # 옛 화면의 갱신
+    assert stale_put.status_code == 404
     assert u.get(f"/keyjoin/jobs/{again['id']}").json()["name"] == "번호 재사용 시험"
     # 다른 계정이 그 뒤 새 작업을 저장해도 지운 번호를 받지 않고, 옛 번호의 삭제는 남의 작업에 닿지 않는다
     assert u.delete(f"/keyjoin/jobs/{again['id']}").status_code == 204
@@ -161,6 +167,136 @@ def test_a_deleted_job_number_is_never_given_to_a_new_job(kj, ab) -> None:  # no
     assert other.delete(f"/keyjoin/jobs/{theirs['id']}").status_code == 204
     assert u.get("/keyjoin/jobs").json() == [] and other.get("/keyjoin/jobs").json() == []
     assert _state() == before
+
+
+# ---------------------------------------------------------------- 갱신의 버전 조건 (expected_version)
+
+
+def _row(job_id: int) -> tuple[Any, ...]:
+    """DB의 그 작업 행(이름·버전·설정·갱신 시각) — 앱과 같은 DB(SQLite·PostgreSQL)에서 읽는다."""
+    rows = db_rows("select name, version, spec, updated_at from keyjoin_jobs where id = ?", job_id)
+    return rows[0] if rows else ()
+
+
+def _body2(ab: dict[str, Any], out_name: str) -> dict[str, Any]:
+    return _body([_input(ab["a"], cols=("c1",)), _input(ab["b"], cols=("c1",), names={"c1": out_name})])
+
+
+def test_update_requires_the_version_the_screen_saw(kj, ab) -> None:  # noqa: F811
+    """갱신은 화면이 본 버전(expected_version)이 필수다 — 재발급의 expected_auth_version과 같은 계약. 없거나 정수가
+    아니면 422, 지금 버전과 다르면 409(KEYJOIN_JOB_VERSION_CHANGED)이고 이름·설정·버전·갱신 시각 모두 그대로다.
+    남의 작업·지운 작업은 버전이 맞아도 404."""
+    u, other = kj["kjj-user1"], kj["kjj-user2"]
+    before = _state()
+    job = _job(u, "버전 조건", ab["body"])
+    jid = job["id"]
+    row0 = _row(jid)
+    for bad in (
+        {"request": _body2(ab, "x")},  # 버전 없음
+        {"expected_version": None, "name": "x"},
+        {"expected_version": True, "name": "x"},
+        {"expected_version": "1", "name": "x"},
+        {"expected_version": 1.0, "name": "x"},
+        {"expected_version": 0, "name": "x"},
+        {"expected_version": -1, "name": "x"},
+        {"expected_version": 1, "name": "x", "x": 1},
+    ):
+        assert u.put(f"/keyjoin/jobs/{jid}", json=bad).status_code == 422, bad
+    assert _row(jid) == row0
+    # 맞는 버전: 설정 → v2
+    v2 = u.put(f"/keyjoin/jobs/{jid}", json={"expected_version": 1, "request": _body2(ab, "교육 수")})
+    assert v2.status_code == 200 and v2.json()["version"] == 2
+    row2 = _row(jid)
+    # 옛 버전(v1)으로 설정·이름 갱신 → 409, 아무것도 바뀌지 않음
+    for stale in ({"expected_version": 1, "request": _body2(ab, "덮기")}, {"expected_version": 1, "name": "덮기"}):
+        res = u.put(f"/keyjoin/jobs/{jid}", json=stale)
+        assert res.status_code == 409, res.text
+        detail = res.json()["detail"]
+        assert detail["code"] == "KEYJOIN_JOB_VERSION_CHANGED"
+        assert "v1" in detail["message"] and "v2" in detail["message"]
+        assert _row(jid) == row2
+    # 앞선 버전(v3 — 아직 없음)도 409
+    assert u.put(f"/keyjoin/jobs/{jid}", json={"expected_version": 3, "name": "덮기"}).status_code == 409
+    # 이름만 바꾸면 버전은 그대로(v2), 조건에는 쓴다
+    renamed = u.put(f"/keyjoin/jobs/{jid}", json={"expected_version": 2, "name": "버전 조건 2"})
+    assert renamed.status_code == 200 and renamed.json()["version"] == 2 and renamed.json()["name"] == "버전 조건 2"
+    # 남의 작업은 버전이 맞아도 404, 행 그대로
+    row3 = _row(jid)
+    assert other.put(f"/keyjoin/jobs/{jid}", json={"expected_version": 2, "name": "남의 것"}).status_code == 404
+    assert _row(jid) == row3
+    # 지운 작업은 404
+    assert u.delete(f"/keyjoin/jobs/{jid}").status_code == 204
+    assert u.put(f"/keyjoin/jobs/{jid}", json={"expected_version": 2, "name": "되살리기"}).status_code == 404
+    assert _row(jid) == () and _state() == before
+
+
+def test_two_windows_update_the_same_job(kj, ab) -> None:  # noqa: F811
+    """두 창이 같은 작업(v1)을 열어 둔다 → 창 2가 먼저 갱신(v2) → 창 1의 갱신(v1 기준)은 409이고 창 2의 설정이 남는다.
+    창 1이 최신(v2)을 다시 읽은 뒤 스스로 다시 누르면 그때만 v3 — 서버는 자동으로 덮지 않는다."""
+    u = kj["kjj-user1"]
+    job = _job(u, "두 창", ab["body"])
+    jid = job["id"]
+    seen1 = u.get(f"/keyjoin/jobs/{jid}").json()["version"]  # 창 1이 본 판
+    seen2 = u.get(f"/keyjoin/jobs/{jid}").json()["version"]  # 창 2가 본 판
+    assert seen1 == seen2 == 1
+    w2 = u.put(f"/keyjoin/jobs/{jid}", json={"expected_version": seen2, "request": _body2(ab, "창2")})
+    assert w2.status_code == 200 and w2.json()["version"] == 2
+    after_w2 = _row(jid)
+    w1 = u.put(f"/keyjoin/jobs/{jid}", json={"expected_version": seen1, "request": _body2(ab, "창1")})
+    assert w1.status_code == 409 and w1.json()["detail"]["code"] == "KEYJOIN_JOB_VERSION_CHANGED"
+    assert _row(jid) == after_w2
+    latest = u.get(f"/keyjoin/jobs/{jid}").json()
+    assert latest["version"] == 2 and latest["inputs"][1]["columns"][0]["out_name"] == "창2"
+    again = u.put(f"/keyjoin/jobs/{jid}", json={"expected_version": latest["version"], "request": _body2(ab, "창1")})
+    assert again.status_code == 200 and again.json()["version"] == 3
+    assert again.json()["inputs"][1]["columns"][0]["out_name"] == "창1"
+    assert u.delete(f"/keyjoin/jobs/{jid}").status_code == 204
+
+
+def test_concurrent_updates_with_the_same_version_apply_once(kj, ab, monkeypatch) -> None:  # noqa: F811
+    """같은 버전(v1)으로 두 갱신이 동시에 온다 — 둘 다 빠른 거절(버전 비교)과 설정 검사를 지난 뒤 조건부 UPDATE에서
+    겹치게 한다(설정 검사 _spec_for가 끝난 직후에 둔 barrier, sleep에 기대지 않음). 설정 검사는 결과 만들기 차례
+    (OUTPUT_SLOTS=1)를 쓰므로 시험 쪽에서 하나씩 돌린 뒤 barrier에 모은다. 요청마다 다른 스레드(각자의 세션).
+    성공(200) 하나·409 하나, 최종 버전 2, 남은 설정 = 성공한 쪽. SQLite·PostgreSQL 모두 (실제 dialect는
+    MOAJWO_RACE_RECORD에 기록 — 도착 때 풀의 연결 수는 설정 검사가 rollback으로 연결을 돌려준 뒤라 0일 수 있다)."""
+    u = kj["kjj-user1"]
+    job = _job(u, "동시 갱신", ab["body"])
+    jid = job["id"]
+    real = keyjoin_jobs._spec_for
+    gate = threading.Barrier(2)
+    seen: list[int | None] = []
+    one_at_a_time = threading.Lock()
+
+    def gated(*args: Any, **kw: Any) -> dict[str, Any]:
+        with one_at_a_time:
+            spec = real(*args, **kw)
+            first = len(seen) < 2
+            if first:
+                seen.append(_checked_out())
+        if first:
+            gate.wait(timeout=20)  # 두 요청이 모두 설정 검사를 마친 뒤 함께 조건부 UPDATE로
+        return spec
+
+    monkeypatch.setattr(keyjoin_jobs, "_spec_for", gated)
+    results: list[tuple[str, int, dict[str, Any]]] = []
+
+    def attempt(label: str) -> None:
+        res = u.put(f"/keyjoin/jobs/{jid}", json={"expected_version": 1, "request": _body2(ab, label)})
+        results.append((label, res.status_code, res.json()))
+
+    _run_threads([threading.Thread(target=attempt, args=(name,)) for name in ("동시A", "동시B")])
+    codes = sorted(code for _, code, _ in results)
+    assert codes == [200, 409], results
+    winner = next(label for label, code, _ in results if code == 200)
+    loser = next(body for _, code, body in results if code == 409)
+    assert loser["detail"]["code"] == "KEYJOIN_JOB_VERSION_CHANGED"
+    final = u.get(f"/keyjoin/jobs/{jid}").json()
+    assert final["version"] == 2 and final["inputs"][1]["columns"][0]["out_name"] == winner
+    _record("keyjoin_concurrent_update_same_version", {
+        "requests": 2, "responses": codes, "final_version": final["version"], "winner_is_final": True,
+        "gathered": len(seen), "pool_checked_out_at_arrival": seen,
+    })  # fmt: skip
+    assert u.delete(f"/keyjoin/jobs/{jid}").status_code == 204
 
 
 # ---------------------------------------------------------------- 새 파일 맞추기
@@ -351,7 +487,7 @@ def test_job_update_makes_the_old_basis_stale(kj, ab) -> None:  # noqa: F811
     req1 = _match(u, job["id"], [ab["a"], ab["b"]])["request"]
     basis1 = _plan(u, req1)["basis"]
     body2 = _body([_input(ab["a"], cols=("c1",)), _input(ab["b"], cols=("c1",), names={"c1": "교육 수"})])
-    assert u.put(f"/keyjoin/jobs/{job['id']}", json={"request": body2}).json()["version"] == 2
+    assert u.put(f"/keyjoin/jobs/{job['id']}", json={"expected_version": 1, "request": body2}).json()["version"] == 2
     m2 = _match(u, job["id"], [ab["a"], ab["b"]])
     assert m2["job"]["version"] == 2 and m2["request"]["inputs"][1]["columns"][0]["out_name"] == "교육 수"
     before = _state()
