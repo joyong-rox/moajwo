@@ -1,7 +1,7 @@
 """0023(저장한 작업 keyjoin_jobs)의 PostgreSQL 경계 — 실제 PostgreSQL 일회용 DB(MOAJWO_TEST_PG_ADMIN_URL)에서 alembic을
 프로세스로 돌린다 (주소가 없으면 건너뜀).
 
-- 빈 DB → 0022 → head: keyjoin_jobs 표(열·소유자별 이름 고유·색인)가 생기고 기존 계정·실행 행은 그대로.
+- 빈 DB → 0022 → 0023: keyjoin_jobs 표(열·소유자별 이름 고유·색인)가 생기고 기존 계정·실행 행은 그대로.
 - downgrade 0022: 이 표만 지우고 계정·실행 기록은 그대로 — 실행 중인 결과 실행이 있어도 막지 않는다(이 표와 무관).
 """
 
@@ -11,7 +11,7 @@ from tests.conftest import pg_database
 from tests.test_migration_0020_postgres import INSERT_RUN, _ok, _revision, _sql
 from tests.test_migrations_postgres import _alembic, needs_admin
 
-HEAD, PREVIOUS = "0023_keyjoin_jobs", "0022_temp_passwords"
+HEAD, PREVIOUS = "0023_keyjoin_jobs", "0022_temp_passwords"  # 이 파일의 대상 0023 (코드 head는 0024)
 COLUMNS = {"id", "owner_id", "name", "version", "spec", "created_at", "updated_at"}
 
 
@@ -31,7 +31,7 @@ def test_0023_creates_keyjoin_jobs_and_downgrade_removes_only_that_table_on_post
                    )[0][0]  # fmt: skip
         _sql(url, INSERT_RUN.format(extra=", worker", values=", 'w-1'"), status="running")  # 실행 중 행은 이 표와 무관
         assert _columns(url) == set()
-        assert _ok(_alembic(url, tmp_path, "upgrade", "head"))
+        assert _ok(_alembic(url, tmp_path, "upgrade", HEAD))
         assert _revision(url) == HEAD and _columns(url) == COLUMNS
         assert _sql(url, "SELECT count(*) FROM keyjoin_jobs")[0][0] == 0
         assert _sql(url, "SELECT username, status FROM users") == [("u1", "active")]

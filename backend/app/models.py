@@ -263,11 +263,15 @@ class KeyJoinJob(Base):
     JSON(spec)으로 둔다(app/keyjoin_jobs.py). 파일 자체·파일 번호·추정 행의 포함/제외 결정·개인정보 확인·요청 번호·
     확인 결과(basis)는 저장하지 않는다 — 새 파일마다 연결 확인을 다시 거친다. 소유자(owner_id)만 조회·수정·삭제·
     실행하고(다른 사용자는 최고 관리자라도 404), 같은 소유자 안에서 이름이 고유하다. 표준 통합 자동화(automations)와
-    별개다.
+    별개다. 번호(id)는 지운 뒤에도 다시 쓰지 않는다(0024 — SQLite AUTOINCREMENT, PostgreSQL은 시퀀스): 화면·API가
+    작업을 번호로만 가리키므로, 지우고 새로 저장한 작업이 옛 화면의 번호를 받으면 옛 삭제·갱신이 새 작업에 닿는다.
     """
 
     __tablename__ = "keyjoin_jobs"
-    __table_args__ = (UniqueConstraint("owner_id", "name", name="uq_keyjoin_jobs_owner_name"),)
+    __table_args__ = (
+        UniqueConstraint("owner_id", "name", name="uq_keyjoin_jobs_owner_name"),
+        {"sqlite_autoincrement": True},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)

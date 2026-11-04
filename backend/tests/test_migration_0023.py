@@ -1,6 +1,7 @@
 """마이그레이션 0023(저장한 작업 keyjoin_jobs) — 빈 SQLite 파일에 alembic을 실제로 실행해 확인한다.
 
-- 0022 → head: keyjoin_jobs 표가 생기고(열·고유 제약·색인), 기존 표의 행은 그대로.
+- 0022 → 0023: keyjoin_jobs 표가 생기고(열·고유 제약·색인), 기존 표의 행은 그대로.
+  (head는 0024 — 번호 방식은 test_migration_0024)
 - downgrade 0022: 이 표만 지우고 계정·실행 기록·자동화 표는 그대로 (저장한 설정만 사라짐).
 PostgreSQL은 test_migration_0023_postgres.py."""
 
@@ -34,7 +35,7 @@ def test_0023_creates_keyjoin_jobs_and_downgrade_removes_only_that_table(tmp_pat
     assert "keyjoin_jobs" not in {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     db.close()
 
-    _alembic(tmp_path, "upgrade", "head")
+    _alembic(tmp_path, "upgrade", "0023_keyjoin_jobs")
     db = sqlite3.connect(tmp_path / "moajwo.db")
     assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0023_keyjoin_jobs"
     assert _columns(db, "keyjoin_jobs") == COLUMNS
@@ -63,7 +64,7 @@ def test_0023_creates_keyjoin_jobs_and_downgrade_removes_only_that_table(tmp_pat
 def test_0023_chain_downgrade_below_0022_is_refused_at_the_top_but_one_step_is_allowed(tmp_path: Path) -> None:
     """임시 비밀번호 상태 계정(또는 담당 있는 실행 중 행)이 있을 때: 'downgrade 0021'은 0023에서 먼저 거절돼 리비전·표가
     그대로(중간 0022에서 멈춰 표만 사라지는 상태 방지), 'downgrade 0022'(이 표만)는 허용된다."""
-    _alembic(tmp_path, "upgrade", "head")
+    _alembic(tmp_path, "upgrade", "0023_keyjoin_jobs")
     db = sqlite3.connect(tmp_path / "moajwo.db")
     db.execute(
         "INSERT INTO users (username, display_name, password_hash, role, is_active, status, failed_logins, "

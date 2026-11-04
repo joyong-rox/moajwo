@@ -136,6 +136,33 @@ def test_save_list_get_update_delete_and_only_the_owner_sees_it(kj, ab) -> None:
     assert _state() == before  # 저장·맞추기·삭제는 실행 기록·결과 파일을 만들지 않는다
 
 
+def test_a_deleted_job_number_is_never_given_to_a_new_job(kj, ab) -> None:  # noqa: F811
+    """다른 창에서 지우고 새로 저장한 작업이 옛 번호를 받으면 옛 화면의 삭제·갱신이 새 작업에 닿는다(2026-11-04
+    격리 재현 — SQLite가 가장 큰 번호를 지운 뒤 그 번호를 다시 주던 조건). 번호를 다시 쓰지 않으므로(0024 — SQLite
+    AUTOINCREMENT, PostgreSQL 시퀀스) 옛 번호의 삭제·갱신은 404이고 새 작업은 그대로다 — 같은 이름·같은 버전이어도,
+    다른 계정이어도."""
+    u, other = kj["kjj-user1"], kj["kjj-user2"]
+    before = _state()
+    old = _job(u, "번호 재사용 시험", ab["body"])  # 방금 만든 작업 = 지금 가장 큰 번호
+    assert u.delete(f"/keyjoin/jobs/{old['id']}").status_code == 204
+    again = _job(u, "번호 재사용 시험", ab["body"])  # 같은 소유자·같은 이름·같은 버전으로 다시 저장
+    assert again["version"] == old["version"] == 1 and again["id"] != old["id"]
+    assert u.delete(f"/keyjoin/jobs/{old['id']}").status_code == 404  # 옛 화면의 확인이 보낸 삭제
+    assert u.put(f"/keyjoin/jobs/{old['id']}", json={"name": "덮기"}).status_code == 404  # 옛 화면의 갱신
+    assert u.get(f"/keyjoin/jobs/{again['id']}").json()["name"] == "번호 재사용 시험"
+    # 다른 계정이 그 뒤 새 작업을 저장해도 지운 번호를 받지 않고, 옛 번호의 삭제는 남의 작업에 닿지 않는다
+    assert u.delete(f"/keyjoin/jobs/{again['id']}").status_code == 204
+    a2 = _csv(other, "A2.csv", A_ROWS)
+    b2 = _upload(other, "B2.xlsx", _xlsx_bytes({"교육": B_ROWS}))
+    theirs = _job(other, "다른 계정 작업", _body([_input(a2, cols=("c1",)), _input(b2, cols=("c1",))]))
+    assert theirs["id"] not in (old["id"], again["id"])
+    assert u.delete(f"/keyjoin/jobs/{again['id']}").status_code == 404
+    assert other.get(f"/keyjoin/jobs/{theirs['id']}").status_code == 200
+    assert other.delete(f"/keyjoin/jobs/{theirs['id']}").status_code == 204
+    assert u.get("/keyjoin/jobs").json() == [] and other.get("/keyjoin/jobs").json() == []
+    assert _state() == before
+
+
 # ---------------------------------------------------------------- 새 파일 맞추기
 
 
