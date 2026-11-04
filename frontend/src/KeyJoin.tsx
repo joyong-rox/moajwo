@@ -381,6 +381,17 @@ function KeyJoin() {
   const [applied, setApplied] = useState<AppliedJob | null>(null) // 이번 초안을 만든 저장한 작업 (변경·예외 안내)
   const [saveName, setSaveName] = useState('')
   const [askDelete, setAskDelete] = useState(false)
+  // 이 화면에서 마지막 작업을 지웠으면 구역(제목·빈 상태·상태 알림)을 남긴다 — 처음부터 0개면 지금처럼 그리지 않는다
+  const [jobsEmptied, setJobsEmptied] = useState(false)
+  // 삭제 확인을 열고 닫거나 지운 뒤, 사라진 단추 대신 초점을 받을 곳 (다시 그린 뒤 옮긴다)
+  const [jobFocus, setJobFocus] = useState<{ to: 'cancel' | 'ask' | 'select' | 'legend'; n: number } | null>(null)
+  const jobsAreaRef = useRef<HTMLFieldSetElement | null>(null)
+  const jobsLegendRef = useRef<HTMLLegendElement | null>(null)
+  const jobSelectRef = useRef<HTMLSelectElement | null>(null)
+  const askDeleteRef = useRef<HTMLButtonElement | null>(null)
+  const cancelDeleteRef = useRef<HTMLButtonElement | null>(null)
+  const deletingRef = useRef(false) // 다시 그리기 전에 두 번 눌려도 삭제 요청은 한 번
+  const mountedRef = useRef(true) // 화면을 떠난 뒤 늦게 온 응답은 상태·초점을 건드리지 않는다
 
   const { request, invalid, refs, baseKey } = buildRequest(files, draft, meta, metaError)
   const reqKey = JSON.stringify(request)
@@ -402,6 +413,20 @@ function KeyJoin() {
     saveDraft(filesKey, draft)
   }, [filesKey, draft])
   useEffect(() => () => planAbort.current?.abort(), [])
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+  useEffect(() => {
+    if (!jobFocus) return
+    // 사용자가 그새 이 구역 밖으로 초점을 옮겼으면 빼앗지 않는다 (사라진 단추의 초점은 body로 떨어져 있다)
+    const active = document.activeElement
+    if (active && active !== document.body && !jobsAreaRef.current?.contains(active)) return
+    const target = { cancel: cancelDeleteRef, ask: askDeleteRef, select: jobSelectRef, legend: jobsLegendRef }[jobFocus.to].current
+    target?.focus({ preventScroll: true })
+  }, [jobFocus])
   useEffect(() => {
     const controller = new AbortController()
     listKeyJoinJobs(controller.signal)
@@ -643,6 +668,7 @@ function KeyJoin() {
   function reloadJobs(keep: number | null) {
     listKeyJoinJobs()
       .then((list) => {
+        if (!mountedRef.current) return
         setJobs(list)
         setJobId(keep !== null && list.some((j) => j.id === keep) ? keep : (list[0]?.id ?? null))
       })
@@ -752,21 +778,55 @@ function KeyJoin() {
     }
   }
 
-  async function removeJob() {
+  function requestJobFocus(to: 'cancel' | 'ask' | 'select' | 'legend') {
+    setJobFocus((f) => ({ to, n: (f?.n ?? 0) + 1 }))
+  }
+
+  /** 인라인 삭제 확인: 누른 '이 작업 삭제'는 사라지므로 덜 위험한 '취소'가 초점을 받는다 */
+  function openDelete() {
     if (jobId === null || jobBusy !== null) return
+    setJobsError(null)
+    setAskDelete(true)
+    requestJobFocus('cancel')
+  }
+
+  function cancelDelete() {
+    if (jobBusy === 'delete') return // 요청을 보낸 뒤에는 취소할 수 없다 (결과를 기다린다)
+    setAskDelete(false)
+    requestJobFocus('ask')
+  }
+
+  async function removeJob() {
+    if (jobId === null || jobBusy !== null || deletingRef.current) return
+    deletingRef.current = true
+    const target = jobId
+    const name = jobs?.find((j) => j.id === target)?.name ?? ''
     setJobBusy('delete')
     setJobsError(null)
+    setJobNote(null)
     try {
-      await deleteKeyJoinJob(jobId)
+      await deleteKeyJoinJob(target)
+      if (!mountedRef.current) return
+      const rest = (jobs ?? []).filter((j) => j.id !== target)
+      setJobs(rest)
+      setJobId(rest[0]?.id ?? null)
       setAskDelete(false)
       setJobMatch(null)
-      setJobNote('저장한 작업을 지웠습니다 (실행 기록·결과 파일은 그대로).')
-      if (applied?.job.id === jobId) setApplied(null)
-      reloadJobs(null)
+      if (applied?.job.id === target) setApplied(null)
+      if (rest.length === 0) setJobsEmptied(true)
+      setJobNote(
+        `저장한 작업을 지웠습니다('${name}'). 실행 기록·결과 파일은 그대로입니다.${rest.length === 0 ? ' 남은 저장한 작업이 없습니다.' : ''}`,
+      )
+      // 남은 작업이 있으면 그 선택 상자, 없으면 이 구역의 제목 — 사라진 '정말 삭제' 대신 (안내 문구로는 옮기지 않는다)
+      requestJobFocus(rest.length ? 'select' : 'legend')
+      reloadJobs(rest[0]?.id ?? null)
     } catch (err) {
-      setJobsError(`지우지 못했습니다: ${errorText(err)}`)
+      if (!mountedRef.current) return
+      // 작업과 '정말 삭제'(다시 시도)·'취소'는 그대로 둔다 — 초점도 누른 단추에 남는다
+      setJobsError(`지우지 못했습니다: ${errorText(err)} — 작업은 그대로 있습니다. 다시 시도하거나 취소하세요.`)
     } finally {
-      setJobBusy(null)
+      deletingRef.current = false
+      if (mountedRef.current) setJobBusy(null)
     }
   }
 
@@ -865,52 +925,87 @@ function KeyJoin() {
         </Banner>
       )}
 
-      {files.length > 0 && jobs !== null && jobs.length > 0 && (
-        <fieldset className="an-step bd-step" aria-busy={jobBusy === 'match' || jobBusy === 'apply'}>
-          <legend>저장한 작업 적용 (선택)</legend>
-          <p className="mw-muted">
-            이전에 저장한 연결 설정을 이번 파일들에 맞춥니다 — 파일 이름이 아니라 시트·열 구조(key 열·가져올 열 이름)로 맞추고, 확실하지
-            않은 것(맞는 파일이 둘 이상·같은 이름의 열·없는 열)은 묻습니다. 적용한 뒤에도 5단계 연결 확인을 거쳐야 만들 수 있습니다 (행
-            포함/제외·개인정보 확인은 새 파일 기준으로 다시).
-          </p>
-          <label className="kj-row">
-            저장한 작업
-            <select
-              className="kj-select"
-              aria-label="저장한 작업"
-              value={jobId ?? ''}
-              onChange={(e) => {
-                setJobId(e.target.value ? Number(e.target.value) : null)
-                setJobMatch(null)
-                setAskDelete(false)
-              }}
-            >
-              {jobs.map((j) => (
-                <option key={j.id} value={j.id}>
-                  {j.name} (v{j.version} · 입력 {j.input_count}개 · key 열 {j.key_columns}개 · {j.scope_label})
-                </option>
-              ))}
-            </select>
-          </label>
-          <div className="admin-actions kj-actions">
-            <button type="button" className="mapping-run" aria-disabled={jobId === null || jobBusy !== null} onClick={() => void matchJob()}>
-              {jobBusy === 'match' ? '맞추는 중…' : '이 파일들에 맞추기'}
-            </button>
-            {!askDelete ? (
-              <button type="button" className="login-link" aria-disabled={jobId === null || jobBusy !== null} onClick={() => setAskDelete(true)}>
-                이 작업 삭제
-              </button>
-            ) : (
-              <>
-                <button type="button" className="mapping-confirm" aria-disabled={jobBusy !== null} onClick={() => void removeJob()}>
-                  {jobBusy === 'delete' ? '지우는 중…' : '정말 삭제 (실행 기록·결과는 남음)'}
+      {files.length > 0 && jobs !== null && (jobs.length > 0 || jobsEmptied) && (
+        <fieldset ref={jobsAreaRef} className="an-step bd-step" aria-busy={jobBusy === 'match' || jobBusy === 'apply'}>
+          {/* 마지막 작업을 지우면 사라진 단추 대신 이 제목이 초점을 받는다 (구역과 상태 알림은 남는다) */}
+          <legend ref={jobsLegendRef} tabIndex={-1}>
+            저장한 작업 적용 (선택)
+          </legend>
+          {jobs.length === 0 ? (
+            <p className="mw-muted">
+              남은 저장한 작업이 없습니다 — 6단계의 &lsquo;저장한 작업으로 저장&rsquo;으로 지금 설정을 다시 저장할 수 있습니다.
+            </p>
+          ) : (
+            <>
+              <p className="mw-muted">
+                이전에 저장한 연결 설정을 이번 파일들에 맞춥니다 — 파일 이름이 아니라 시트·열 구조(key 열·가져올 열 이름)로 맞추고, 확실하지
+                않은 것(맞는 파일이 둘 이상·같은 이름의 열·없는 열)은 묻습니다. 적용한 뒤에도 5단계 연결 확인을 거쳐야 만들 수 있습니다 (행
+                포함/제외·개인정보 확인은 새 파일 기준으로 다시).
+              </p>
+              <label className="kj-row">
+                저장한 작업
+                <select
+                  ref={jobSelectRef}
+                  className="kj-select"
+                  aria-label="저장한 작업"
+                  value={jobId ?? ''}
+                  onChange={(e) => {
+                    setJobId(e.target.value ? Number(e.target.value) : null)
+                    setJobMatch(null)
+                    if (jobBusy !== 'delete') setAskDelete(false)
+                  }}
+                >
+                  {jobs.map((j) => (
+                    <option key={j.id} value={j.id}>
+                      {j.name} (v{j.version} · 입력 {j.input_count}개 · key 열 {j.key_columns}개 · {j.scope_label})
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="admin-actions kj-actions">
+                <button type="button" className="mapping-run" aria-disabled={jobId === null || jobBusy !== null} onClick={() => void matchJob()}>
+                  {jobBusy === 'match' ? '맞추는 중…' : '이 파일들에 맞추기'}
                 </button>
-                <button type="button" className="login-link" onClick={() => setAskDelete(false)}>
-                  취소
-                </button>
-              </>
-            )}
-          </div>
+                {!askDelete && (
+                  <button
+                    ref={askDeleteRef}
+                    type="button"
+                    className="login-link"
+                    aria-disabled={jobId === null || jobBusy !== null}
+                    onClick={openDelete}
+                  >
+                    이 작업 삭제
+                  </button>
+                )}
+              </div>
+              {askDelete && (
+                // 모달이 아닌 같은 자리의 확인 — 초점을 가두지 않고, 이 묶음 안에서만 Esc로 닫는다 (다른 입력의 Esc는 그대로)
+                <div
+                  role="group"
+                  aria-labelledby={`${ids}-jobdel`}
+                  className="kj-input"
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Escape' || jobBusy === 'delete') return
+                    e.preventDefault()
+                    e.stopPropagation()
+                    cancelDelete()
+                  }}
+                >
+                  <p id={`${ids}-jobdel`} className="kj-input-title">
+                    &lsquo;{jobs.find((j) => j.id === jobId)?.name ?? ''}&rsquo; 작업을 지울까요? 실행 기록·결과 파일은 남습니다 (Esc: 취소).
+                  </p>
+                  <div className="admin-actions kj-actions">
+                    <button type="button" className="mapping-confirm" aria-disabled={jobBusy !== null} onClick={() => void removeJob()}>
+                      {jobBusy === 'delete' ? '지우는 중…' : '정말 삭제 (실행 기록·결과는 남음)'}
+                    </button>
+                    <button ref={cancelDeleteRef} type="button" className="login-link" aria-disabled={jobBusy === 'delete'} onClick={cancelDelete}>
+                      취소
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
           <p role="status" className="mw-muted kj-jobnote">
             {jobNote ?? ''}
           </p>
