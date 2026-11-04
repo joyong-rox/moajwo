@@ -314,6 +314,7 @@ function draftFromRequest(req: KeyJoinRequest): Draft {
 }
 
 type AppliedJob = { job: KeyJoinJob; notes: string[]; kinds: KeyJoinJobMatch['expected_key_kinds'] }
+type JobFocusTo = 'cancel' | 'ask' | 'sure' | 'recheck' | 'select' | 'legend'
 
 /** 저장 때 key 열의 자료형 분포(글자·정수)와 이번 확인 결과를 비교 — 서버(app/keyjoin_jobs.py kind_changes)와 같은 규칙 */
 function kindChangeNotes(expected: AppliedJob['kinds'], plan: KeyJoinPlan): string[] {
@@ -380,18 +381,23 @@ function KeyJoin() {
   const [saveNote, setSaveNote] = useState<string | null>(null) // 6단계 저장 구역의 상태 알림 (목록이 비어 있어도 보인다)
   const [applied, setApplied] = useState<AppliedJob | null>(null) // 이번 초안을 만든 저장한 작업 (변경·예외 안내)
   const [saveName, setSaveName] = useState('')
-  const [askDelete, setAskDelete] = useState(false)
+  // 삭제 확인을 연 작업 — 확인 문구·'정말 삭제'·다시 확인은 연 때의 ID에만 (그 뒤 선택·목록이 바뀌어도 대상이 바뀌지 않는다).
+  // unknown: 삭제 결과를 확인하지 못함 (응답도 목록도 못 받음) — '정말 삭제' 대신 목록만 다시 읽는 '삭제 여부 다시 확인'
+  const [delTarget, setDelTarget] = useState<{ id: number; name: string; unknown: boolean } | null>(null)
   // 이 화면에서 마지막 작업을 지웠으면 구역(제목·빈 상태·상태 알림)을 남긴다 — 처음부터 0개면 지금처럼 그리지 않는다
   const [jobsEmptied, setJobsEmptied] = useState(false)
   // 삭제 확인을 열고 닫거나 지운 뒤, 사라진 단추 대신 초점을 받을 곳 (다시 그린 뒤 옮긴다)
-  const [jobFocus, setJobFocus] = useState<{ to: 'cancel' | 'ask' | 'select' | 'legend'; n: number } | null>(null)
+  const [jobFocus, setJobFocus] = useState<{ to: JobFocusTo; n: number } | null>(null)
   const jobsAreaRef = useRef<HTMLFieldSetElement | null>(null)
   const jobsLegendRef = useRef<HTMLLegendElement | null>(null)
   const jobSelectRef = useRef<HTMLSelectElement | null>(null)
   const askDeleteRef = useRef<HTMLButtonElement | null>(null)
   const cancelDeleteRef = useRef<HTMLButtonElement | null>(null)
+  const sureDeleteRef = useRef<HTMLButtonElement | null>(null)
+  const recheckDeleteRef = useRef<HTMLButtonElement | null>(null)
   const deletingRef = useRef(false) // 다시 그리기 전에 두 번 눌려도 삭제 요청은 한 번
   const mountedRef = useRef(true) // 화면을 떠난 뒤 늦게 온 응답은 상태·초점을 건드리지 않는다
+  const jobsSeq = useRef(0) // 저장한 작업 목록 요청 순번 — 늦게 온 예전 응답이 더 새 목록(지운 결과)을 덮지 않게
 
   const { request, invalid, refs, baseKey } = buildRequest(files, draft, meta, metaError)
   const reqKey = JSON.stringify(request)
@@ -424,7 +430,14 @@ function KeyJoin() {
     // 사용자가 그새 이 구역 밖으로 초점을 옮겼으면 빼앗지 않는다 (사라진 단추의 초점은 body로 떨어져 있다)
     const active = document.activeElement
     if (active && active !== document.body && !jobsAreaRef.current?.contains(active)) return
-    const target = { cancel: cancelDeleteRef, ask: askDeleteRef, select: jobSelectRef, legend: jobsLegendRef }[jobFocus.to].current
+    const target = {
+      cancel: cancelDeleteRef,
+      ask: askDeleteRef,
+      sure: sureDeleteRef,
+      recheck: recheckDeleteRef,
+      select: jobSelectRef,
+      legend: jobsLegendRef,
+    }[jobFocus.to].current
     // 스크롤을 막지 않는다 — 지운 뒤의 선택 상자·제목은 확대(200%)·좁은 화면에서 화면 위쪽 밖에 있을 수 있어, 초점이 보이도록 필요한 만큼만 옮긴다
     target?.focus()
   }, [jobFocus])
@@ -666,14 +679,22 @@ function KeyJoin() {
     if (recheck) void check()
   }
 
-  function reloadJobs(keep: number | null) {
+  /** 목록을 다시 읽는다. pick: 방금 저장한 작업을 고를 때 — 그 밖에는 지금 선택을 지킨다 (기다리는 동안 사용자가 고른 것을 덮지 않음).
+   *  더 나중에 보낸 목록 요청이 있으면 이 응답은 버린다 — 늦게 온 예전 목록이 지운 작업을 되살리지 않게 */
+  function reloadJobs(pick: number | null) {
+    const n = ++jobsSeq.current
     listKeyJoinJobs()
       .then((list) => {
-        if (!mountedRef.current) return
+        if (!mountedRef.current || n !== jobsSeq.current) return
         setJobs(list)
-        setJobId(keep !== null && list.some((j) => j.id === keep) ? keep : (list[0]?.id ?? null))
+        setJobId((cur) => {
+          const has = (id: number | null) => id !== null && list.some((j) => j.id === id)
+          return has(pick) ? pick : has(cur) ? cur : (list[0]?.id ?? null)
+        })
       })
-      .catch((err: unknown) => setJobsError(`저장한 작업 목록을 읽지 못했습니다: ${errorText(err)}`))
+      .catch((err: unknown) => {
+        if (mountedRef.current && n === jobsSeq.current) setJobsError(`저장한 작업 목록을 읽지 못했습니다: ${errorText(err)}`)
+      })
   }
 
   /** 맞춘 요청을 초안으로 — 입력 순서(역할 순)가 주소의 파일 순서가 되도록 주소를 고친다. 행 결정·확인 결과는 새로 시작 */
@@ -779,52 +800,98 @@ function KeyJoin() {
     }
   }
 
-  function requestJobFocus(to: 'cancel' | 'ask' | 'select' | 'legend') {
+  function requestJobFocus(to: JobFocusTo) {
     setJobFocus((f) => ({ to, n: (f?.n ?? 0) + 1 }))
   }
 
-  /** 인라인 삭제 확인: 누른 '이 작업 삭제'는 사라지므로 덜 위험한 '취소'가 초점을 받는다 */
+  /** 인라인 삭제 확인: 누른 '이 작업 삭제'는 사라지므로 덜 위험한 '취소'가 초점을 받는다. 대상은 지금 고른 작업의 ID로 고정 */
   function openDelete() {
     if (jobId === null || jobBusy !== null) return
     setJobsError(null)
-    setAskDelete(true)
+    setDelTarget({ id: jobId, name: jobs?.find((j) => j.id === jobId)?.name ?? '', unknown: false })
     requestJobFocus('cancel')
   }
 
   function cancelDelete() {
     if (jobBusy === 'delete') return // 요청을 보낸 뒤에는 취소할 수 없다 (결과를 기다린다)
-    setAskDelete(false)
+    setDelTarget(null)
     requestJobFocus('ask')
   }
 
+  /** 지운 것이 확인됨 — 남은 목록으로 바꾸고 안내·초점 */
+  function showDeleted(target: { id: number }, rest: KeyJoinJob[], note: string) {
+    setJobs(rest)
+    setJobId((cur) => (cur !== null && cur !== target.id && rest.some((j) => j.id === cur) ? cur : (rest[0]?.id ?? null)))
+    setDelTarget(null)
+    setJobMatch(null)
+    if (applied?.job.id === target.id) setApplied(null)
+    if (rest.length === 0) setJobsEmptied(true)
+    setJobNote(`${note} 실행 기록·결과 파일은 그대로입니다.${rest.length === 0 ? ' 남은 저장한 작업이 없습니다.' : ''}`)
+    // 남은 작업이 있으면 그 선택 상자, 없으면 이 구역의 제목 — 사라진 '정말 삭제' 대신 (안내 문구로는 옮기지 않는다)
+    requestJobFocus(rest.length ? 'select' : 'legend')
+  }
+
+  /** 삭제 응답이 실패·유실됐을 때(err) 또는 '삭제 여부 다시 확인'(err = null): DELETE는 다시 보내지 않고 목록만 다시 읽어
+   *  그 작업이 서버에 남았는지로 결과를 정한다 — 서버가 지운 뒤 응답만 잃었거나 다른 창에서 먼저 지웠을(404) 수 있다 */
+  async function settleDelete(target: { id: number; name: string }, err: unknown) {
+    jobsSeq.current += 1 // 이보다 먼저 보낸 목록 요청의 늦은 응답은 버린다
+    const why = err === null ? '' : ` (삭제 응답: ${errorText(err)})`
+    let list: KeyJoinJob[]
+    try {
+      list = await listKeyJoinJobs()
+    } catch (readErr) {
+      if (!mountedRef.current) return
+      setDelTarget({ ...target, unknown: true })
+      setJobsError(
+        `삭제 여부를 확인하지 못했습니다${why} — 목록도 읽지 못했습니다(${errorText(readErr)}). '삭제 여부 다시 확인'은 목록만 다시 읽습니다 (삭제 요청을 다시 보내지 않음).`,
+      )
+      requestJobFocus('recheck')
+      return
+    }
+    if (!mountedRef.current) return
+    if (list.some((j) => j.id === target.id)) {
+      // 서버에 남아 있다 — 확인('정말 삭제'로 다시 시도·취소)은 그대로
+      setJobs(list)
+      setDelTarget({ ...target, unknown: false })
+      setJobsError(`지우지 못했습니다${why} — 목록을 다시 읽어 보니 작업은 그대로 있습니다. 다시 시도하거나 취소하세요.`)
+      requestJobFocus('sure')
+    } else {
+      showDeleted(target, list, `'${target.name}' 작업은 지워져 목록에 없습니다 — 목록을 다시 읽어 확인했습니다${why}. 다른 창에서 먼저 지웠을 수도 있습니다.`)
+    }
+  }
+
   async function removeJob() {
-    if (jobId === null || jobBusy !== null || deletingRef.current) return
+    const target = delTarget
+    if (target === null || target.unknown || jobBusy !== null || deletingRef.current) return
     deletingRef.current = true
-    const target = jobId
-    const name = jobs?.find((j) => j.id === target)?.name ?? ''
     setJobBusy('delete')
     setJobsError(null)
     setJobNote(null)
     try {
-      await deleteKeyJoinJob(target)
+      try {
+        await deleteKeyJoinJob(target.id)
+      } catch (err) {
+        if (mountedRef.current) await settleDelete(target, err)
+        return
+      }
       if (!mountedRef.current) return
-      const rest = (jobs ?? []).filter((j) => j.id !== target)
-      setJobs(rest)
-      setJobId(rest[0]?.id ?? null)
-      setAskDelete(false)
-      setJobMatch(null)
-      if (applied?.job.id === target) setApplied(null)
-      if (rest.length === 0) setJobsEmptied(true)
-      setJobNote(
-        `저장한 작업을 지웠습니다('${name}'). 실행 기록·결과 파일은 그대로입니다.${rest.length === 0 ? ' 남은 저장한 작업이 없습니다.' : ''}`,
-      )
-      // 남은 작업이 있으면 그 선택 상자, 없으면 이 구역의 제목 — 사라진 '정말 삭제' 대신 (안내 문구로는 옮기지 않는다)
-      requestJobFocus(rest.length ? 'select' : 'legend')
-      reloadJobs(rest[0]?.id ?? null)
-    } catch (err) {
-      if (!mountedRef.current) return
-      // 작업과 '정말 삭제'(다시 시도)·'취소'는 그대로 둔다 — 초점도 누른 단추에 남는다
-      setJobsError(`지우지 못했습니다: ${errorText(err)} — 작업은 그대로 있습니다. 다시 시도하거나 취소하세요.`)
+      showDeleted(target, (jobs ?? []).filter((j) => j.id !== target.id), `저장한 작업을 지웠습니다('${target.name}').`)
+      reloadJobs(null)
+    } finally {
+      deletingRef.current = false
+      if (mountedRef.current) setJobBusy(null)
+    }
+  }
+
+  /** 결과를 확인하지 못한 삭제: 목록만 다시 읽는다 (DELETE를 다시 보내지 않음) */
+  async function recheckDelete() {
+    const target = delTarget
+    if (target === null || jobBusy !== null || deletingRef.current) return
+    deletingRef.current = true
+    setJobBusy('delete')
+    setJobsError(null)
+    try {
+      await settleDelete(target, null)
     } finally {
       deletingRef.current = false
       if (mountedRef.current) setJobBusy(null)
@@ -950,10 +1017,12 @@ function KeyJoin() {
                   className="kj-select"
                   aria-label="저장한 작업"
                   value={jobId ?? ''}
+                  aria-disabled={jobBusy === 'delete'}
                   onChange={(e) => {
+                    if (jobBusy === 'delete') return // 지우는 동안에는 선택을 바꾸지 않는다 (결과·다시 시도는 확인을 연 작업에만)
                     setJobId(e.target.value ? Number(e.target.value) : null)
                     setJobMatch(null)
-                    if (jobBusy !== 'delete') setAskDelete(false)
+                    setDelTarget(null)
                   }}
                 >
                   {jobs.map((j) => (
@@ -967,7 +1036,7 @@ function KeyJoin() {
                 <button type="button" className="mapping-run" aria-disabled={jobId === null || jobBusy !== null} onClick={() => void matchJob()}>
                   {jobBusy === 'match' ? '맞추는 중…' : '이 파일들에 맞추기'}
                 </button>
-                {!askDelete && (
+                {!delTarget && (
                   <button
                     ref={askDeleteRef}
                     type="button"
@@ -979,7 +1048,7 @@ function KeyJoin() {
                   </button>
                 )}
               </div>
-              {askDelete && (
+              {delTarget && (
                 // 모달이 아닌 같은 자리의 확인 — 초점을 가두지 않고, 이 묶음 안에서만 Esc로 닫는다 (다른 입력의 Esc는 그대로)
                 <div
                   role="group"
@@ -993,12 +1062,30 @@ function KeyJoin() {
                   }}
                 >
                   <p id={`${ids}-jobdel`} className="kj-input-title">
-                    &lsquo;{jobs.find((j) => j.id === jobId)?.name ?? ''}&rsquo; 작업을 지울까요? 실행 기록·결과 파일은 남습니다 (Esc: 취소).
+                    &lsquo;{delTarget.name}&rsquo; 작업을 지울까요? 실행 기록·결과 파일은 남습니다 (Esc: 취소).
                   </p>
                   <div className="admin-actions kj-actions">
-                    <button type="button" className="mapping-confirm" aria-disabled={jobBusy !== null} onClick={() => void removeJob()}>
-                      {jobBusy === 'delete' ? '지우는 중…' : '정말 삭제 (실행 기록·결과는 남음)'}
-                    </button>
+                    {delTarget.unknown ? (
+                      <button
+                        ref={recheckDeleteRef}
+                        type="button"
+                        className="mapping-confirm"
+                        aria-disabled={jobBusy !== null}
+                        onClick={() => void recheckDelete()}
+                      >
+                        {jobBusy === 'delete' ? '확인 중…' : '삭제 여부 다시 확인'}
+                      </button>
+                    ) : (
+                      <button
+                        ref={sureDeleteRef}
+                        type="button"
+                        className="mapping-confirm"
+                        aria-disabled={jobBusy !== null}
+                        onClick={() => void removeJob()}
+                      >
+                        {jobBusy === 'delete' ? '지우는 중…' : '정말 삭제 (실행 기록·결과는 남음)'}
+                      </button>
+                    )}
                     <button ref={cancelDeleteRef} type="button" className="login-link" aria-disabled={jobBusy === 'delete'} onClick={cancelDelete}>
                       취소
                     </button>
