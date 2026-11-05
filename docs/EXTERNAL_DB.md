@@ -576,6 +576,30 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 
 전환 뒤 점검(19:59, 쓰기 없음): 프런트 `/` 200 · 프런트 `/api/health`·API `/health` `database: ok` · `/auth/status` `setup_required: true` → 관리자 생성·사용자 1명 발급 뒤 `false`(20:11 쓰기 재개) · setup/signup 410 · 첫 백업(7장) 완료. 릴리스 가지 `release/render-eeb27f1`(= `eeb27f1`)은 움직이지 않으며 새 릴리스는 새 가지로(Auto-Deploy Off·수동 배포). 세부 기록은 Git 밖 `backups/followup-20261030/round11/`과 승인 묶음 `round10/APPROVAL-RENDER-20261101.md`. 가지 `test/render-20261021`(옛 프런트 시험 가지, 60bcae8)은 어느 서비스도 가리키지 않게 된 뒤 2026-11-01 12차에 bundle로 보존하고 삭제했다(`deploy/render-preview-20261021`은 PR #19 기록으로 보존).
 
+**2026-11-05 갱신 뒤 현재값 (eeb27f1 → 8cc69d0 · Neon 0022 → 0024 — 수행 주체: Render 가지 변경·수동 배포는 소유자 승인 뒤 Claude가 Render 화면에서, Neon 마이그레이션·점검·백업은 작업 에이전트가 소유자 PC에서):**
+
+| 서비스 | 연결 브랜치 | Auto-Deploy | live 배포 |
+|---|---|---|---|
+| `moajwo-test-api` | **`release/render-8cc69d0`** (= main `8cc69d0`, 앱 코드 = 로컬 운영 `2608fbe`와 같음) | Off | `8cc69d0` 2026-11-05 17:17 KST(`dep-dbm3mpec6qcc73ft8ppg`) — 배포 로그에 `Running upgrade` 없음(0024 head 확인만) |
+| `moajwo-test` | **`release/render-8cc69d0`** | Off | `8cc69d0` 2026-11-05 17:19 KST(`dep-dbm3nohsrm7s73f06t10`) |
+| `moajwo-test-web` | (설정 그대로) | Off | 이 갱신의 대상 아님. 2026-11-05 조회 때 **Active**(Render 이벤트 2026-11-02 22:37 Resumed — 2026-11-01 정지 기록과 다름, live `66405ef` 옛 프런트). 정지 여부는 소유자 결정 대기(2026-11-15 재결정) |
+
+- 두 서비스는 가지만 바꾸고 저장만 했다(17:09~17:11). 그 밖의 설정(Dockerfile·health 경로 등)은 이번에 바꾸지 않았다.
+- **Neon `neondb`:** 2026-11-05 17:15:02~17:15:06 KST에 소유자 PC의 `moajwo-migrate`(소유 계정·직접 연결)로 `alembic upgrade head`를 실행했다 — `0022_temp_passwords` → `0023_keyjoin_jobs` → **`0024_keyjoin_job_ids`**.
+  - 새 표 `keyjoin_jobs`·`keyjoin_jobs_id_seq`의 앱 계정 권한은 소유 계정의 기본 권한(5장 `ALTER DEFAULT PRIVILEGES`)으로 붙었다(빠진 권한 0행 — 추가 GRANT 없음).
+  - users 수는 그대로다. 앱 계정의 DDL은 여전히 42501이다.
+  - Render에는 계속 앱 계정만 둔다(3장).
+- **순서:** Neon 마이그레이션(소유자 PC) → API 수동 배포 → 프런트 수동 배포. 0022 위에서는 새 이미지가 기동 때 0023을 앱 계정으로 적용하려다 42501로 실패하므로, 마이그레이션을 먼저 한다(2026-11-05 `moajwo_restore_test` 리허설 확인).
+- **갱신 뒤 점검(17:25~17:26, 쓰기 없음):**
+  - `wake_render.ps1` 4/4.
+  - 프런트 `/` 200(JS `index-B-EMwPC7.js`·보안 헤더 4종).
+  - 프런트 `/api/health`·API `/health` `database: ok`.
+  - `/auth/status` `setup_required: false`(API·프런트 경유).
+  - 가입·설정 410(API·프런트 경유).
+  - 저장한 작업 API·`/auth/me` 비로그인 401.
+- **백업 (7장):** 갱신 전 2회(준비 때와 마이그레이션 직전 `-PreDeploy`), 갱신 뒤 1회.
+- **릴리스 가지:** `release/render-8cc69d0`은 움직이지 않는다. 새 릴리스는 새 가지로 한다. 옛 릴리스 가지 `release/render-eeb27f1`은 되돌리기용으로 보존한다(8-4).
+
 **제안값 (승인 묶음 8-5에 넣어 한 번에 적용 — 이번 작업에서는 저장하지 않음):**
 
 | 서비스 | 항목 | 현재 | 제안 | 영향 |
@@ -602,6 +626,15 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 - **쓰기 재개 후**: 전환 뒤 생긴 계정·기록이 있으므로, 예전 백업으로 되돌려 새 계정·자료를 잃는 복구를 자동으로 하지 않습니다. 필요하면 그 시점 백업을 먼저 받고, 잃는 범위를 알린 뒤 승인받습니다.
 - **0022(관리자 아이디 `admin` 고정·계정 발급·임시 비밀번호) 반영 뒤**: 되돌릴 대상은 0022를 아는 이미지뿐입니다 (0021까지만 아는 이미지는 기동 때 모르는 리비전에서 멈춤). 0022 downgrade는 임시 비밀번호 상태인 계정이 (이용 중·중지·만료와 관계없이) 하나라도 있으면 거절하고, 이전 판으로 돌아가면 공개 회원가입·(계정 0개면) 최초 설정이 다시 열리므로 **이미지만 이전 판으로 바꾸는 것을 안전한 복구로 적지 않습니다** — 자료 복구(A·B)와 계정 정책 복구는 다른 문제이며 새 정책을 유지하는 복구 경로는 아직 검증되지 않았습니다 (`docs/DEPLOY.md` 12-4). 계정(전환 뒤 아이디 `admin`)·비밀번호 해시·자료 소유는 0021 ↔ 0022 사이에서 그대로입니다.
 
+- **0023 이상 반영 뒤(Render 2026-11-05 — neondb 0024)**: `0023_keyjoin_jobs`를 모르는 이미지(예: 이전 릴리스 `eeb27f1`)는 **기동하지 못합니다** — 기동 때 `alembic upgrade head`가 모르는 리비전(`Can't locate revision identified by '0024_keyjoin_job_ids'`)에서 멈춥니다(2026-11-05 `moajwo_restore_test` 리허설 확인).
+  - 반대로 새 이미지(0023 이상)는 0022 DB에서 기동 때 앱 계정으로 0023을 적용하려다 42501로 멈춥니다(스키마 변경은 소유자 PC에서만).
+  - 그래서 **마이그레이션과 API 배포 사이에는 짧게만 두고, 그동안 이전 API가 다시 시작되지 않게 합니다**(무료 인스턴스 휴면 복귀 포함).
+  - **기본 복구는 수정판으로 고쳐 올리기(fix-forward)** 입니다: 원인을 고친 커밋으로 새 릴리스 가지를 만들어 배포하고, DB는 0024를 유지합니다.
+  - 이전 릴리스로 되돌려야 하면(소유자 승인 뒤) **순서가 정해져 있습니다**:
+    - ① 백업(7장, `-PreDeploy`)
+    - ② 소유자 PC의 소유 계정으로 `alembic downgrade 0022_temp_passwords` — 0024 → 0023 → 0022. **0023 downgrade는 `keyjoin_jobs` 표를 지우므로 Render에서 저장한 작업이 사라집니다** — 건수를 먼저 기록하고 잃는 범위를 알립니다. 0022 아래로 내리는 연쇄 downgrade는 0023의 보호가 먼저 막습니다.
+    - ③ Render 두 서비스의 가지를 `release/render-eeb27f1`로 되돌려 API → 프런트 수동 배포(대시보드 롤백은 자동 배포를 끄므로 Off 유지 확인)
+  - 리허설(2026-11-05, `moajwo_restore_test`)에서 ②(3.6초, 표 제거)와 그 위의 eeb27f1 기동(health ok·`setup_required: false`·410)을 확인했습니다. 실제 `neondb`에서 되돌린 적은 없습니다.
 - 0022 이후의 계정 정책 복구(2026-10-31 결정): 구판으로 되돌릴 때는 로컬 compose의 B′(덧붙임 설정으로 공개 가입 차단, `docs/DEPLOY.md` 4장 B′)이
   기준이며, Render용 호환 구성은 따로 만들지 않았다. 변경을 요청할 수 없는 이용 중지 임시 계정은 관리자의 「임시 비밀번호 폐기」(`docs/DEPLOY.md` 12-6)로
   downgrade 보호 조건 밖으로 내보낸다 — 이용 중 임시 계정은 본인 변경을 기다린다.
