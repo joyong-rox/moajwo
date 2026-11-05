@@ -15,6 +15,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# 2026-11-05 APT 보안 수정 (DSA-6607-1 · CVE-2026-109518, docs/SECURITY-APT-20261105.md):
+# 위 고정 기반의 apt·libapt-pkg7.0은 3.0.3(결함판)이고, 수정판 3.0.4가 든 공식 python 기반은 아직 없다(2026-11-05 확인).
+# 결함 있는 apt로 수정판을 받지 않도록, 먼저 docker/apt_verified_fetch.py가 Debian 서명(sqv + 기반 이미지의 저장소 키링)과
+# 저장소에 고정한 SHA-256으로 검증한 .deb 두 개만 dpkg로 설치하고, Debian 판 비교로 둘 다 3.0.4 이상인지 확인한다.
+# 아래 apt-get은 그 뒤에만 쓴다. 수정판이 든 공식 기반이 나오면 기반 digest를 바꾸고 이 단계를 뺀다(같은 PR에서 검증 목록도).
+COPY docker/apt_verified_fetch.py /tmp/apt-fix/
+RUN python -I /tmp/apt-fix/apt_verified_fetch.py /tmp/apt-fix/debs \
+    && dpkg -i /tmp/apt-fix/debs/libapt-pkg7.0_3.0.4_amd64.deb /tmp/apt-fix/debs/apt_3.0.4_amd64.deb \
+    && for p in apt libapt-pkg7.0; do \
+         v=$(dpkg-query -W -f='${Version}' "$p") && dpkg --compare-versions "$v" ge 3.0.4 && echo "$p $v" || exit 1; \
+       done \
+    && rm -rf /tmp/apt-fix
+
 COPY requirements.txt requirements-linux-hashes.txt ./
 # 2026-10 eMudhra 인증서 사고 대응 (docs/SECURITY-CA-20261026.md):
 # - 기반 이미지의 pip(24.0)는 손상된 중간 인증서를 믿는 옛 certifi를 품고 있어, 의존성을 받기 전에 수정판 pip 26.2.2를 먼저

@@ -3,8 +3,8 @@
  "kind": "backend",
  "verified": {
   "what": "이 목록은 CI에서 검증한 완성 이미지의 실행 환경이다. scripts/image_gate.sh가 반영 전 후보 이미지의 목록을 이 파일의 실행 환경 항목과 비교한다 (docs/DEPLOY.md 11장)",
-  "ci_run": "joyong-rox/moajwo Actions run 40665331568 (image-gate, ubuntu-24.04)",
-  "commit": "606900d03c5078380e90e644f8a3c6fbe97007b5",
+  "ci_run": "joyong-rox/moajwo Actions run 41951432086 (image-gate, ubuntu-24.04)",
+  "commit": "eebd3108a49519a7c9c408901896d0c2aeb8c39e",
   "docker": [
    "docker 28.0.4",
    "Docker Compose version v2.38.2"
@@ -13,23 +13,25 @@
    "docker.io/library/python:3.11.18-slim-trixie@sha256:82209229d3fda30d71e603ec95bb4bea0476635ba6df3df2e32284e036654f51"
   ],
   "smoke": "scripts/image_smoke.py (image_smoke 2) 22/22 통과 · 도구 오류 0 (backend·frontend 함께)",
-  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-10-28T07:10:42Z — 결과는 그 run의 산출물",
-  "collected_at": "2026-10-28T09:35:24Z"
+  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-11-04T19:02:00Z — 결과는 그 run의 산출물",
+  "collected_at": "2026-11-05T01:53:11Z"
  },
  "image": {
-  "id": "sha256:2f3966718a696ea4974ebf98b441b3a31f69cf96a8b82d786bb585f9b1184134",
+  "id": "sha256:f0aaa8145c007cdf44646a0a43140426d80fb770ae08fd95c77394dbe9590814",
   "id_meaning": "config digest (기존 저장소)",
-  "created": "2026-10-28T09:35:23.881046174Z",
+  "created": "2026-11-05T01:53:10.382528737Z",
   "diff_ids": [
    "sha256:a70f6272827f64e1427d048ced77491aab5d64ab95725e56920802ff391197d7",
    "sha256:cc28e9b8727bd558eb76d69889c971452f06f6f6c91bb2e56b786e46e276de0f",
    "sha256:c8624fffa1d06e06d3bc5dcc16e8da97838cd0279166bda3a2086e48d9d6c5bc",
    "sha256:95e5c677aa457a1c20a4e8cebe2559c1d572003dfb9ad923e260ae20c09a9195",
-   "sha256:95f39dfbc9ec68aa584b21f97ddc5530f6c98121d8f5b534747cbb32ffd8eb80",
-   "sha256:087e3b0f92e35967ace12e804231591482584a251cc5ce770aa619c84d67bc30",
-   "sha256:4f2c6a98d7c67cdf422c26e7df65d13c461c1ec63b733a11b1e5f0f3feed8c13",
-   "sha256:36e3d6544011896d4a032598c297c1d5ec09e01a4d1c1a1b107bf2d4e209345f",
-   "sha256:a18273380560824382726f8b8259d169eae9b1f988d6eef324ecc7085ddf4c2a"
+   "sha256:f859564ea6550a2c1f3a401946a760388321557f3162aeee7216df646feaecea",
+   "sha256:c60f46883782335469293208eb59d6c3de039977f6e85c6e4f3b1daf7832b60c",
+   "sha256:d7311ae373f04a216bf0c0318b2f5b25b27b480dbefdd6238e835f0fbe9b4b40",
+   "sha256:e934650877853b2587c056530d7f90e5cb44e4283a76121ad855010fc32e08cd",
+   "sha256:414789c55db8d94f3bc668934e65a8a4ec68db9d87c5a5049d7830b8ee11be25",
+   "sha256:af14e5f271fa2b0bcc59b3b7b6833f2b01975d9a572656afe51bafe14036386c",
+   "sha256:6996ea8652b756d24730795a1b89f037df9fff1f31c03d717ab619cb25f1deed"
   ]
  },
  "platform": {
@@ -46,7 +48,7 @@
  "machine": "x86_64",
  "os_packages": {
   "adduser": "3.152",
-  "apt": "3.0.3",
+  "apt": "3.0.4",
   "base-files": "13.8+deb13u7",
   "base-passwd": "3.6.7",
   "bash": "5.2.37-2+b10",
@@ -66,7 +68,7 @@
   "hostname": "3.25",
   "init-system-helpers": "1.69~deb13u1",
   "libacl1": "2.3.2-2+b1",
-  "libapt-pkg7.0": "3.0.3",
+  "libapt-pkg7.0": "3.0.4",
   "libattr1": "1:2.5.2-3",
   "libaudit-common": "1:4.0.2-2+deb13u1",
   "libaudit1": "1:4.0.2-2+deb13u1",
