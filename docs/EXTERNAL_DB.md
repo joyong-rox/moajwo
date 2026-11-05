@@ -582,7 +582,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 |---|---|---|---|
 | `moajwo-test-api` | **`release/render-8cc69d0`** (= main `8cc69d0`, 앱 코드 = 로컬 운영 `2608fbe`와 같음) | Off | `8cc69d0` 2026-11-05 17:17 KST(`dep-dbm3mpec6qcc73ft8ppg`) — 배포 로그에 `Running upgrade` 없음(0024 head 확인만) |
 | `moajwo-test` | **`release/render-8cc69d0`** | Off | `8cc69d0` 2026-11-05 17:19 KST(`dep-dbm3nohsrm7s73f06t10`) |
-| `moajwo-test-web` | (설정 그대로) | Off | 이 갱신의 대상 아님. 2026-11-05 조회 때 **Active**(Render 이벤트 2026-11-02 22:37 Resumed — 2026-11-01 정지 기록과 다름, live `66405ef` 옛 프런트). 정지 여부는 소유자 결정 대기(2026-11-15 재결정) |
+| `moajwo-test-web` | (설정 그대로) | Off | 이 갱신의 대상 아님. **현재 Suspended.** 이벤트 이력: 2026-11-01 19:57 정지 → 2026-11-02 22:37 재개(Render 이벤트 "Resumed by you" — 재개한 주체·작업 세션의 기록 없음) → 2026-11-05 17:34 **소유자 결정으로 재정지**("Suspended by you", 소유자 승인 뒤 Claude가 Render 화면에서). live 배포는 `66405ef`(옛 프런트) 그대로. **삭제 여부는 2026-11-15에 다시 결정** |
 
 - 두 서비스는 가지만 바꾸고 저장만 했다(17:09~17:11). 그 밖의 설정(Dockerfile·health 경로 등)은 이번에 바꾸지 않았다.
 - **Neon `neondb`:** 2026-11-05 17:15:02~17:15:06 KST에 소유자 PC의 `moajwo-migrate`(소유 계정·직접 연결)로 `alembic upgrade head`를 실행했다 — `0022_temp_passwords` → `0023_keyjoin_jobs` → **`0024_keyjoin_job_ids`**.
