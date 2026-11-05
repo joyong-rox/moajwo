@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import {
   AnalysisProblemError,
+  ApiError,
   applyKeyJoinJob,
   createKeyJoinJob,
   deleteKeyJoinJob,
@@ -123,6 +124,15 @@ function saveDraft(filesKey: string, draft: Draft) {
 
 function errorText(err: unknown) {
   return err instanceof Error ? err.message : String(err)
+}
+
+/** 저장한 작업 갱신(PUT)의 결과를 모르는가 — 서버가 거절했다고 확정된 응답(4xx: 409 버전·이름·연결 확인, 404, 422, 401 등)이
+ *  아니면 모른다: 응답을 받지 못함(연결 끊김 — TypeError), 응답 본문을 다 받지 못함, 중계·서버의 5xx(502·503·504).
+ *  서버는 이미 커밋했을 수 있다 — 격리 API(2026-11-04)에서 요청을 다 보낸 직후 연결이 끊겨도 서버는 처리를 마치고 커밋했다 */
+function updateOutcomeUnknown(err: unknown): boolean {
+  if (err instanceof AnalysisProblemError) return false
+  if (err instanceof ApiError) return err.status >= 500
+  return true
 }
 
 /** 요청 번호: 같은 생성 요청의 재전송을 서버가 알아보는 32자리 16진수 (randomUUID와 달리 보안 문맥이 아닌 주소에서도 됨) */
@@ -376,10 +386,13 @@ function KeyJoin() {
   const [jobMatch, setJobMatch] = useState<KeyJoinJobMatch | null>(null) // 자동으로 정하지 못한 배정·열 (사용자가 고른다)
   const [rolePicks, setRolePicks] = useState<Record<number, string>>({}) // 역할 → '파일:시트'
   const [colPicks, setColPicks] = useState<Record<string, string>>({}) // '역할:k0' → column_id ('' = 가져올 열을 뺌)
-  const [jobBusy, setJobBusy] = useState<'match' | 'apply' | 'save' | 'delete' | null>(null)
+  const [jobBusy, setJobBusy] = useState<'match' | 'apply' | 'save' | 'recheck' | 'delete' | null>(null)
   const [jobNote, setJobNote] = useState<string | null>(null) // 저장한 작업 적용 구역의 상태 알림
   const [saveNote, setSaveNote] = useState<string | null>(null) // 6단계 저장 구역의 상태 알림 (목록이 비어 있어도 보인다)
   const [applied, setApplied] = useState<AppliedJob | null>(null) // 이번 초안을 만든 저장한 작업 (변경·예외 안내)
+  // 갱신 결과를 확인하지 못했고 저장된 판도 읽지 못함 — 갱신 단추 자리에 '저장된 판 확인'(목록만 다시 읽음)을 둔다.
+  // seen: 갱신을 보낸 때의 작업, why: 받은 오류 문구
+  const [updateUnknown, setUpdateUnknown] = useState<{ seen: AppliedJob; why: string } | null>(null)
   const [saveName, setSaveName] = useState('')
   // 삭제 확인을 연 작업 — 확인 문구·'정말 삭제'·다시 확인은 연 때의 ID에만 (그 뒤 선택·목록이 바뀌어도 대상이 바뀌지 않는다).
   // unknown: 삭제 결과를 확인하지 못함 (응답도 목록도 못 받음) — '정말 삭제' 대신 목록만 다시 읽는 '삭제 여부 다시 확인'
@@ -710,6 +723,7 @@ function KeyJoin() {
     setNote(null)
     setJobMatch(null)
     setApplied({ job: m.job, notes: m.notes, kinds: m.expected_key_kinds })
+    setUpdateUnknown(null) // 방금 서버에서 받은 판으로 다시 맞췄다
     setJobNote(`저장한 작업 '${m.job.name}' (v${m.job.version})을 이번 파일에 맞춰 넣었습니다 — 변경·예외 ${m.notes.length}건. 5단계에서 연결을 확인하세요.`)
     if (key !== filesKey) {
       saveDraft(key, d)
@@ -785,18 +799,99 @@ function KeyJoin() {
     }
     setJobBusy('save')
     setSaveNote(null)
+    setUpdateUnknown(null)
     try {
-      const job = update && applied ? await updateKeyJoinJob(applied.job.id, { request }) : await createKeyJoinJob(name, request)
+      const job =
+        update && applied
+          ? await updateKeyJoinJob(applied.job.id, { expected_version: applied.job.version, request })
+          : await createKeyJoinJob(name, request)
       setSaveNote(`저장한 작업 '${job.name}' (v${job.version})${update ? '으로 갱신' : '으로 저장'}했습니다 — 다음 자료는 위 '저장한 작업 적용'에서 맞춰 쓰세요.`)
       if (update && applied) setApplied({ ...applied, job })
       setSaveName('')
       reloadJobs(job.id)
     } catch (err) {
+      const stale = err instanceof AnalysisProblemError && err.code === 'KEYJOIN_JOB_VERSION_CHANGED'
+      const gone = err instanceof ApiError && err.status === 404
+      if (update && applied && (stale || gone)) {
+        await showLatestJob(applied, null) // 다시 보내지 않는다 — 최신 목록을 읽어 알릴 뿐
+        return
+      }
+      if (update && applied && updateOutcomeUnknown(err)) {
+        await showLatestJob(applied, errorText(err)) // 결과를 모름 — 다시 보내지 않고, 지금 저장된 판만 읽어 사실대로 알린다
+        return
+      }
       const text =
         err instanceof AnalysisProblemError && err.problems.length ? `${err.message} ${err.problems.join(' / ')}` : errorText(err)
       setSaveNote(`저장하지 못했습니다: ${text}`)
     } finally {
       setJobBusy(null)
+    }
+  }
+
+  /** 갱신 뒤 최신 목록을 다시 읽어 알린다 — 갱신은 다시 보내지 않는다. 지금 판을 기준으로 다시 누를지는 사용자가 정한다
+   *  (재발급의 expected_auth_version과 같은 흐름). 더 나중에 보낸 목록 요청이 있으면 이 응답은 버린다.
+   *  unknown = null: 갱신이 거절됨(409: 그 사이 다른 곳에서 먼저 갱신 · 404: 지워짐) — 서버는 아무것도 바꾸지 않았다.
+   *  unknown = 받은 오류 문구: 응답으로 결과를 알 수 없음 — 서버가 반영했을 수 있다. 읽은 판만 사실대로 말하고, 버전이 올랐어도
+   *  이 화면의 갱신이 반영됐다고 단정하지 않는다(다른 창도 갱신할 수 있다). 읽기도 실패하면 미확인으로 두고 '저장된 판 확인'을 준다 */
+  async function showLatestJob(seen: AppliedJob, unknown: string | null) {
+    const n = ++jobsSeq.current
+    const head = unknown === null ? '갱신하지 않았습니다' : `갱신 결과를 확인하지 못했습니다 (${unknown}) — 갱신을 다시 보내지 않았습니다.`
+    try {
+      const list = await listKeyJoinJobs()
+      if (!mountedRef.current || n !== jobsSeq.current) return
+      setJobs(list)
+      setJobId((cur) => (cur !== null && list.some((j) => j.id === cur) ? cur : (list[0]?.id ?? null)))
+      setUpdateUnknown(null)
+      const latest = list.find((j) => j.id === seen.job.id)
+      if (!latest) {
+        setApplied(null)
+        if (list.length === 0) setJobsEmptied(true)
+        setSaveNote(
+          unknown === null
+            ? `갱신하지 않았습니다 — 작업 '${seen.job.name}': 그 사이 지워져 목록에 없습니다. 이 화면의 설정은 새 이름으로 저장할 수 있습니다.`
+            : `${head} 다시 읽어 보니 작업 '${seen.job.name}': 지금 목록에 없습니다(지워짐). 이 화면의 설정은 그대로 있고 새 이름으로 저장할 수 있습니다.`,
+        )
+        return
+      }
+      setApplied({ ...seen, job: latest })
+      if (unknown === null) {
+        setSaveNote(
+          `갱신하지 않았습니다 — 작업 '${latest.name}': 그 사이 다른 곳에서 먼저 바뀌었습니다 (이 화면이 본 판 v${seen.job.version}, 지금 v${latest.version}). ` +
+            `최신 목록을 다시 읽었습니다. 지금 저장된 설정을 보려면 위 '저장한 작업 적용'에서 다시 맞추고, ` +
+            `이 화면의 설정으로 지금 판(v${latest.version})을 덮으려면 갱신을 다시 누르세요.`,
+        )
+        return
+      }
+      setSaveNote(
+        latest.version === seen.job.version
+          ? `${head} 다시 읽어 보니 작업 '${latest.name}': 지금 저장된 판은 v${latest.version}입니다 — 이 화면이 갱신을 보낸 판과 같습니다` +
+              `(읽은 때까지 반영되지 않음). 이 화면의 설정은 그대로 있습니다. 저장하려면 갱신을 다시 누르세요 — 그 사이 앞의 갱신이 ` +
+              `반영됐다면 다시 누른 갱신은 막히고 알려 드립니다.`
+          : `${head} 다시 읽어 보니 작업 '${latest.name}': 지금 저장된 판은 v${latest.version}입니다 (이 화면이 갱신을 보낸 판 v${seen.job.version}). ` +
+              `이 판이 이 화면의 갱신인지 다른 곳의 변경인지는 알 수 없습니다. 지금 저장된 설정을 보려면 위 '저장한 작업 적용'에서 다시 ` +
+              `맞추고, 이 화면의 설정으로 지금 판(v${latest.version})을 덮으려면 갱신을 누르세요.`,
+      )
+    } catch (err) {
+      if (!mountedRef.current || n !== jobsSeq.current) return
+      if (unknown === null) {
+        setSaveNote(`갱신하지 않았습니다 — 그 사이 다른 곳에서 바뀌었거나 지워졌습니다. 최신 목록을 읽지 못했습니다: ${errorText(err)}`)
+        return
+      }
+      setUpdateUnknown({ seen, why: unknown })
+      setSaveNote(
+        `${head} 저장된 판도 읽지 못했습니다 (${errorText(err)}). 이 화면의 설정은 그대로 있습니다 — '저장된 판 확인'으로 다시 읽은 뒤 정하세요.`,
+      )
+    }
+  }
+
+  /** '저장된 판 확인' — 결과를 모르는 갱신 뒤 목록만 다시 읽는다 (갱신은 보내지 않는다) */
+  async function recheckUpdate() {
+    if (updateUnknown === null || jobBusy !== null) return
+    setJobBusy('recheck')
+    try {
+      await showLatestJob(updateUnknown.seen, updateUnknown.why)
+    } finally {
+      if (mountedRef.current) setJobBusy(null)
     }
   }
 
@@ -824,7 +919,10 @@ function KeyJoin() {
     setJobId((cur) => (cur !== null && cur !== target.id && rest.some((j) => j.id === cur) ? cur : (rest[0]?.id ?? null)))
     setDelTarget(null)
     setJobMatch(null)
-    if (applied?.job.id === target.id) setApplied(null)
+    if (applied?.job.id === target.id) {
+      setApplied(null)
+      setUpdateUnknown(null)
+    }
     if (rest.length === 0) setJobsEmptied(true)
     setJobNote(`${note} 실행 기록·결과 파일은 그대로입니다.${rest.length === 0 ? ' 남은 저장한 작업이 없습니다.' : ''}`)
     // 남은 작업이 있으면 그 선택 상자, 없으면 이 구역의 제목 — 사라진 '정말 삭제' 대신 (안내 문구로는 옮기지 않는다)
@@ -1992,11 +2090,17 @@ function KeyJoin() {
               <button type="button" className="mapping-confirm" aria-disabled={!canSave || !saveName.trim()} onClick={() => void saveJob(false)}>
                 {jobBusy === 'save' ? '저장 중…' : '저장한 작업으로 저장'}
               </button>
-              {applied && (
-                <button type="button" className="mapping-confirm" aria-disabled={!canSave} onClick={() => void saveJob(true)}>
-                  작업 &lsquo;{applied.job.name}&rsquo; 갱신 (v{applied.job.version + 1})
-                </button>
-              )}
+              {/* 같은 자리의 같은 button — 갱신 결과를 모르는 동안 '저장된 판 확인'으로 바뀌어도 누른 단추의 초점이 그대로 남는다 */}
+              {applied &&
+                (updateUnknown ? (
+                  <button type="button" className="mapping-confirm" aria-disabled={jobBusy !== null} onClick={() => void recheckUpdate()}>
+                    {jobBusy === 'recheck' ? '확인 중…' : '저장된 판 확인'}
+                  </button>
+                ) : (
+                  <button type="button" className="mapping-confirm" aria-disabled={!canSave} onClick={() => void saveJob(true)}>
+                    작업 &lsquo;{applied.job.name}&rsquo; 갱신 (v{applied.job.version + 1})
+                  </button>
+                ))}
             </div>
             <p role="status" className="mw-muted kj-jobnote">
               {saveNote ?? ''}

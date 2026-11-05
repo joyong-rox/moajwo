@@ -13,6 +13,10 @@
   아님). 확실하지 않으면(같은 점수의 파일이 둘, 같은 이름의 열이 여럿, 열이 없음) 자동으로 정하지 않고 후보를 보여
   사용자가 고르게 한다(apply의 assignments·columns). 이름이 같고 위치만 바뀐 열은 그대로 맞추고 '열 위치 변경'으로
   알린다. 이름이 다른 열은 위치가 같아도 자동으로 쓰지 않는다(사용자가 고른 뒤에만).
+- 갱신(PUT)은 화면이 본 버전(expected_version)을 **반드시** 받는다(재발급의 expected_auth_version과 같은 계약 — 없거나
+  정수가 아니면 422). 번호·소유자·버전을 조건으로 한 UPDATE 한 문장으로만 바꾸고, 그 사이 다른 창의 갱신이 먼저
+  반영됐으면 덮지 않고 409(KEYJOIN_JOB_VERSION_CHANGED). 화면은 자동으로 다시 보내지 않고 최신 목록을 다시 읽는다.
+  버전은 지금처럼 설정을 바꿀 때만 +1이다(이름만 바꾸는 갱신은 버전 그대로 — 조건에는 쓴다).
 - 소유자만 목록·조회·수정·삭제·맞추기를 한다(다른 사용자는 최고 관리자라도 404). 표준 통합 자동화
   (app/automation.py)와 그 화면·표·API는 그대로다.
 - key별 집계 후 연결(aggregate) 설정도 입력마다 저장하고(함수·열 이름·위치·결과 이름), 새 파일에서는 집계 열을 가져올
@@ -29,8 +33,8 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -84,8 +88,13 @@ class CreateIn(BaseModel):
 
 
 class UpdateIn(BaseModel):
+    """갱신: expected_version은 화면이 본 작업 버전 — **필수**(1 이상의 정수). 지금 버전과 다르면(다른 창의 갱신이
+    먼저 반영됨) 덮지 않고 409. 본문·버전이 없거나 정수가 아니면(불리언·문자열·실수 포함) 422 — 조건 없는 갱신
+    경로는 없다."""
+
     model_config = ConfigDict(extra="forbid")
 
+    expected_version: StrictInt = Field(ge=1)
     name: StoredText | None = Field(default=None, min_length=1, max_length=NAME_MAX)
     request: KeyJoinIn | None = None  # 있으면 설정을 통째로 바꾼다 (버전 +1)
 
@@ -637,29 +646,57 @@ def get_job(job_id: int, db: Annotated[Session, Depends(get_session)], user: Cur
 def update_job(
     job_id: int, body: UpdateIn, db: Annotated[Session, Depends(get_session)], user: CurrentUserDep
 ) -> dict[str, Any]:
-    """이름·설정을 바꾼다 (설정을 바꾸면 버전 +1 — 이전 판으로 받은 확인 결과는 요청이 달라져 만들기에 쓸 수 없다)."""
+    """이름·설정을 바꾼다 (설정을 바꾸면 버전 +1 — 이전 판으로 받은 확인 결과는 요청이 달라져 만들기에 쓸 수 없다).
+    화면이 본 버전(expected_version, 필수)과 지금 버전이 같을 때만 바꾼다 — 결정은 번호·소유자·버전을 조건으로 한 UPDATE
+    한 문장이다(앞의 버전 비교는 헛일을 줄이는 빠른 거절일 뿐). 0행이면 그 사이 지워졌거나 남의 것이면 404, 다른 갱신이
+    먼저 반영됐으면 409(KEYJOIN_JOB_VERSION_CHANGED) — 어느 쪽도 아무것도 바꾸지 않는다."""
     job = _get(db, job_id, user)
     if body.name is None and body.request is None:
         raise _bad("바꿀 이름이나 설정을 보내세요.")
+    if job.version != body.expected_version:
+        raise _version_changed(body.expected_version, job.version)
+    values: dict[str, Any] = {"updated_at": datetime.now(KST)}
     if body.name is not None:
         name = body.name.strip()
         if not name:
             raise _bad("작업 이름을 적으세요.")
         if _name_taken(db, user, name, except_id=job.id):
             raise _conflict("KEYJOIN_JOB_NAME_TAKEN", "같은 이름의 저장한 작업이 이미 있습니다 — 다른 이름을 적으세요.")
-        job.name = name
+        values["name"] = name
     if body.request is not None:
-        job.spec = json.dumps(_spec_for(db, user, body.request), ensure_ascii=False)
-        job.version += 1
-    job.updated_at = datetime.now(KST)
+        values["spec"] = json.dumps(_spec_for(db, user, body.request), ensure_ascii=False)
+        values["version"] = body.expected_version + 1
+    stmt = (
+        update(KeyJoinJob)
+        .where(KeyJoinJob.id == job_id, KeyJoinJob.owner_id == user.id, KeyJoinJob.version == body.expected_version)
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
     try:
-        db.commit()
+        changed = db.execute(stmt).rowcount
+        if changed:
+            db.commit()
     except IntegrityError as exc:
         db.rollback()
         raise _conflict(
             "KEYJOIN_JOB_NAME_TAKEN", "같은 이름의 저장한 작업이 이미 있습니다 — 다른 이름을 적으세요."
         ) from exc
+    if not changed:
+        db.rollback()
+        now = db.scalar(select(KeyJoinJob.version).where(KeyJoinJob.id == job_id, KeyJoinJob.owner_id == user.id))
+        if now is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, NOT_FOUND)
+        raise _version_changed(body.expected_version, now)
+    db.refresh(job)
     return job_out(job)
+
+
+def _version_changed(seen: int, now: int) -> HTTPException:
+    return _conflict(
+        "KEYJOIN_JOB_VERSION_CHANGED",
+        f"이 작업은 그 사이 다른 곳에서 바뀌었습니다 (이 화면이 본 판 v{seen}, 지금 v{now}) — 바꾸지 않았습니다. "
+        "최신 내용을 다시 불러온 뒤 다시 저장하세요.",
+    )
 
 
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
