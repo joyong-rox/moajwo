@@ -198,7 +198,7 @@ function SaveAutomation({ run }: { run: IntegrationRun }) {
     return (
       <p className="integration-automation-saved" role="status">
         자동화 '{saved.name}'(으)로 저장했습니다 — 열 규칙 {saved.column_rules.length}개, 이름 연결{' '}
-        {Object.keys(saved.entity_rules).length}개. 상단 '자동화' 메뉴에서 새 파일로 실행하세요.
+        {Object.keys(saved.entity_rules).length}개. 상단 '자동화·저장한 작업' 메뉴에서 새 파일로 실행하세요.
       </p>
     )
   }

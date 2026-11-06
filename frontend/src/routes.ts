@@ -15,7 +15,7 @@ export const ADMIN_BASE = '/moajwoAdmin'
 /** 화면 경로와 볼 수 있는 역할. 메뉴에는 볼 수 있는 것만 보인다 (서버도 같은 기준으로 403을 돌려준다). */
 export const ROUTES: RouteDef[] = [
   { path: '/', label: '홈', roles: ALL, inMenu: true },
-  { path: '/automations', label: '자동화', roles: ALL, inMenu: true },
+  { path: '/automations', label: '자동화·저장한 작업', roles: ALL, inMenu: true }, // 통합 자동화 + 공통 key 저장한 작업
   { path: '/runs', label: '실행 기록', roles: ALL, inMenu: true },
   { path: '/reviews', label: '검토 목록', roles: ALL, inMenu: true },
   { path: '/mapping', label: '열 매핑', roles: ALL, inMenu: true },

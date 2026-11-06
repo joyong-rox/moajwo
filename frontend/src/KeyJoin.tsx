@@ -36,7 +36,7 @@ import PiiNotice from './PiiNotice'
 import { navigate, replaceSearch, useSearch } from './router'
 import { RunDownloadLink } from './RunDownloadLink'
 import { TableRegion } from './Analysis' // 넘칠 때만 이름(region)·Tab 정지점을 받는 표 래퍼 (키보드 가로 스크롤)
-import { formatTime, KEYJOIN_SCOPE_LABEL } from './runFormat'
+import { jobTimeText, KEYJOIN_SCOPE_LABEL } from './runFormat'
 import { Banner, NavLink, WorkflowSteps, type Step } from './Workflow'
 
 const STORE = 'moajwo.keyjoin.draft' // 새로고침·뒤로 가기 뒤에도 같은 파일이면 설정을 이어 쓴다 (이 브라우저에만, 선택은 ID로만)
@@ -94,6 +94,33 @@ const NEW_INPUT: InputDraft = { key_columns: [], columns: [] }
 function filesFrom(search: string): number[] {
   const raw = new URLSearchParams(search).get('files') ?? ''
   return [...new Set(raw.split(',').map((v) => Number(v.trim())))].filter((n) => Number.isInteger(n) && n > 0)
+}
+
+// '자동화·저장한 작업'의 '적용하러 가기'로 고른 작업 번호 (?job=). 파일을 고르기 전이면 이 탭에 남겨 두었다가, 홈에서 파일을 고르고
+// 들어온 뒤 처음 읽은 목록에서 한 번 고르고 지운다 (맞추기는 사용자가 누른다)
+const PICK = 'moajwo.keyjoin.pick'
+
+function jobFrom(search: string): number | null {
+  const n = Number(new URLSearchParams(search).get('job') ?? '')
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+
+function loadPick(): number | null {
+  try {
+    const n = Number(sessionStorage.getItem(PICK) ?? '')
+    return Number.isInteger(n) && n > 0 ? n : null
+  } catch {
+    return null
+  }
+}
+
+function savePick(id: number | null) {
+  try {
+    if (id === null) sessionStorage.removeItem(PICK)
+    else sessionStorage.setItem(PICK, String(id))
+  } catch {
+    // 저장소를 쓸 수 없으면(사생활 보호 창 등) 이번 화면에서만 — 파일을 고르고 돌아오면 첫 작업이 골라진다
+  }
 }
 
 function loadDraft(filesKey: string): Draft {
@@ -335,11 +362,6 @@ function kindsOf(job: KeyJoinJob): AppliedJob['kinds'] {
   return Object.fromEntries(job.inputs.map((i) => [String(i.role), i.key_kinds]))
 }
 
-/** 저장한 작업의 마지막 저장 시각 — 갱신한 적이 있으면 수정 시각, 없으면 처음 저장 시각 */
-function jobTimeText(job: KeyJoinJob): string {
-  return `${job.updated_at ? '수정' : '저장'} ${formatTime(job.updated_at ?? job.created_at)}`
-}
-
 /** 저장 때 key 열의 자료형 분포(글자·정수)와 이번 확인 결과를 비교 — 서버(app/keyjoin_jobs.py kind_changes)와 같은 규칙 */
 function kindChangeNotes(expected: AppliedJob['kinds'], plan: KeyJoinPlan): string[] {
   const out: string[] = []
@@ -432,6 +454,8 @@ function KeyJoin() {
   const deletingRef = useRef(false) // 다시 그리기 전에 두 번 눌려도 삭제 요청은 한 번
   const mountedRef = useRef(true) // 화면을 떠난 뒤 늦게 온 응답은 상태·초점을 건드리지 않는다
   const jobsSeq = useRef(0) // 저장한 작업 목록 요청 순번 — 늦게 온 예전 응답이 더 새 목록(지운 결과)을 덮지 않게
+  // '자동화·저장한 작업'에서 고른 작업 (주소 ?job= — 없으면 이 탭에 남긴 것). 파일 없이 열었을 때 목록에 표시한다
+  const [pickId] = useState(() => jobFrom(window.location.search) ?? loadPick())
 
   const { request, invalid, refs, baseKey } = buildRequest(files, draft, meta, metaError)
   const reqKey = JSON.stringify(request)
@@ -478,12 +502,27 @@ function KeyJoin() {
     target?.focus()
   }, [jobFocus])
   useEffect(() => {
+    // 파일 없이 고른 작업은 홈에서 파일을 고르고 돌아올 때까지 이 탭에 남긴다
+    const want = jobFrom(window.location.search)
+    if (want !== null && filesFrom(window.location.search).length === 0) savePick(want)
+  }, [])
+  useEffect(() => {
     const controller = new AbortController()
+    const want = jobFrom(window.location.search) ?? loadPick()
+    const withFiles = filesFrom(window.location.search).length > 0
     listKeyJoinJobs(controller.signal)
       .then((list) => {
         if (controller.signal.aborted) return
         setJobs(list)
-        setJobId((cur) => (cur !== null && list.some((j) => j.id === cur) ? cur : (list[0]?.id ?? null)))
+        const picked = want === null ? null : (list.find((j) => j.id === want) ?? null)
+        if (want !== null && (withFiles || !picked)) savePick(null) // 한 번 쓰면(또는 없는 작업이면) 지운다
+        if (want !== null && withFiles)
+          setJobNote(
+            picked
+              ? `골라 둔 작업: '${picked.name}' (v${picked.version}) — '자동화·저장한 작업'에서 골랐습니다. '이 파일들에 맞추기'를 누르면 이번 파일에 맞춥니다.`
+              : `'자동화·저장한 작업'에서 고른 작업을 목록에서 찾지 못했습니다 (번호 ${want}) — 그 사이 지워졌을 수 있습니다. 선택 상자에서 고르세요.`,
+          )
+        setJobId((cur) => (cur !== null && list.some((j) => j.id === cur) ? cur : (picked?.id ?? list[0]?.id ?? null)))
       })
       .catch((err: unknown) => {
         if (!controller.signal.aborted) setJobsError(`저장한 작업 목록을 읽지 못했습니다: ${errorText(err)}`)
@@ -1108,6 +1147,7 @@ function KeyJoin() {
     : null
   const takenSaved = takenTarget !== null && savedHere && applied?.job.id === takenTarget.job.id && applied.job.version === takenTarget.job.version
   const fileLabel = (fid: number) => `#${fid} ${meta[fid]?.original_name ?? ''}`.trim()
+  const pickedJob = pickId !== null ? (jobs?.find((j) => j.id === pickId) ?? null) : null
 
   let why: string | null = null
   if (!files.length) why = '고른 파일이 없습니다 — 홈에서 파일을 고르세요.'
@@ -1187,17 +1227,25 @@ function KeyJoin() {
         <fieldset className="an-step bd-step">
           <legend>저장한 작업{jobs !== null ? ` (${jobs.length}개)` : ''}</legend>
           <p className="mw-muted">
-            이 화면에서 저장한 공통 key 연결 설정입니다 (본인 것만 — &lsquo;자동화&rsquo; 메뉴와는 따로 저장). 이번 파일에 맞춰 쓰거나
-            지우려면 홈에서 파일을 {MIN_INPUTS}개 이상 고르고 &lsquo;공통 key로 연결하기&rsquo;로 들어오세요 — 위쪽 &lsquo;저장한 작업
-            적용&rsquo;에서 합니다.
+            이 화면에서 저장한 공통 key 연결 설정입니다 (본인 것만 — &lsquo;자동화·저장한 작업&rsquo; 메뉴에서도 보고 지울 수 있습니다).
+            이번 파일에 맞춰 쓰거나 지우려면 홈에서 파일을 {MIN_INPUTS}개 이상 고르고 &lsquo;공통 key로 연결하기&rsquo;로 들어오세요 — 위쪽
+            &lsquo;저장한 작업 적용&rsquo;에서 합니다.
           </p>
+          {pickId !== null && jobs !== null && (
+            <p className="kj-picknote">
+              {pickedJob
+                ? `고른 작업: '${pickedJob.name}' (v${pickedJob.version}) — 홈에서 파일을 ${MIN_INPUTS}개 이상 고르고 '공통 key로 연결하기'로 들어오면 이 작업이 골라진 채로 열립니다.`
+                : `'자동화·저장한 작업'에서 고른 작업을 목록에서 찾지 못했습니다 (번호 ${pickId}) — 그 사이 지워졌을 수 있습니다.`}
+            </p>
+          )}
           {jobs !== null &&
             (jobs.length === 0 ? (
               <p className="mw-muted">저장한 작업이 없습니다 — 파일을 고른 뒤 6단계 &lsquo;저장한 작업으로 저장&rsquo;으로 만들 수 있습니다.</p>
             ) : (
               <ul className="bd-files kj-joblist" aria-label="저장한 작업 목록">
                 {jobs.map((j) => (
-                  <li key={j.id}>
+                  <li key={j.id} className={j.id === pickedJob?.id ? 'is-picked' : undefined}>
+                    {j.id === pickedJob?.id && <span className="kind-badge is-picked">고른 작업</span>}
                     <strong>{j.name}</strong>
                     <span>v{j.version}</span>
                     <span>{jobTimeText(j)}</span>
@@ -2258,7 +2306,7 @@ function KeyJoin() {
               <div ref={takenRef} role="group" aria-labelledby={`${ids}-taken`} className="mapping-warn kj-taken">
                 <p id={`${ids}-taken`}>
                   {taken.job
-                    ? `같은 이름의 작업이 위 '저장한 작업 적용' 목록에 있습니다: '${taken.job.name}' (v${taken.job.version} · ${jobTimeText(taken.job)}). 저장한 작업은 '자동화' 메뉴가 아니라 이 화면에서 봅니다.`
+                    ? `같은 이름의 작업이 위 '저장한 작업 적용' 목록에 있습니다: '${taken.job.name}' (v${taken.job.version} · ${jobTimeText(taken.job)}). 저장한 작업은 이 화면과 '자동화·저장한 작업' 메뉴에서 봅니다.`
                     : taken.readError !== null
                       ? `같은 이름 '${taken.name}'의 작업이 있다고 서버가 알렸지만 목록을 읽지 못했습니다 (${taken.readError}) — 그 작업은 위 '저장한 작업 적용' 목록에 있습니다.`
                       : `목록을 다시 읽어 보니 '${taken.name}' 작업이 보이지 않습니다 — 그 사이 다른 곳에서 지웠을 수 있습니다. 다시 저장하거나 다른 이름을 적으세요.`}
