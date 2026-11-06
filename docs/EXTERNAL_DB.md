@@ -603,7 +603,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
   - `moajwo-test`의 가지만 바꾸고 저장 → Auto-Deploy Off 확인 → 프런트만 수동 배포(14:00 시작 → 14:01 Live, 배포 로그 오류 없음). 그 밖의 설정은 바꾸지 않았다.
   - 배포 전: 병합 커밋 `81225af`로 진단 image-check 통과(Render 프런트 빌드·`nginx -t`·비루트·상류 TLS 검증·Trivy 0).
   - 갱신 뒤 점검(14:07~14:08, 쓰기 없음): `wake_render.ps1` 4/4 · 프런트 `/` 200(JS `index-D92jgbhH.js`·보안 헤더 4종, 새 안내 문구 포함) · 프런트 `/api/health`·API `/health` `database: ok` · `setup_required: false`(API·프런트) · 가입·설정 410 · 저장한 작업 API·`/auth/me` 비로그인 401. API의 live 배포가 `8cc69d0`(`dep-dbm3mpec6qcc73ft8ppg`) 그대로인지는 응답으로 구별할 수 없어(backend 코드가 같음) Render 화면의 값으로 확인했다.
-  - `frontend/Dockerfile.render`의 nginx 기반(`FROM nginx:1.30-alpine`)은 digest로 고정돼 있지 않아 Render가 빌드할 때의 상류를 쓴다(로컬 `frontend/Dockerfile`은 고정). 이번 image-check에서 상류가 alpine 3.24.3 → 3.24.4로 바뀐 것을 확인했다 — 고정은 별도 PR로 다룬다.
+  - `frontend/Dockerfile.render`의 nginx 기반은 **digest로 고정됨(다음 배포부터 적용)**: `nginx:1.30-alpine@sha256:e9b2d7624fd7957f4ed44ae0a272d93fb73aeb8512ba8916f8118ae6143fd115`(nginx 1.30.6 · Alpine 3.24.4) — 81225af 배포 직전 image-check(run 42163628838)가 태그로 받아 실제로 쓴 이미지다. 로컬 `frontend/Dockerfile`의 고정(`sha256:47928bf…`, Alpine 3.24.3)과는 다른 판이며 로컬 쪽은 바꾸지 않았다. 지금 live 프런트(`dep-dbmltne7bikc73bdo25g`)는 고정 전 Dockerfile(떠도는 태그)로 빌드됐고, 그때 Render가 받은 기반 digest는 확인하지 않았다 — 고정은 다음 Render 프런트 배포 때 새 릴리스 가지로 함께 들어간다.
 - **릴리스 가지:** 릴리스 가지는 움직이지 않는다. 새 릴리스는 새 가지로 한다. `release/render-8cc69d0`은 **API가 계속 쓰므로 보존**하고, `release/render-81225af`는 프런트가 쓴다. 옛 릴리스 가지 `release/render-eeb27f1`은 되돌리기용으로 보존한다(8-4).
 
 **제안값 (승인 묶음 8-5에 넣어 한 번에 적용 — 이번 작업에서는 저장하지 않음):**
