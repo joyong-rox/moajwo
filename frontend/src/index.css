@@ -1248,6 +1248,7 @@ body {
 }
 
 .automation,
+.saved-hub-keyjoin,
 .runs {
   margin-top: 24px;
   border: 1px solid var(--border);
@@ -1264,6 +1265,7 @@ body {
 }
 
 .automation h2,
+.saved-hub-keyjoin h2,
 .runs h2 {
   margin: 0 0 4px;
   font-size: 1.125rem;
@@ -4651,6 +4653,7 @@ button.wk-card:hover {
 .admin,
 .glossary,
 .automation,
+.saved-hub-keyjoin,
 .runs,
 .upload,
 .validation,
@@ -4664,6 +4667,7 @@ button.wk-card:hover {
 .admin,
 .glossary,
 .automation,
+.saved-hub-keyjoin,
 .runs {
   padding: 20px;
 }
@@ -4671,6 +4675,7 @@ button.wk-card:hover {
 .admin h2,
 .glossary h2,
 .automation h2,
+.saved-hub-keyjoin h2,
 .runs h2,
 .upload h2,
 .validation h2 {
@@ -5061,6 +5066,7 @@ details.automation-files[open] {
   .admin,
   .glossary,
   .automation,
+  .saved-hub-keyjoin,
   .runs {
     padding: 16px;
   }
@@ -5523,6 +5529,92 @@ ul.bd-item-problems,
 .kj-joblist > li > strong {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* '자동화·저장한 작업'에서 고른 작업 (파일을 고르기 전 목록) */
+.kj-joblist > li.is-picked {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.kj-picknote {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+/* 자동화·저장한 작업 (/automations) — 두 구역과 종류 표시 */
+.saved-hub-jump {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 8px 0 16px;
+}
+
+.saved-hub-jobs {
+  margin-top: 12px;
+}
+
+.saved-hub-jobs > li > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.saved-hub-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+  margin-left: auto;
+}
+
+.saved-hub-jobs > li > .saved-hub-confirm {
+  flex-basis: 100%;
+  min-width: 0;
+}
+
+.kind-badge {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.kind-badge.is-auto {
+  background: var(--confirmed-bg);
+  color: var(--confirmed-text);
+}
+
+.kind-badge.is-keyjoin {
+  background: var(--note-bg);
+  color: var(--note-text);
+}
+
+.kind-badge.is-picked {
+  background: var(--bg);
+  color: var(--accent-hover);
+  border: 1px solid var(--accent);
+}
+
+.automation-pick .automation-pick-name {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-width: 0;
+  color: var(--text);
+  font-size: inherit;
+}
+
+.automation-pick .automation-pick-name > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.automation-pick .kind-badge {
+  font-size: 0.8rem;
 }
 
 /* 라벨 글자 + 선택 상자 한 줄 (좁으면 줄바꿈) */

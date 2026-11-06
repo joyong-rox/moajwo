@@ -576,7 +576,7 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 
 전환 뒤 점검(19:59, 쓰기 없음): 프런트 `/` 200 · 프런트 `/api/health`·API `/health` `database: ok` · `/auth/status` `setup_required: true` → 관리자 생성·사용자 1명 발급 뒤 `false`(20:11 쓰기 재개) · setup/signup 410 · 첫 백업(7장) 완료. 릴리스 가지 `release/render-eeb27f1`(= `eeb27f1`)은 움직이지 않으며 새 릴리스는 새 가지로(Auto-Deploy Off·수동 배포). 세부 기록은 Git 밖 `backups/followup-20261030/round11/`과 승인 묶음 `round10/APPROVAL-RENDER-20261101.md`. 가지 `test/render-20261021`(옛 프런트 시험 가지, 60bcae8)은 어느 서비스도 가리키지 않게 된 뒤 2026-11-01 12차에 bundle로 보존하고 삭제했다(`deploy/render-preview-20261021`은 PR #19 기록으로 보존).
 
-**현재값 — 2026-11-05 갱신(eeb27f1 → 8cc69d0 · Neon 0022 → 0024) + 2026-11-06 프런트만 갱신(8cc69d0 → 81225af) (수행 주체: Render 가지 변경·수동 배포는 소유자 승인 뒤 Claude가 Render 화면에서, Neon 마이그레이션·점검·백업은 작업 에이전트가 소유자 PC에서):**
+**2026-11-06 16:42 정지 전까지의 값 — 2026-11-05 갱신(eeb27f1 → 8cc69d0 · Neon 0022 → 0024) + 2026-11-06 프런트만 갱신(8cc69d0 → 81225af) (수행 주체: Render 가지 변경·수동 배포는 소유자 승인 뒤 Claude가 Render 화면에서, Neon 마이그레이션·점검·백업은 작업 에이전트가 소유자 PC에서). 지금 상태는 아래 '현재값 — 2026-11-06 16:42 세 서비스 정지':**
 
 | 서비스 | 연결 브랜치 | Auto-Deploy | live 배포 |
 |---|---|---|---|
@@ -605,6 +605,20 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
   - 갱신 뒤 점검(14:07~14:08, 쓰기 없음): `wake_render.ps1` 4/4 · 프런트 `/` 200(JS `index-D92jgbhH.js`·보안 헤더 4종, 새 안내 문구 포함) · 프런트 `/api/health`·API `/health` `database: ok` · `setup_required: false`(API·프런트) · 가입·설정 410 · 저장한 작업 API·`/auth/me` 비로그인 401. API의 live 배포가 `8cc69d0`(`dep-dbm3mpec6qcc73ft8ppg`) 그대로인지는 응답으로 구별할 수 없어(backend 코드가 같음) Render 화면의 값으로 확인했다.
   - `frontend/Dockerfile.render`의 nginx 기반은 **digest로 고정됨(다음 배포부터 적용)**: `nginx:1.30-alpine@sha256:e9b2d7624fd7957f4ed44ae0a272d93fb73aeb8512ba8916f8118ae6143fd115`(nginx 1.30.6 · Alpine 3.24.4) — 81225af 배포 직전 image-check(run 42163628838)가 태그로 받아 실제로 쓴 이미지다. 로컬 `frontend/Dockerfile`의 고정(`sha256:47928bf…`, Alpine 3.24.3)과는 다른 판이며 로컬 쪽은 바꾸지 않았다. 지금 live 프런트(`dep-dbmltne7bikc73bdo25g`)는 고정 전 Dockerfile(떠도는 태그)로 빌드됐고, 그때 Render가 받은 기반 digest는 확인하지 않았다 — 고정은 다음 Render 프런트 배포 때 새 릴리스 가지로 함께 들어간다.
 - **릴리스 가지:** 릴리스 가지는 움직이지 않는다. 새 릴리스는 새 가지로 한다. `release/render-8cc69d0`은 **API가 계속 쓰므로 보존**하고, `release/render-81225af`는 프런트가 쓴다. 옛 릴리스 가지 `release/render-eeb27f1`은 되돌리기용으로 보존한다(8-4).
+
+**현재값 — 2026-11-06 16:42 세 서비스 정지 (소유자 결정: 실사용은 로컬로 — 수행 주체: 소유자 승인 뒤 Claude가 Render 화면에서 Suspend):**
+
+| 서비스 | 상태 | 연결 브랜치 (그대로) | 마지막 live 배포 (그대로) |
+|---|---|---|---|
+| `moajwo-test` | **Suspended** 2026-11-06 16:42 KST | `release/render-81225af` | `81225af`(`dep-dbmltne7bikc73bdo25g`) |
+| `moajwo-test-api` | **Suspended** 2026-11-06 16:42 KST | `release/render-8cc69d0` | `8cc69d0`(`dep-dbm3mpec6qcc73ft8ppg`) |
+| `moajwo-test-web` | **Suspended** (2026-11-05 17:34부터 정지 상태 — 16:42 정지 대상에 함께 포함) | (설정 그대로) | `66405ef`(옛 프런트) |
+
+- **실사용은 로컬(127.0.0.1)에서 소유자 혼자 합니다. Render·Neon에는 실제 업무 자료를 넣지 않습니다.** Render는 시연·시험용이었고, 다시 켤지는 소유자가 정합니다(Resume은 Render 화면 조작 — 소유자 또는 소유자 승인을 받은 Claude).
+- 서비스·설정·환경 변수·릴리스 가지는 지우거나 바꾸지 않았습니다. 세 릴리스 가지(`release/render-81225af`·`release/render-8cc69d0`·`release/render-eeb27f1`)는 그대로 보존합니다.
+- **Neon `neondb`** 자료(0024)는 그대로입니다. 주간 백업 예약(7장, 매주 일요일 21:00)은 당분간 유지합니다.
+- 정지 뒤 공개 주소 확인(2026-11-06 16:57 KST, GET만 — 로그인·쿠키 없음): 세 서비스 모두 HTTP 503 'Service Suspended'("This service has been suspended by its owner."). Render 화면의 값은 소유자 전달값입니다.
+- `moajwo-test-web`의 삭제 여부는 예정대로 2026-11-15에 다시 결정합니다.
 
 **제안값 (승인 묶음 8-5에 넣어 한 번에 적용 — 이번 작업에서는 저장하지 않음):**
 

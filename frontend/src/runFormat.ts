@@ -23,6 +23,11 @@ export function formatTime(value: string | null): string {
   return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}:${p.second}`
 }
 
+/** 저장한 작업의 마지막 저장 시각 — 갱신한 적이 있으면 수정 시각, 없으면 처음 저장 시각 */
+export function jobTimeText(job: { created_at: string; updated_at: string | null }): string {
+  return `${job.updated_at ? '수정' : '저장'} ${formatTime(job.updated_at ?? job.created_at)}`
+}
+
 export function formatDuration(ms: number | null): string {
   if (ms === null) return '-'
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}초`
