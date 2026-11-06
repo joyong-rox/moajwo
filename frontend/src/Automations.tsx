@@ -17,6 +17,7 @@ import ReviewPanel from './ReviewPanel'
 import { RunOutcomeText } from './RunOutcome'
 import { formatDuration, formatTime, STATUS_CLASS } from './runFormat'
 import { RunDownloadLink } from './RunDownloadLink'
+import { NavLink } from './Workflow'
 
 function errorText(err: unknown) {
   return err instanceof Error ? err.message : String(err)
@@ -55,7 +56,14 @@ function Automations() {
         </p>
       )}
       {automations !== null && automations.length === 0 && (
-        <p className="upload-drop-hint">저장된 자동화가 없습니다.</p>
+        <>
+          <p className="upload-drop-hint">저장된 자동화가 없습니다.</p>
+          {/* 공통 key 연결의 '저장한 작업'은 다른 기능(따로 저장)이라 여기에 나오지 않는다 — 찾는 곳을 알려 준다 */}
+          <p className="upload-drop-hint">
+            공통 key 취합의 &lsquo;저장한 작업&rsquo;은 자동화와 따로 저장되어 이 목록에 나오지 않습니다 — 그 화면에 있습니다.{' '}
+            <NavLink href="/keyjoin">공통 key로 연결하기에서 저장한 작업 보기</NavLink>
+          </p>
+        </>
       )}
       {automations !== null && automations.length > 0 && (
         <ul className="automation-list">

@@ -36,7 +36,7 @@ import PiiNotice from './PiiNotice'
 import { navigate, replaceSearch, useSearch } from './router'
 import { RunDownloadLink } from './RunDownloadLink'
 import { TableRegion } from './Analysis' // 넘칠 때만 이름(region)·Tab 정지점을 받는 표 래퍼 (키보드 가로 스크롤)
-import { KEYJOIN_SCOPE_LABEL } from './runFormat'
+import { formatTime, KEYJOIN_SCOPE_LABEL } from './runFormat'
 import { Banner, NavLink, WorkflowSteps, type Step } from './Workflow'
 
 const STORE = 'moajwo.keyjoin.draft' // 새로고침·뒤로 가기 뒤에도 같은 파일이면 설정을 이어 쓴다 (이 브라우저에만, 선택은 ID로만)
@@ -323,8 +323,22 @@ function draftFromRequest(req: KeyJoinRequest): Draft {
   }
 }
 
-type AppliedJob = { job: KeyJoinJob; notes: string[]; kinds: KeyJoinJobMatch['expected_key_kinds'] }
+// 이 화면의 설정과 이어진 저장한 작업 — 갱신(PUT)의 대상. from: 'match' = 맞추기·적용으로 초안에 넣은 작업(변경·예외 배너를 보인다),
+// 'save' = 이 화면에서 새로 저장했거나 같은 이름 안내에서 고른 기존 작업 (적용한 것이 아니라 배너는 없다)
+type AppliedJob = { job: KeyJoinJob; notes: string[]; kinds: KeyJoinJobMatch['expected_key_kinds']; from: 'match' | 'save' }
 type JobFocusTo = 'cancel' | 'ask' | 'sure' | 'recheck' | 'select' | 'legend'
+// 같은 이름(409) 뒤 안내 — 저장은 다시 보내지 않고 목록만 다시 읽어 찾은 기존 작업 (못 찾았거나 목록을 읽지 못하면 job = null)
+type NameTaken = { name: string; job: KeyJoinJob | null; readError: string | null }
+
+/** 저장 응답의 입력별 key 자료형 분포 → 맞추기 응답(expected_key_kinds)과 같은 꼴 (역할 → 분포) */
+function kindsOf(job: KeyJoinJob): AppliedJob['kinds'] {
+  return Object.fromEntries(job.inputs.map((i) => [String(i.role), i.key_kinds]))
+}
+
+/** 저장한 작업의 마지막 저장 시각 — 갱신한 적이 있으면 수정 시각, 없으면 처음 저장 시각 */
+function jobTimeText(job: KeyJoinJob): string {
+  return `${job.updated_at ? '수정' : '저장'} ${formatTime(job.updated_at ?? job.created_at)}`
+}
 
 /** 저장 때 key 열의 자료형 분포(글자·정수)와 이번 확인 결과를 비교 — 서버(app/keyjoin_jobs.py kind_changes)와 같은 규칙 */
 function kindChangeNotes(expected: AppliedJob['kinds'], plan: KeyJoinPlan): string[] {
@@ -394,13 +408,20 @@ function KeyJoin() {
   // seen: 갱신을 보낸 때의 작업, why: 받은 오류 문구
   const [updateUnknown, setUpdateUnknown] = useState<{ seen: AppliedJob; why: string } | null>(null)
   const [saveName, setSaveName] = useState('')
+  // 이 화면이 applied 작업에 마지막으로 저장(새로 저장·갱신)한 설정의 saveKey — 지금 설정과 같으면 6단계 칸이 '저장됨'이 된다
+  const [savedKey, setSavedKey] = useState<string | null>(null)
+  const [taken, setTaken] = useState<NameTaken | null>(null) // 같은 이름 409 뒤 기존 작업 안내 (자동으로 다시 보내지 않는다)
+  const saveNameRef = useRef<HTMLInputElement | null>(null)
+  const saveTitleRef = useRef<HTMLParagraphElement | null>(null) // 6단계 저장 칸의 제목 ('저장됨: …'으로 바뀐다)
+  const takenRef = useRef<HTMLDivElement | null>(null)
   // 삭제 확인을 연 작업 — 확인 문구·'정말 삭제'·다시 확인은 연 때의 ID에만 (그 뒤 선택·목록이 바뀌어도 대상이 바뀌지 않는다).
   // unknown: 삭제 결과를 확인하지 못함 (응답도 목록도 못 받음) — '정말 삭제' 대신 목록만 다시 읽는 '삭제 여부 다시 확인'
   const [delTarget, setDelTarget] = useState<{ id: number; name: string; unknown: boolean } | null>(null)
   // 이 화면에서 마지막 작업을 지웠으면 구역(제목·빈 상태·상태 알림)을 남긴다 — 처음부터 0개면 지금처럼 그리지 않는다
   const [jobsEmptied, setJobsEmptied] = useState(false)
   // 삭제 확인을 열고 닫거나 지운 뒤, 사라진 단추 대신 초점을 받을 곳 (다시 그린 뒤 옮긴다)
-  const [jobFocus, setJobFocus] = useState<{ to: JobFocusTo; n: number } | null>(null)
+  // force: 사용자가 이 구역 밖의 단추(같은 이름 안내의 '그 작업 고르기')로 직접 옮겨 달라고 한 때 — 초점이 구역 밖에 있어도 옮긴다
+  const [jobFocus, setJobFocus] = useState<{ to: JobFocusTo; n: number; force?: boolean } | null>(null)
   const jobsAreaRef = useRef<HTMLFieldSetElement | null>(null)
   const jobsLegendRef = useRef<HTMLLegendElement | null>(null)
   const jobSelectRef = useRef<HTMLSelectElement | null>(null)
@@ -414,6 +435,8 @@ function KeyJoin() {
 
   const { request, invalid, refs, baseKey } = buildRequest(files, draft, meta, metaError)
   const reqKey = JSON.stringify(request)
+  // 저장한 작업에 들어가는 설정만으로 비교하는 key — 행 포함/제외 결정(rows)은 저장하지 않으므로 빼고 본다 ('저장됨' 판정용)
+  const saveKey = JSON.stringify({ ...request, inputs: request.inputs.map((i) => ({ ...i, rows: undefined })) })
   // fresh: 지금 설정으로 받은 확인 결과 (만들기의 근거). view: 마지막으로 받은 확인 결과 (결과 영역을 그리는 데만 씀)
   const fresh = checked?.key === reqKey ? checked.plan : null
   const view = checked?.plan ?? null
@@ -442,7 +465,7 @@ function KeyJoin() {
     if (!jobFocus) return
     // 사용자가 그새 이 구역 밖으로 초점을 옮겼으면 빼앗지 않는다 (사라진 단추의 초점은 body로 떨어져 있다)
     const active = document.activeElement
-    if (active && active !== document.body && !jobsAreaRef.current?.contains(active)) return
+    if (!jobFocus.force && active && active !== document.body && !jobsAreaRef.current?.contains(active)) return
     const target = {
       cancel: cancelDeleteRef,
       ask: askDeleteRef,
@@ -722,7 +745,9 @@ function KeyJoin() {
     setCheckError(null)
     setNote(null)
     setJobMatch(null)
-    setApplied({ job: m.job, notes: m.notes, kinds: m.expected_key_kinds })
+    setApplied({ job: m.job, notes: m.notes, kinds: m.expected_key_kinds, from: 'match' })
+    setSavedKey(null) // 맞춘 초안은 이 화면이 저장한 설정이 아니다 ('저장됨'이 아님)
+    setTaken(null)
     setUpdateUnknown(null) // 방금 서버에서 받은 판으로 다시 맞췄다
     setJobNote(`저장한 작업 '${m.job.name}' (v${m.job.version})을 이번 파일에 맞춰 넣었습니다 — 변경·예외 ${m.notes.length}건. 5단계에서 연결을 확인하세요.`)
     if (key !== filesKey) {
@@ -789,35 +814,49 @@ function KeyJoin() {
     }
   }
 
-  /** 지금 설정을 저장한 작업으로 저장(새 이름) 또는 적용했던 작업을 갱신(버전 +1). 서버가 연결 확인을 한 번 거친다 */
-  async function saveJob(update: boolean) {
+  /** 지금 설정을 저장한 작업으로 저장(target = null: 새 이름) 또는 target 작업을 갱신(버전 +1). 서버가 연결 확인을 한 번 거친다.
+   *  저장·갱신에 성공하면 그 작업이 이 화면의 갱신 대상이 되고 6단계 칸이 '저장됨'이 된다 (같은 설정으로 다시 저장하지 않게).
+   *  같은 이름(409)이면 다시 보내지 않고 목록만 다시 읽어 기존 작업을 찾아 고를 것(그 작업 고르기·지금 설정으로 갱신·다른 이름)을 보인다 */
+  async function saveJob(target: AppliedJob | null) {
     if (jobBusy !== null || invalid.length || files.length < MIN_INPUTS) return
     const name = saveName.trim()
-    if (!update && !name) {
+    if (target === null && !name) {
       setSaveNote('저장할 작업 이름을 적으세요.')
+      return
+    }
+    if (target !== null && target.job.id === applied?.job.id && savedKey === saveKey) {
+      setSaveNote(`지금 설정은 이미 작업 '${target.job.name}' (v${target.job.version})에 저장되어 있습니다 — 설정을 바꾼 뒤 갱신하세요.`)
       return
     }
     setJobBusy('save')
     setSaveNote(null)
     setUpdateUnknown(null)
+    closeTaken()
+    const key = saveKey
     try {
       const job =
-        update && applied
-          ? await updateKeyJoinJob(applied.job.id, { expected_version: applied.job.version, request })
+        target !== null
+          ? await updateKeyJoinJob(target.job.id, { expected_version: target.job.version, request })
           : await createKeyJoinJob(name, request)
-      setSaveNote(`저장한 작업 '${job.name}' (v${job.version})${update ? '으로 갱신' : '으로 저장'}했습니다 — 다음 자료는 위 '저장한 작업 적용'에서 맞춰 쓰세요.`)
-      if (update && applied) setApplied({ ...applied, job })
+      setSaveNote(`저장한 작업 '${job.name}' (v${job.version})${target !== null ? '으로 갱신' : '으로 저장'}했습니다 — 다음 자료는 위 '저장한 작업 적용'에서 맞춰 쓰세요.`)
+      setApplied(target !== null ? { ...target, job } : { job, notes: [], kinds: kindsOf(job), from: 'save' })
+      setSavedKey(key)
       setSaveName('')
       reloadJobs(job.id)
     } catch (err) {
       const stale = err instanceof AnalysisProblemError && err.code === 'KEYJOIN_JOB_VERSION_CHANGED'
       const gone = err instanceof ApiError && err.status === 404
-      if (update && applied && (stale || gone)) {
-        await showLatestJob(applied, null) // 다시 보내지 않는다 — 최신 목록을 읽어 알릴 뿐
+      if (target !== null && (stale || gone)) {
+        await showLatestJob(target, null) // 다시 보내지 않는다 — 최신 목록을 읽어 알릴 뿐
         return
       }
-      if (update && applied && updateOutcomeUnknown(err)) {
-        await showLatestJob(applied, errorText(err)) // 결과를 모름 — 다시 보내지 않고, 지금 저장된 판만 읽어 사실대로 알린다
+      if (target !== null && updateOutcomeUnknown(err)) {
+        await showLatestJob(target, errorText(err)) // 결과를 모름 — 다시 보내지 않고, 지금 저장된 판만 읽어 사실대로 알린다
+        return
+      }
+      if (target === null && err instanceof AnalysisProblemError && err.code === 'KEYJOIN_JOB_NAME_TAKEN') {
+        setSaveNote(`저장하지 못했습니다: ${err.message} (아래 안내에서 기존 작업을 고르거나 다른 이름을 적으세요)`)
+        await showTaken(name) // 다시 보내지 않는다 — 목록만 읽어 기존 작업을 찾는다
         return
       }
       const text =
@@ -835,6 +874,7 @@ function KeyJoin() {
    *  이 화면의 갱신이 반영됐다고 단정하지 않는다(다른 창도 갱신할 수 있다). 읽기도 실패하면 미확인으로 두고 '저장된 판 확인'을 준다 */
   async function showLatestJob(seen: AppliedJob, unknown: string | null) {
     const n = ++jobsSeq.current
+    setSavedKey(null) // 갱신이 거절됐거나 결과를 모른다 — 이 화면의 설정이 저장됐다고 말하지 않는다
     const head = unknown === null ? '갱신하지 않았습니다' : `갱신 결과를 확인하지 못했습니다 (${unknown}) — 갱신을 다시 보내지 않았습니다.`
     try {
       const list = await listKeyJoinJobs()
@@ -895,8 +935,48 @@ function KeyJoin() {
     }
   }
 
-  function requestJobFocus(to: JobFocusTo) {
-    setJobFocus((f) => ({ to, n: (f?.n ?? 0) + 1 }))
+  /** 같은 이름(409) 뒤: 저장을 다시 보내지 않고 목록만 다시 읽어 그 이름의 기존 작업을 찾는다 (이 화면의 목록도 최신으로).
+   *  더 나중에 보낸 목록 요청이 있으면 이 응답은 버린다 */
+  async function showTaken(name: string) {
+    const n = ++jobsSeq.current
+    try {
+      const list = await listKeyJoinJobs()
+      if (!mountedRef.current || n !== jobsSeq.current) return
+      setJobs(list)
+      setJobId((cur) => (cur !== null && list.some((j) => j.id === cur) ? cur : (list[0]?.id ?? null)))
+      setTaken({ name, job: list.find((j) => j.name === name) ?? null, readError: null })
+    } catch (err) {
+      if (!mountedRef.current || n !== jobsSeq.current) return
+      setTaken({ name, job: null, readError: errorText(err) })
+    }
+  }
+
+  /** 같은 이름 안내 — '그 작업 고르기': 위 '저장한 작업 적용'의 선택 상자에서 그 작업을 고르고 초점을 옮긴다 (맞추기는 사용자가 누른다) */
+  function pickTaken() {
+    if (!taken?.job || jobBusy !== null) return
+    const job = taken.job
+    setJobId(job.id)
+    setJobMatch(null)
+    setDelTarget(null)
+    setJobsError(null)
+    setJobNote(`골랐습니다: 작업 '${job.name}' (v${job.version}) — '이 파일들에 맞추기'를 누르면 이번 파일에 맞춥니다.`)
+    requestJobFocus('select', true)
+  }
+
+  /** 같은 이름 안내를 닫는다 — 초점이 그 안의 단추에 있었으면(사라진다) 6단계 칸의 제목으로 옮긴다 (body로 떨어지지 않게) */
+  function closeTaken() {
+    if (takenRef.current?.contains(document.activeElement)) saveTitleRef.current?.focus()
+    setTaken(null)
+  }
+
+  /** 같은 이름 안내 — '다른 이름 적기': 이름 칸으로 초점을 옮기고 적은 이름을 고른다 (저장은 사용자가 다시 누른다) */
+  function focusSaveName() {
+    saveNameRef.current?.focus()
+    saveNameRef.current?.select()
+  }
+
+  function requestJobFocus(to: JobFocusTo, force = false) {
+    setJobFocus((f) => ({ to, n: (f?.n ?? 0) + 1, force }))
   }
 
   /** 인라인 삭제 확인: 누른 '이 작업 삭제'는 사라지므로 덜 위험한 '취소'가 초점을 받는다. 대상은 지금 고른 작업의 ID로 고정 */
@@ -922,7 +1002,9 @@ function KeyJoin() {
     if (applied?.job.id === target.id) {
       setApplied(null)
       setUpdateUnknown(null)
+      setSavedKey(null)
     }
+    if (taken?.job?.id === target.id) setTaken(null)
     if (rest.length === 0) setJobsEmptied(true)
     setJobNote(`${note} 실행 기록·결과 파일은 그대로입니다.${rest.length === 0 ? ' 남은 저장한 작업이 없습니다.' : ''}`)
     // 남은 작업이 있으면 그 선택 상자, 없으면 이 구역의 제목 — 사라진 '정말 삭제' 대신 (안내 문구로는 옮기지 않는다)
@@ -1016,6 +1098,15 @@ function KeyJoin() {
 
   const kindNotes = applied && fresh ? kindChangeNotes(applied.kinds, fresh) : []
   const canSave = files.length >= MIN_INPUTS && invalid.length === 0 && jobBusy === null
+  // 지금 설정이 applied 작업에 저장되어 있다 (이 화면이 저장·갱신한 그대로) — 6단계 칸은 '저장됨', 갱신은 설정을 바꾼 뒤에만
+  const savedHere = applied !== null && savedKey === saveKey
+  // 같은 이름 안내의 '지금 설정으로 갱신' 대상 — 그 작업이 이미 이 화면의 작업이면 그 정보(배너 등)를 이어 쓴다
+  const takenTarget: AppliedJob | null = taken?.job
+    ? applied?.job.id === taken.job.id
+      ? { ...applied, job: taken.job }
+      : { job: taken.job, notes: [], kinds: kindsOf(taken.job), from: 'save' }
+    : null
+  const takenSaved = takenTarget !== null && savedHere && applied?.job.id === takenTarget.job.id && applied.job.version === takenTarget.job.version
   const fileLabel = (fid: number) => `#${fid} ${meta[fid]?.original_name ?? ''}`.trim()
 
   let why: string | null = null
@@ -1089,6 +1180,40 @@ function KeyJoin() {
             <NavLink href="/">홈으로</NavLink>
           </p>
         </Banner>
+      )}
+
+      {/* 파일을 고르지 않아도 저장한 작업이 어디 있는지·무엇이 있는지 보이게 (보기만 — 적용·삭제는 파일을 고른 뒤 위 구역에서) */}
+      {!files.length && (jobs !== null || jobsError) && (
+        <fieldset className="an-step bd-step">
+          <legend>저장한 작업{jobs !== null ? ` (${jobs.length}개)` : ''}</legend>
+          <p className="mw-muted">
+            이 화면에서 저장한 공통 key 연결 설정입니다 (본인 것만 — &lsquo;자동화&rsquo; 메뉴와는 따로 저장). 이번 파일에 맞춰 쓰거나
+            지우려면 홈에서 파일을 {MIN_INPUTS}개 이상 고르고 &lsquo;공통 key로 연결하기&rsquo;로 들어오세요 — 위쪽 &lsquo;저장한 작업
+            적용&rsquo;에서 합니다.
+          </p>
+          {jobs !== null &&
+            (jobs.length === 0 ? (
+              <p className="mw-muted">저장한 작업이 없습니다 — 파일을 고른 뒤 6단계 &lsquo;저장한 작업으로 저장&rsquo;으로 만들 수 있습니다.</p>
+            ) : (
+              <ul className="bd-files kj-joblist" aria-label="저장한 작업 목록">
+                {jobs.map((j) => (
+                  <li key={j.id}>
+                    <strong>{j.name}</strong>
+                    <span>v{j.version}</span>
+                    <span>{jobTimeText(j)}</span>
+                    <span className="mw-muted">
+                      입력 {j.input_count}개 · key 열 {j.key_columns}개 · {j.scope_label}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ))}
+          {jobsError && (
+            <p className="upload-error" role="alert">
+              {jobsError}
+            </p>
+          )}
+        </fieldset>
       )}
 
       {files.length > 0 && jobs !== null && (jobs.length > 0 || jobsEmptied) && (
@@ -1303,7 +1428,7 @@ function KeyJoin() {
         </fieldset>
       )}
 
-      {files.length > 0 && applied && (
+      {files.length > 0 && applied?.from === 'match' && (
         <Banner
           tone={applied.notes.length + kindNotes.length ? 'warn' : 'info'}
           icon={applied.notes.length + kindNotes.length ? 'alert' : 'info'}
@@ -2068,8 +2193,26 @@ function KeyJoin() {
               )}
             </div>
           )}
-          <div className="kj-input">
-            <p className="kj-input-title">이 설정을 저장한 작업으로 저장 — 다음 자료에 같은 규칙을 맞춰 씁니다</p>
+          <div className={`kj-input${savedHere ? ' is-saved' : ''}`}>
+            <p ref={saveTitleRef} tabIndex={-1} className="kj-input-title">
+              {savedHere && applied
+                ? `저장됨: ${applied.job.name} (v${applied.job.version})`
+                : '이 설정을 저장한 작업으로 저장 — 다음 자료에 같은 규칙을 맞춰 씁니다'}
+            </p>
+            {savedHere && applied ? (
+              <p>
+                지금 설정이 이 작업에 저장되어 있습니다 — 다시 저장하지 않아도 됩니다. 설정을 바꾸면 &lsquo;갱신&rsquo;으로 이 작업에
+                반영하고, 따로 두려면 다른 이름을 적어 새로 저장하세요. 다음 자료는 위 &lsquo;저장한 작업 적용&rsquo;에서 맞춰 씁니다.
+              </p>
+            ) : (
+              applied &&
+              savedKey !== null && (
+                <p className="mapping-warn">
+                  작업 &lsquo;{applied.job.name}&rsquo; (v{applied.job.version})에 저장한 뒤 설정을 바꿨습니다 — 이 작업에 반영하려면
+                  &lsquo;갱신&rsquo;을, 따로 두려면 다른 이름으로 저장을 누르세요.
+                </p>
+              )
+            )}
             <p className="mw-muted">
               저장하는 것: 입력마다 시트·열 대응 기준(이름·위치), key 열과 복합 key 순서, 가져올 열·결과 이름·순서, 기준 입력·범위.
               저장하지 않는 것: 파일 자체·행 포함/제외 결정·개인정보 확인·요청 번호·확인 결과. 저장할 때 서버가 연결 확인을 한 번
@@ -2078,16 +2221,20 @@ function KeyJoin() {
             <label className="kj-row">
               작업 이름
               <input
+                ref={saveNameRef}
                 type="text"
                 className="bd-input"
                 aria-label="저장할 작업 이름"
                 maxLength={100}
                 value={saveName}
-                onChange={(e) => setSaveName(e.target.value)}
+                onChange={(e) => {
+                  setSaveName(e.target.value)
+                  if (taken && e.target.value.trim() !== taken.name) setTaken(null) // 다른 이름을 적기 시작하면 앞 이름의 안내는 닫는다
+                }}
               />
             </label>
             <div className="admin-actions kj-actions">
-              <button type="button" className="mapping-confirm" aria-disabled={!canSave || !saveName.trim()} onClick={() => void saveJob(false)}>
+              <button type="button" className="mapping-confirm" aria-disabled={!canSave || !saveName.trim()} onClick={() => void saveJob(null)}>
                 {jobBusy === 'save' ? '저장 중…' : '저장한 작업으로 저장'}
               </button>
               {/* 같은 자리의 같은 button — 갱신 결과를 모르는 동안 '저장된 판 확인'으로 바뀌어도 누른 단추의 초점이 그대로 남는다 */}
@@ -2097,7 +2244,8 @@ function KeyJoin() {
                     {jobBusy === 'recheck' ? '확인 중…' : '저장된 판 확인'}
                   </button>
                 ) : (
-                  <button type="button" className="mapping-confirm" aria-disabled={!canSave} onClick={() => void saveJob(true)}>
+                  // 지금 설정이 이미 저장되어 있으면 누를 수 없음(눌러도 보내지 않고 알림만) — 같은 설정으로 판만 올리지 않게
+                  <button type="button" className="mapping-confirm" aria-disabled={!canSave || savedHere} onClick={() => void saveJob(applied)}>
                     작업 &lsquo;{applied.job.name}&rsquo; 갱신 (v{applied.job.version + 1})
                   </button>
                 ))}
@@ -2105,6 +2253,43 @@ function KeyJoin() {
             <p role="status" className="mw-muted kj-jobnote">
               {saveNote ?? ''}
             </p>
+            {taken && (
+              // 같은 이름(409) 안내 — 저장은 다시 보내지 않았다. 고를 것: 그 작업 고르기 · 지금 설정으로 갱신 · 다른 이름 적기
+              <div ref={takenRef} role="group" aria-labelledby={`${ids}-taken`} className="mapping-warn kj-taken">
+                <p id={`${ids}-taken`}>
+                  {taken.job
+                    ? `같은 이름의 작업이 위 '저장한 작업 적용' 목록에 있습니다: '${taken.job.name}' (v${taken.job.version} · ${jobTimeText(taken.job)}). 저장한 작업은 '자동화' 메뉴가 아니라 이 화면에서 봅니다.`
+                    : taken.readError !== null
+                      ? `같은 이름 '${taken.name}'의 작업이 있다고 서버가 알렸지만 목록을 읽지 못했습니다 (${taken.readError}) — 그 작업은 위 '저장한 작업 적용' 목록에 있습니다.`
+                      : `목록을 다시 읽어 보니 '${taken.name}' 작업이 보이지 않습니다 — 그 사이 다른 곳에서 지웠을 수 있습니다. 다시 저장하거나 다른 이름을 적으세요.`}
+                </p>
+                {takenSaved ? (
+                  <p>지금 설정은 이미 이 작업에 저장되어 있습니다 — 다시 저장하지 않아도 됩니다.</p>
+                ) : (
+                  takenTarget && (
+                    <p className="mw-muted">
+                      &lsquo;지금 설정으로 갱신&rsquo;은 그 작업에 저장된 설정을 이 화면의 설정으로 바꿉니다 (판 +1 — 이전 판으로 되돌리는 기능은
+                      없습니다).
+                    </p>
+                  )
+                )}
+                <div className="admin-actions kj-actions">
+                  {taken.job && (
+                    <button type="button" className="mapping-run" aria-disabled={jobBusy !== null} onClick={pickTaken}>
+                      그 작업 고르기
+                    </button>
+                  )}
+                  {takenTarget && !takenSaved && (
+                    <button type="button" className="mapping-confirm" aria-disabled={!canSave} onClick={() => void saveJob(takenTarget)}>
+                      지금 설정으로 &lsquo;{takenTarget.job.name}&rsquo; 갱신 (v{takenTarget.job.version + 1})
+                    </button>
+                  )}
+                  <button type="button" className="login-link" onClick={focusSaveName}>
+                    다른 이름 적기
+                  </button>
+                </div>
+              </div>
+            )}
             {!canSave && jobBusy === null && files.length > 0 && (
               <p className="mw-muted">고칠 입력이 없을 때 저장할 수 있습니다 (2·3단계의 &lsquo;고칠 것&rsquo;을 먼저 해결).</p>
             )}
