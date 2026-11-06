@@ -5501,6 +5501,30 @@ ul.bd-item-problems,
   overflow-wrap: anywhere;
 }
 
+/* 6단계 저장 칸: 지금 설정이 저장한 작업에 저장되어 있음 ('저장됨: 이름 (v1)') */
+.kj-input.is-saved {
+  border-color: var(--ok);
+  background: var(--pass-bg);
+}
+
+/* 같은 이름(409) 안내 — 단추 묶음과 문장이 좁은 폭에서 줄바꿈되게 */
+.kj-taken {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.kj-taken > p {
+  margin: 0;
+}
+
+/* 파일을 고르지 않았을 때의 저장한 작업 목록 (보기만) — 긴 이름도 칸 안에서 줄바꿈 */
+.kj-joblist > li > strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 /* 라벨 글자 + 선택 상자 한 줄 (좁으면 줄바꿈) */
 .kj-row {
   display: flex;
