@@ -36,7 +36,7 @@ from app.decisions import DecisionInput, learn_column, load_decisions, load_lear
 from app.files import load_parsed
 from app.glossary import normalize_name
 from app.glossary_api import glossary_state
-from app.mapping import ColumnMapping, MappingEngine, get_engine, normalize, split_column_name
+from app.mapping import LLM_DISABLED_REASON, ColumnMapping, MappingEngine, get_engine, normalize, split_column_name
 from app.models import Automation, GlossaryAlias, MappingDecision, ReviewItem, ReviewSession, SourceFile, User
 from app.name_limits import (
     GLOSSARY_NAME_MAX,
@@ -172,12 +172,14 @@ def _mapping_reason(m: ColumnMapping) -> tuple[str, str]:
             f"유사도 {top.score:.2f}({detail})로 확인 기준(0.75 이상, 0.90 미만 또는 후보 차이 작음)입니다{gap}.",
             "rule",
         )
+    # 설정에서 LLM 단계를 껐으면 그 사실을 덧붙인다 (켜져 있는데 부르지 못한 경우와 구분)
+    off = " LLM 단계는 설정에서 꺼져 있어 묻지 않았습니다." if m.reason == LLM_DISABLED_REASON else ""
     if top is not None:
         return (
-            f"표준 사전과 맞는 항목을 찾지 못했습니다. 가장 가까운 후보는 '{top.label}' {top.score:.2f}입니다.",
+            f"표준 사전과 맞는 항목을 찾지 못했습니다. 가장 가까운 후보는 '{top.label}' {top.score:.2f}입니다.{off}",
             "rule",
         )
-    return "표준 사전과 맞는 항목을 찾지 못했습니다.", "rule"
+    return f"표준 사전과 맞는 항목을 찾지 못했습니다.{off}", "rule"
 
 
 def entity_reason(status: str, value: str, note: str | None, candidates: list[dict[str, Any]]) -> str:

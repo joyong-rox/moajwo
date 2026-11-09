@@ -58,6 +58,12 @@ function Mapping({ fileId }: { fileId: number }) {
                 'LLM을 사용할 수 없어 일부 열이 미해결로 남았습니다 (설정의 LLM 제공자·연결 확인).'}
             </p>
           )}
+          {mapping.llm === 'disabled' && (
+            <p className="mapping-warn" role="status">
+              LLM 단계 꺼짐(설정) — 사전·유사도로 정하지 못한 열은 LLM에 묻지 않고 미해결로 남겼습니다. 다시 쓰려면 최고
+              관리자가 설정 화면의 &lsquo;열 매핑 LLM 단계&rsquo;에서 켭니다.
+            </p>
+          )}
           {mapping.sheets.map((sheet) => (
             <p key={sheet.name} className="mapping-sheet mapping-summary">
               <strong>{sheet.name}</strong>{' '}
