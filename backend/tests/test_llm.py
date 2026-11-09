@@ -70,6 +70,7 @@ def test_only_owner_can_change(client: TestClient) -> None:
             assert client.get("/settings/llm").status_code == 403
             assert client.put("/settings/llm", json={"mode": "openai"}).status_code == 403
             assert client.post("/settings/llm/test").status_code == 403
+            assert client.put("/settings/llm/stage", json={"enabled": False}).status_code == 403
     finally:
         app.dependency_overrides[current_user] = original
 
@@ -180,3 +181,33 @@ def test_model_reason_loses_control_characters_it_cannot_store() -> None:
 
     assert clean_reason("인구\x00 수를 뜻함\x01") == "인구 수를 뜻함"
     assert clean_reason("줄\n바꿈\t유지") == "줄\n바꿈\t유지"
+
+
+def test_llm_stage_default_on_toggle_and_kept_across_provider_changes(client: TestClient) -> None:
+    """LLM 단계는 기본 켜짐. 소유자가 끄면 바로 반영되고, 제공자를 바꿔 저장해도 켜기/끄기는 그대로다."""
+    res = client.get("/settings/llm").json()
+    assert res["stage_enabled"] is True and llm.stage_enabled() is True
+
+    res = client.put("/settings/llm/stage", json={"enabled": False})
+    assert res.status_code == 200, res.text
+    assert res.json()["stage_enabled"] is False and res.json()["mode"] == "ollama"
+    assert llm.stage_enabled() is False
+    llm.set_current(None)  # 저장값을 다시 읽어도 꺼짐
+    assert llm.stage_enabled() is False and client.get("/settings/llm").json()["stage_enabled"] is False
+
+    res = client.put("/settings/llm", json={"mode": "anthropic", "api_key": SECRET})
+    assert res.status_code == 200 and res.json()["stage_enabled"] is False  # 제공자 저장이 끔을 되돌리지 않는다
+    res = client.put("/settings/llm/stage", json={"enabled": True})
+    assert (
+        res.json()["stage_enabled"] is True and res.json()["mode"] == "anthropic" and res.json()["api_key_set"] is True
+    )
+    assert client.put("/settings/llm/stage", json={}).status_code == 422
+
+
+def test_llm_stage_missing_in_saved_setting_means_on() -> None:
+    """이 값이 생기기 전에 저장한 설정(llm_provider)은 켜짐으로 읽는다 — 기존 설정을 덮어쓰지 않고 지금과 같게 동작."""
+    old = llm.LlmConfig.from_json(json.dumps({"mode": "ollama", "model": None, "base_url": None, "api_key": None}))
+    assert old.stage_enabled is True
+    assert llm.LlmConfig.from_json(json.dumps({"mode": "ollama", "stage_enabled": False})).stage_enabled is False
+    assert llm.LlmConfig.from_json(json.dumps({"mode": "ollama", "stage_enabled": "no"})).stage_enabled is True
+    assert json.loads(llm.LlmConfig(stage_enabled=False).to_json())["stage_enabled"] is False

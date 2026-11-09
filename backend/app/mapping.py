@@ -46,7 +46,10 @@ MAX_LLM_COLUMNS = 15  # 요청 하나에서 LLM으로 넘기는 열 수 상한
 
 Status = Literal["auto", "review", "unresolved", "confirmed"]
 Method = Literal["exact", "standard", "learned", "exact_part", "similarity", "pattern", "llm", "user", "none"]
-EngineStatus = Literal["ok", "unavailable", "skipped"]
+# disabled: 설정에서 LLM 단계를 끔 · unavailable: 켜져 있으나 부르지 못함
+# skipped: 이 요청은 LLM을 쓰지 않음·보낼 열 없음
+EngineStatus = Literal["ok", "unavailable", "skipped", "disabled"]
+LLM_DISABLED_REASON = "LLM 단계를 쓰지 않도록 설정되어 미해결로 남김 (설정 > LLM 제공자)"
 
 EmbedFn = Callable[[list[str]], list[list[float]]]
 LlmFn = Callable[[str, str, dict[str, Any]], dict[str, Any]]
@@ -482,12 +485,20 @@ def _llm_schema(fields: list[StandardField]) -> dict[str, Any]:
 
 
 class MappingEngine:
-    def __init__(self, fields: list[StandardField], embed_fn: EmbedFn | None, llm_fn: LlmFn | None) -> None:
+    def __init__(
+        self,
+        fields: list[StandardField],
+        embed_fn: EmbedFn | None,
+        llm_fn: LlmFn | None,
+        llm_enabled_fn: Callable[[], bool] | None = None,
+    ) -> None:
+        """llm_enabled_fn: 3단계(LLM)를 쓸지 그때그때 묻는다 (설정 > LLM 단계). 없으면 늘 켜짐."""
         self.fields = fields
         self._by_key = {f.key: f for f in fields}
         self._exact = {normalize(t): f.key for f in fields for t in f.texts}
         self._embed_fn = embed_fn
         self._llm_fn = llm_fn
+        self._llm_enabled_fn = llm_enabled_fn
         self._field_vectors: dict[str, list[list[float]]] | None = None
         self._lock = threading.Lock()
 
@@ -745,7 +756,18 @@ class MappingEngine:
 
         llm_status: EngineStatus = "skipped"
         pending = [(n, r) for n, r in zip(names, results, strict=True) if r.status == "unresolved"]
-        if use_llm and self._llm_fn is not None and pending:
+        if (
+            use_llm
+            and self._llm_fn is not None
+            and pending
+            and self._llm_enabled_fn is not None
+            and not self._llm_enabled_fn()
+        ):
+            # 설정에서 끔: LLM에 보내지 않고 미해결로 둔다 (저장된 분석·확정·자동화 규칙은 그대로)
+            llm_status = "disabled"
+            for _, rest in pending:
+                rest.reason = LLM_DISABLED_REASON
+        elif use_llm and self._llm_fn is not None and pending:
             llm_status = "ok"
             for idx, (name, result) in enumerate(pending):
                 if idx >= MAX_LLM_COLUMNS:
@@ -786,4 +808,7 @@ def _round(value: float | None) -> float | None:
 @lru_cache(maxsize=1)
 def get_engine() -> MappingEngine:
     # 임베딩은 항상 로컬 Ollama, 3단계 판정은 설정된 LLM 제공자(기본 로컬 Ollama)
-    return MappingEngine(load_dictionary(), embed_fn=ollama.embed, llm_fn=llm.chat_json)
+    # 3단계를 쓸지는 설정(llm_provider의 stage_enabled)을 부를 때마다 읽는다
+    return MappingEngine(
+        load_dictionary(), embed_fn=ollama.embed, llm_fn=llm.chat_json, llm_enabled_fn=llm.stage_enabled
+    )

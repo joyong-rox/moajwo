@@ -280,6 +280,7 @@ class LlmSettingsOut(BaseModel):
     api_key_set: bool  # API 키 자체는 돌려주지 않는다
     api_key_hint: str | None  # 끝 4자리만
     is_external: bool
+    stage_enabled: bool  # 열 매핑 3단계(LLM)를 쓰는가 — 끄면 미해결로 남김
     modes: dict[str, str]
     default_models: dict[str, str]
     embedding: str
@@ -301,6 +302,7 @@ def llm_settings_out(db: Session) -> LlmSettingsOut:
         api_key_set=bool(config.api_key),
         api_key_hint=llm.masked_key(config.api_key),
         is_external=config.is_external,
+        stage_enabled=config.stage_enabled,
         modes=llm.MODE_LABEL,
         default_models={k: v for k, v in llm.DEFAULT_MODEL.items() if v},
         embedding=f"로컬 Ollama {OLLAMA_EMBED_MODEL} (모든 모드 공통)",
@@ -336,6 +338,7 @@ def update_llm_settings(
         model=(body.model or "").strip() or None,
         base_url=(body.base_url or "").strip().rstrip("/") or None,
         api_key=api_key if body.mode != "ollama" else None,
+        stage_enabled=previous.stage_enabled,  # 제공자를 바꿔도 LLM 단계 켜기/끄기는 그대로 (따로 저장)
     )
     try:
         llm.validate(config)
@@ -350,6 +353,27 @@ def update_llm_settings(
     db.commit()
     llm.set_current(config)
     logger.info("llm provider set to %s by user %s", config.mode, actor.id)  # 키·주소는 기록하지 않는다
+    return llm_settings_out(db)
+
+
+class LlmStageIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/settings/llm/stage", response_model=LlmSettingsOut)
+def update_llm_stage(body: LlmStageIn, actor: OwnerDep, db: Annotated[Session, Depends(get_session)]) -> LlmSettingsOut:
+    """열 매핑 3단계(LLM) 사용을 켜거나 끈다 — 제공자·모델·키는 그대로 둔다. 끄면 사전·유사도로 정하지 못한 열은
+    LLM에 보내지 않고 미해결로 남긴다(임베딩 유사도는 그대로). 저장된 분석·확정·자동화 규칙은 바꾸지 않는다."""
+    config = llm.with_updates(llm.load(db), stage_enabled=body.enabled)
+    row = db.get(AppSetting, llm.SETTING_KEY)
+    if row is None:
+        row = AppSetting(key=llm.SETTING_KEY, value="{}")
+        db.add(row)
+    row.value = config.to_json()
+    row.updated_by, row.updated_at = actor.id, datetime.now(UTC)
+    db.commit()
+    llm.set_current(config)
+    logger.info("llm mapping stage %s by user %s", "enabled" if body.enabled else "disabled", actor.id)
     return llm_settings_out(db)
 
 

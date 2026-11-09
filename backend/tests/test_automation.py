@@ -288,3 +288,57 @@ def test_screen_times_carry_kst_offset(client: TestClient) -> None:
     got = client.get(f"/automations/{automation['id']}").json()
     assert got["updated_at"].endswith("+09:00") and got["updated_at"][:19] == _kst_wall(updated)
     assert got["created_at"].endswith("+09:00")
+
+
+def test_llm_stage_off_in_analysis_review_and_automation(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """설정에서 LLM 단계를 끄면 열 매핑 분석·검토 만들기·자동화 실행 모두 LLM을 부르지 않고 미해결로 둔다.
+    다시 켜면 지금과 같이 LLM에 묻는다. 저장된 자동화 규칙은 끔과 관계없이 그대로 적용된다."""
+    from app import automation, files, integration, llm, review, validation_api
+    from app.mapping import MappingEngine, load_dictionary
+
+    calls: list[str] = []
+
+    def counting_llm(system: str, user: str, schema: dict) -> dict[str, Any]:
+        calls.append(user)
+        return {"key": "none", "confidence": 0, "reason": "해당 없음"}
+
+    engine = MappingEngine(load_dictionary(), None, counting_llm, llm_enabled_fn=llm.stage_enabled)
+    for module in (files, validation_api, review, integration, automation):
+        monkeypatch.setattr(module, "get_engine", lambda: engine)
+    new_col = "시험용 새 열 r30"
+    month = [HEADER + [new_col]] + [[*r, "x"] for r in SEPT[1:]]
+    try:
+        # 끔 — 매핑 분석
+        llm.set_current(llm.LlmConfig(stage_enabled=False))
+        fid = _upload(client, "llm끔-분석.xlsx", month)
+        res = client.post(f"/files/{fid}/mapping")
+        assert res.status_code == 200, res.text
+        col = {c["column"]: c for c in res.json()["sheets"][0]["columns"]}[new_col]
+        assert res.json()["llm"] == "disabled" and col["status"] == "unresolved" and calls == []
+        assert "LLM 단계를 쓰지 않도록 설정" in col["reason"]
+        # 끔 — 검토 만들기
+        made = client.post("/reviews", json={"file_ids": [fid]})
+        assert made.status_code in (200, 201), made.text
+        item = next(i for i in made.json()["items"] if i["kind"] == "mapping" and i["column"] == new_col)
+        assert item["category"] == "pending" and "LLM 단계는 설정에서 꺼져" in item["reason"] and calls == []
+        # 자동화 저장(끔 상태에서도 사용자가 확정한 규칙은 저장된다) 뒤 끔 — 자동화 실행
+        _, run = _manual_run(client, _upload(client, "llm끔-기준.xlsx", SEPT))
+        saved = client.post(f"/runs/{run['id']}/automation", json={"name": "LLM 끔 시험"}).json()
+        out = client.post(
+            f"/automations/{saved['id']}/run", json={"file_ids": [_upload(client, "llm끔-월.xlsx", month)]}
+        )
+        assert out.status_code == 201, out.text
+        rv = client.get(f"/reviews/{out.json()['review_id']}").json()
+        item = next(i for i in rv["items"] if i["kind"] == "mapping" and i["column"] == new_col)
+        assert "LLM 단계는 설정에서 꺼져" in item["reason"] and calls == []
+        ruled = next(i for i in rv["items"] if i["kind"] == "mapping" and i["column"] == "기관명")
+        assert ruled["category"] == "auto"  # 저장된 규칙은 그대로
+        # 켬 — 같은 자동화를 다시 실행하면 새 열을 LLM에 묻는다 (지금과 같은 동작)
+        llm.set_current(llm.LlmConfig(stage_enabled=True))
+        out = client.post(
+            f"/automations/{saved['id']}/run", json={"file_ids": [_upload(client, "llm켬-월.xlsx", month)]}
+        )
+        assert out.status_code == 201, out.text
+        assert any(new_col in c for c in calls)
+    finally:
+        llm.set_current(None)

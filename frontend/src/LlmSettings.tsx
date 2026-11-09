@@ -1,5 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { fetchLlmSettings, saveLlmSettings, testLlmSettings, type LlmMode, type LlmSettings as Data } from './api'
+import {
+  fetchLlmSettings,
+  saveLlmSettings,
+  saveLlmStage,
+  testLlmSettings,
+  type LlmMode,
+  type LlmSettings as Data,
+} from './api'
 import { formatTime } from './runFormat'
 
 const MODE_HINT: Record<LlmMode, string> = {
@@ -17,6 +24,7 @@ function LlmSettings() {
   const [model, setModel] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [stageOn, setStageOn] = useState(true) // 열 매핑 3단계(LLM) 사용 — 제공자 설정과 따로 저장
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -27,6 +35,7 @@ function LlmSettings() {
     setModel(d.model ?? '')
     setBaseUrl(d.base_url ?? '')
     setApiKey('')
+    setStageOn(d.stage_enabled)
   }
 
   useEffect(() => {
@@ -53,7 +62,31 @@ function LlmSettings() {
         ...(apiKey.trim() || !sameMode ? { api_key: apiKey.trim() } : {}),
       })
       apply(saved)
-      setMessage(`저장했습니다 — 이제 '${saved.mode_label}'로 열 매핑을 판정합니다.`)
+      setMessage(
+        saved.stage_enabled
+          ? `저장했습니다 — 이제 '${saved.mode_label}'로 열 매핑을 판정합니다.`
+          : `저장했습니다 — 제공자는 '${saved.mode_label}'입니다 (열 매핑 LLM 단계는 꺼져 있어 쓰지 않음).`,
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function saveStage(e: FormEvent) {
+    e.preventDefault()
+    setBusy(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const saved = await saveLlmStage(stageOn)
+      apply(saved)
+      setMessage(
+        saved.stage_enabled
+          ? '저장했습니다 — 열 매핑 3단계에서 LLM을 다시 씁니다.'
+          : '저장했습니다 — 이제 열 매핑 3단계에서 LLM을 쓰지 않습니다 (사전·유사도로 정하지 못한 열은 미해결로 남김).',
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -88,9 +121,37 @@ function LlmSettings() {
         <p className="llm-current">
           현재: <strong>{data.mode_label}</strong> · 모델 {data.effective_model ?? '-'}
           {data.is_external && <span className="llm-external-tag">외부 전송</span>}
+          {` · 열 매핑 LLM 단계 ${data.stage_enabled ? '사용' : '사용 안 함'}`}
           {data.updated_at && ` · ${data.updated_by_name ?? '-'} ${formatTime(data.updated_at)} 변경`}
         </p>
       )}
+      <form className="llm-form" onSubmit={(e) => void saveStage(e)}>
+        <fieldset className="llm-modes">
+          <legend>열 매핑 LLM 단계</legend>
+          <label className={`llm-mode${stageOn ? ' is-selected' : ''}`}>
+            <input type="radio" name="llm-stage" value="on" checked={stageOn} onChange={() => setStageOn(true)} />
+            <span className="llm-mode-text">
+              <strong>사용</strong>
+              <span>사전·유사도로 정하지 못한 열을 아래 제공자의 LLM에 물어 제안을 받습니다 (제안은 늘 확인 대상).</span>
+            </span>
+          </label>
+          <label className={`llm-mode${!stageOn ? ' is-selected' : ''}`}>
+            <input type="radio" name="llm-stage" value="off" checked={!stageOn} onChange={() => setStageOn(false)} />
+            <span className="llm-mode-text">
+              <strong>사용 안 함</strong>
+              <span>
+                그런 열은 LLM에 보내지 않고 미해결로 둡니다. 임베딩 유사도는 그대로 쓰고, 저장된 분석·확정·자동화 규칙은 바뀌지
+                않습니다.
+              </span>
+            </span>
+          </label>
+        </fieldset>
+        <div className="review-actions">
+          <button type="submit" className="mapping-run" disabled={busy || data === null || stageOn === data.stage_enabled}>
+            LLM 단계 저장
+          </button>
+        </div>
+      </form>
       <form className="llm-form" onSubmit={(e) => void save(e)}>
         <fieldset className="llm-modes">
           <legend>제공자</legend>

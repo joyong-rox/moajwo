@@ -389,3 +389,43 @@ def test_context_guard_keeps_user_decisions() -> None:
     engine = MappingEngine(load_dictionary(), None, None)
     m = _by_column(engine.map_columns(["화물"], [[1]], use_llm=False, decisions={"화물": "truck"}))
     assert (m["화물"].status, m["화물"].field_key) == ("confirmed", "truck")
+
+
+def test_llm_stage_disabled_skips_llm_and_keeps_stage_one_two() -> None:
+    """설정에서 LLM 단계를 끄면 미해결 열을 LLM에 보내지 않고 'disabled'로 알린다 (1·2단계는 그대로).
+    다시 켜면 지금과 같다."""
+    llm = FakeLlm({"열3": {"key": "phone", "confidence": 0.8, "reason": "전화번호 형식"}})
+    flags = {"on": False}
+    engine = MappingEngine(FIELDS, fake_embed, llm, llm_enabled_fn=lambda: flags["on"])
+    columns = ["부처", "예산 액수", "열3", "강수량(mm)"]
+    samples = [["행안부"], [1], ["02-1234-5678"], [1.5]]
+
+    off = engine.map_columns(columns, samples)
+    m = _by_column(off)
+    assert off.llm == "disabled" and llm.calls == []
+    assert (m["부처"].status, m["부처"].method) == ("auto", "exact")
+    assert (m["예산 액수"].status, m["예산 액수"].method) == ("auto", "similarity")
+    for c in ("열3", "강수량(mm)"):
+        assert m[c].status == "unresolved" and m[c].field_key is None
+        assert "LLM 단계를 쓰지 않도록 설정" in (m[c].reason or "")
+
+    flags["on"] = True
+    on = engine.map_columns(columns, samples)
+    m = _by_column(on)
+    assert on.llm == "ok" and len(llm.calls) == 2
+    assert (m["열3"].status, m["열3"].method, m["열3"].field_key) == ("review", "llm", "phone")
+
+
+def test_llm_stage_disabled_is_not_unavailable_and_not_skipped() -> None:
+    """'disabled'(설정에서 끔)는 'unavailable'(켜져 있으나 부르지 못함)·
+    'skipped'(이 요청은 LLM 안 씀·보낼 열 없음)와 다르다."""
+
+    def broken(*_: Any) -> dict[str, Any]:
+        raise ollama.OllamaError("down")
+
+    down = MappingEngine(FIELDS, fake_embed, broken, llm_enabled_fn=lambda: True).map_columns(["강수량"], [[1]])
+    assert down.llm == "unavailable" and "LLM을 사용할 수 없어" in (down.columns[0].reason or "")
+    off = MappingEngine(FIELDS, fake_embed, broken, llm_enabled_fn=lambda: False)
+    assert off.map_columns(["강수량"], [[1]]).llm == "disabled"  # 꺼져 있으면 부르지도 않는다 (예외 없음)
+    assert off.map_columns(["강수량"], [[1]], use_llm=False).llm == "skipped"
+    assert off.map_columns(["부처"], [["행안부"]]).llm == "skipped"  # 보낼 열이 없으면 끔 여부와 관계없이 skipped

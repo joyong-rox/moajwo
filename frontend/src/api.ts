@@ -65,7 +65,8 @@ export type PiiSummary = { counts: Record<PiiType, number>; items: PiiItem[]; ac
 export type MappingStatus = 'auto' | 'review' | 'unresolved' | 'confirmed' | 'unanalyzed'
 export type MappingMethod =
   'exact' | 'standard' | 'learned' | 'exact_part' | 'similarity' | 'pattern' | 'llm' | 'user' | 'none'
-export type EngineStatus = 'ok' | 'unavailable' | 'skipped'
+// disabled: 설정에서 열 매핑 LLM 단계를 끔 (unavailable = 켜져 있으나 부르지 못함, skipped = 이 요청은 LLM을 쓰지 않음·보낼 열 없음)
+export type EngineStatus = 'ok' | 'unavailable' | 'skipped' | 'disabled'
 
 export type MappingCandidate = {
   key: string
@@ -1090,6 +1091,7 @@ export type LlmSettings = {
   api_key_set: boolean
   api_key_hint: string | null
   is_external: boolean
+  stage_enabled: boolean // 열 매핑 3단계(LLM)를 쓰는가 — 끄면 미해결로 남김
   modes: Record<LlmMode, string>
   default_models: Partial<Record<LlmMode, string>>
   embedding: string
@@ -1109,6 +1111,11 @@ export async function saveLlmSettings(body: {
   api_key?: string
 }): Promise<LlmSettings> {
   return json(await apiFetch(`${API_BASE}/settings/llm`, { method: 'PUT', ...jsonBody(body) }))
+}
+
+/** 열 매핑 3단계(LLM) 사용 켜기/끄기 — 제공자·모델·키는 그대로 둔다 (소유자) */
+export async function saveLlmStage(enabled: boolean): Promise<LlmSettings> {
+  return json(await apiFetch(`${API_BASE}/settings/llm/stage`, { method: 'PUT', ...jsonBody({ enabled }) }))
 }
 
 export async function testLlmSettings(): Promise<{

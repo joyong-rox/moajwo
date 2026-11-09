@@ -48,6 +48,10 @@ class LlmConfig:
     model: str | None = None  # 비우면 모드별 기본 모델 (OpenAI·Custom은 필수)
     base_url: str | None = None  # OpenAI·Anthropic은 비우면 공식 주소, Custom은 필수, Ollama는 환경 변수
     api_key: str | None = None
+    # 열 매핑 3단계(LLM)를 쓰는가. 끄면 사전·유사도로 정하지 못한 열은 LLM에 보내지 않고
+    # 미해결로 남긴다(임베딩 유사도는 그대로).
+    # 저장값에 없으면 켜짐 — 이 값이 생기기 전의 설정(llm_provider)을 덮어쓰지 않고 지금과 같게 동작한다
+    stage_enabled: bool = True
 
     @property
     def effective_model(self) -> str | None:
@@ -70,7 +74,14 @@ class LlmConfig:
     def from_json(cls, text: str) -> LlmConfig:
         data = json.loads(text)
         mode = data.get("mode") if data.get("mode") in MODES else "ollama"
-        return cls(mode=mode, model=data.get("model"), base_url=data.get("base_url"), api_key=data.get("api_key"))
+        stage = data.get("stage_enabled", True)
+        return cls(
+            mode=mode,
+            model=data.get("model"),
+            base_url=data.get("base_url"),
+            api_key=data.get("api_key"),
+            stage_enabled=stage if isinstance(stage, bool) else True,
+        )
 
 
 def validate(config: LlmConfig) -> None:
@@ -122,6 +133,11 @@ def current() -> LlmConfig:
                 logger.exception("llm_provider 설정을 불러오지 못했습니다.")
                 return LlmConfig()
         return _current
+
+
+def stage_enabled() -> bool:
+    """열 매핑 3단계(LLM)를 쓰는가 — 매핑 엔진이 LLM을 부르기 직전에 읽는다 (설정을 저장하면 바로 반영)."""
+    return current().stage_enabled
 
 
 def set_current(config: LlmConfig | None) -> None:

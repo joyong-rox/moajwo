@@ -312,6 +312,8 @@ def _merge_status(current: str, new: str) -> str:
         return "unavailable"
     if "ok" in (current, new):
         return "ok"
+    if "disabled" in (current, new):  # 설정에서 LLM 단계를 끔 — 보낼 열이 있었던 시트가 하나라도 있으면
+        return "disabled"
     return "skipped"
 
 
