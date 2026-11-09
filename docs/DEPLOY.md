@@ -852,10 +852,10 @@ key 취합이 있으면서 0021이 없는 판(통합 후보 `8d40c69` 계열 —
 | 이미지 | 태그 | digest (멀티아키 색인) | linux/amd64 매니페스트 | 내용 |
 |---|---|---|---|---|
 | backend 기반 | `python:3.11.18-slim-trixie` | `sha256:82209229d3fda30d71e603ec95bb4bea0476635ba6df3df2e32284e036654f51` | `sha256:0451b9eeed3e5a9523d8958cc33262eb5843c7af3114c50f45d99f56e2b883ac` | Python 3.11.18 · Debian 13 trixie (2026-10-26 생성, 2026-10-27 CI 이미지 검사의 기반과 같은 매니페스트) |
-| frontend 실행 기반 | `nginx:1.30-alpine` | `sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee17884204677702951` | `sha256:84ed8c0dd296c188bfc24ed506f46589e9285fb0b11cf3a04d91d524d3067e11` | nginx 1.30.6 · Alpine 3.24.3 (2026-10-28 반영과 CI가 실제로 쓴 색인) |
+| frontend 실행 기반 | `nginx:1.30-alpine` | `sha256:e9b2d7624fd7957f4ed44ae0a272d93fb73aeb8512ba8916f8118ae6143fd115` | `sha256:bb8f722b4be005fcd7827816a136ab779fd40185d85b5171be915cc7fc0575c7` | nginx 1.30.6-r1 · Alpine 3.24.4 (2026-11-05 생성 — 2026-11-09부터 Render용 `Dockerfile.render`와 같은 색인. 이전 고정 `sha256:47928bf…`·매니페스트 `84ed8c0d…`는 Alpine 3.24.3, 2026-10-28~11-09) |
 | frontend 빌드 단계 | `node:24.22.1-alpine` | `sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53` (그대로) | `sha256:1200d815de24f8dcca745fbf7651d166034a35adbcad8860a8538ffff44f1420` | 완성 이미지에 남지 않음 |
 
-**기반을 고정해도 같아지지 않는 것**: backend의 `apt-get install --only-upgrade ca-certificates`와 frontend의 `apk upgrade …`는 빌드할
+**기반을 고정해도 같아지지 않는 것**: backend의 `apt-get install --only-upgrade ca-certificates zlib1g`와 frontend의 `apk upgrade …`는 빌드할
 때 저장소에서 받습니다. pip 의존성은 해시 고정이라 같습니다. 그래서 반영 전에 **완성 이미지**를 다시 확인합니다.
 
 **빌드 → 검증 → 반영의 연결** (`scripts/deploy.sh` 3·6단계):

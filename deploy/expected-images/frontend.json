@@ -3,37 +3,37 @@
  "kind": "frontend",
  "verified": {
   "what": "이 목록은 CI에서 검증한 완성 이미지의 실행 환경이다. scripts/image_gate.sh가 반영 전 후보 이미지의 목록을 이 파일의 실행 환경 항목과 비교한다 (docs/DEPLOY.md 11장)",
-  "ci_run": "joyong-rox/moajwo Actions run 41745107282 (image-gate, ubuntu-24.04)",
-  "commit": "616c83d152f7e26ba041decb6b979bc2317e34fa",
+  "ci_run": "joyong-rox/moajwo Actions run 42634852866 (image-gate, ubuntu-24.04)",
+  "commit": "977e5fd11abf9602186ae63dc5b89bfd9140c58e",
   "docker": [
    "docker 28.0.4",
    "Docker Compose version v2.38.2"
   ],
   "bases": [
    "docker.io/library/node:24.22.1-alpine@sha256:06d7adf3e0ef61a13f1d28682726366f97a15aa1888c934d3ecec86c33918b53",
-   "docker.io/library/nginx:1.30-alpine@sha256:47928bf67eb62a1863cb08d9ecb52d3e704304ba614eaee17884204677702951"
+   "docker.io/library/nginx:1.30-alpine@sha256:e9b2d7624fd7957f4ed44ae0a272d93fb73aeb8512ba8916f8118ae6143fd115"
   ],
-  "smoke": "scripts/image_smoke.py 22/22 통과 (backend·frontend 함께)",
-  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-11-03T19:16:30Z — 결과는 그 run의 산출물",
-  "collected_at": "2026-11-04T00:13:20Z"
+  "smoke": "scripts/image_smoke.py (image_smoke 2) 22/22 통과 · 도구 오류 0 (backend·frontend 함께)",
+  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-11-09T13:58:27Z — 결과는 그 run의 산출물",
+  "collected_at": "2026-11-09T14:28:12Z"
  },
  "image": {
-  "id": "sha256:d2593ca538ff78b5876c337406a83a4b9336f1b1e746614353debd087d8e5edc",
+  "id": "sha256:9afc351d6286c816e490c10c78058dc3c9d0bc05537ae3bb0ea96142280eec4d",
   "id_meaning": "config digest (기존 저장소)",
-  "created": "2026-11-04T00:13:19.664960113Z",
+  "created": "2026-11-09T14:28:07.412912835Z",
   "diff_ids": [
-   "sha256:75c137aedfb2760f88629236cb7b797630aed0c3d91d626d1d1bb694878fc2ba",
-   "sha256:5b91dba2fc11b3e6dab4d25e913db11e6e701065af717028e060dfb5ab8532e4",
-   "sha256:a8a09d37d441c540c613402fa23c75308b04f4801e80f6d193316949f3df4b42",
-   "sha256:d87f6628aa86314e48021285bd5dce15a2cf5166c1c80246d2e03dbb674abaf2",
-   "sha256:313dac429378b98567656151706777045067624f9a6678873dd6fdc7ecf35545",
-   "sha256:2ba21653acee34632d9eab26da39a5ff0cac12021817e6a5e9efac9507628575",
-   "sha256:3212502c73d1691bd2b186efdda493ca750fc99795b6b0b85741af01b4e79aa4",
-   "sha256:8ff2a17964b4a163c6ba0fa456ebd70ed12823a74324ba3b6f49d87bc25c1456",
-   "sha256:34894db902cec9621438775bccf2d282590137ca16dde424909b5fd4f86e1114",
-   "sha256:afc04093350cdf017759ba3bf47b4707ddd0fb8bba5fda8ef4eff95b16534dd4",
-   "sha256:ab2f4610efb662480979880a646d4a295326a5b154bc39a9e3bb12507e6bf5b6",
-   "sha256:32ad44d94ce37fddf20e7f11fa2d1e97fabddfe13a50476b59c6697947c3444d"
+   "sha256:75f1d9657d880da5f75298e8f40e9928bb6e260c50d26f97af196845307e3064",
+   "sha256:495c4fa2cdd4685f4fe4eabd11e86f59285fab926335bba75d4160d5ff3b6154",
+   "sha256:8a4b8e348afac340cd546c8d53f590002cbd871c2eb6978b916961073e8a3b16",
+   "sha256:58eeef868683cc63489dafb4f1d7dd419f989548f0702cc3182476b4dae141f5",
+   "sha256:3831075a57f3b915290905a7c4072930c51d329dccead9f41eb439925205711a",
+   "sha256:3abae6d8a7fc137a1bd5f4a86932b1b8b7c1da3191b6590d9195f263519b4257",
+   "sha256:8f5b99f326f295649f3ca11561d758e897be5cb851fcc0c2497b9214fdcacd64",
+   "sha256:7249c65f5b3fbe84a1b5dcedaa13a7ce52fee36aeaa1cf590fb04ad689bad31e",
+   "sha256:4ddd9a7403518c1787248147c30971b3c9bf19cb2e475e4c4ec86f0f3fe0ba6e",
+   "sha256:fbc17c44f402a804f07beeb0e41f7f28cdc904c693d69168c24a9d9d5d7591a1",
+   "sha256:bbc802e55fe19620bbe373e52e14e0778c69cd963238a3774bf03c30effda216",
+   "sha256:c794a5bf8536209200ceba39cb90e7f9ffa4cc0d865e32d28b9d08d402eac6eb"
   ]
  },
  "platform": {
@@ -43,17 +43,17 @@
  },
  "os_release": {
   "id": "alpine",
-  "version_id": "3.24.3",
-  "detail": "3.24.3"
+  "version_id": "3.24.4",
+  "detail": "3.24.4"
  },
  "machine": "x86_64",
  "os_packages": {
   "alpine-baselayout": "3.7.2-r1",
   "alpine-baselayout-data": "3.7.2-r1",
   "alpine-keys": "2.6-r0",
-  "alpine-release": "3.24.3-r0",
+  "alpine-release": "3.24.4-r0",
   "aom-libs": "3.14.1-r0",
-  "apk-tools": "3.0.8-r0",
+  "apk-tools": "3.0.9-r0",
   "brotli-libs": "1.2.1-r0",
   "busybox": "1.37.0-r31",
   "busybox-binsh": "1.37.0-r31",
@@ -65,7 +65,7 @@
   "freetype": "2.14.3-r0",
   "geoip": "1.6.12-r6",
   "gettext-envsubst": "1.0-r0",
-  "libapk": "3.0.8-r0",
+  "libapk": "3.0.9-r0",
   "libavif": "1.4.1-r0",
   "libbsd": "0.12.2-r0",
   "libbz2": "1.0.8-r6",
@@ -115,9 +115,9 @@
   "scanelf": "1.3.9-r1",
   "ssl_client": "1.37.0-r31",
   "tiff": "4.7.2-r0",
-  "tzdata": "2026e-r0",
+  "tzdata": "2026f-r0",
   "xz-libs": "5.8.4-r0",
-  "zlib": "1.3.2-r1",
+  "zlib": "1.4-r0",
   "zstd-libs": "1.5.7-r2"
  },
  "ca_bundle": {

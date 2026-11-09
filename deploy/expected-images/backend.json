@@ -3,8 +3,8 @@
  "kind": "backend",
  "verified": {
   "what": "이 목록은 CI에서 검증한 완성 이미지의 실행 환경이다. scripts/image_gate.sh가 반영 전 후보 이미지의 목록을 이 파일의 실행 환경 항목과 비교한다 (docs/DEPLOY.md 11장)",
-  "ci_run": "joyong-rox/moajwo Actions run 41951432086 (image-gate, ubuntu-24.04)",
-  "commit": "eebd3108a49519a7c9c408901896d0c2aeb8c39e",
+  "ci_run": "joyong-rox/moajwo Actions run 42634852866 (image-gate, ubuntu-24.04)",
+  "commit": "977e5fd11abf9602186ae63dc5b89bfd9140c58e",
   "docker": [
    "docker 28.0.4",
    "Docker Compose version v2.38.2"
@@ -13,25 +13,25 @@
    "docker.io/library/python:3.11.18-slim-trixie@sha256:82209229d3fda30d71e603ec95bb4bea0476635ba6df3df2e32284e036654f51"
   ],
   "smoke": "scripts/image_smoke.py (image_smoke 2) 22/22 통과 · 도구 오류 0 (backend·frontend 함께)",
-  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-11-04T19:02:00Z — 결과는 그 run의 산출물",
-  "collected_at": "2026-11-05T01:53:11Z"
+  "trivy": "Trivy 0.76.0 · DB UpdatedAt 2026-11-09T13:58:27Z — 결과는 그 run의 산출물",
+  "collected_at": "2026-11-09T14:28:11Z"
  },
  "image": {
-  "id": "sha256:f0aaa8145c007cdf44646a0a43140426d80fb770ae08fd95c77394dbe9590814",
+  "id": "sha256:bdb03b73e20b3b3af289f3b643b4522b3843c94c32368d7be34263892122a4a3",
   "id_meaning": "config digest (기존 저장소)",
-  "created": "2026-11-05T01:53:10.382528737Z",
+  "created": "2026-11-09T14:28:10.360260614Z",
   "diff_ids": [
    "sha256:a70f6272827f64e1427d048ced77491aab5d64ab95725e56920802ff391197d7",
    "sha256:cc28e9b8727bd558eb76d69889c971452f06f6f6c91bb2e56b786e46e276de0f",
    "sha256:c8624fffa1d06e06d3bc5dcc16e8da97838cd0279166bda3a2086e48d9d6c5bc",
    "sha256:95e5c677aa457a1c20a4e8cebe2559c1d572003dfb9ad923e260ae20c09a9195",
-   "sha256:f859564ea6550a2c1f3a401946a760388321557f3162aeee7216df646feaecea",
-   "sha256:c60f46883782335469293208eb59d6c3de039977f6e85c6e4f3b1daf7832b60c",
-   "sha256:d7311ae373f04a216bf0c0318b2f5b25b27b480dbefdd6238e835f0fbe9b4b40",
-   "sha256:e934650877853b2587c056530d7f90e5cb44e4283a76121ad855010fc32e08cd",
-   "sha256:414789c55db8d94f3bc668934e65a8a4ec68db9d87c5a5049d7830b8ee11be25",
-   "sha256:af14e5f271fa2b0bcc59b3b7b6833f2b01975d9a572656afe51bafe14036386c",
-   "sha256:6996ea8652b756d24730795a1b89f037df9fff1f31c03d717ab619cb25f1deed"
+   "sha256:f7214ee1414ab4dc0661306155011f431e9bf794f30d44662e31d20792f7c475",
+   "sha256:af935d0e09aa33d03e95235776510297e37fd47d0ea49626dd83d8a98b23e000",
+   "sha256:f847e1374abd3aff46b942405e14acbcc7c390d3bf4feddbf4d35c0e0333ecda",
+   "sha256:d2cd98f71a30572ac8014660b80debcf9d1da3bec6954f93a948fc047a8a1601",
+   "sha256:7173b2d28f5ea6ad71dc42206b57057fd4d608c31f4d7c5f2b56c4ee869842ef",
+   "sha256:cb062a8f8260552afff33ea0cbf00e0de7b30d781062636b89a7ad94c06179fc",
+   "sha256:d9369fa591e1288ddfc4da6a82dc2f8d10f0b76134fe774ee8b397a439433799"
   ]
  },
  "platform": {
@@ -133,7 +133,7 @@
   "tar": "1.35+dfsg-3.1",
   "tzdata": "2026e-0+deb13u1",
   "util-linux": "2.41.5-0+deb13u1",
-  "zlib1g": "1:1.3.dfsg+really1.3.1-1+b1"
+  "zlib1g": "1:1.3.dfsg+really1.3.1-1+deb13u1"
  },
  "python": {
   "version": "3.11.18",
