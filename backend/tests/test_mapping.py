@@ -149,6 +149,14 @@ def test_default_dictionary_loads_and_is_unique() -> None:
     assert [m[c].field_key for c in ("시·도", "기준 년도", "집행율(%)")] == ["sido", "year", "execution_rate"]
 
 
+def test_default_dictionary_budget_terms_exact() -> None:
+    """'세출예산현액'은 '예산현액'과 같은 예산액 별칭 — 정확 일치로 정해져 LLM까지 가지 않는다
+    (2026-11-09 로컬 LLM 비교에서 모든 모델이 이 열을 집행액으로 답함)."""
+    engine = MappingEngine(load_dictionary(), None, None)
+    m = _by_column(engine.map_columns(["세출예산현액(천원)", "예산현액"], [[], []]))
+    assert [(m[c].field_key, m[c].status, m[c].method) for c in ("세출예산현액(천원)", "예산현액")] == [("budget", "auto", "exact")] * 2
+
+
 @pytest.mark.parametrize("url", ["https://api.openai.com", "http://example.com:11434", "http://8.8.8.8:11434"])
 def test_only_local_ollama_allowed(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
     monkeypatch.setattr(ollama, "OLLAMA_BASE_URL", url)

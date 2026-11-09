@@ -15,7 +15,7 @@
     { "key": "population_male", "label": "남자 인구", "description": "남성 인구(명)", "aliases": ["남", "남자", "남성", "남자인구", "남성인구"] },
     { "key": "population_female", "label": "여자 인구", "description": "여성 인구(명)", "aliases": ["여", "여자", "여성", "여자인구", "여성인구"] },
     { "key": "households", "label": "세대수", "description": "세대·가구 수", "aliases": ["세대", "가구수", "가구", "세대 수"] },
-    { "key": "budget", "label": "예산액", "description": "편성된 예산 금액", "aliases": ["예산", "예산현액", "본예산", "세출예산", "예산금액", "총예산"] },
+    { "key": "budget", "label": "예산액", "description": "편성된 예산 금액", "aliases": ["예산", "예산현액", "세출예산현액", "본예산", "세출예산", "예산금액", "총예산"] },
     { "key": "expenditure", "label": "집행액", "description": "실제 집행·지출된 금액", "aliases": ["집행", "지출액", "지출", "집행금액", "집행실적"] },
     { "key": "execution_rate", "label": "집행률", "description": "예산 대비 집행 비율(%)", "aliases": ["집행율", "집행비율", "예산집행률"] },
     { "key": "amount", "label": "금액", "description": "일반 금액", "aliases": ["액수", "총액", "합계금액", "금액합계"] },
