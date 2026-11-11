@@ -3,6 +3,35 @@
 이 문서는 Render 검토·시연 서비스가 재시작·재배포돼도 계정과 기록이 남도록 외부 PostgreSQL을 쓰는 방법입니다.
 로컬 운영·폐쇄망 구성은 그대로 SQLite(파일)와 로컬 Ollama를 씁니다. 외부 DB에 접속하지 않습니다.
 
+> **2026-11-11 처분 — Render 세 서비스와 Neon 프로젝트를 삭제했습니다.**
+>
+> 소유자 결정은 "실사용은 로컬뿐"입니다. 2026-11-11 10:43~10:47 KST에 소유자 승인을 받은 Claude가 각 콘솔에서 삭제했습니다.
+> - 삭제한 것: Render `moajwo-test`·`moajwo-test-api`·`moajwo-test-web`, Neon 프로젝트 `moajwo-test`(`neondb`·`moajwo_restore_test` 포함).
+> - Neon은 콘솔 표시상 복구 기간 동안에만 되살릴 수 있고, 그 뒤에는 영구 삭제됩니다.
+> - **이 문서가 설명하는 외부 DB 구성은 지금 어디에도 떠 있지 않습니다.** 아래 내용은 그때의 기록이자 재구성 절차입니다. 7장의 주간 백업·분기 복원 일정과 8-3의 '현재값'은 지난 기록입니다.
+>
+> **마지막 백업** (삭제 전 같은 날, 7장 Docker 방식):
+> - 위치: `backups/external-db/20261111-102725/neondb-20261111-102725.dump` — 소유자 PC, Git 밖. 형식 custom(`--no-owner --no-privileges`), 리비전 `0024_keyjoin_job_ids`.
+> - sha256: `6ec0ffe2ecb2bb281ab5f71a3afdae73b40c8a9926f759a31ce4a9af75b41aef`
+> - 검증: 빈 `moajwo_restore_test`에 복원하고 권한을 다시 적용했다(5장). 표별 건수·내용 해시가 원본과 모두 같았다. 확인 뒤 복원 DB는 비웠다.
+> - 보존: 2027-11-11까지(소유자 결정). 그 전 Neon 백업들은 2026-12-11경 소유자 승인 뒤 정리한다.
+>
+> **남긴 것:**
+> - 릴리스 가지 `release/render-eeb27f1`·`release/render-8cc69d0`·`release/render-81225af`와 `deploy/render-preview-20261021`.
+> - 이 문서와 도구(`scripts/pg_docker.ps1`·`backup_external_db.ps1`·`register_weekly_backup.ps1`·`wake_render.ps1`).
+>
+> **정리한 것:**
+> - 주간 백업 예약 `moajwo-weekly-backup`을 해제했다.
+> - 소유자 PC의 서비스 파일·비밀번호 파일·컨테이너용 사본(`pg_service.docker.conf`)은 Neon 항목만 있어서 파일째 지웠다. 공개 CA 파일만 남겼다.
+>
+> **재구성할 때는 이 문서 순서를 따릅니다:**
+> 1. 2장 — 그날 무료 조건을 다시 확인한다.
+> 2. 8-0 — 경로를 정한다. 마지막 백업으로 되살리기, 또는 빈 DB(B).
+> 3. 8-3 준비 1~8단계 — 새 Neon 프로젝트(PostgreSQL 17)·`moajwo_restore_test`, 앱 계정(5장, SQL로), 서비스 파일·비밀번호 파일(3-1)을 만든다.
+> 4. 되살리는 경우 — 7장 복원 절차로 마지막 백업을 먼저 `moajwo_restore_test`에서 확인한다. 그다음 새 `neondb`에 복원하고 5장 권한을 다시 적용한다.
+> 5. 8-3 전환 9~13단계 — 새 Render 서비스, 승인된 릴리스 가지로 진행한다. 새 서비스의 주소·설정은 새로 정한다.
+> 6. 주간 백업을 `scripts/register_weekly_backup.ps1`로 다시 등록한다.
+
 > **2026-10-30 보완:** 날짜가 붙은 과거 관측(2026-10-23·25·27)은 그 날짜의 기록으로 두고, 2026-10-30에 확인한 것만 날짜를 붙여 더했습니다. 실제 Neon 연결·Render 변경은 여전히 하지 않았습니다 (`backups/followup-20261030/EXTERNAL-DB-STATUS.md`).
 >
 > **2026-10-30 2차 보완(검토 지시 4장):** 앱 역할은 콘솔이 아니라 SQL로만 만들고 만든 뒤 확인하는 절차(5장), 복원 뒤 권한 재적용·앱 계정 로그인 확인(7장), 서비스 파일의 CA 절대 경로와 설치·점검 절차(3-1), 소유자 최소 준비(3-3), Render 배포 커밋 관측(8-3)을 더했고, 5·7장 절차를 로컬 PostgreSQL 17.11에서 합성 역할·계정으로 다시 확인했습니다 — 실제 Neon은 여전히 미연결 (`backups/followup-20261030/round2/`).
@@ -619,6 +648,22 @@ Render 환경 변수 저장 선택지 (https://render.com/docs/configure-environ
 - **Neon `neondb`** 자료(0024)는 그대로입니다. 주간 백업 예약(7장, 매주 일요일 21:00)은 당분간 유지합니다.
 - 정지 뒤 공개 주소 확인(2026-11-06 16:57 KST, GET만 — 로그인·쿠키 없음): 세 서비스 모두 HTTP 503 'Service Suspended'("This service has been suspended by its owner."). Render 화면의 값은 소유자 전달값입니다.
 - `moajwo-test-web`의 삭제 여부는 예정대로 2026-11-15에 다시 결정합니다.
+
+**현재값 — 2026-11-11 삭제 (소유자 결정: 실사용은 로컬뿐 — 수행 주체: 소유자 승인 뒤 Claude가 Render·Neon 콘솔에서):**
+
+| 대상 | 상태 | 남긴 것 |
+|---|---|---|
+| Render `moajwo-test` | **삭제** 2026-11-11 10:43~10:47 KST | 연결했던 가지 `release/render-81225af` |
+| Render `moajwo-test-api` | **삭제** (같은 시각) | 연결했던 가지 `release/render-8cc69d0` |
+| Render `moajwo-test-web` | **삭제** (같은 시각) | — (2026-11-15 재결정은 필요 없어짐) |
+| Neon 프로젝트 `moajwo-test` (`neondb`·`moajwo_restore_test`) | **삭제** (같은 시각) — 콘솔 표시상 복구 기간 뒤 영구 삭제 | 마지막 백업(맨 위 안내 — 위치·sha256·복원 확인) |
+
+- **삭제 전:** 마지막 백업을 받아 빈 `moajwo_restore_test`에 복원했다(7장 절차). 표별 건수·내용 해시가 원본과 같은 것을 확인한 뒤에만 삭제했다. Moajwo 자료가 있는 DB는 `neondb` 하나였다. `postgres` DB에는 Neon 내부 표만 있었다.
+- **삭제 뒤 (2026-11-11):**
+  - 주간 백업 예약 `moajwo-weekly-backup`을 해제했다(`register_weekly_backup.ps1 -Remove`).
+  - 소유자 PC의 Neon 접속 파일(서비스 파일·비밀번호 파일·컨테이너용 사본)을 지웠다.
+  - Render 환경 변수에 있던 접속 주소는 서비스와 함께 사라졌다.
+- **보존:** 릴리스 가지 `release/render-eeb27f1`(되돌리기용이던 옛 릴리스)·`release/render-8cc69d0`·`release/render-81225af`와 `deploy/render-preview-20261021`을 보존한다. 이 문서의 기록도 재구성용으로 보존한다. 다시 만들 때는 맨 위 안내의 순서를 따른다.
 
 **제안값 (승인 묶음 8-5에 넣어 한 번에 적용 — 이번 작업에서는 저장하지 않음):**
 
